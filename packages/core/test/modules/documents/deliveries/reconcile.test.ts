@@ -1,9 +1,13 @@
 /** reconcileStaleDeliveries: the delivery half of OutboxReconcile (core-ports J1a). */
+
 import { describe, expect, test } from "bun:test";
 import type { DeliveryId, WorkspaceId } from "@kvitbit/domain/contract";
 import { Documents } from "@kvitbit/domain/contract";
-import { Effect, Exit, Ref } from "effect";
-import { TestClock } from "effect/testing";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 import {
   claim,
   DeliveriesRepo,
@@ -32,7 +36,7 @@ const clearStarted = Effect.flatMap(StartedDeliveries, (r) => Ref.set(r, []));
 const attempts = Effect.flatMap(CaptureEmailSender, (c) => Ref.get(c.attempts));
 const sentKeys = Effect.map(
   Effect.flatMap(CaptureEmailSender, (c) => Ref.get(c.sent)),
-  (emails) => emails.map((e) => e.idempotencyKey),
+  (emails) => EffectArray.map(emails, (e) => e.idempotencyKey),
 );
 const reconcile = reconcileStaleDeliveries(THRESHOLD);
 
@@ -60,14 +64,17 @@ describe("reconcileStaleDeliveries (J1a)", () => {
         yield* TestClock.adjust("30 seconds");
         // t0+60s: a job that died after claim (H3), and one that finished.
         const claimed = yield* queued;
-        expect(yield* as(worker, claim(WORKSPACE_A, claimed))).toBe("sending");
+        const result = yield* as(worker, claim(WORKSPACE_A, claimed));
+        expect(result).toBe("sending");
         const done = yield* queued;
-        expect(yield* as(worker, deliver(WORKSPACE_A, done))).toBe("sent");
+        const result2 = yield* as(worker, deliver(WORKSPACE_A, done));
+        expect(result2).toBe("sent");
         yield* clearStarted;
 
         // t0+150s: only the row last changed before t0+30s is stale.
         yield* TestClock.adjust("90 seconds");
-        expect(yield* reconcile).toEqual([
+        const reconcile_1 = yield* reconcile;
+        expect(reconcile_1).toEqual([
           { workspaceId: WORKSPACE_A, deliveryId: lostStart, status: "queued" },
         ]);
 
@@ -80,7 +87,8 @@ describe("reconcileStaleDeliveries (J1a)", () => {
           { workspaceId: WORKSPACE_B, deliveryId: inB, status: "queued" },
           { workspaceId: WORKSPACE_A, deliveryId: claimed, status: "sending" },
         ]);
-        expect(yield* started).toEqual([
+        const started_1 = yield* started;
+        expect(started_1).toEqual([
           { workspaceId: WORKSPACE_A, deliveryId: lostStart },
           { workspaceId: WORKSPACE_B, deliveryId: inB },
           { workspaceId: WORKSPACE_A, deliveryId: claimed },
@@ -88,7 +96,8 @@ describe("reconcileStaleDeliveries (J1a)", () => {
         // Reconcile only starts jobs: it changes no row and calls no provider.
         expect((yield* delivery(lostStart)).status).toBe("queued");
         expect((yield* delivery(claimed)).status).toBe("sending");
-        expect(yield* attempts).toBe(1);
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(1);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -98,19 +107,26 @@ describe("reconcileStaleDeliveries (J1a)", () => {
     const exit = await run(
       Effect.gen(function* () {
         const id = yield* queued;
-        expect(yield* as(worker, claim(WORKSPACE_A, id))).toBe("sending");
+        const result = yield* as(worker, claim(WORKSPACE_A, id));
+        expect(result).toBe("sending");
         // The job's process dies here: claimed, provider never called.
         yield* TestClock.adjust("3 minutes");
         yield* clearStarted;
-        expect((yield* reconcile).map((r) => r.deliveryId)).toEqual([id]);
-        expect(yield* started).toEqual([{ workspaceId: WORKSPACE_A, deliveryId: id }]);
+        const reconciled = yield* reconcile;
+        expect(EffectArray.map(reconciled, (r) => r.deliveryId)).toEqual([id]);
+        const started_1 = yield* started;
+        expect(started_1).toEqual([{ workspaceId: WORKSPACE_A, deliveryId: id }]);
+        const result2 = yield* as(worker, deliver(WORKSPACE_A, id));
         // The restarted DocumentDelivery job runs deliver.
-        expect(yield* as(worker, deliver(WORKSPACE_A, id))).toBe("sent");
-        expect(yield* sentKeys).toEqual([id]);
-        expect(yield* attempts).toBe(1);
+        expect(result2).toBe("sent");
+        const sentKeys_1 = yield* sentKeys;
+        expect(sentKeys_1).toEqual([id]);
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(1);
         // Terminal now: a later pass finds nothing.
         yield* TestClock.adjust("3 minutes");
-        expect(yield* reconcile).toEqual([]);
+        const reconcile_1 = yield* reconcile;
+        expect(reconcile_1).toEqual([]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -124,10 +140,14 @@ describe("reconcileStaleDeliveries (J1a)", () => {
         const { deliveryId } = yield* d.send(proforma.id);
         yield* d.cancel(proforma.id, { reason: "chyba" });
         yield* TestClock.adjust("3 minutes");
-        expect((yield* reconcile).map((r) => r.deliveryId)).toEqual([deliveryId]);
-        expect(yield* as(worker, deliver(WORKSPACE_A, deliveryId))).toBe("skipped");
-        expect(yield* attempts).toBe(0);
-        expect(yield* reconcile).toEqual([]);
+        const reconciled = yield* reconcile;
+        expect(EffectArray.map(reconciled, (r) => r.deliveryId)).toEqual([deliveryId]);
+        const result = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        expect(result).toBe("skipped");
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(0);
+        const reconcile_1 = yield* reconcile;
+        expect(reconcile_1).toEqual([]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -139,15 +159,21 @@ describe("reconcileStaleDeliveries (J1a)", () => {
         const d = yield* Documents;
         const proforma = yield* d.issue({ input: invoiceInput({ kind: "proforma" }) });
         const { deliveryId } = yield* d.send(proforma.id);
-        expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
+        const result = yield* as(worker, claim(WORKSPACE_A, deliveryId));
+        expect(result).toBe("sending");
         // The job dies before the provider call; the proforma is cancelled meanwhile.
         yield* d.cancel(proforma.id, { reason: "chyba" });
         yield* TestClock.adjust("3 minutes");
-        expect((yield* reconcile).map((r) => r.status)).toEqual(["sending"]);
-        expect(yield* as(worker, deliver(WORKSPACE_A, deliveryId))).toBe("skipped");
-        expect(yield* delivery(deliveryId)).toMatchObject({ failure: "document_cancelled" });
-        expect(yield* attempts).toBe(0);
-        expect(yield* reconcile).toEqual([]);
+        const reconciled = yield* reconcile;
+        expect(EffectArray.map(reconciled, (r) => r.status)).toEqual(["sending"]);
+        const result2 = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        expect(result2).toBe("skipped");
+        const result3 = yield* delivery(deliveryId);
+        expect(result3).toMatchObject({ failure: "document_cancelled" });
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(0);
+        const reconcile_1 = yield* reconcile;
+        expect(reconcile_1).toEqual([]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -157,15 +183,18 @@ describe("reconcileStaleDeliveries (J1a)", () => {
     const exit = await run(
       Effect.gen(function* () {
         const id = yield* queued;
-        expect(yield* as(worker, claim(WORKSPACE_A, id))).toBe("sending");
+        const result = yield* as(worker, claim(WORKSPACE_A, id));
+        expect(result).toBe("sending");
         yield* TestClock.adjust("100 seconds");
         yield* CaptureEmailSender.failNext("not_accepted");
         yield* Effect.flip(as(worker, deliver(WORKSPACE_A, id)));
         // Claimed 160 s ago, but its last attempt was recorded 60 s ago.
         yield* TestClock.adjust("60 seconds");
-        expect(yield* reconcile).toEqual([]);
+        const reconcile_1 = yield* reconcile;
+        expect(reconcile_1).toEqual([]);
         yield* TestClock.adjust("61 seconds");
-        expect((yield* reconcile).map((r) => r.status)).toEqual(["sending"]);
+        const reconciled = yield* reconcile;
+        expect(EffectArray.map(reconciled, (r) => r.status)).toEqual(["sending"]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -189,8 +218,13 @@ describe("reconcileStaleDeliveries (J1a)", () => {
             }),
           ),
         );
-        expect(restarted.map((r) => r.deliveryId)).toEqual([first, second]);
-        expect((yield* started).map((s) => s.deliveryId)).toEqual([first, second, second]);
+        expect(EffectArray.map(restarted, (r) => r.deliveryId)).toEqual([first, second]);
+        const restartedJobs = yield* started;
+        expect(EffectArray.map(restartedJobs, (s) => s.deliveryId)).toEqual([
+          first,
+          second,
+          second,
+        ]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -215,8 +249,9 @@ describe("reconcileStaleDeliveries (J1a)", () => {
             ),
           ),
         );
-        expect(Exit.hasInterrupts(pass)).toBe(true);
-        expect(yield* started).toEqual([]);
+        pass.pipe(Exit.hasInterrupts, expect).toBe(true);
+        const started_1 = yield* started;
+        expect(started_1).toEqual([]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);

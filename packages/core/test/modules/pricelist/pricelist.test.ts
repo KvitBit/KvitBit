@@ -1,18 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  Caller,
-  CurrentCaller,
+import type { Caller, CoreError, CurrentCaller, PriceListItemView } from "@kvitbit/domain/contract";
+import {
+  PriceList,
   PriceListItemId,
-  PriceListItemView,
+  PriceListItemInput,
   RequestKey,
 } from "@kvitbit/domain/contract";
-import { PriceList } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect, Exit } from "effect";
-import type { PriceListItemViewData } from "../../../src/modules/pricelist";
-import { PriceListItems, PriceListTestLayer } from "../../../src/modules/pricelist";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import {
+  type PriceListItemSaveInput,
+  PriceListItems,
+  PriceListItemViewSchema,
+  PriceListTestLayer,
+} from "../../../src/modules/pricelist";
 import type { CoreStore } from "../../../src/store/CoreStore";
 import { member, runTest, shareVisitor, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
-import { as, expectFailure, failureOf, history, successOf } from "../contacts/harness";
+import { as, failureOf, history, successOf } from "../contacts/harness";
 
 const run = <A, E>(
   caller: Caller,
@@ -20,15 +29,18 @@ const run = <A, E>(
 ) => runTest(caller, Effect.provide(effect, PriceListTestLayer));
 
 const owner = member("owner");
-const view = (v: PriceListItemView) => v as PriceListItemViewData;
-type SaveInput = Parameters<PriceList["Service"]["save"]>[0];
-const input = (fields: Record<string, unknown>) => fields as unknown as SaveInput;
+const view = (value: PriceListItemView) =>
+  Schema.decodeUnknownOption(PriceListItemViewSchema)(value).pipe(Option.getOrThrow);
+type FixtureFields = Omit<typeof PriceListItemSaveInput.Encoded, "vat"> & {
+  readonly colour?: string;
+  readonly vat?: (typeof PriceListItemSaveInput.Encoded)["vat"] | "21";
+};
 const dec = (s: string) => BigDecimal.fromStringUnsafe(s);
 
-const saveHour = (fields: Record<string, unknown> = {}) =>
+const saveHour = (fields: FixtureFields = {}) =>
   Effect.flatMap(PriceList, (p) =>
     p.save(
-      input({
+      PriceListItemInput.make({
         name: "Konzultace",
         unit: "hod",
         unitPrice: dec("1500"),
@@ -67,36 +79,58 @@ describe("PriceList.save", () => {
 
   test("accepts unitPrice as a decimal string", async () => {
     const exit = await run(owner, saveHour({ unitPrice: "1234.50" }));
-    expect(BigDecimal.format(successOf(exit).unitPrice)).toBe("1234.5");
+    const unitPrice = BigDecimal.format(successOf(exit).unitPrice);
+    expect(unitPrice).toBe("1234.5");
   });
 
   test("required fields and malformed values are Invalid{request.malformed}", async () => {
     const noPrice = await run(
       owner,
-      Effect.flatMap(PriceList, (p) => p.save(input({ name: "X", currency: "CZK" }))),
+      Effect.flatMap(PriceList, (p) =>
+        p.save(PriceListItemInput.make({ name: "X", currency: "CZK" })),
+      ),
     );
-    expectFailure(noPrice, { issues: [{ path: ["unitPrice"], code: "request.malformed" }] });
-    for (const unitPrice of ["", "1e3", " 12"]) {
-      expectFailure(await run(owner, saveHour({ unitPrice })), {
+    const noPriceFailure = failureOf<unknown, CoreError>(noPrice);
+    expect(noPriceFailure).toMatchObject({
+      issues: [{ path: ["unitPrice"], code: "request.malformed" }],
+    });
+    const malformedPrices = await Promise.all(
+      EffectArray.map(["", "1e3", " 12"], (unitPrice) => run(owner, saveHour({ unitPrice }))),
+    );
+    for (const malformedPrice of malformedPrices) {
+      const malformedPriceFailure = failureOf<unknown, CoreError>(malformedPrice);
+      expect(malformedPriceFailure).toMatchObject({
         issues: [{ path: ["unitPrice"], code: "request.malformed" }],
       });
     }
-    expectFailure(await run(owner, saveHour({ colour: "red" })), {
+    const failure = failureOf<unknown, CoreError>(await run(owner, saveHour({ colour: "red" })));
+    expect(failure).toMatchObject({
       issues: [{ path: ["colour"], code: "request.malformed" }],
     });
-    expectFailure(
+    const failure2 = failureOf<unknown, CoreError>(
       await run(
         owner,
         saveHour({ id: "01900000-0000-7000-8000-000000000001", expectedRevision: 1.5 }),
       ),
-      { issues: [{ path: ["expectedRevision"], code: "request.malformed" }] },
     );
+    expect(failure2).toMatchObject({
+      issues: [{ path: ["expectedRevision"], code: "request.malformed" }],
+    });
     const badCurrency = await run(owner, saveHour({ currency: "czk" }));
-    expectFailure(badCurrency, { issues: [{ path: ["currency"], code: "request.malformed" }] });
+    const badCurrencyFailure = failureOf<unknown, CoreError>(badCurrency);
+    expect(badCurrencyFailure).toMatchObject({
+      issues: [{ path: ["currency"], code: "request.malformed" }],
+    });
     const badVat = await run(owner, saveHour({ vat: "21" }));
-    expectFailure(badVat, { issues: [{ path: ["vat"], code: "request.malformed" }] });
+    const badVatFailure = failureOf<unknown, CoreError>(badVat);
+    expect(badVatFailure).toMatchObject({
+      issues: [{ path: ["vat"], code: "request.malformed" }],
+    });
     const blankName = await run(owner, saveHour({ name: "  " }));
-    expectFailure(blankName, { issues: [{ path: ["name"], code: "request.malformed" }] });
+    const blankNameFailure = failureOf<unknown, CoreError>(blankName);
+    expect(blankNameFailure).toMatchObject({
+      issues: [{ path: ["name"], code: "request.malformed" }],
+    });
   });
 
   test("revisions: each edit bumps the revision; stale or missing ones are Conflict", async () => {
@@ -105,21 +139,31 @@ describe("PriceList.save", () => {
       Effect.gen(function* () {
         const prices = yield* PriceList;
         const created = yield* saveHour();
-        const second = view(
-          yield* prices.save(
-            input({ id: created.id, expectedRevision: 1, unitPrice: dec("1800"), unit: null }),
+        const saveResult = yield* prices.save(
+          PriceListItemInput.make({
+            id: created.id,
+            expectedRevision: 1,
+            unitPrice: dec("1800"),
+            unit: null,
+          }),
+        );
+        const second = view(saveResult);
+        const saveResult2 = yield* prices.save(
+          PriceListItemInput.make({ id: created.id, expectedRevision: 2, name: "Konzultace+" }),
+        );
+        const third = view(saveResult2);
+        const saveResult3 = yield* prices.save(
+          PriceListItemInput.make({ id: created.id, expectedRevision: 3, unitPrice: "1800.00" }),
+        );
+        const unchanged = view(saveResult3);
+        const stale = yield* Effect.flip(
+          prices.save(
+            PriceListItemInput.make({ id: created.id, expectedRevision: 2, name: "Old" }),
           ),
         );
-        const third = view(
-          yield* prices.save(input({ id: created.id, expectedRevision: 2, name: "Konzultace+" })),
+        const missing = yield* Effect.flip(
+          prices.save(PriceListItemInput.make({ id: created.id, name: "Old" })),
         );
-        const unchanged = view(
-          yield* prices.save(input({ id: created.id, expectedRevision: 3, unitPrice: "1800.00" })),
-        );
-        const stale = yield* Effect.flip(
-          prices.save(input({ id: created.id, expectedRevision: 2, name: "Old" })),
-        );
-        const missing = yield* Effect.flip(prices.save(input({ id: created.id, name: "Old" })));
         return { second, third, unchanged, stale, missing };
       }),
     );
@@ -138,18 +182,23 @@ describe("PriceList.save", () => {
   });
 
   test("requestKey replays the stored result; another payload is idempotency_mismatch", async () => {
-    const key = "01900000-0000-7000-8000-0000000000ac" as RequestKey;
+    const key = RequestKey.make("01900000-0000-7000-8000-0000000000ac");
     const exit = await run(
       owner,
       Effect.gen(function* () {
         const prices = yield* PriceList;
-        const body = input({ name: "Hodina", unitPrice: "100", currency: "CZK" });
-        const first = view(yield* prices.save(body, { requestKey: key }));
-        const replay = view(yield* prices.save(body, { requestKey: key }));
+        const body = PriceListItemInput.make({ name: "Hodina", unitPrice: "100", currency: "CZK" });
+        const saveResult = yield* prices.save(body, { requestKey: key });
+        const first = view(saveResult);
+        const saveResult2 = yield* prices.save(body, { requestKey: key });
+        const replay = view(saveResult2);
         const mismatch = yield* Effect.flip(
-          prices.save(input({ name: "Jiné", unitPrice: "100", currency: "CZK" }), {
-            requestKey: key,
-          }),
+          prices.save(
+            PriceListItemInput.make({ name: "Jiné", unitPrice: "100", currency: "CZK" }),
+            {
+              requestKey: key,
+            },
+          ),
         );
         return { first, replay, mismatch, all: yield* prices.list() };
       }),
@@ -175,20 +224,25 @@ describe("PriceList.archive and list", () => {
         yield* prices.archive(hour.id);
         const names = (q?: Parameters<PriceList["Service"]["list"]>[0]) =>
           Effect.map(prices.list(q), (items) =>
-            items.map((i) => `${view(i).name}${view(i).archived ? " (archived)" : ""}`),
+            EffectArray.map(
+              items,
+              (i) => `${view(i).name}${view(i).archived ? " (archived)" : ""}`,
+            ),
           );
+        const includingArchived = yield* prices.list({ includeArchived: true });
         return {
           active: yield* names(),
           all: yield* names({ includeArchived: true }),
           text: yield* names({ text: "skoleni" }),
           description: yield* names({ text: "WORKSHOP" }),
-          archivedRevision: (yield* prices.list({ includeArchived: true }))
-            .map(view)
-            .find((i) => i.archived)?.revision,
+          archivedRevision: Option.getOrUndefined(
+            EffectArray.findFirst(EffectArray.map(includingArchived, view), (i) => i.archived),
+          )?.revision,
         };
       }),
     );
-    expect(successOf(exit)).toEqual({
+    const lists = successOf(exit);
+    expect(lists).toEqual({
       active: ["Audit kódu", "Školení"],
       all: ["Audit kódu", "Konzultace (archived)", "Školení"],
       text: ["Školení"],
@@ -198,19 +252,22 @@ describe("PriceList.archive and list", () => {
   });
 
   test("unknown ids are NotFound", async () => {
-    const id = "01900000-0000-7000-8000-000000000099" as PriceListItemId;
+    const id = PriceListItemId.make("01900000-0000-7000-8000-000000000099");
     const exit = await run(
       owner,
       Effect.gen(function* () {
         const prices = yield* PriceList;
         return [
           yield* Effect.exit(prices.archive(id)),
-          yield* Effect.exit(prices.save(input({ id, expectedRevision: 1, name: "X" }))),
+          yield* Effect.exit(
+            prices.save(PriceListItemInput.make({ id, expectedRevision: 1, name: "X" })),
+          ),
         ] as const;
       }),
     );
     for (const e of successOf(exit)) {
-      expectFailure(e, { _tag: "NotFound", entity: "PriceListItem", id });
+      const failure = failureOf<unknown, CoreError>(e);
+      expect(failure).toMatchObject({ _tag: "NotFound", entity: "PriceListItem", id });
     }
   });
 });
@@ -223,44 +280,52 @@ describe("PriceList authorization and tenancy", () => {
         const saved = yield* saveHour();
         const prices = yield* PriceList;
         return yield* as(caller)(
-          Effect.all({
-            list: Effect.exit(prices.list()),
-            create: Effect.exit(saveHour()),
-            save: Effect.exit(
-              prices.save(input({ id: saved.id, expectedRevision: 1, name: "Edited" })),
-            ),
-            archive: Effect.exit(prices.archive(saved.id)),
-          }),
+          Effect.all(
+            {
+              list: Effect.exit(prices.list()),
+              create: Effect.exit(saveHour()),
+              save: Effect.exit(
+                prices.save(
+                  PriceListItemInput.make({ id: saved.id, expectedRevision: 1, name: "Edited" }),
+                ),
+              ),
+              archive: Effect.exit(prices.archive(saved.id)),
+            },
+            { concurrency: 1 },
+          ),
         );
       }),
     ).then(successOf);
 
-  const tags = (exits: Record<string, Exit.Exit<unknown, unknown>>) =>
-    Object.fromEntries(
-      Object.entries(exits).map(([k, v]) => [
-        k,
-        Exit.isSuccess(v) ? "ok" : (failureOf(v) as { _tag: string })._tag,
-      ]),
+  const tagOf = (exit: Exit.Exit<unknown, CoreError>) =>
+    Exit.isSuccess(exit) ? "ok" : failureOf(exit)._tag;
+  const tags = (exits: Awaited<ReturnType<typeof attempt>>) =>
+    EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(exits), ([key, exit]) => [key, tagOf(exit)]),
     );
 
   test("owner, admin and member write; accountant and System read only", async () => {
-    for (const role of ["owner", "admin", "member"] as const) {
-      expect(tags(await attempt(member(role)))).toEqual({
+    const writers = await Promise.all(
+      EffectArray.map(["owner", "admin", "member"] as const, (role) => attempt(member(role))),
+    );
+    for (const exits of writers) {
+      expect(tags(exits)).toEqual({
         list: "ok",
         create: "ok",
         save: "ok",
         archive: "ok",
       });
     }
-    for (const caller of [member("accountant"), system()]) {
-      const exits = await attempt(caller);
+    const readers = await Promise.all([attempt(member("accountant")), attempt(system())]);
+    for (const exits of readers) {
       expect(tags(exits)).toEqual({
         list: "ok",
         create: "Forbidden",
         save: "Forbidden",
         archive: "Forbidden",
       });
-      expectFailure(exits.create, { action: "priceList.write" });
+      const failure = failureOf<unknown, CoreError>(exits.create);
+      expect(failure).toMatchObject({ action: "priceList.write" });
     }
   });
 
@@ -275,17 +340,20 @@ describe("PriceList authorization and tenancy", () => {
       create: "ok",
     });
     const contactsOnly = await attempt(member("owner", { scopes: ["contacts:write"] }));
-    expect(new Set(Object.values(tags(contactsOnly)))).toEqual(new Set(["Forbidden"]));
-    expectFailure(contactsOnly.list, { action: "priceList.read" });
-    expect(new Set(Object.values(tags(await attempt(shareVisitor()))))).toEqual(
+    expect(new Set(EffectRecord.values(tags(contactsOnly)))).toEqual(new Set(["Forbidden"]));
+    const failure = failureOf<unknown, CoreError>(contactsOnly.list);
+    expect(failure).toMatchObject({ action: "priceList.read" });
+    expect(new Set(EffectRecord.values(tags(await attempt(shareVisitor()))))).toEqual(
       new Set(["Forbidden"]),
     );
   });
 
   test("another Workspace sees none of the items and gets NotFound on writes", async () => {
     const exits = await attempt(member("owner", { workspaceId: WORKSPACE_B }));
-    expectFailure(exits.save, { _tag: "NotFound", entity: "PriceListItem" });
-    expectFailure(exits.archive, { _tag: "NotFound", entity: "PriceListItem" });
+    const failure = failureOf<unknown, CoreError>(exits.save);
+    expect(failure).toMatchObject({ _tag: "NotFound", entity: "PriceListItem" });
+    const failure2 = failureOf<unknown, CoreError>(exits.archive);
+    expect(failure2).toMatchObject({ _tag: "NotFound", entity: "PriceListItem" });
     expect(Exit.isSuccess(exits.list) && exits.list.value).toEqual([]);
   });
 });

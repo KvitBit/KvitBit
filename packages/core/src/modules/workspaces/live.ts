@@ -6,12 +6,11 @@
  * Error channels: the domain tag states the errors the methods really raise (`Unavailable` on
  * every method, `Conflict{idempotency_mismatch}` on `create`), so the layer needs no cast.
  */
+
 import type {
   AccessEvent,
   Action,
   AuditEntry,
-  BankAccountId,
-  BankAccountView,
   BrandingImage,
   BrandingPatch,
   Caller,
@@ -25,7 +24,6 @@ import type {
   IssuingEntityPatch,
   MemberCaller,
   MemberView,
-  NumberingSeriesId,
   RegistryResult,
   Role,
   NumberingSeriesView as SeriesView,
@@ -33,18 +31,20 @@ import type {
   UserId,
   WorkspaceId,
   WorkspaceSettingsPatch,
-  WorkspaceSlug,
   WorkspaceSummary,
-  WorkspaceView,
 } from "@kvitbit/domain/contract";
 import {
+  BankAccountId as BankAccountIdSchema,
+  BankAccountView,
   Channel,
   ClientRef,
   Conflict,
+  CurrencyCode,
   CurrentCaller,
   DocumentKind as DocumentKindSchema,
   Forbidden,
   Hex,
+  InvitationId as InvitationIdSchema,
   InvitationView as InvitationViewSchema,
   Locale,
   NotFound,
@@ -53,14 +53,25 @@ import {
   Role as RoleSchema,
   Scope,
   ThemeSource,
-  type Unavailable,
   UserId as UserIdSchema,
   WorkspaceId as WorkspaceIdSchema,
+  WorkspaceSlug,
   Workspaces,
+  WorkspaceView,
 } from "@kvitbit/domain/contract";
-import type { BlobKey } from "@kvitbit/domain/ports";
-import { BlobStorage } from "@kvitbit/domain/ports";
-import { Context, Data, Effect, Layer, Option, Schema, Stream } from "effect";
+import { BlobKey, BlobStorage, BlobTooLarge } from "@kvitbit/domain/ports";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as EffectString from "effect/String";
 import { can } from "../../policy/can";
 import { checkMembershipChange } from "../../policy/membership";
 import { authorize, authorizeInWorkspace } from "../../policy/Policy";
@@ -131,9 +142,10 @@ type Service = Workspaces["Service"];
 /** The domain interface; kept as a named export for tests and callers of `makeWorkspaces`. */
 export type WorkspacesImpl = Service;
 
+const isBrandingImageType = Schema.is(Schema.Literals(BRANDING_IMAGE_TYPES));
+
 /** Codec of the `MemberCaller` that `create` stores for request-key replay. */
-export const MemberCallerSchema = Schema.Struct({
-  _tag: Schema.Literal("Member"),
+export const MemberCallerSchema = Schema.TaggedStruct("Member", {
   userId: UserIdSchema,
   workspaceId: WorkspaceIdSchema,
   role: RoleSchema,
@@ -148,27 +160,29 @@ const SeriesInputSchema = Schema.Struct({
   kind: DocumentKindSchema,
   name: Schema.String,
   pattern: Schema.String,
-  nextNumber: Schema.optional(Schema.Number),
+  nextNumber: Schema.optional(Schema.Finite),
   isDefault: Schema.optional(Schema.Boolean),
 });
 
 const InvitePayload = Schema.Struct({ email: Schema.String, role: RoleSchema });
 
-const codec = <A>(schema: unknown) => schema as Schema.Codec<A, unknown>;
-
 // Small helpers -------------------------------------------------------------------------------
 
 type AuditChange = AuditEntry["changes"][number];
+const encodeJson = Schema.encodeOption(Schema.fromJsonString(Schema.Unknown));
+const jsonString = (value: AuditChange["before"]) => Option.getOrUndefined(encodeJson(value));
 
 /** Changed top-level fields of two records, as audit changes under `prefix`. */
-const diff = (prefix: string, before: object, after: object): Array<AuditChange> => {
-  const b = before as Record<string, unknown>;
-  const a = after as Record<string, unknown>;
-  const keys = new Set([...Object.keys(b), ...Object.keys(a)]);
+const diff = (
+  prefix: string,
+  before: Readonly<Record<string, AuditChange["before"]>>,
+  after: Readonly<Record<string, AuditChange["before"]>>,
+): Array<AuditChange> => {
+  const keys = new Set([...EffectRecord.keys(before), ...EffectRecord.keys(after)]);
   const out: Array<AuditChange> = [];
   for (const key of keys) {
-    if (JSON.stringify(b[key]) !== JSON.stringify(a[key])) {
-      out.push({ path: `${prefix}${key}`, before: b[key] ?? null, after: a[key] ?? null });
+    if (jsonString(before[key]) !== jsonString(after[key])) {
+      out.push({ path: `${prefix}${key}`, before: before[key] ?? null, after: after[key] ?? null });
     }
   }
   return out;
@@ -176,7 +190,10 @@ const diff = (prefix: string, before: object, after: object): Array<AuditChange>
 
 /** W5: a closed Workspace rejects every non-read action. */
 const requireOpen = (row: WorkspaceRow, action: Forbidden["action"]) =>
-  row.closed ? Effect.fail(new Forbidden({ action })) : Effect.void;
+  Effect.fail(Forbidden.make({ action })).pipe(
+    Effect.when(Effect.succeed(row.closed)),
+    Effect.asVoid,
+  );
 
 const seriesKindsFor = (regime: TaxRegime): ReadonlyArray<DocumentKind> =>
   regime === "vat_payer"
@@ -184,10 +201,13 @@ const seriesKindsFor = (regime: TaxRegime): ReadonlyArray<DocumentKind> =>
     : ["invoice", "proforma", "credit_note"];
 
 const brandingKey = (workspaceId: WorkspaceId, image: BrandingImage, sha256: string) =>
-  `branding/${workspaceId}/${image}/${sha256}` as BlobKey;
+  BlobKey.make(`branding/${workspaceId}/${image}/${sha256}`);
 
 /** Internal: the create probe found no committed key, so the registry must be consulted. */
-class RegistryNeeded extends Data.TaggedError("RegistryNeeded") {}
+class RegistryNeeded extends Schema.TaggedError<
+  RegistryNeeded,
+  { readonly brand: unique symbol }
+>()("RegistryNeeded", {}) {}
 
 /** W6: generated-slug inserts retried on a concurrent unique violation before giving up. */
 const SLUG_INSERT_ATTEMPTS = 20;
@@ -198,7 +218,7 @@ const invitationStatus = (row: InvitationRow, now: string): InvitationView["stat
   row.status === "pending" && row.expiresAt <= now ? "expired" : row.status;
 
 const notPending = () =>
-  new Conflict({ reason: "illegal_transition", detail: "invitation.not_pending" });
+  Conflict.make({ reason: "illegal_transition", detail: "invitation.not_pending" });
 
 const memberCaller = (input: {
   readonly userId: UserId;
@@ -214,18 +234,21 @@ const memberCaller = (input: {
 const THEME_JSON_MAX_BYTES = 64 * 1024;
 
 /** The issue a theme source raises, or null when it is acceptable (contrast is apps/server's). */
-const themeIssueOf = (theme: unknown): Issue["code"] | null => {
+const themeIssueOf = (
+  theme: NonNullable<SettingsPatch["branding"]>["theme"],
+): Issue["code"] | null => {
   if (theme === undefined || theme === null) return null;
-  const tag = typeof theme === "object" && "_tag" in theme ? theme._tag : undefined;
-  if (tag === "Seed") {
-    const seed = (theme as { readonly seed?: unknown }).seed;
-    return typeof seed === "string" && Schema.is(Hex)(seed) ? null : "theme.seed_invalid";
+  if (Predicate.hasProperty(theme, "_tag") && theme._tag === "Seed") {
+    return Predicate.hasProperty(theme, "seed") && Schema.is(Hex)(theme.seed)
+      ? null
+      : "theme.seed_invalid";
   }
-  if (tag === "MaterialThemeBuilder") {
-    const json = (theme as { readonly json?: unknown }).json;
-    if (typeof json !== "object" || json === null || Array.isArray(json))
+  if (Predicate.hasProperty(theme, "_tag") && theme._tag === "MaterialThemeBuilder") {
+    if (!(Predicate.hasProperty(theme, "json") && Predicate.isObject(theme.json)))
       return "theme.json_invalid";
-    const size = new TextEncoder().encode(JSON.stringify(json)).byteLength;
+    const encoded = encodeJson(theme.json);
+    if (Option.isNone(encoded)) return "theme.json_invalid";
+    const size = new TextEncoder().encode(encoded.value).byteLength;
     return size > THEME_JSON_MAX_BYTES ? "theme.too_large" : null;
   }
   return Schema.is(ThemeSource)(theme) ? null : "request.malformed";
@@ -256,16 +279,15 @@ const brandingIssues = (patch: {
 const mergeBranding = (
   current: Branding,
   patch: SettingsPatch["branding"] | BrandingPatch | undefined,
-): Branding =>
-  patch === undefined
-    ? current
-    : {
-        ...current,
-        ...(patch.pdfTemplate === undefined ? {} : { pdfTemplate: patch.pdfTemplate }),
-        ...(patch.accentColor === undefined ? {} : { accentColor: patch.accentColor as Hex }),
-        ...(patch.footerText === undefined ? {} : { footerText: patch.footerText }),
-        ...(patch.theme === undefined ? {} : { theme: patch.theme as Branding["theme"] }),
-      };
+): Branding => {
+  if (patch === undefined) return current;
+  const merged = { ...current };
+  if (patch.pdfTemplate !== undefined) merged.pdfTemplate = patch.pdfTemplate;
+  if (patch.accentColor !== undefined) merged.accentColor = Hex.make(patch.accentColor);
+  if (patch.footerText !== undefined) merged.footerText = patch.footerText;
+  if (patch.theme === null || Schema.is(ThemeSource)(patch.theme)) merged.theme = patch.theme;
+  return merged;
+};
 
 // The service ---------------------------------------------------------------------------------
 
@@ -282,20 +304,12 @@ export const makeWorkspaces = Effect.gen(function* () {
   const store = yield* CoreStore;
   // Only the store and ids: the build-time context may hold a CurrentCaller (or other per-request
   // services), and providing it per call would override the caller's own.
-  const context = Context.pick(
-    CoreStore,
-    IdGenerator,
-  )(yield* Effect.context<CoreStore | IdGenerator>());
+  const buildContext = yield* Effect.context<CoreStore | IdGenerator>();
+  const context = Context.pick(CoreStore, IdGenerator)(buildContext);
 
   /** Provides the store and ids captured at layer build; every method needs only CurrentCaller. */
-  const run = <A, E>(
-    effect: Effect.Effect<A, E, CoreStore | IdGenerator | CurrentCaller>,
-  ): Effect.Effect<
-    A,
-    | Exclude<E, { readonly _tag: "StoreUnavailable" | "BlobUnavailable" | "RegistryUnavailable" }>
-    | Unavailable,
-    CurrentCaller
-  > => orUnavailable(Effect.provideContext(effect, context)) as never;
+  const run = <A, E>(effect: Effect.Effect<A, E, CoreStore | IdGenerator | CurrentCaller>) =>
+    orUnavailable(Effect.provideContext(effect, context));
 
   const audit = (
     workspaceId: WorkspaceId,
@@ -303,43 +317,35 @@ export const makeWorkspaces = Effect.gen(function* () {
     revision: number | null,
     changes: ReadonlyArray<AuditChange>,
     extra: { readonly actor?: AuditEntry["actor"]; readonly subject?: AuditEntry["subject"] } = {},
-  ) =>
-    appendAudit({
+  ) => {
+    const entry = {
       workspaceId,
       subject: extra.subject ?? { entity: "Workspace", id: workspaceId },
       action,
       revision,
       changes,
-      ...(extra.actor === undefined ? {} : { actor: extra.actor }),
-    });
-
-  /** `UniqueViolation` on the slug index is a lost race for the slug (W6). */
-  const slugRace = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    Effect.catchTag(
-      effect as Effect.Effect<A, E | { readonly _tag: "UniqueViolation" }, R>,
-      "UniqueViolation",
-      () => Effect.fail(invalid(["slug"], "workspace.slug_taken")),
-    ) as Effect.Effect<
-      A,
-      Exclude<E, { readonly _tag: "UniqueViolation" }> | ReturnType<typeof invalid>,
-      R
-    >;
+    } as const;
+    return appendAudit(extra.actor === undefined ? entry : { ...entry, actor: extra.actor });
+  };
 
   /** Whether `slug` is free for `workspaceId` (another Workspace's slug or live alias is taken). */
-  const slugFree = (slug: string, workspaceId: WorkspaceId | null, now: string) =>
-    Effect.gen(function* () {
-      const owner = yield* repo.findWorkspaceBySlug(slug);
-      if (Option.isSome(owner) && owner.value.id !== workspaceId) return false;
-      const alias = yield* repo.findSlugAlias(slug);
-      if (
-        Option.isSome(alias) &&
-        alias.value.workspaceId !== workspaceId &&
-        alias.value.expiresAt > now
-      ) {
-        return false;
-      }
-      return true;
-    });
+  const slugFree = Effect.fn("slugFree")(function* (
+    slug: string,
+    workspaceId: WorkspaceId | null,
+    now: string,
+  ) {
+    const owner = yield* repo.findWorkspaceBySlug(slug);
+    if (Option.isSome(owner) && owner.value.id !== workspaceId) return false;
+    const alias = yield* repo.findSlugAlias(slug);
+    if (
+      Option.isSome(alias) &&
+      alias.value.workspaceId !== workspaceId &&
+      alias.value.expiresAt > now
+    ) {
+      return false;
+    }
+    return true;
+  });
 
   const accountView = (row: BankAccountRow, workspace: WorkspaceRow): BankAccountViewFields => ({
     id: row.id,
@@ -352,40 +358,43 @@ export const makeWorkspaces = Effect.gen(function* () {
   });
 
   const activeAccounts = (workspaceId: WorkspaceId) =>
-    Effect.map(repo.listBankAccounts(workspaceId), (all) => all.filter((a) => !a.archived));
+    Effect.map(repo.listBankAccounts(workspaceId), (all) =>
+      EffectArray.filter(all, (a) => !a.archived),
+    );
 
-  const defaultSeries = (views: ReadonlyArray<SeriesView>): SeriesByKind => {
-    const out: { [K in DocumentKind]?: NumberingSeriesId } = {};
-    for (const view of views) if (view.isDefault) out[view.kind] = view.id;
-    return out as SeriesByKind;
-  };
+  const defaultSeries = (views: ReadonlyArray<SeriesView>): SeriesByKind =>
+    Fn.pipe(
+      views,
+      EffectArray.filter((view) => view.isDefault),
+      EffectArray.map((view) => [view.kind, view.id] as const),
+      EffectRecord.fromEntries,
+    );
 
-  const workspaceView = (row: WorkspaceRow) =>
-    Effect.gen(function* () {
-      const date = yield* today;
-      const accounts = yield* activeAccounts(row.id);
-      const seriesViews = yield* series.list(row.id, date);
-      const view: WorkspaceViewFields = {
-        id: row.id,
-        slug: row.slug,
-        name: row.name,
-        closed: row.closed,
-        revision: row.revision,
-        issuingEntity: row.issuingEntity,
-        taxRegime: regimeOn(row.taxRegimes, date),
-        taxRegimeHistory: row.taxRegimes,
-        defaults: { ...row.defaults, preferredSeriesByKind: defaultSeries(seriesViews) },
-        reminderPolicy: row.reminders,
-        bankAccounts: accounts.map((a) => accountView(a, row)),
-        branding: row.branding,
-      };
-      return view as unknown as WorkspaceView;
-    });
+  const workspaceView = Effect.fn("workspaceView")(function* (row: WorkspaceRow) {
+    const date = yield* today;
+    const accounts = yield* activeAccounts(row.id);
+    const seriesViews = yield* series.list(row.id, date);
+    const view: WorkspaceViewFields = {
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      closed: row.closed,
+      revision: row.revision,
+      issuingEntity: row.issuingEntity,
+      taxRegime: regimeOn(row.taxRegimes, date),
+      taxRegimeHistory: row.taxRegimes,
+      defaults: { ...row.defaults, preferredSeriesByKind: defaultSeries(seriesViews) },
+      reminderPolicy: row.reminders,
+      bankAccounts: EffectArray.map(accounts, (a) => accountView(a, row)),
+      branding: row.branding,
+    };
+    return WorkspaceView.make(view);
+  });
 
   const names = (ids: ReadonlyArray<UserId>) =>
     Effect.map(
       directory.lookup([...new Set(ids)]),
-      (users) => new Map(users.map((u) => [u.userId, u])),
+      (users) => new Map(EffectArray.map(users, (u) => [u.userId, u])),
     );
 
   const invitationView = (
@@ -403,7 +412,7 @@ export const makeWorkspaces = Effect.gen(function* () {
   });
 
   const memberWorkspace = (caller: Caller, action: Forbidden["action"]) =>
-    caller._tag === "Member" ? Effect.succeed(caller) : Effect.fail(new Forbidden({ action }));
+    caller._tag === "Member" ? Effect.succeed(caller) : Effect.fail(Forbidden.make({ action }));
 
   /** Starts the invitation email for `row`'s current epoch once the transaction commits. */
   const sendAfterCommit = (row: InvitationRow) =>
@@ -445,76 +454,94 @@ export const makeWorkspaces = Effect.gen(function* () {
   const tokenHashOf = (invitationId: InvitationId, epoch: number) =>
     Effect.flatMap(tokens.token(invitationId, epoch), sha256Hex);
 
-  const findByToken = (token: string) =>
-    Effect.gen(function* () {
-      const tokenHash = yield* sha256Hex(token);
-      const found = yield* repo.findInvitationByTokenHash(tokenHash);
-      if (Option.isNone(found)) return yield* new NotFound({ entity: "Invitation", id: "token" });
-      return found.value;
-    });
+  const findByToken = Effect.fn("findByToken")(function* (token: string) {
+    const tokenHash = yield* sha256Hex(token);
+    const found = yield* repo.findInvitationByTokenHash(tokenHash);
+    if (Option.isNone(found)) return yield* NotFound.make({ entity: "Invitation", id: "token" });
+    return found.value;
+  });
 
   /**
    * R1/R1c under the workspace lock: re-reads the actor's membership and re-runs `can` with the
    * stored role, so a request admitted before a demotion, removal or transfer cannot commit a
    * privileged change. Call after `repo.lockWorkspace`. Non-Member callers pass through.
    */
-  const recheck = <C extends Caller>(caller: C, workspaceId: WorkspaceId, action: Action) =>
-    Effect.gen(function* () {
-      if (caller._tag !== "Member") return caller;
-      const stored = yield* repo.findMembership(workspaceId, caller.userId);
-      if (Option.isNone(stored)) return yield* new Forbidden({ action });
-      const actor = { ...caller, role: stored.value.role } as C;
-      if (!can(actor, action)) return yield* new Forbidden({ action });
-      return actor;
-    });
+  const recheck = Effect.fn("recheck")(function* (
+    caller: Caller,
+    workspaceId: WorkspaceId,
+    action: Action,
+  ) {
+    if (caller._tag !== "Member") return caller;
+    const stored = yield* repo.findMembership(workspaceId, caller.userId);
+    if (Option.isNone(stored)) return yield* Forbidden.make({ action });
+    const actor = { ...caller, role: stored.value.role };
+    if (!can(actor, action)) return yield* Forbidden.make({ action });
+    return actor;
+  });
 
   /** Whether the latest ownership transfer was `from` → `to` and `to` still owns the Workspace. */
-  const transferredBy = (workspaceId: WorkspaceId, from: UserId, to: UserId) =>
-    Effect.gen(function* () {
-      const target = yield* repo.findMembership(workspaceId, to);
-      if (Option.isNone(target) || target.value.role !== "owner") return false;
-      const history = yield* store.audit.history(workspaceId, {
-        entity: "Workspace",
-        id: workspaceId,
-      });
-      const last = history.filter((e) => e.action === "workspace.transferOwnership").at(-1);
-      if (last === undefined || last.actor._tag !== "Member" || last.actor.userId !== from)
-        return false;
-      return last.changes.some((c) => c.path === `members.${to}` && c.after === "owner");
+  const transferredBy = Effect.fn("transferredBy")(function* (
+    workspaceId: WorkspaceId,
+    from: UserId,
+    to: UserId,
+  ) {
+    const target = yield* repo.findMembership(workspaceId, to);
+    if (Option.isNone(target) || target.value.role !== "owner") return false;
+    const history = yield* store.audit.history(workspaceId, {
+      entity: "Workspace",
+      id: workspaceId,
     });
+    const last = EffectArray.filter(history, (e) => e.action === "workspace.transferOwnership").at(
+      -1,
+    );
+    if (last === undefined || last.actor._tag !== "Member" || last.actor.userId !== from)
+      return false;
+    return EffectArray.some(last.changes, (c) => c.path === `members.${to}` && c.after === "owner");
+  });
 
   /**
    * Locks the Workspace for a revision-checked settings write. Closed state (W5) and the stored
    * role (R1) are checked before the revision (C2), so a caller without access learns nothing
    * from a `Conflict{revision_changed, currentRevision}`.
    */
-  const lockForSettings = (caller: Caller, workspaceId: WorkspaceId, expectedRevision: number) =>
-    Effect.gen(function* () {
-      const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
-      yield* requireOpen(row, "workspace.settings");
-      yield* recheck(caller, workspaceId, "workspace.settings");
-      if (row.revision !== expectedRevision) {
-        return yield* new Conflict({ reason: "revision_changed", currentRevision: row.revision });
-      }
-      return row;
-    });
+  const lockForSettings = Effect.fn("lockForSettings")(function* (
+    caller: Caller,
+    workspaceId: WorkspaceId,
+    expectedRevision: number,
+  ) {
+    const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
+    yield* requireOpen(row, "workspace.settings");
+    yield* recheck(caller, workspaceId, "workspace.settings");
+    if (row.revision !== expectedRevision) {
+      return yield* Conflict.make({ reason: "revision_changed", currentRevision: row.revision });
+    }
+    return row;
+  });
 
   /**
    * Before field validation and any request-log replay (W5, R1a, C3): a closed Workspace, or an
    * actor whose stored membership no longer allows `action`, gets no cached write result.
    * Returns the actor with its stored role; the locked write rechecks.
    */
-  const preflight = <C extends Caller>(caller: C, workspaceId: WorkspaceId, action: Action) =>
-    Effect.gen(function* () {
-      yield* requireOpen(yield* storeOnly(repo.getWorkspace(workspaceId)), action);
-      return yield* recheck(caller, workspaceId, action);
-    });
+  const preflight = Effect.fn("preflight")(function* (
+    caller: Caller,
+    workspaceId: WorkspaceId,
+    action: Action,
+  ) {
+    const value_1 = yield* storeOnly(repo.getWorkspace(workspaceId));
+    yield* requireOpen(value_1, action);
+    return yield* recheck(caller, workspaceId, action);
+  });
 
   /** Owner/admin gate for invitations to the `admin` role (R1c). */
-  const manageAdminsFor = (caller: Caller, role: InvitationRow["role"]) =>
-    role === "admin" && !can(caller, "member.manageAdmins")
-      ? Effect.fail(new Forbidden({ action: "member.manageAdmins" }))
-      : Effect.void;
+  const manageAdminsFor = Effect.fnUntraced(function* (
+    caller: Caller,
+    role: InvitationRow["role"],
+  ) {
+    if (role === "admin" && !can(caller, "member.manageAdmins")) {
+      return yield* Forbidden.make({ action: "member.manageAdmins" });
+    }
+  });
 
   const impl: WorkspacesImpl = {
     // Account caller -------------------------------------------------------------------------
@@ -524,139 +551,142 @@ export const makeWorkspaces = Effect.gen(function* () {
         Effect.gen(function* () {
           const caller = yield* authorize("workspace.create");
           if (caller._tag !== "Account")
-            return yield* new Forbidden({ action: "workspace.create" });
-          const fields = yield* decodeInput(codec<NewWorkspaceFields>(NewWorkspaceFields), input);
-          const ico = fields.ico?.trim();
+            return yield* Forbidden.make({ action: "workspace.create" });
+          const fields = yield* decodeInput(NewWorkspaceFields, input);
+          const ico =
+            fields.ico === undefined || fields.ico === null
+              ? undefined
+              : EffectString.trim(fields.ico);
           const idempotency = {
             scope: { _tag: "User", userId: caller.userId } as const,
             key: opts?.requestKey,
             method: "Workspaces.create",
             // The decoded fields: the slug is a plain string here, so an invalid slug reaches
             // the slug rule below instead of failing the fingerprint encoding.
-            payload: { schema: codec<NewWorkspaceFields>(NewWorkspaceFields), value: fields },
-            result: codec<MemberCaller>(MemberCallerSchema),
+            payload: { schema: NewWorkspaceFields, value: fields },
+            result: MemberCallerSchema,
           };
-          const createBody = (record: RegistryResult | null) =>
-            Effect.gen(function* () {
-              const name = (fields.name ?? record?.name ?? "").trim();
-              if (name === "") return yield* invalid(["name"], "request.malformed");
-              const now = yield* nowIso;
-              const date = yield* today;
-              const base = slugify(name);
-              let suffix = 1;
-              /** The next free generated candidate after `suffix` (W6). */
-              const nextGenerated = Effect.gen(function* () {
-                for (;;) {
-                  const candidate = suffix === 1 ? base : withSuffix(base, suffix);
-                  suffix++;
-                  if (yield* slugFree(candidate, null, now)) return candidate;
-                }
-              });
-              let slug: string;
-              if (fields.slug !== undefined) {
-                if (!isValidSlug(fields.slug))
-                  return yield* invalid(["slug"], "workspace.slug_invalid");
-                if (!(yield* slugFree(fields.slug, null, now))) {
-                  return yield* invalid(["slug"], "workspace.slug_taken");
-                }
-                slug = fields.slug;
-              } else {
-                slug = yield* nextGenerated;
+          const createBody = Effect.fn("createBody")(function* (record: RegistryResult | null) {
+            const name = EffectString.trim(fields.name ?? record?.name ?? "");
+            if (name === "") return yield* invalid(["name"], "request.malformed");
+            const now = yield* nowIso;
+            const date = yield* today;
+            const base = slugify(name);
+            let suffix = 1;
+            /** The next free generated candidate after `suffix` (W6). */
+            const nextGenerated = Effect.gen(function* () {
+              let candidate = suffix === 1 ? base : withSuffix(base, suffix);
+              while (!(yield* slugFree(candidate, null, now))) {
+                suffix++;
+                candidate = withSuffix(base, suffix);
               }
-              const workspaceId = yield* newId<WorkspaceId>();
-              const regime = fields.taxRegime ?? "non_vat_payer";
-              const issuingEntity: IssuingEntity = {
-                name: record?.name ?? name,
-                ico: ico === undefined || ico === "" ? null : ico,
-                dic: record?.dic ?? null,
-                address: record?.address ?? EMPTY_ADDRESS,
-                legalForm: record?.legalForm ?? null,
-                registerEntry: record?.registerEntry ?? null,
-                email: caller.email,
-                phone: null,
-                web: null,
-              };
-              const row: WorkspaceRow = {
-                id: workspaceId,
+              suffix++;
+              return candidate;
+            });
+            let slug: string;
+            if (fields.slug !== undefined) {
+              if (!isValidSlug(fields.slug))
+                return yield* invalid(["slug"], "workspace.slug_invalid");
+              if (!(yield* slugFree(fields.slug, null, now))) {
+                return yield* invalid(["slug"], "workspace.slug_taken");
+              }
+              slug = fields.slug;
+            } else {
+              slug = yield* nextGenerated;
+            }
+            const workspaceId = yield* newId(WorkspaceIdSchema.make);
+            const regime = fields.taxRegime ?? "non_vat_payer";
+            const issuingEntity: IssuingEntity = {
+              name: record?.name ?? name,
+              ico: ico === undefined || ico === "" ? null : ico,
+              dic: record?.dic ?? null,
+              address: record?.address ?? EMPTY_ADDRESS,
+              legalForm: record?.legalForm ?? null,
+              registerEntry: record?.registerEntry ?? null,
+              email: caller.email,
+              phone: null,
+              web: null,
+            };
+            const row: WorkspaceRow = {
+              id: workspaceId,
+              workspaceId,
+              revision: 1,
+              slug: WorkspaceSlug.make(slug),
+              name,
+              closed: false,
+              closedAt: null,
+              createdAt: now,
+              issuingEntity,
+              taxRegimes: [{ regime, effectiveFrom: date }],
+              defaults: {
+                currency: fields.defaults?.currency ?? CurrencyCode.make("CZK"),
+                language: fields.defaults?.language ?? caller.locale,
+                dueDays: 14,
+                paymentMethod: "bank_transfer",
+                defaultNote: null,
+                paymentRounding: "none",
+                paymentTaxDocumentAutoSend: false,
+              },
+              bankAccountByCurrency: {},
+              reminders: DEFAULT_REMINDERS,
+              branding: DEFAULT_BRANDING,
+            };
+            // W6: the insert runs in a savepoint, so a concurrent create that took a generated
+            // candidate first only costs a retry with the next suffix (bounded). An explicitly
+            // requested slug still fails `slug_taken`.
+            for (let attempt = 1; ; attempt++) {
+              const inserted = yield* Effect.result(
+                store.transaction(repo.insertWorkspace({ ...row, slug: WorkspaceSlug.make(slug) })),
+              );
+              if (inserted._tag === "Success") break;
+              const error = inserted.failure;
+              if (error._tag !== "UniqueViolation") return yield* error;
+              // Another unique key (a duplicate fresh id) is a defect, as before.
+              if (error.constraint !== WORKSPACE_SLUG_UNIQUE) return yield* Effect.die(error);
+              if (fields.slug !== undefined || attempt >= SLUG_INSERT_ATTEMPTS)
+                return yield* invalid(["slug"], "workspace.slug_taken");
+              slug = yield* nextGenerated;
+            }
+            yield* storeOnly(
+              repo.insertMembership({
+                id: yield* newId(),
                 workspaceId,
                 revision: 1,
-                slug: slug as WorkspaceSlug,
-                name,
-                closed: false,
-                closedAt: null,
-                createdAt: now,
-                issuingEntity,
-                taxRegimes: [{ regime, effectiveFrom: date }],
-                defaults: {
-                  currency:
-                    fields.defaults?.currency ?? ("CZK" as WorkspaceRow["defaults"]["currency"]),
-                  language: fields.defaults?.language ?? caller.locale,
-                  dueDays: 14,
-                  paymentMethod: "bank_transfer",
-                  defaultNote: null,
-                  paymentRounding: "none",
-                  paymentTaxDocumentAutoSend: false,
-                },
-                bankAccountByCurrency: {},
-                reminders: DEFAULT_REMINDERS,
-                branding: DEFAULT_BRANDING,
-              };
-              // W6: the insert runs in a savepoint, so a concurrent create that took a generated
-              // candidate first only costs a retry with the next suffix (bounded). An explicitly
-              // requested slug still fails `slug_taken`.
-              for (let attempt = 1; ; attempt++) {
-                const inserted = yield* Effect.result(
-                  store.transaction(repo.insertWorkspace({ ...row, slug: slug as WorkspaceSlug })),
-                );
-                if (inserted._tag === "Success") break;
-                const error = inserted.failure;
-                if (error._tag !== "UniqueViolation") return yield* Effect.fail(error);
-                // Another unique key (a duplicate fresh id) is a defect, as before.
-                if (error.constraint !== WORKSPACE_SLUG_UNIQUE) return yield* Effect.die(error);
-                if (fields.slug !== undefined || attempt >= SLUG_INSERT_ATTEMPTS)
-                  return yield* invalid(["slug"], "workspace.slug_taken");
-                slug = yield* nextGenerated;
-              }
-              yield* storeOnly(
-                repo.insertMembership({
-                  id: yield* newId<string>(),
-                  workspaceId,
-                  revision: 1,
-                  userId: caller.userId,
-                  role: "owner",
-                  joinedAt: now,
-                  removedAt: null,
-                }),
-              );
-              yield* series.ensureDefaults(workspaceId, seriesKindsFor(regime));
-              yield* audit(
-                workspaceId,
-                "workspace.create",
-                1,
-                [
-                  { path: "slug", before: null, after: slug },
-                  { path: "name", before: null, after: name },
-                  { path: `members.${caller.userId}`, before: null, after: "owner" },
-                ],
-                {
-                  actor: {
-                    _tag: "Member",
-                    userId: caller.userId,
-                    channel: caller.channel,
-                    client: null,
-                  },
-                },
-              );
-              return memberCaller({
                 userId: caller.userId,
-                workspaceId,
                 role: "owner",
-                scopes: "all",
-                locale: caller.locale,
-                channel: caller.channel,
-                client: null,
-              });
+                joinedAt: now,
+                removedAt: null,
+              }),
+            );
+            yield* series.ensureDefaults(workspaceId, seriesKindsFor(regime));
+            yield* audit(
+              workspaceId,
+              "workspace.create",
+              1,
+              [
+                { path: "slug", before: null, after: slug },
+                { path: "name", before: null, after: name },
+                { path: `members.${caller.userId}`, before: null, after: "owner" },
+              ],
+              {
+                actor: {
+                  _tag: "Member",
+                  userId: caller.userId,
+                  channel: caller.channel,
+                  client: null,
+                },
+              },
+            );
+            return memberCaller({
+              userId: caller.userId,
+              workspaceId,
+              role: "owner",
+              scopes: "all",
+              locale: caller.locale,
+              channel: caller.channel,
+              client: null,
             });
+          });
           let created: MemberCaller;
           if (ico === undefined || ico === "") {
             created = yield* withIdempotency(idempotency, createBody(null));
@@ -667,13 +697,13 @@ export const makeWorkspaces = Effect.gen(function* () {
               idempotency.key === undefined
                 ? null
                 : yield* Effect.result(
-                    withIdempotency(idempotency, Effect.fail(new RegistryNeeded())),
+                    withIdempotency(idempotency, Effect.fail(RegistryNeeded.make({}))),
                   );
             if (probe !== null && probe._tag === "Success") {
               created = probe.success;
             } else {
               if (probe !== null && probe.failure._tag !== "RegistryNeeded") {
-                return yield* Effect.fail(probe.failure);
+                return yield* probe.failure;
               }
               const record = yield* registry.lookup(ico);
               created = yield* withIdempotency(idempotency, createBody(record));
@@ -683,7 +713,7 @@ export const makeWorkspaces = Effect.gen(function* () {
           // creator who left or was demoted since does not get a stale owner caller back (R1a).
           const membership = yield* repo.findMembership(created.workspaceId, caller.userId);
           if (Option.isNone(membership)) {
-            return yield* new Forbidden({ action: "workspace.enter" });
+            return yield* Forbidden.make({ action: "workspace.enter" });
           }
           return memberCaller({
             userId: caller.userId,
@@ -701,7 +731,7 @@ export const makeWorkspaces = Effect.gen(function* () {
       Effect.gen(function* () {
         const caller = yield* authorize("workspace.listMine");
         if (caller._tag !== "Account")
-          return yield* new Forbidden({ action: "workspace.listMine" });
+          return yield* Forbidden.make({ action: "workspace.listMine" });
         const date = yield* today;
         const memberships = yield* repo.listMembershipsOfUser(caller.userId);
         const out: Array<WorkspaceSummary> = [];
@@ -718,7 +748,10 @@ export const makeWorkspaces = Effect.gen(function* () {
             closed: row.closed,
           });
         }
-        return out.sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+        return out.sort(
+          (a, b) =>
+            EffectString.localeCompare(b.name)(a.name) || EffectString.localeCompare(b.id)(a.id),
+        );
       }),
     ),
 
@@ -726,10 +759,11 @@ export const makeWorkspaces = Effect.gen(function* () {
       run(
         Effect.gen(function* () {
           const caller = yield* authorize("workspace.enter");
-          if (caller._tag !== "Account") return yield* new Forbidden({ action: "workspace.enter" });
+          if (caller._tag !== "Account")
+            return yield* Forbidden.make({ action: "workspace.enter" });
           const membership = yield* repo.findMembership(workspace, caller.userId);
           if (Option.isNone(membership)) {
-            return yield* new NotFound({ entity: "Workspace", id: workspace });
+            return yield* NotFound.make({ entity: "Workspace", id: workspace });
           }
           return memberCaller({
             userId: caller.userId,
@@ -748,7 +782,7 @@ export const makeWorkspaces = Effect.gen(function* () {
         Effect.gen(function* () {
           const caller = yield* authorize("invitation.accept");
           if (caller._tag !== "Account")
-            return yield* new Forbidden({ action: "invitation.accept" });
+            return yield* Forbidden.make({ action: "invitation.accept" });
           return yield* store.transaction(
             Effect.gen(function* () {
               const found = yield* findByToken(token);
@@ -758,11 +792,13 @@ export const makeWorkspaces = Effect.gen(function* () {
               const invitation = yield* repo.lockInvitation(found.workspaceId, found.id);
               const now = yield* nowIso;
               if (invitation.tokenHash !== found.tokenHash) {
-                return yield* new NotFound({ entity: "Invitation", id: "token" });
+                return yield* NotFound.make({ entity: "Invitation", id: "token" });
               }
               if (invitationStatus(invitation, now) !== "pending") return yield* notPending();
-              if (invitation.emailLower !== caller.email.trim().toLowerCase()) {
-                return yield* new Forbidden({ action: "invitation.accept" });
+              if (
+                invitation.emailLower !== EffectString.toLowerCase(EffectString.trim(caller.email))
+              ) {
+                return yield* Forbidden.make({ action: "invitation.accept" });
               }
               const existing = yield* repo.findMembership(workspace.id, caller.userId);
               const role: Role = Option.isSome(existing) ? existing.value.role : invitation.role;
@@ -779,7 +815,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                 } else {
                   yield* storeOnly(
                     repo.insertMembership({
-                      id: yield* newId<string>(),
+                      id: yield* newId(),
                       workspaceId: workspace.id,
                       revision: 1,
                       userId: caller.userId,
@@ -839,9 +875,9 @@ export const makeWorkspaces = Effect.gen(function* () {
           const caller = yield* CurrentCaller;
           // R1e: Account callers hold registry.lookup; Members need contact.read.
           yield* authorize(caller._tag === "Member" ? "contact.read" : "registry.lookup");
-          const trimmed = ico.trim();
+          const trimmed = EffectString.trim(ico);
           const result = yield* registry.lookup(trimmed);
-          if (result === null) return yield* new NotFound({ entity: "Contact", id: trimmed });
+          if (result === null) return yield* NotFound.make({ entity: "Contact", id: trimmed });
           return result;
         }),
       ),
@@ -849,22 +885,22 @@ export const makeWorkspaces = Effect.gen(function* () {
     peekInvitation: run(
       Effect.gen(function* () {
         // The invitation page sees only NotFound, whoever asks.
-        const caller = yield* Effect.mapError(
-          authorize("invitation.peek"),
-          () => new NotFound({ entity: "Invitation", id: "token" }),
+        const caller = yield* Effect.mapError(authorize("invitation.peek"), () =>
+          NotFound.make({ entity: "Invitation", id: "token" }),
         );
         if (caller._tag !== "InvitationHolder") {
-          return yield* new NotFound({ entity: "Invitation", id: "token" });
+          return yield* NotFound.make({ entity: "Invitation", id: "token" });
         }
         const invitation = yield* findByToken(caller.token);
         const workspace = yield* storeOnly(repo.getWorkspace(invitation.workspaceId));
         const inviter = (yield* names([invitation.invitedBy])).get(invitation.invitedBy);
+        const at = yield* nowIso;
         const peek: InvitationPeek = {
           workspaceName: workspace.name,
           inviterName: inviter?.name ?? "",
           role: invitation.role,
           email: invitation.email,
-          status: invitationStatus(invitation, yield* nowIso),
+          status: invitationStatus(invitation, at),
           expiresAt: invitation.expiresAt,
         };
         return peek;
@@ -876,7 +912,8 @@ export const makeWorkspaces = Effect.gen(function* () {
     current: run(
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("workspace.read");
-        return yield* workspaceView(yield* storeOnly(repo.getWorkspace(workspaceId)));
+        const value_1 = yield* storeOnly(repo.getWorkspace(workspaceId));
+        return yield* workspaceView(value_1);
       }),
     ),
 
@@ -884,20 +921,16 @@ export const makeWorkspaces = Effect.gen(function* () {
       run(
         Effect.gen(function* () {
           const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
-          const fields = yield* decodeInput(
-            codec<IssuingEntityPatchFields>(IssuingEntityPatchFields),
-            patch,
-          );
+          const fields = yield* decodeInput(IssuingEntityPatchFields, patch);
           return yield* store.transaction(
             Effect.gen(function* () {
               const row = yield* lockForSettings(caller, workspaceId, expectedRevision);
               const issues: Array<Issue> = [];
-              if (fields.name !== undefined && fields.name.trim() === "") {
+              if (fields.name !== undefined && EffectString.trim(fields.name) === "") {
                 issues.push(issue(["name"], "request.malformed"));
               }
-              if (fields.ico !== undefined && fields.ico !== null) {
-                if (!isValidIco(fields.ico)) issues.push(issue(["ico"], "ico.checksum"));
-              }
+              if (fields.ico !== undefined && fields.ico !== null && !isValidIco(fields.ico))
+                issues.push(issue(["ico"], "ico.checksum"));
               if (
                 fields.email !== undefined &&
                 fields.email !== null &&
@@ -905,7 +938,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               ) {
                 issues.push(issue(["email"], "request.malformed"));
               }
-              const last = row.taxRegimes[row.taxRegimes.length - 1];
+              const last = row.taxRegimes.at(-1);
               if (
                 fields.taxRegime !== undefined &&
                 last !== undefined &&
@@ -915,12 +948,26 @@ export const makeWorkspaces = Effect.gen(function* () {
               }
               yield* failIssues(issues);
               const { taxRegime, ...entityPatch } = fields;
+              const currentEntity = row.issuingEntity;
               const issuingEntity: IssuingEntity = {
-                ...row.issuingEntity,
-                ...Object.fromEntries(
-                  Object.entries(entityPatch).filter(([, v]) => v !== undefined),
-                ),
-                ...(entityPatch.name === undefined ? {} : { name: entityPatch.name.trim() }),
+                name:
+                  entityPatch.name === undefined
+                    ? currentEntity.name
+                    : EffectString.trim(entityPatch.name),
+                address: entityPatch.address ?? currentEntity.address,
+                ico: entityPatch.ico === undefined ? currentEntity.ico : entityPatch.ico,
+                dic: entityPatch.dic === undefined ? currentEntity.dic : entityPatch.dic,
+                legalForm:
+                  entityPatch.legalForm === undefined
+                    ? currentEntity.legalForm
+                    : entityPatch.legalForm,
+                registerEntry:
+                  entityPatch.registerEntry === undefined
+                    ? currentEntity.registerEntry
+                    : entityPatch.registerEntry,
+                email: entityPatch.email === undefined ? currentEntity.email : entityPatch.email,
+                phone: entityPatch.phone === undefined ? currentEntity.phone : entityPatch.phone,
+                web: entityPatch.web === undefined ? currentEntity.web : entityPatch.web,
               };
               let taxRegimes = row.taxRegimes;
               if (
@@ -957,21 +1004,24 @@ export const makeWorkspaces = Effect.gen(function* () {
       run(
         Effect.gen(function* () {
           const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
-          const fields = yield* decodeInput(codec<SettingsPatch>(SettingsPatchFields), patch);
+          const fields = yield* decodeInput(SettingsPatchFields, patch);
           return yield* store.transaction(
             Effect.gen(function* () {
               const row = yield* lockForSettings(caller, workspaceId, expectedRevision);
               const now = yield* nowIso;
               const date = yield* today;
               const issues: Array<Issue> = [];
-              const name = fields.name?.trim();
-              if (name === "") issues.push(issue(["name"], "request.malformed"));
+              const name = fields.name === undefined ? undefined : EffectString.trim(fields.name);
+              if (fields.name !== undefined && EffectString.trim(fields.name) === "") {
+                issues.push(issue(["name"], "request.malformed"));
+              }
               const slugChanged = fields.slug !== undefined && fields.slug !== row.slug;
               if (fields.slug !== undefined && !isValidSlug(fields.slug)) {
                 issues.push(issue(["slug"], "workspace.slug_invalid"));
               } else if (
+                fields.slug !== undefined &&
                 slugChanged &&
-                !(yield* slugFree(fields.slug as string, workspaceId, now))
+                !(yield* slugFree(fields.slug, workspaceId, now))
               ) {
                 issues.push(issue(["slug"], "workspace.slug_taken"));
               }
@@ -985,11 +1035,12 @@ export const makeWorkspaces = Effect.gen(function* () {
               }
               const seriesViews = yield* series.list(workspaceId, date);
               const promote: Array<SeriesView> = [];
-              for (const [kind, id] of Object.entries(
-                defaults.preferredSeriesByKind ?? {},
-              ) as Array<[DocumentKind, NumberingSeriesId | undefined]>) {
+              for (const kind of DocumentKindSchema.literals) {
+                const id = defaults.preferredSeriesByKind?.[kind];
                 if (id === undefined) continue;
-                const target = seriesViews.find((s) => s.id === id && s.kind === kind);
+                const target = Option.getOrUndefined(
+                  EffectArray.findFirst(seriesViews, (s) => s.id === id && s.kind === kind),
+                );
                 if (target === undefined) {
                   issues.push(
                     issue(["defaults", "preferredSeriesByKind", kind], "request.malformed"),
@@ -1000,32 +1051,37 @@ export const makeWorkspaces = Effect.gen(function* () {
               if (
                 offsets !== undefined &&
                 (offsets.length > MAX_REMINDER_OFFSETS ||
-                  offsets.some((d) => d < 1 || d > MAX_DUE_DAYS) ||
+                  EffectArray.some(offsets, (d) => d < 1 || d > MAX_DUE_DAYS) ||
                   new Set(offsets).size !== offsets.length)
               ) {
                 issues.push(issue(["reminderPolicy", "offsetsDays"], "request.malformed"));
               }
               yield* failIssues(issues);
 
-              const { preferredSeriesByKind: _ignored, ...defaultFields } = defaults;
               const next: WorkspaceRow = {
                 ...row,
-                ...(name === undefined ? {} : { name }),
-                ...(fields.slug === undefined ? {} : { slug: fields.slug as WorkspaceSlug }),
+                name: name ?? row.name,
+                slug: fields.slug === undefined ? row.slug : WorkspaceSlug.make(fields.slug),
                 defaults: {
-                  ...row.defaults,
-                  ...(Object.fromEntries(
-                    Object.entries(defaultFields).filter(([, v]) => v !== undefined),
-                  ) as Partial<WorkspaceRow["defaults"]>),
+                  currency: defaults.currency ?? row.defaults.currency,
+                  language: defaults.language ?? row.defaults.language,
+                  dueDays: defaults.dueDays ?? row.defaults.dueDays,
+                  paymentMethod: defaults.paymentMethod ?? row.defaults.paymentMethod,
+                  defaultNote:
+                    defaults.defaultNote === undefined
+                      ? row.defaults.defaultNote
+                      : defaults.defaultNote,
+                  paymentRounding: defaults.paymentRounding ?? row.defaults.paymentRounding,
+                  paymentTaxDocumentAutoSend:
+                    defaults.paymentTaxDocumentAutoSend ?? row.defaults.paymentTaxDocumentAutoSend,
                 },
                 reminders: {
-                  ...row.reminders,
-                  ...(Object.fromEntries(
-                    Object.entries(fields.reminderPolicy ?? {}).filter(([, v]) => v !== undefined),
-                  ) as Partial<WorkspaceRow["reminders"]>),
-                  ...(offsets === undefined
-                    ? {}
-                    : { offsetsDays: [...offsets].sort((a, b) => a - b) }),
+                  enabled: fields.reminderPolicy?.enabled ?? row.reminders.enabled,
+                  proformas: fields.reminderPolicy?.proformas ?? row.reminders.proformas,
+                  offsetsDays:
+                    offsets === undefined
+                      ? row.reminders.offsetsDays
+                      : [...offsets].sort((a, b) => a - b),
                 },
                 branding: mergeBranding(row.branding, fields.branding),
               };
@@ -1035,17 +1091,23 @@ export const makeWorkspaces = Effect.gen(function* () {
                 const stale = yield* repo.findSlugAlias(row.slug);
                 if (Option.isSome(stale)) yield* storeOnly(repo.removeSlugAlias(stale.value));
               }
-              const saved = yield* slugRace(
-                Effect.catchTag(repo.updateWorkspace(next, row.revision), "NotFound", Effect.die),
+              const saved = yield* repo.updateWorkspace(next, row.revision).pipe(
+                Effect.catchTags({
+                  NotFound: Effect.die,
+                  UniqueViolation: () => Effect.fail(invalid(["slug"], "workspace.slug_taken")),
+                }),
               );
               if (slugChanged) {
                 yield* storeOnly(
                   repo.insertSlugAlias({
-                    id: yield* newId<string>(),
+                    id: yield* newId(),
                     workspaceId,
                     revision: 1,
                     slug: row.slug,
-                    expiresAt: new Date(Date.parse(now) + SLUG_ALIAS_TTL_MILLIS).toISOString(),
+                    expiresAt: DateTime.makeUnsafe(now).pipe(
+                      DateTime.addDuration(SLUG_ALIAS_TTL_MILLIS),
+                      DateTime.formatIso,
+                    ),
                   }),
                 );
               }
@@ -1076,9 +1138,12 @@ export const makeWorkspaces = Effect.gen(function* () {
               const { revision: _b, ...afterFields } = saved;
               yield* audit(workspaceId, "workspace.settings.update", saved.revision, [
                 ...diff("", beforeFields, afterFields),
-                ...promote.map((s) => ({
+                ...EffectArray.map(promote, (s) => ({
                   path: `defaults.preferredSeriesByKind.${s.kind}`,
-                  before: seriesViews.find((v) => v.kind === s.kind && v.isDefault)?.id ?? null,
+                  before:
+                    Option.getOrUndefined(
+                      EffectArray.findFirst(seriesViews, (v) => v.kind === s.kind && v.isDefault),
+                    )?.id ?? null,
                   after: s.id,
                 })),
               ]);
@@ -1093,12 +1158,12 @@ export const makeWorkspaces = Effect.gen(function* () {
         Effect.gen(function* () {
           const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
           yield* preflight(caller, workspaceId, "workspace.settings");
-          const fields = yield* decodeInput(codec<BankAccountFields>(BankAccountFields), input);
+          const fields = yield* decodeInput(BankAccountFields, input);
           const iban = normalizeIban(fields.iban);
           const bic =
             fields.bic === undefined || fields.bic === null
               ? null
-              : fields.bic.trim().toUpperCase();
+              : EffectString.toUpperCase(EffectString.trim(fields.bic));
           const issues: Array<Issue> = [];
           if (!isValidIban(iban)) issues.push(issue(["iban"], "request.malformed"));
           if (bic !== null && !isValidBic(bic)) issues.push(issue(["bic"], "request.malformed"));
@@ -1110,8 +1175,8 @@ export const makeWorkspaces = Effect.gen(function* () {
               // current state; only a create (no id) is replayed from the request log.
               key: fields.id === undefined ? opts?.requestKey : undefined,
               method: "Workspaces.saveBankAccount",
-              payload: { schema: codec<BankAccountFields>(BankAccountFields), value: fields },
-              result: codec<BankAccountViewFields>(BankAccountViewFields),
+              payload: { schema: BankAccountFields, value: fields },
+              result: BankAccountViewFields,
             },
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
@@ -1119,13 +1184,14 @@ export const makeWorkspaces = Effect.gen(function* () {
               yield* recheck(caller, workspaceId, "workspace.settings");
               const now = yield* nowIso;
               // Full replacement (C6): an omitted name or bic clears it.
-              const name = fields.name?.trim() || null;
+              const trimmedName = EffectString.trim(fields.name ?? "");
+              const name = trimmedName === "" ? null : trimmedName;
               let before: BankAccountRow | null = null;
               let saved: BankAccountRow;
               if (fields.id !== undefined) {
                 const current = yield* repo.lockBankAccount(workspaceId, fields.id);
                 if (current.archived)
-                  return yield* new NotFound({ entity: "BankAccount", id: fields.id });
+                  return yield* NotFound.make({ entity: "BankAccount", id: fields.id });
                 before = current;
                 const isDefaultNow =
                   workspace.bankAccountByCurrency[current.currency] === current.id;
@@ -1139,13 +1205,15 @@ export const makeWorkspaces = Effect.gen(function* () {
                   return accountView(current, workspace); // idempotent by state (C6)
                 }
                 if (current.currency !== fields.currency) {
+                  const value_1 = yield* activeAccounts(workspaceId);
                   // A currency change moves drafts, Templates and a currency default with it.
-                  const others = (yield* activeAccounts(workspaceId)).some(
+                  const others = EffectArray.some(
+                    value_1,
                     (a) => a.currency === current.currency && a.id !== current.id,
                   );
                   const uses = yield* references.count(workspaceId, current.id);
                   if (uses > 0 || (isDefaultNow && others)) {
-                    return yield* new Conflict({
+                    return yield* Conflict.make({
                       reason: "illegal_transition",
                       detail: "bank_account.in_use",
                     });
@@ -1160,7 +1228,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               } else {
                 saved = yield* storeOnly(
                   repo.insertBankAccount({
-                    id: yield* newId<BankAccountId>(),
+                    id: yield* newId(BankAccountIdSchema.make),
                     workspaceId,
                     revision: 1,
                     name,
@@ -1172,7 +1240,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                   }),
                 );
               }
-              const byCurrency: Record<string, BankAccountId> = {
+              const byCurrency = {
                 ...workspace.bankAccountByCurrency,
               };
               if (
@@ -1180,8 +1248,10 @@ export const makeWorkspaces = Effect.gen(function* () {
                 before.currency !== saved.currency &&
                 byCurrency[before.currency] === saved.id
               ) {
+                const value_1 = yield* activeAccounts(workspaceId);
                 // The account left its old currency: promote another account of it, if any.
-                const others = (yield* activeAccounts(workspaceId)).filter(
+                const others = EffectArray.filter(
+                  value_1,
                   (a) => a.currency === before?.currency && a.id !== saved.id,
                 );
                 if (others[0] === undefined) delete byCurrency[before.currency];
@@ -1207,7 +1277,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               return result;
             }),
           );
-          return view as unknown as BankAccountView;
+          return BankAccountView.make(view);
         }),
       ),
 
@@ -1240,7 +1310,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               // A currency default is always in use (4.1), even as its currency's only account.
               const inUse = uses > 0 || isDefault;
               if (inUse && substitute === undefined) {
-                return yield* new Conflict({
+                return yield* Conflict.make({
                   reason: "illegal_transition",
                   detail: "bank_account.in_use",
                 });
@@ -1248,7 +1318,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               if (substitute !== undefined && uses > 0) {
                 yield* references.reassign(workspaceId, id, substitute.id);
               }
-              const byCurrency: Record<string, BankAccountId> = {
+              const byCurrency = {
                 ...workspace.bankAccountByCurrency,
               };
               if (isDefault) {
@@ -1304,16 +1374,17 @@ export const makeWorkspaces = Effect.gen(function* () {
               // C6: as saveBankAccount, only a create (no id) uses the request log.
               key: input.id === undefined ? opts?.requestKey : undefined,
               method: "Workspaces.configureSeries",
-              payload: { schema: codec<typeof input>(SeriesInputSchema), value: input },
-              result: codec<SeriesView>(NumberingSeriesView),
+              payload: { schema: SeriesInputSchema, value: input },
+              result: NumberingSeriesView,
             },
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* requireOpen(workspace, "workspace.settings");
               yield* recheck(caller, workspaceId, "workspace.settings");
-              const { view, before } = yield* series.configure(workspaceId, input, yield* today);
+              const today_1 = yield* today;
+              const { view, before } = yield* series.configure(workspaceId, input, today_1);
               // A repeat with the same configuration changes nothing (C6 full replacement).
-              if (before !== null && JSON.stringify(before) === JSON.stringify(view)) return view;
+              if (before !== null && jsonString(before) === jsonString(view)) return view;
               // The default series per kind is part of WorkspaceView, so its revision moves.
               const next = yield* storeOnly(repo.updateWorkspace(workspace, workspace.revision));
               yield* audit(workspaceId, "workspace.series.configure", next.revision, [
@@ -1328,7 +1399,8 @@ export const makeWorkspaces = Effect.gen(function* () {
     listSeries: run(
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("workspace.read");
-        return yield* series.list(workspaceId, yield* today);
+        const today_1 = yield* today;
+        return yield* series.list(workspaceId, today_1);
       }),
     ),
 
@@ -1337,15 +1409,14 @@ export const makeWorkspaces = Effect.gen(function* () {
         Effect.gen(function* () {
           const { caller, workspaceId } = yield* authorizeInWorkspace("workspace.settings");
           yield* preflight(caller, workspaceId, "workspace.settings");
-          const contentType = file.contentType.toLowerCase();
-          if (!(BRANDING_IMAGE_TYPES as ReadonlyArray<string>).includes(contentType)) {
+          const contentType = EffectString.toLowerCase(file.contentType);
+          if (!isBrandingImageType(contentType)) {
             return yield* invalid(["contentType"], "branding.image_type_rejected");
           }
           // Checked while streaming (W7): the size cap aborts early and the signature is checked
           // as soon as its signature's bytes have arrived (PNG 8, JPEG 3), before any further
           // chunk is pulled.
-          const headerBytes =
-            IMAGE_SIGNATURE_BYTES[contentType as keyof typeof IMAGE_SIGNATURE_BYTES];
+          const headerBytes = IMAGE_SIGNATURE_BYTES[contentType];
           const parts: Array<Uint8Array> = [];
           let size = 0;
           let headerChecked = false;
@@ -1360,8 +1431,9 @@ export const makeWorkspaces = Effect.gen(function* () {
             }
             return out;
           };
-          yield* Stream.runForEach(file.bytes, (chunk) =>
-            Effect.gen(function* () {
+          yield* Stream.runForEach(
+            file.bytes,
+            Effect.fnUntraced(function* (chunk) {
               size += chunk.byteLength;
               if (size > BRANDING_IMAGE_MAX_BYTES) {
                 return yield* invalid(["file"], "branding.image_too_large");
@@ -1378,17 +1450,17 @@ export const makeWorkspaces = Effect.gen(function* () {
             }),
           );
           const bytes = joined(size);
-          if (!headerChecked && !matchesImageSignature(contentType, bytes)) {
+          if (!(headerChecked || matchesImageSignature(contentType, bytes))) {
             return yield* invalid(["file"], "branding.image_type_rejected");
           }
           const sha256 = yield* sha256Hex(bytes);
           const key = brandingKey(workspaceId, image, sha256);
-          yield* Effect.catchTag(
+          yield* Effect.catchIf(
             blobs.put(key, Stream.succeed(bytes), {
               contentType,
               maxBytes: BRANDING_IMAGE_MAX_BYTES,
             }),
-            "BlobTooLarge",
+            (error) => error instanceof BlobTooLarge,
             () => Effect.fail(invalid(["file"], "branding.image_too_large")),
           );
           const fresh: ImageRef = { contentType, bytes: size, sha256, updatedAt: yield* nowIso };
@@ -1406,19 +1478,18 @@ export const makeWorkspaces = Effect.gen(function* () {
               ) {
                 return previous;
               }
-              const ref = fresh;
               const next = yield* storeOnly(
                 repo.updateWorkspace(
-                  { ...row, branding: { ...row.branding, [image]: ref } },
+                  { ...row, branding: { ...row.branding, [image]: fresh } },
                   row.revision,
                 ),
               );
               yield* audit(workspaceId, "workspace.branding.image.set", next.revision, [
-                { path: `branding.${image}`, before: previous, after: ref },
+                { path: `branding.${image}`, before: previous, after: fresh },
               ]);
               // Superseded blobs stay: keys are content-addressed, so deleting one here could
               // remove an image a concurrent request just stored again. Housekeeping collects them.
-              return ref;
+              return fresh;
             }),
           );
         }),
@@ -1430,11 +1501,11 @@ export const makeWorkspaces = Effect.gen(function* () {
           const { workspaceId } = yield* authorizeInWorkspace("workspace.read");
           const row = yield* storeOnly(repo.getWorkspace(workspaceId));
           const ref = row.branding[image];
-          if (ref === null) return yield* new NotFound({ entity: "BrandingImage", id: image });
+          if (ref === null) return yield* NotFound.make({ entity: "BrandingImage", id: image });
           const bytes = yield* Effect.catchTag(
             blobs.get(brandingKey(workspaceId, image, ref.sha256)),
             "BlobMissing",
-            () => Effect.fail(new NotFound({ entity: "BrandingImage", id: image })),
+            () => Effect.fail(NotFound.make({ entity: "BrandingImage", id: image })),
           );
           const download: FileDownload = {
             filename: `${image}.${ref.contentType === "image/png" ? "png" : "jpg"}`,
@@ -1491,8 +1562,9 @@ export const makeWorkspaces = Effect.gen(function* () {
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("member.read");
         const rows = yield* repo.listMembers(workspaceId);
-        const users = yield* names(rows.map((m) => m.userId));
-        return rows.map(
+        const users = yield* names(EffectArray.map(rows, (m) => m.userId));
+        return EffectArray.map(
+          rows,
           (m): MemberView => ({
             userId: m.userId,
             name: users.get(m.userId)?.name ?? "",
@@ -1508,12 +1580,19 @@ export const makeWorkspaces = Effect.gen(function* () {
       Effect.gen(function* () {
         const { workspaceId } = yield* authorizeInWorkspace("invitation.read");
         const now = yield* nowIso;
-        const cutoff = new Date(Date.parse(now) - INVITATION_LIST_EXPIRED_MILLIS).toISOString();
-        const rows = (yield* repo.listInvitations(workspaceId)).filter(
+        const cutoff = DateTime.makeUnsafe(now).pipe(
+          DateTime.subtractDuration(INVITATION_LIST_EXPIRED_MILLIS),
+          DateTime.formatIso,
+        );
+        const value_1 = yield* repo.listInvitations(workspaceId);
+        const rows = EffectArray.filter(
+          value_1,
           (i) => (i.status === "pending" || i.status === "expired") && i.expiresAt > cutoff,
         );
-        const users = yield* names(rows.map((i) => i.invitedBy));
-        return rows.map((i) => invitationView(i, users.get(i.invitedBy)?.name ?? "", now));
+        const users = yield* names(EffectArray.map(rows, (i) => i.invitedBy));
+        return EffectArray.map(rows, (i) =>
+          invitationView(i, users.get(i.invitedBy)?.name ?? "", now),
+        );
       }),
     ),
 
@@ -1524,21 +1603,22 @@ export const makeWorkspaces = Effect.gen(function* () {
           yield* checkMembershipChange(caller, { _tag: "Invite", role });
           const member = yield* memberWorkspace(caller, "member.invite");
           const workspaceId = member.workspaceId;
+          const value_1 = yield* preflight(member, workspaceId, "member.invite");
           // The stored role must still allow this invitation before a replay is served (R1c).
-          yield* checkMembershipChange(yield* preflight(member, workspaceId, "member.invite"), {
+          yield* checkMembershipChange(value_1, {
             _tag: "Invite",
             role,
           });
-          const address = email.trim();
+          const address = EffectString.trim(email);
           if (!isValidEmail(address)) return yield* invalid(["email"], "request.malformed");
-          const inviteRole = role as InvitationRow["role"];
+          const inviteRole = role;
           return yield* withIdempotency(
             {
               scope: { _tag: "Workspace", workspaceId },
               key: opts?.requestKey,
               method: "Workspaces.invite",
               payload: { schema: InvitePayload, value: { email: address, role } },
-              result: codec<InvitationView>(InvitationViewSchema),
+              result: InvitationViewSchema,
             },
             Effect.gen(function* () {
               const workspace = yield* storeOnly(repo.lockWorkspace(workspaceId));
@@ -1546,11 +1626,19 @@ export const makeWorkspaces = Effect.gen(function* () {
               const actor = yield* recheck(member, workspaceId, "member.invite");
               yield* checkMembershipChange(actor, { _tag: "Invite", role });
               const now = yield* nowIso;
-              const emailLower = address.toLowerCase();
+              const emailLower = EffectString.toLowerCase(address);
               const memberRows = yield* repo.listMembers(workspaceId);
-              const users = yield* names([...memberRows.map((m) => m.userId), member.userId]);
-              if (memberRows.some((m) => users.get(m.userId)?.email.toLowerCase() === emailLower)) {
-                return yield* new Conflict({ reason: "duplicate" });
+              const users = yield* names([
+                ...EffectArray.map(memberRows, (m) => m.userId),
+                member.userId,
+              ]);
+              if (
+                EffectArray.some(memberRows, (m) => {
+                  const user = users.get(m.userId);
+                  return user !== undefined && EffectString.toLowerCase(user.email) === emailLower;
+                })
+              ) {
+                return yield* Conflict.make({ reason: "duplicate" });
               }
               const inviterName = users.get(member.userId)?.name ?? "";
               const pending = yield* repo.findPendingInvitation(workspaceId, emailLower);
@@ -1559,7 +1647,10 @@ export const makeWorkspaces = Effect.gen(function* () {
                 const existing = pending.value;
                 return invitationView(existing, users.get(existing.invitedBy)?.name ?? "", now);
               }
-              const expiresAt = new Date(Date.parse(now) + INVITATION_TTL_MILLIS).toISOString();
+              const expiresAt = DateTime.makeUnsafe(now).pipe(
+                DateTime.addDuration(INVITATION_TTL_MILLIS),
+                DateTime.formatIso,
+              );
               let row: InvitationRow;
               if (Option.isSome(pending)) {
                 // A pending invitation past its expiry is renewed in place with a new epoch.
@@ -1583,7 +1674,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                   ),
                 );
               } else {
-                const id = yield* newId<InvitationId>();
+                const id = yield* newId(InvitationIdSchema.make);
                 row = yield* storeOnly(
                   repo.insertInvitation({
                     id,
@@ -1629,7 +1720,11 @@ export const makeWorkspaces = Effect.gen(function* () {
               // Pending invitations only; an expired one is renewed by inviting the email again.
               if (invitationStatus(invitation, now) !== "pending") return yield* notPending();
               // C6: no second email within 60 s of the last one.
-              if (Date.parse(now) - Date.parse(invitation.lastSentAt) < RESEND_COOLDOWN_MILLIS)
+              if (
+                DateTime.toEpochMillis(DateTime.makeUnsafe(now)) -
+                  DateTime.toEpochMillis(DateTime.makeUnsafe(invitation.lastSentAt)) <
+                RESEND_COOLDOWN_MILLIS
+              )
                 return;
               const sendEpoch = invitation.sendEpoch + 1;
               const next = yield* storeOnly(
@@ -1640,7 +1735,10 @@ export const makeWorkspaces = Effect.gen(function* () {
                     sendEpoch,
                     workflowStartedAt: null,
                     lastSentAt: now,
-                    expiresAt: new Date(Date.parse(now) + INVITATION_TTL_MILLIS).toISOString(),
+                    expiresAt: DateTime.makeUnsafe(now).pipe(
+                      DateTime.addDuration(INVITATION_TTL_MILLIS),
+                      DateTime.formatIso,
+                    ),
                   },
                   invitation.revision,
                 ),
@@ -1669,7 +1767,8 @@ export const makeWorkspaces = Effect.gen(function* () {
               const actor = yield* recheck(caller, workspaceId, "member.invite");
               const invitation = yield* repo.lockInvitation(workspaceId, id);
               yield* manageAdminsFor(actor, invitation.role);
-              const status = invitationStatus(invitation, yield* nowIso);
+              const nowIso_1 = yield* nowIso;
+              const status = invitationStatus(invitation, nowIso_1);
               // Idempotent by state: revoked or accepted stays as it is; expired can be revoked.
               if (status !== "pending" && status !== "expired") return;
               yield* storeOnly(
@@ -1703,7 +1802,7 @@ export const makeWorkspaces = Effect.gen(function* () {
                     targetRole: record.value.role,
                   });
                 }
-                return yield* new NotFound({ entity: "Member", id: userId });
+                return yield* NotFound.make({ entity: "Member", id: userId });
               }
               const target = found.value;
               yield* checkMembershipChange(
@@ -1714,8 +1813,9 @@ export const makeWorkspaces = Effect.gen(function* () {
               );
               if (role === target.role) return;
               if (role === null) {
+                const nowIso_1 = yield* nowIso;
                 // W8: ends the membership; apps/server then revokes its keys and grants.
-                yield* storeOnly(repo.removeMembership(target, yield* nowIso));
+                yield* storeOnly(repo.removeMembership(target, nowIso_1));
               } else {
                 yield* storeOnly(repo.updateMembership({ ...target, role }, target.revision));
               }
@@ -1743,12 +1843,13 @@ export const makeWorkspaces = Effect.gen(function* () {
             if (Option.isNone(found)) return;
             // R3 against the stored role: a caller promoted to owner since entering cannot leave.
             if (found.value.role === "owner") {
-              return yield* new Conflict({
+              return yield* Conflict.make({
                 reason: "illegal_transition",
                 detail: "member.owner_cannot_leave",
               });
             }
-            yield* storeOnly(repo.removeMembership(found.value, yield* nowIso));
+            const nowIso_1 = yield* nowIso;
+            yield* storeOnly(repo.removeMembership(found.value, nowIso_1));
             yield* audit(member.workspaceId, "member.leave", workspace.revision, [
               { path: `members.${member.userId}`, before: found.value.role, after: null },
             ]);
@@ -1766,7 +1867,7 @@ export const makeWorkspaces = Effect.gen(function* () {
           const caller = yield* CurrentCaller;
           const member = yield* memberWorkspace(caller, "workspace.transferOwnership");
           if (!can({ ...member, role: "owner" }, "workspace.transferOwnership")) {
-            return yield* new Forbidden({ action: "workspace.transferOwnership" });
+            return yield* Forbidden.make({ action: "workspace.transferOwnership" });
           }
           const workspaceId = member.workspaceId;
           yield* store.transaction(
@@ -1775,23 +1876,23 @@ export const makeWorkspaces = Effect.gen(function* () {
               yield* requireOpen(workspace, "workspace.transferOwnership");
               const self = yield* repo.findMembership(workspaceId, member.userId);
               if (Option.isNone(self)) {
-                return yield* new Forbidden({ action: "workspace.transferOwnership" });
+                return yield* Forbidden.make({ action: "workspace.transferOwnership" });
               }
               if (self.value.role !== "owner") {
                 // C6: a retry of this caller's completed transfer to `to` succeeds; any other
                 // transfer by a non-owner stays Forbidden (R1).
                 if (yield* transferredBy(workspaceId, member.userId, to)) return;
-                return yield* new Forbidden({ action: "workspace.transferOwnership" });
+                return yield* Forbidden.make({ action: "workspace.transferOwnership" });
               }
               // A new transfer needs the supplied caller's own role too (R1a): a request that
               // entered as admin gains nothing from a promotion since.
               if (!can(member, "workspace.transferOwnership")) {
-                return yield* new Forbidden({ action: "workspace.transferOwnership" });
+                return yield* Forbidden.make({ action: "workspace.transferOwnership" });
               }
               if (to === member.userId)
-                return yield* new Conflict({ reason: "illegal_transition" });
+                return yield* Conflict.make({ reason: "illegal_transition" });
               const target = yield* repo.findMembership(workspaceId, to);
-              if (Option.isNone(target)) return yield* new NotFound({ entity: "Member", id: to });
+              if (Option.isNone(target)) return yield* NotFound.make({ entity: "Member", id: to });
               // W4: one transaction; the caller becomes admin first, so a unique owner index
               // never sees two owners.
               yield* storeOnly(
@@ -1818,7 +1919,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
               yield* recheck(caller, workspaceId, "workspace.close");
               if (row.closed) return; // idempotent by state (C6 wins over W5 here)
-              if (confirmName.trim() !== row.name)
+              if (EffectString.trim(confirmName) !== row.name)
                 return yield* invalid(["confirmName"], "request.malformed");
               const now = yield* nowIso;
               const next = yield* storeOnly(
@@ -1847,22 +1948,22 @@ export const makeWorkspaces = Effect.gen(function* () {
                   ? "grant.revoke.all"
                   : "grant.revoke.own";
           const { workspaceId } = yield* authorizeInWorkspace(action);
-          const entity = event.action.startsWith("apiKey.") ? "ApiKey" : "McpGrant";
-          if (event.subject.entity !== entity) return yield* new Forbidden({ action });
+          const entity = EffectString.startsWith("apiKey.")(event.action) ? "ApiKey" : "McpGrant";
+          if (event.subject.entity !== entity) return yield* Forbidden.make({ action });
           yield* store.transaction(
             Effect.gen(function* () {
               // The workspace lock serializes duplicate hooks, so the history check below and the
               // append are atomic at READ COMMITTED (C6).
               const row = yield* storeOnly(repo.lockWorkspace(workspaceId));
               // W5: no new credentials on a closed Workspace; revocations stay possible.
-              if (event.action.endsWith(".create")) yield* requireOpen(row, action);
+              if (EffectString.endsWith(".create")(event.action)) yield* requireOpen(row, action);
               // Idempotent by subject and action (C6): a repeated hook writes no second entry.
               const prior = yield* store.audit.history(workspaceId, {
                 entity,
                 id: event.subject.id,
               });
-              if (prior.some((e) => e.action === event.action)) return;
-              const created = event.action.endsWith(".create");
+              if (EffectArray.some(prior, (e) => e.action === event.action)) return;
+              const created = EffectString.endsWith(".create")(event.action);
               yield* audit(
                 workspaceId,
                 event.action,

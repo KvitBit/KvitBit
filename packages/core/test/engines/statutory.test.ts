@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { VatTreatment } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
 import { StatutoryText } from "../../src/engines";
 
 const notes = (
@@ -7,14 +8,17 @@ const notes = (
     treatments?: ReadonlySet<VatTreatment>;
   },
 ) =>
-  StatutoryText.notes({
-    kind: "invoice",
-    regime: "vat_payer",
-    treatments: new Set(),
-    issuerRegisterEntry: null,
-    language: "cs",
-    ...input,
-  }).map((n) => [n.code, n.text]);
+  EffectArray.map(
+    StatutoryText.notes({
+      kind: "invoice",
+      regime: "vat_payer",
+      treatments: new Set(),
+      issuerRegisterEntry: null,
+      language: "cs",
+      ...input,
+    }),
+    (n) => [n.code, n.text],
+  );
 
 describe("StatutoryText.title", () => {
   test.each([

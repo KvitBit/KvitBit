@@ -3,6 +3,7 @@
  * same in every locale, so imports keep working); only number formatting follows the locale.
  */
 
+import * as EffectArray from "effect/Array";
 import type { CsvTable } from "./csv";
 import { amount, int, money, num, text } from "./csv";
 import type { ReportDocument, ReportExpense, ReportPayment } from "./source";
@@ -18,7 +19,7 @@ const amountTable = (rows: ReadonlyArray<AmountRow>, withOriginal: boolean): Csv
     "gross_czk",
     ...(withOriginal ? ["gross_original", "currency"] : []),
   ],
-  rows: rows.map((r) => [
+  rows: EffectArray.map(rows, (r) => [
     text(r.key),
     text(r.label),
     int(r.count),
@@ -39,7 +40,7 @@ export const reportTable = (view: ReportViewData): CsvTable => {
     case "profit":
       return {
         header: ["month", "revenue_czk", "expenses_czk", "profit_czk"],
-        rows: view.rows.map((r) => [
+        rows: EffectArray.map(view.rows, (r) => [
           text(r.month),
           money(r.revenue.amount),
           money(r.expenses.amount),
@@ -49,7 +50,7 @@ export const reportTable = (view: ReportViewData): CsvTable => {
     case "cashflow":
       return {
         header: ["month", "in_czk", "out_czk", "net_czk"],
-        rows: view.points.map((p) => [
+        rows: EffectArray.map(view.points, (p) => [
           text(p.month),
           money(p.in.amount),
           money(p.out.amount),
@@ -70,8 +71,8 @@ export const reportTable = (view: ReportViewData): CsvTable => {
           "outstanding",
           "outstanding_czk",
         ],
-        rows: view.buckets.flatMap((b) =>
-          b.documents.map((d) => [
+        rows: EffectArray.flatMap(view.buckets, (b) =>
+          EffectArray.map(b.documents, (d) => [
             text(b.bucket),
             text(d.id),
             text(d.kind),
@@ -96,18 +97,21 @@ export const reportTable = (view: ReportViewData): CsvTable => {
           "vat_czk",
           "documents",
         ],
-        rows: [
-          ...view.output.map((l) => ["output", l] as const),
-          ...view.input.map((l) => ["input", l] as const),
-        ].map(([section, l]) => [
-          text(section),
-          text(l.month),
-          text(l.treatment),
-          num(l.ratePercent),
-          money(l.base.amount),
-          money(l.vat.amount),
-          int(l.documents.length),
-        ]),
+        rows: EffectArray.map(
+          [
+            ...EffectArray.map(view.output, (l) => ["output", l] as const),
+            ...EffectArray.map(view.input, (l) => ["input", l] as const),
+          ],
+          ([section, l]) => [
+            text(section),
+            text(l.month),
+            text(l.treatment),
+            num(l.ratePercent),
+            money(l.base.amount),
+            money(l.vat.amount),
+            int(l.documents.length),
+          ],
+        ),
       };
   }
 };
@@ -139,7 +143,7 @@ export const documentsTable = (rows: ReadonlyArray<ReportDocument>): CsvTable =>
     "settlement",
     "outstanding",
   ],
-  rows: byId(rows).map((d) => [
+  rows: EffectArray.map(byId(rows), (d) => [
     text(d.id),
     text(d.kind),
     text(d.finalInvoice ? "true" : "false"),
@@ -164,7 +168,7 @@ export const documentsTable = (rows: ReadonlyArray<ReportDocument>): CsvTable =>
 
 export const paymentsTable = (rows: ReadonlyArray<ReportPayment>): CsvTable => ({
   header: ["id", "direction", "document_id", "expense_id", "paid_on", "amount", "currency"],
-  rows: byId(rows).map((p) => [
+  rows: EffectArray.map(byId(rows), (p) => [
     text(p.id),
     text(p.direction),
     text("document" in p.target ? p.target.document : null),
@@ -194,13 +198,18 @@ export const expensesTable = (rows: ReadonlyArray<ReportExpense>): CsvTable => (
     "fx_quantity",
     "deductible_percent",
   ],
-  rows: byId(rows).map((e) => [
+  rows: EffectArray.map(byId(rows), (e) => [
     text(e.id),
     text(e.supplierDocumentNumber),
     text(e.supplier?.contactId ?? null),
     text(e.supplier?.name ?? null),
     text(e.category),
-    text([...e.tags].sort().join("|")),
+    text(
+      EffectArray.join(
+        [...e.tags].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+        "|",
+      ),
+    ),
     text(e.issuedOn),
     text(e.taxPoint),
     text(e.currency),

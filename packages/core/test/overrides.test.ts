@@ -1,11 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  ContactDefaults,
-  CurrencyCode,
-  DocumentKind,
-  NumberingSeriesId,
-  ReminderPolicy,
-} from "@kvitbit/domain/contract";
+import type { ContactDefaults, ReminderPolicy } from "@kvitbit/domain/contract";
+import { CurrencyCode, NumberingSeriesId } from "@kvitbit/domain/contract";
 import type {
   EffectiveReminders,
   RemindersChoice,
@@ -18,10 +13,10 @@ import {
   resolveReminders,
 } from "../src/shared/overrides";
 
-const s = (n: number) => `01900000-0000-7000-8000-00000000500${n}` as NumberingSeriesId;
-const CZK = "CZK" as CurrencyCode;
-const EUR = "EUR" as CurrencyCode;
-const USD = "USD" as CurrencyCode;
+const s = (n: number) => NumberingSeriesId.make(`01900000-0000-7000-8000-00000000500${n}`);
+const CZK = CurrencyCode.make("CZK");
+const EUR = CurrencyCode.make("EUR");
+const USD = CurrencyCode.make("USD");
 
 const workspace: WorkspaceBillingDefaults = {
   currency: CZK,
@@ -155,7 +150,7 @@ describe("resolveReminders (rule D16)", () => {
   });
 
   test("only Invoices and Proformas are reminded", () => {
-    for (const kind of ["credit_note", "payment_tax_document"] as ReadonlyArray<DocumentKind>) {
+    for (const kind of ["credit_note", "payment_tax_document"] as const) {
       expect(resolveReminders({ kind, choice: "on", contact: custom, workspace: on })).toEqual(
         none,
       );

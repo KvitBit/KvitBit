@@ -7,7 +7,7 @@
  * BrandingPreview | BankAccountReferences. `RegistryLookup` is shared with `Contacts.fromIco` (W9), so it is
  * required, never provided here.
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { IssuerSnapshotsLive } from "./issuer";
 import { WorkspacesLive } from "./live";
 import {

@@ -5,7 +5,9 @@
  */
 import type { CurrentCaller } from "@kvitbit/domain/contract";
 import { PublicShareLinks } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { IdGenerator } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import { DocumentDeliveryReads, DocumentsRepo } from "../documents";
@@ -27,6 +29,7 @@ export type PublicShareLinksDeps =
 const make = Effect.gen(function* () {
   // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
+  const buildContext = yield* Effect.context<PublicShareLinksDeps>();
   const context = Context.pick(
     CoreStore,
     IdGenerator,
@@ -35,17 +38,17 @@ const make = Effect.gen(function* () {
     ShareLinksRepo,
     ShareLinkKeys,
     ShareWorkspaces,
-  )(yield* Effect.context<PublicShareLinksDeps>());
+  )(buildContext);
   const run = <A, E>(effect: Effect.Effect<A, E, PublicShareLinksDeps | CurrentCaller>) =>
     Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
   return PublicShareLinks.of({
-    create: (id) => run(create(id)),
-    revoke: (id) => run(revoke(id)),
-    views: (id, page) => run(views(id, page)),
+    create: Effect.fn("PublicShareLinks.create")((id) => run(create(id))),
+    revoke: Effect.fn("PublicShareLinks.revoke")((id) => run(revoke(id))),
+    views: Effect.fn("PublicShareLinks.views")((id, page) => run(views(id, page))),
     open: run(open),
-    pdf: (opts) => run(pdf(opts)),
+    pdf: Effect.fn("PublicShareLinks.pdf")((opts) => run(pdf(opts))),
     logo: run(logo),
   });
 });

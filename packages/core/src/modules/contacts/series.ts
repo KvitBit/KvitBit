@@ -4,8 +4,13 @@
  * caller's Workspace and number that document kind. The numbering module owns series; the
  * parent provides this port from it at integration. In-memory fake below for tests.
  */
+
 import type { DocumentKind, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Ref } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import type { StoreUnavailable } from "../../store/CoreStore";
 
 export class ContactSeriesLookup extends Context.Service<
@@ -20,7 +25,7 @@ export class ContactSeriesLookup extends Context.Service<
       ids: ReadonlyArray<NumberingSeriesId>,
     ) => Effect.Effect<ReadonlyMap<NumberingSeriesId, DocumentKind>, StoreUnavailable>;
   }
->()("kvitbit/core/ContactSeriesLookup") {}
+>()("@kvitbit/core/modules/contacts/series/ContactSeriesLookup") {}
 
 /** A series as the fake knows it. */
 export interface FakeSeries {
@@ -33,7 +38,7 @@ export interface FakeSeries {
 export class FakeContactSeries extends Context.Service<
   FakeContactSeries,
   { readonly series: Ref.Ref<ReadonlyArray<FakeSeries>> }
->()("kvitbit/core/testing/FakeContactSeries") {
+>()("@kvitbit/core/modules/contacts/series/FakeContactSeries") {
   static readonly layer: Layer.Layer<FakeContactSeries | ContactSeriesLookup> = Layer.effect(
     ContactSeriesLookup,
     Effect.map(FakeContactSeries, (fake) => ({
@@ -42,9 +47,10 @@ export class FakeContactSeries extends Context.Service<
           Ref.get(fake.series),
           (all) =>
             new Map(
-              all
-                .filter((s) => s.workspaceId === workspaceId && ids.includes(s.id))
-                .map((s) => [s.id, s.kind] as const),
+              EffectArray.map(
+                EffectArray.filter(all, (s) => s.workspaceId === workspaceId && ids.includes(s.id)),
+                (s) => [s.id, s.kind] as const,
+              ),
             ),
         ),
     })),

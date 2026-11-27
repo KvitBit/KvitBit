@@ -2,9 +2,10 @@
  * Draft methods: preview, createDraft, discardDraft and edit of a draft. Each follows the
  * method shape of src/index.ts. Drafts audit only create and discard (issue is P2's).
  */
+
 import type { DocumentId, DocumentPatch, RequestOptions } from "@kvitbit/domain/contract";
-import { Conflict, DocumentInput } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import { Conflict, DocumentId as DocumentIdSchema, DocumentInput } from "@kvitbit/domain/contract";
+import * as Effect from "effect/Effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
@@ -23,8 +24,8 @@ import { DocumentViewCodec, toView } from "./view";
  * Live totals (rule D15): the createDraft code path and errors, inside a CoreStore transaction
  * (the snapshot ports' contract, #402), with nothing stored, numbered, audited or logged.
  */
-export const preview = (input: DocumentInput) =>
-  Effect.gen(function* () {
+export const preview = Effect.fn("preview")(
+  function* (input: DocumentInput) {
     const { workspaceId } = yield* authorizeInWorkspace("document.draft");
     const store = yield* CoreStore;
     return yield* store.transaction(
@@ -32,14 +33,18 @@ export const preview = (input: DocumentInput) =>
         const { today, at } = yield* now;
         const spec = yield* specFromInput(workspaceId, input);
         const composed = yield* compose(workspaceId, spec, { today });
-        const row = newDraftRecord(yield* newId<DocumentId>(), workspaceId, composed, at);
+        const value_1 = yield* newId(DocumentIdSchema.make);
+        const row = newDraftRecord(value_1, workspaceId, composed, at);
         return toView(row, { today });
       }),
     );
-  }).pipe(fxDryRun, orUnavailable);
+  },
+  (_) => fxDryRun(_),
+  (_) => orUnavailable(_),
+);
 
-export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
-  Effect.gen(function* () {
+export const createDraft = Effect.fn("createDraft")(
+  function* (input: DocumentInput, opts?: RequestOptions) {
     const { workspaceId } = yield* authorizeInWorkspace("document.draft");
     return yield* withIdempotency(
       {
@@ -54,8 +59,9 @@ export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
         const { today, at } = yield* now;
         const spec = yield* specFromInput(workspaceId, input);
         const composed = yield* compose(workspaceId, spec, { today });
+        const value_1 = yield* newId(DocumentIdSchema.make);
         const row = yield* repo
-          .insert(newDraftRecord(yield* newId<DocumentId>(), workspaceId, composed, at))
+          .insert(newDraftRecord(value_1, workspaceId, composed, at))
           // A draft has no number, so no unique index can break.
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
         yield* appendAudit({
@@ -67,11 +73,13 @@ export const createDraft = (input: DocumentInput, opts?: RequestOptions) =>
         return toView(row, { today });
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /** Drafts only (rule D2); a hard delete that never consumes a number (D1). */
-export const discardDraft = (id: DocumentId, expectedRevision: number) =>
-  Effect.gen(function* () {
+export const discardDraft = Effect.fn("discardDraft")(
+  function* (id: DocumentId, expectedRevision: number) {
     const { workspaceId } = yield* authorizeInWorkspace("document.draft");
     const store = yield* CoreStore;
     const repo = yield* DocumentsRepo;
@@ -88,24 +96,28 @@ export const discardDraft = (id: DocumentId, expectedRevision: number) =>
         });
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /**
  * `edit` of a draft (locked row from `getForUpdate`): applies the patch and recomposes with
  * fresh party snapshots and defaults (drafts are never frozen, rule D10). Not audited.
  * `number` is for issued documents only (rule D4).
  */
-export const editDraft = (row: DocumentRecord, patch: DocumentPatch) =>
-  Effect.gen(function* () {
-    if (patch.number !== undefined) {
-      return yield* new Conflict({ reason: "illegal_transition" });
-    }
-    const repo = yield* DocumentsRepo;
-    const { today, at } = yield* now;
-    const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), patch);
-    const composed = yield* compose(row.workspaceId, spec, { today });
-    const next = yield* repo
-      .update({ ...row, ...composed, updatedAt: at }, row.revision)
-      .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-    return yield* viewOf(next);
-  });
+export const editDraft = Effect.fn("editDraft")(function* (
+  row: DocumentRecord,
+  patch: DocumentPatch,
+) {
+  if (patch.number !== undefined) {
+    return yield* Conflict.make({ reason: "illegal_transition" });
+  }
+  const repo = yield* DocumentsRepo;
+  const { today, at } = yield* now;
+  const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), patch);
+  const composed = yield* compose(row.workspaceId, spec, { today });
+  const next = yield* repo
+    .update({ ...row, ...composed, updatedAt: at }, row.revision)
+    .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
+  return yield* viewOf(next);
+});

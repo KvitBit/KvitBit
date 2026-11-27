@@ -3,9 +3,10 @@
  * The actor comes from the current caller: Members and System callers produce entries; Account,
  * share visitor and invitation callers produce none unless `actor` is given explicitly.
  */
-import type { AuditEntry, AuditEntryId, WorkspaceId } from "@kvitbit/domain/contract";
-import { CurrentCaller } from "@kvitbit/domain/contract";
-import { Clock, Effect } from "effect";
+import type { AuditEntry, WorkspaceId } from "@kvitbit/domain/contract";
+import { AuditEntryId, CurrentCaller } from "@kvitbit/domain/contract";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import type { StoreUnavailable } from "../store/CoreStore";
 import { CoreStore } from "../store/CoreStore";
 import { IdGenerator } from "./ids";
@@ -35,9 +36,11 @@ export const appendAudit = (
           : null);
     if (actor === null) return null;
     const ids = yield* IdGenerator;
+    const id = yield* ids.next;
+    const now = yield* DateTime.now;
     const entry: AuditEntry = {
-      id: (yield* ids.next) as AuditEntryId,
-      at: new Date(yield* Clock.currentTimeMillis).toISOString(),
+      id: AuditEntryId.make(id),
+      at: DateTime.formatIso(now),
       actor,
       subject: input.subject,
       action: input.action,

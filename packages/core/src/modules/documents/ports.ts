@@ -27,8 +27,9 @@ import type {
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { BigDecimal, Effect } from "effect";
-import { Context } from "effect";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
 import type { WorkspaceBillingDefaults, WorkspaceReminderPolicy } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { AddressRecord } from "./record";
@@ -61,7 +62,7 @@ export class DocumentContacts extends Context.Service<
       id: ContactId,
     ) => Effect.Effect<ContactForDocument, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/documents/DocumentContacts") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentContacts") {}
 
 // Price List (core-identity #402 (2)) -------------------------------------------------------
 
@@ -87,7 +88,7 @@ export class DocumentPriceList extends Context.Service<
       id: PriceListItemId,
     ) => Effect.Effect<PriceListItemForLine, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/documents/DocumentPriceList") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentPriceList") {}
 
 // Issuing Entity (proposal #407 to core-identity / ci-workspaces) ---------------------------
 
@@ -132,7 +133,7 @@ export class DocumentIssuers extends Context.Service<
       on: IsoDate,
     ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
   }
->()("kvitbit/core/documents/DocumentIssuers") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentIssuers") {}
 
 // Renderer ----------------------------------------------------------------------------------
 
@@ -150,4 +151,4 @@ export class DocumentRenderer extends Context.Service<
   {
     readonly render: (view: DocumentView, options: RenderOptions) => Effect.Effect<Uint8Array>;
   }
->()("kvitbit/core/documents/DocumentRenderer") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentRenderer") {}

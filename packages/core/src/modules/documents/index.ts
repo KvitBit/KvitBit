@@ -107,7 +107,9 @@
  * ~/.t3/orchestrator-state/cd-lifecycle-paymentqr-handoff/). When it lands, run it in `compose`
  * (validation, with the allocated number at issue) and in `toView`.
  */
-import { Layer } from "effect";
+import type { DocumentView } from "@kvitbit/domain/contract";
+import * as Layer from "effect/Layer";
+import type * as Schema from "effect/Schema";
 import { NumberingTestLayer } from "../numbering";
 import { type DocumentActivity, DocumentActivityNone } from "./activity";
 import { DeliveriesRepoMemory, DeliveryJobsMemory, DocumentSenderLive } from "./deliveries";
@@ -117,6 +119,9 @@ import { DocumentPaymentsLive } from "./payments";
 import { DocumentsRepoMemory } from "./repo";
 import { DocumentSenderStub } from "./sender";
 import { DocumentsLive } from "./service";
+import { DocumentViewCodec as ConcreteDocumentViewCodec } from "./view";
+
+export const DocumentViewCodec: Schema.Codec<DocumentView, unknown> = ConcreteDocumentViewCodec;
 
 export { DocumentActivity, DocumentActivityNone } from "./activity";
 export type { Composed, ComposeOptions, Deduction, DocumentSpec, LineSpec } from "./compose";
@@ -227,8 +232,6 @@ export type { RelatedDocument, ViewContext } from "./view";
 export {
   DocumentSummaryCodec,
   DocumentSummaryData,
-  DocumentViewCodec,
-  DocumentViewData,
   LineViewData,
   toLineView,
   toSummary,

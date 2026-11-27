@@ -15,8 +15,8 @@ import type {
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { Effect } from "effect";
-import { Context } from "effect";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
 import type { StoreUnavailable } from "../../store/CoreStore";
 
 /** Settlement of an Expense: paid vs gross; an incomplete Expense is "unpaid". */
@@ -54,7 +54,7 @@ export class ExpensePayables extends Context.Service<
       paid: { readonly amount: Money; readonly payments: number },
     ) => Effect.Effect<ExpenseSettlement, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/ExpensePayables") {}
+>()("@kvitbit/core/modules/payments/ports/ExpensePayables") {}
 
 export class PaymentSettings extends Context.Service<
   PaymentSettings,
@@ -64,4 +64,4 @@ export class PaymentSettings extends Context.Service<
       workspaceId: WorkspaceId,
     ) => Effect.Effect<boolean, NotFound | StoreUnavailable, CurrentCaller>;
   }
->()("kvitbit/core/payments/PaymentSettings") {}
+>()("@kvitbit/core/modules/payments/ports/PaymentSettings") {}

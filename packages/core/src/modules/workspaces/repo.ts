@@ -3,6 +3,7 @@
  * and its in-memory implementation on `MemoryTables`. Tables: workspaces, workspace_slug_aliases,
  * memberships, invitations, bank_accounts. Numbering Series live in the numbering module.
  */
+
 import type {
   BankAccountId,
   Conflict,
@@ -11,7 +12,11 @@ import type {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, type Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 import { BankAccountRow, InvitationRow, MembershipRow, SlugAliasRow, WorkspaceRow } from "./model";
@@ -134,38 +139,35 @@ export class WorkspacesRepo extends Context.Service<
       expectedRevision: number,
     ) => Effect.Effect<BankAccountRow, NotFound | Conflict | UniqueViolation | Fail>;
   }
->()("kvitbit/core/WorkspacesRepo") {}
+>()("@kvitbit/core/modules/workspaces/repo/WorkspacesRepo") {}
 
 const live = (row: MembershipRow) => row.removedAt === null;
-
-/** Row schemas brand their ids; the collection reads them as plain codecs. */
-const codec = <A>(schema: unknown) => schema as Schema.Codec<A, unknown>;
 
 export const Workspaces = defineCollection<WorkspaceRow>({
   name: "workspaces",
   entity: "Workspace",
-  schema: codec<WorkspaceRow>(WorkspaceRow),
+  schema: WorkspaceRow,
   unique: [{ name: WORKSPACE_SLUG_UNIQUE, scope: "global", key: (w) => [w.slug] }],
 });
 
 export const SlugAliases = defineCollection<SlugAliasRow>({
   name: "workspace_slug_aliases",
   entity: "Workspace",
-  schema: codec<SlugAliasRow>(SlugAliasRow),
+  schema: SlugAliasRow,
   unique: [{ name: SLUG_ALIAS_UNIQUE, scope: "global", key: (a) => [a.slug] }],
 });
 
 export const Memberships = defineCollection<MembershipRow>({
   name: "memberships",
   entity: "Member",
-  schema: codec<MembershipRow>(MembershipRow),
+  schema: MembershipRow,
   unique: [{ name: MEMBERSHIP_USER_UNIQUE, scope: "workspace", key: (m) => [m.userId] }],
 });
 
 export const Invitations = defineCollection<InvitationRow>({
   name: "invitations",
   entity: "Invitation",
-  schema: codec<InvitationRow>(InvitationRow),
+  schema: InvitationRow,
   unique: [
     { name: INVITATION_TOKEN_UNIQUE, scope: "global", key: (i) => [i.tokenHash] },
     {
@@ -179,7 +181,7 @@ export const Invitations = defineCollection<InvitationRow>({
 export const BankAccounts = defineCollection<BankAccountRow>({
   name: "bank_accounts",
   entity: "BankAccount",
-  schema: codec<BankAccountRow>(BankAccountRow),
+  schema: BankAccountRow,
 });
 
 /** `WorkspacesRepo` on `MemoryTables` (shares the in-memory store's transactions). */
@@ -193,51 +195,73 @@ export const WorkspacesRepoMemory: Layer.Layer<WorkspacesRepo, never, MemoryTabl
     const invitations = tables.collection(Invitations);
     const accounts = tables.collection(BankAccounts);
     return {
-      getWorkspace: (id) => workspaces.get(id, id),
-      getWorkspaceForUpdate: (id, expectedRevision) =>
-        workspaces.getForUpdate(id, id, expectedRevision),
-      lockWorkspace: (id) => workspaces.lock(id, id),
+      getWorkspace: Effect.fn("WorkspacesRepo.getWorkspace")((id) => workspaces.get(id, id)),
+      getWorkspaceForUpdate: Effect.fn("WorkspacesRepo.getWorkspaceForUpdate")(
+        (id, expectedRevision) => workspaces.getForUpdate(id, id, expectedRevision),
+      ),
+      lockWorkspace: Effect.fn("WorkspacesRepo.lockWorkspace")((id) => workspaces.lock(id, id)),
       insertWorkspace: workspaces.insert,
       updateWorkspace: workspaces.update,
-      findWorkspaceBySlug: (slug) => workspaces.findUnique(WORKSPACE_SLUG_UNIQUE, [slug]),
+      findWorkspaceBySlug: Effect.fn("workspaces.findSlug")((slug) =>
+        workspaces.findUnique(WORKSPACE_SLUG_UNIQUE, [slug]),
+      ),
 
-      findSlugAlias: (slug) => aliases.findUnique(SLUG_ALIAS_UNIQUE, [slug]),
-      removeSlugAlias: (row) => aliases.remove(row.workspaceId, row.id, row.revision),
+      findSlugAlias: Effect.fn("WorkspacesRepo.findSlugAlias")((slug) =>
+        aliases.findUnique(SLUG_ALIAS_UNIQUE, [slug]),
+      ),
+      removeSlugAlias: Effect.fn("WorkspacesRepo.removeSlugAlias")((row) =>
+        aliases.remove(row.workspaceId, row.id, row.revision),
+      ),
       insertSlugAlias: aliases.insert,
 
-      findMembership: (workspaceId, userId) =>
+      findMembership: Effect.fn("WorkspacesRepo.findMembership")((workspaceId, userId) =>
         Effect.map(
           memberships.findUnique(MEMBERSHIP_USER_UNIQUE, [userId], workspaceId),
           Option.filter(live),
         ),
-      findMembershipRecord: (workspaceId, userId) =>
-        memberships.findUnique(MEMBERSHIP_USER_UNIQUE, [userId], workspaceId),
-      listMembers: (workspaceId) =>
+      ),
+      findMembershipRecord: Effect.fn("WorkspacesRepo.findMembershipRecord")(
+        (workspaceId, userId) =>
+          memberships.findUnique(MEMBERSHIP_USER_UNIQUE, [userId], workspaceId),
+      ),
+      listMembers: Effect.fn("WorkspacesRepo.listMembers")((workspaceId) =>
         Effect.map(memberships.list(workspaceId, { orderBy: ["joinedAt"] }), (rows) =>
-          rows.filter(live),
+          EffectArray.filter(rows, live),
         ),
-      listMembershipsOfUser: (userId) =>
-        Effect.map(memberships.listGlobal({ where: { userId } }), (rows) => rows.filter(live)),
+      ),
+      listMembershipsOfUser: Effect.fn("WorkspacesRepo.listMembershipsOfUser")((userId) =>
+        Effect.map(memberships.listGlobal({ where: { userId } }), (rows) =>
+          EffectArray.filter(rows, live),
+        ),
+      ),
       insertMembership: memberships.insert,
       updateMembership: memberships.update,
-      removeMembership: (row, removedAt) =>
+      removeMembership: Effect.fn("WorkspacesRepo.removeMembership")((row, removedAt) =>
         memberships.update({ ...row, removedAt }, row.revision).pipe(
           Effect.asVoid,
           // The per-Workspace user key is unchanged, so the unique index cannot fire.
           Effect.catchTag("UniqueViolation", (e) => Effect.die(e)),
         ),
+      ),
 
       getInvitation: invitations.get,
       lockInvitation: invitations.lock,
-      findInvitationByTokenHash: (tokenHash) =>
-        invitations.findUnique(INVITATION_TOKEN_UNIQUE, [tokenHash]),
-      findPendingInvitation: (workspaceId, emailLower) =>
-        invitations.findUnique(INVITATION_PENDING_EMAIL_UNIQUE, [emailLower], workspaceId),
-      listInvitations: (workspaceId) => invitations.list(workspaceId, { orderBy: ["createdAt"] }),
+      findInvitationByTokenHash: Effect.fn("WorkspacesRepo.findInvitationByTokenHash")(
+        (tokenHash) => invitations.findUnique(INVITATION_TOKEN_UNIQUE, [tokenHash]),
+      ),
+      findPendingInvitation: Effect.fn("WorkspacesRepo.findPendingInvitation")(
+        (workspaceId, emailLower) =>
+          invitations.findUnique(INVITATION_PENDING_EMAIL_UNIQUE, [emailLower], workspaceId),
+      ),
+      listInvitations: Effect.fn("WorkspacesRepo.listInvitations")((workspaceId) =>
+        invitations.list(workspaceId, { orderBy: ["createdAt"] }),
+      ),
       insertInvitation: invitations.insert,
       updateInvitation: invitations.update,
 
-      listBankAccounts: (workspaceId) => accounts.list(workspaceId, { orderBy: ["createdAt"] }),
+      listBankAccounts: Effect.fn("WorkspacesRepo.listBankAccounts")((workspaceId) =>
+        accounts.list(workspaceId, { orderBy: ["createdAt"] }),
+      ),
       getBankAccount: accounts.get,
       lockBankAccount: accounts.lock,
       insertBankAccount: accounts.insert,

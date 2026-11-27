@@ -4,17 +4,21 @@
  * zero to haléře), and VAT stays per rate bucket: a bucket's CZK VAT is its stored `vatCzk`,
  * never recomputed from a document total (board #377).
  */
+
 import type {
   CashflowPoint,
-  CurrencyCode,
   DashboardView,
-  IsoDate,
   Money,
   TaxRegime,
   VatBucket,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import { BigDecimal } from "effect";
+import { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectString from "effect/String";
 import { daysBetween } from "../../engines/calendar";
 import { HUNDRED, roundAt, sumAll, ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
@@ -40,7 +44,7 @@ import type {
   VatSummaryView,
 } from "./views";
 
-export const CZK = "CZK" as CurrencyCode;
+export const CZK = CurrencyCode.make("CZK");
 export const czk = (amount: BigDecimal.BigDecimal): Money => ({
   amount: BigDecimal.normalize(amount),
   currency: CZK,
@@ -54,19 +58,32 @@ export interface Period {
 // CZK conversion ------------------------------------------------------------------------------
 
 /** `amount` (in `currency`) in CZK with the row's stored fixing. */
-export const toCzk = (
-  amount: BigDecimal.BigDecimal,
-  currency: CurrencyCode,
-  fx: StoredFx | null,
-): BigDecimal.BigDecimal => {
-  if (currency === CZK) return roundAt(amount, 2);
-  if (fx === null) {
-    // ReportsSource guarantees a stored fixing on every non-CZK row (Documents/Payments resolve
-    // it before persisting, board #360); a missing one is a bug, not a user error.
-    throw new Error(`reports: ${currency} row without a stored fixing`);
-  }
-  return Fx.toCzk(amount, fx);
-};
+export const toCzk: {
+  (
+    currency: CurrencyCode,
+    fx: StoredFx | null,
+  ): (amount: BigDecimal.BigDecimal) => BigDecimal.BigDecimal;
+  (
+    amount: BigDecimal.BigDecimal,
+    currency: CurrencyCode,
+    fx: StoredFx | null,
+  ): BigDecimal.BigDecimal;
+} = Fn.dual(
+  3,
+  (
+    amount: BigDecimal.BigDecimal,
+    currency: CurrencyCode,
+    fx: StoredFx | null,
+  ): BigDecimal.BigDecimal => {
+    if (currency === CZK) return roundAt(amount, 2);
+    // ReportsSource guarantees a stored fixing on every non-CZK row.
+    const fixing = Option.getOrThrowWith(
+      Option.fromNullOr(fx),
+      () => new Error(`reports: ${currency} row without a stored fixing`),
+    );
+    return Fx.toCzk(amount, fixing);
+  },
+);
 
 const bucketBaseCzk = (b: VatBucket, currency: CurrencyCode, fx: StoredFx | null) =>
   toCzk(b.base, currency, fx);
@@ -84,7 +101,7 @@ interface CzkBucket {
 }
 
 const rateKey = (treatment: VatTreatment, rate: BigDecimal.BigDecimal) =>
-  `${treatment}|${BigDecimal.format(BigDecimal.normalize(rate))}`;
+  `${treatment}|${rate.pipe(BigDecimal.normalize, BigDecimal.format)}`;
 
 /** The full supply per bucket in CZK (revenue, expenses: no advance netting). */
 const fullBucketsCzk = (
@@ -92,7 +109,7 @@ const fullBucketsCzk = (
   currency: CurrencyCode,
   fx: StoredFx | null,
 ): ReadonlyArray<CzkBucket> =>
-  buckets.map((b) => ({
+  EffectArray.map(buckets, (b) => ({
     treatment: b.treatment,
     ratePercent: b.ratePercent,
     base: bucketBaseCzk(b, currency, fx),
@@ -140,7 +157,7 @@ export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> =
   };
   for (const b of d.totals.buckets) add(b, 1);
   for (const b of d.advanceDeductions) add(b, -1);
-  return [...net.values()].map((b) => ({
+  return EffectArray.map([...net.values()], (b) => ({
     treatment: b.treatment,
     ratePercent: b.ratePercent,
     base: toCzk(b.base, d.currency, d.fx),
@@ -152,8 +169,8 @@ export const taxableBucketsCzk = (d: ReportDocument): ReadonlyArray<CzkBucket> =
 };
 
 const sumCzk = (buckets: ReadonlyArray<CzkBucket>) => ({
-  net: sumAll(buckets.map((b) => b.base)),
-  vat: sumAll(buckets.map((b) => b.vat)),
+  net: sumAll(EffectArray.map(buckets, (b) => b.base)),
+  vat: sumAll(EffectArray.map(buckets, (b) => b.vat)),
 });
 
 // Tax Regime -----------------------------------------------------------------------------------
@@ -163,7 +180,10 @@ const sumCzk = (buckets: ReadonlyArray<CzkBucket>) => ({
  * effective on or before `date` (the last in stored order on a tie); before the first entry, the earliest entry's regime (a Workspace
  * has a regime from creation, so earlier tax points carry it); with none, non-payer.
  */
-export const regimeOn = (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate): TaxRegime => {
+export const regimeOn: {
+  (date: IsoDate): (periods: ReadonlyArray<TaxRegimePeriod>) => TaxRegime;
+  (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate): TaxRegime;
+} = Fn.dual(2, (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate): TaxRegime => {
   let best: TaxRegimePeriod | undefined;
   let earliest: TaxRegimePeriod | undefined;
   for (const p of periods) {
@@ -174,7 +194,7 @@ export const regimeOn = (periods: ReadonlyArray<TaxRegimePeriod>, date: IsoDate)
     }
   }
   return (best ?? earliest)?.regime ?? "non_vat_payer";
-};
+});
 
 const deductible = (vatCzk: BigDecimal.BigDecimal, percent: number) =>
   percent >= 100
@@ -202,7 +222,7 @@ const claimsInputVat = (b: VatBucket) => b.treatment === "standard" || b.treatme
  * for a `vat_payer` (rounded once per bucket); self-assessed reverse charge is owed by a
  * `vat_payer` or an `identified_person`, and deductible only by the former.
  */
-export const expenseVat = (e: ReportExpense, regime: TaxRegime) => {
+const expenseVatImpl = (e: ReportExpense, regime: TaxRegime) => {
   const input: Array<{
     readonly bucket: VatBucket;
     readonly base: BigDecimal.BigDecimal;
@@ -233,37 +253,50 @@ export const expenseVat = (e: ReportExpense, regime: TaxRegime) => {
   }
   return { input, output };
 };
+export const expenseVat: {
+  (regime: TaxRegime): (e: ReportExpense) => ReturnType<typeof expenseVatImpl>;
+  (e: ReportExpense, regime: TaxRegime): ReturnType<typeof expenseVatImpl>;
+} = Fn.dual(2, expenseVatImpl);
 
 /** What the Expense costs the Workspace in CZK: gross, plus self-assessed VAT owed, minus deductible input VAT. */
-export const expenseCostCzk = (e: ReportExpense, regime: TaxRegime): BigDecimal.BigDecimal => {
+export const expenseCostCzk: {
+  (regime: TaxRegime): (e: ReportExpense) => BigDecimal.BigDecimal;
+  (e: ReportExpense, regime: TaxRegime): BigDecimal.BigDecimal;
+} = Fn.dual(2, (e: ReportExpense, regime: TaxRegime): BigDecimal.BigDecimal => {
   const { input, output } = expenseVat(e, regime);
   const full = sumCzk(fullBucketsCzk(e.totals.buckets, e.currency, e.fx));
   return BigDecimal.subtract(
-    sumAll([full.net, full.vat, ...output.map((o) => o.vat)]),
-    sumAll(input.map((i) => i.vat)),
+    sumAll([full.net, full.vat, ...EffectArray.map(output, (o) => o.vat)]),
+    sumAll(EffectArray.map(input, (i) => i.vat)),
   );
-};
+});
 
 // Ordering helpers ----------------------------------------------------------------------------
 
 /** Code-unit order (locale independent, so output is byte-identical everywhere). */
-export const compareStrings = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+export const compareStrings: {
+  (b: string): (a: string) => number;
+  (a: string, b: string): number;
+} = Fn.dual(2, (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0));
 
-export const monthOf = (date: IsoDate): string => date.slice(0, 7);
+export const monthOf = (date: IsoDate): string => EffectString.slice(0, 7)(date);
 
 /** Months counted from year 0: `year * 12 + month - 1`. */
 const monthIndex = (date: IsoDate | string): number =>
-  Number(date.slice(0, 4)) * 12 + Number(date.slice(5, 7)) - 1;
+  Number(EffectString.slice(0, 4)(date)) * 12 + Number(EffectString.slice(5, 7)(date)) - 1;
 
 const monthAt = (index: number): string =>
-  `${String(Math.floor(index / 12)).padStart(4, "0")}-${String((index % 12) + 1).padStart(2, "0")}`;
+  `${EffectString.padStart(4, "0")(String(Math.floor(index / 12)))}-${EffectString.padStart(2, "0")(String((index % 12) + 1))}`;
 
 /** Every month `YYYY-MM` from `from`'s month to `to`'s month, oldest first (no date arithmetic past 9999-12). */
-export const monthsBetween = (from: IsoDate, to: IsoDate): ReadonlyArray<string> => {
+export const monthsBetween: {
+  (to: IsoDate): (from: IsoDate) => ReadonlyArray<string>;
+  (from: IsoDate, to: IsoDate): ReadonlyArray<string>;
+} = Fn.dual(2, (from: IsoDate, to: IsoDate): ReadonlyArray<string> => {
   const months: Array<string> = [];
   for (let i = monthIndex(from); i <= monthIndex(to); i++) months.push(monthAt(i));
   return months;
-};
+});
 
 // Revenue and expenses ------------------------------------------------------------------------
 
@@ -297,12 +330,12 @@ const groupRows = (
     group.items.push(item);
     groups.set(item.key, group);
   }
-  return [...groups.entries()]
-    .sort(([a], [b]) => compareStrings(a, b))
-    .map(([key, g]) => {
-      const net = sumAll(g.items.map((i) => i.net));
-      const vat = sumAll(g.items.map((i) => i.vat));
-      const adjustment = sumAll(g.items.map((i) => i.adjustment));
+  return EffectArray.map(
+    [...groups.entries()].sort(([a], [b]) => compareStrings(a, b)),
+    ([key, g]) => {
+      const net = sumAll(EffectArray.map(g.items, (i) => i.net));
+      const vat = sumAll(EffectArray.map(g.items, (i) => i.vat));
+      const adjustment = sumAll(EffectArray.map(g.items, (i) => i.adjustment));
       return {
         key,
         label: g.label,
@@ -312,19 +345,20 @@ const groupRows = (
         gross: czk(sumAll([net, vat, adjustment])),
         original: byCurrency
           ? {
-              amount: BigDecimal.normalize(sumAll(g.items.map((i) => i.gross))),
-              currency: key as CurrencyCode,
+              amount: BigDecimal.normalize(sumAll(EffectArray.map(g.items, (i) => i.gross))),
+              currency: CurrencyCode.make(key),
             }
           : null,
       };
-    });
+    },
+  );
 };
 
 const totalsOf = (rows: ReadonlyArray<AmountRow>) => ({
-  count: rows.reduce((n, r) => n + r.count, 0),
-  net: czk(sumAll(rows.map((r) => r.net.amount))),
-  vat: czk(sumAll(rows.map((r) => r.vat.amount))),
-  gross: czk(sumAll(rows.map((r) => r.gross.amount))),
+  count: EffectArray.reduce(rows, 0, (n, r) => n + r.count),
+  net: czk(sumAll(EffectArray.map(rows, (r) => r.net.amount))),
+  vat: czk(sumAll(EffectArray.map(rows, (r) => r.vat.amount))),
+  gross: czk(sumAll(EffectArray.map(rows, (r) => r.gross.amount))),
 });
 
 /**
@@ -336,76 +370,109 @@ export const isRevenueDocument = (d: ReportDocument): boolean =>
   d.status === "issued" &&
   (d.kind === "invoice" || (d.kind === "credit_note" && d.correctsKind === "invoice"));
 
-export const revenue = (
-  documents: ReadonlyArray<ReportDocument>,
-  period: Period,
-  groupBy: RevenueView["groupBy"],
-): RevenueView => {
-  const items = documents
-    .filter((d) => isRevenueDocument(d) && period.from <= d.issuedOn && d.issuedOn <= period.to)
-    .map((d): GroupItem => {
-      const { net, vat } = sumCzk(fullBucketsCzk(d.totals.buckets, d.currency, d.fx));
-      const key =
-        groupBy === "month"
-          ? monthOf(d.issuedOn)
-          : groupBy === "currency"
-            ? d.currency
-            : (d.contact.id ?? `name:${d.contact.name}`);
-      return {
-        key,
-        label: groupBy === "contact" ? d.contact.name : null,
-        labelRank: `${d.issuedOn}|${d.id}`,
-        net,
-        vat,
-        adjustment: toCzk(d.totals.roundingAdjustment.amount, d.currency, d.fx),
-        gross: d.totals.gross.amount,
-      };
-    });
-  const rows = groupRows(items, groupBy === "currency");
-  return { report: "revenue", period, groupBy, rows, totals: totalsOf(rows) };
-};
+export const revenue: {
+  (
+    period: Period,
+    groupBy: RevenueView["groupBy"],
+  ): (documents: ReadonlyArray<ReportDocument>) => RevenueView;
+  (
+    documents: ReadonlyArray<ReportDocument>,
+    period: Period,
+    groupBy: RevenueView["groupBy"],
+  ): RevenueView;
+} = Fn.dual(
+  3,
+  (
+    documents: ReadonlyArray<ReportDocument>,
+    period: Period,
+    groupBy: RevenueView["groupBy"],
+  ): RevenueView => {
+    const items = EffectArray.map(
+      EffectArray.filter(
+        documents,
+        (d) => isRevenueDocument(d) && period.from <= d.issuedOn && d.issuedOn <= period.to,
+      ),
+      (d): GroupItem => {
+        const { net, vat } = sumCzk(fullBucketsCzk(d.totals.buckets, d.currency, d.fx));
+        const key =
+          groupBy === "month"
+            ? monthOf(d.issuedOn)
+            : groupBy === "currency"
+              ? d.currency
+              : (d.contact.id ?? `name:${d.contact.name}`);
+        return {
+          key,
+          label: groupBy === "contact" ? d.contact.name : null,
+          labelRank: `${d.issuedOn}|${d.id}`,
+          net,
+          vat,
+          adjustment: toCzk(d.totals.roundingAdjustment.amount, d.currency, d.fx),
+          gross: d.totals.gross.amount,
+        };
+      },
+    );
+    const rows = groupRows(items, groupBy === "currency");
+    return { report: "revenue", period, groupBy, rows, totals: totalsOf(rows) };
+  },
+);
 
-export const expenses = (
-  records: ReadonlyArray<ReportExpense>,
-  period: Period,
-  groupBy: ExpensesView["groupBy"],
-  incomplete: number,
-): ExpensesView => {
-  const items = records
-    .filter((e) => period.from <= e.issuedOn && e.issuedOn <= period.to)
-    .map((e): GroupItem => {
-      const { net, vat } = sumCzk(fullBucketsCzk(e.totals.buckets, e.currency, e.fx));
-      const supplierKey =
-        e.supplier === null
-          ? ""
-          : (e.supplier.contactId ?? (e.supplier.name === null ? "" : `name:${e.supplier.name}`));
-      const key =
-        groupBy === "month"
-          ? monthOf(e.issuedOn)
-          : groupBy === "currency"
-            ? e.currency
+export const expenses: {
+  (
+    period: Period,
+    groupBy: ExpensesView["groupBy"],
+    incomplete: number,
+  ): (records: ReadonlyArray<ReportExpense>) => ExpensesView;
+  (
+    records: ReadonlyArray<ReportExpense>,
+    period: Period,
+    groupBy: ExpensesView["groupBy"],
+    incomplete: number,
+  ): ExpensesView;
+} = Fn.dual(
+  4,
+  (
+    records: ReadonlyArray<ReportExpense>,
+    period: Period,
+    groupBy: ExpensesView["groupBy"],
+    incomplete: number,
+  ): ExpensesView => {
+    const items = EffectArray.map(
+      EffectArray.filter(records, (e) => period.from <= e.issuedOn && e.issuedOn <= period.to),
+      (e): GroupItem => {
+        const { net, vat } = sumCzk(fullBucketsCzk(e.totals.buckets, e.currency, e.fx));
+        const supplierKey =
+          e.supplier === null
+            ? ""
+            : (e.supplier.contactId ?? (e.supplier.name === null ? "" : `name:${e.supplier.name}`));
+        const key =
+          groupBy === "month"
+            ? monthOf(e.issuedOn)
+            : groupBy === "currency"
+              ? e.currency
+              : groupBy === "category"
+                ? (e.category ?? "")
+                : supplierKey;
+        const label =
+          groupBy === "contact"
+            ? (e.supplier?.name ?? null)
             : groupBy === "category"
-              ? (e.category ?? "")
-              : supplierKey;
-      const label =
-        groupBy === "contact"
-          ? (e.supplier?.name ?? null)
-          : groupBy === "category"
-            ? e.category
-            : null;
-      return {
-        key,
-        label,
-        labelRank: `${e.issuedOn}|${e.id}`,
-        net,
-        vat,
-        adjustment: toCzk(e.totals.roundingAdjustment.amount, e.currency, e.fx),
-        gross: e.totals.gross.amount,
-      };
-    });
-  const rows = groupRows(items, groupBy === "currency");
-  return { report: "expenses", period, groupBy, rows, totals: totalsOf(rows), incomplete };
-};
+              ? e.category
+              : null;
+        return {
+          key,
+          label,
+          labelRank: `${e.issuedOn}|${e.id}`,
+          net,
+          vat,
+          adjustment: toCzk(e.totals.roundingAdjustment.amount, e.currency, e.fx),
+          gross: e.totals.gross.amount,
+        };
+      },
+    );
+    const rows = groupRows(items, groupBy === "currency");
+    return { report: "expenses", period, groupBy, rows, totals: totalsOf(rows), incomplete };
+  },
+);
 
 /** Expense cost per month (`expenseCostCzk` under the regime at each tax point). */
 const costByMonth = (
@@ -421,78 +488,105 @@ const costByMonth = (
     list.push(expenseCostCzk(e, regimeOn(regimes, e.taxPoint)));
     byMonth.set(month, list);
   }
-  return new Map([...byMonth].map(([m, list]) => [m, sumAll(list)]));
+  return new Map(EffectArray.map([...byMonth], ([m, list]) => [m, sumAll(list)]));
 };
 
 /** Revenue net of VAT minus Expense cost (net of deductible VAT under the Tax Regime), per month. */
-export const profit = (
-  documents: ReadonlyArray<ReportDocument>,
-  records: ReadonlyArray<ReportExpense>,
-  regimes: ReadonlyArray<TaxRegimePeriod>,
-  period: Period,
-): ProfitView => {
-  const rev = revenue(documents, period, "month");
-  const revByMonth = new Map(rev.rows.map((r) => [r.key, r.net.amount]));
-  const expByMonth = costByMonth(records, regimes, period);
-  const rows = monthsBetween(period.from, period.to).map((month) => {
-    const r = revByMonth.get(month) ?? ZERO;
-    const e = expByMonth.get(month) ?? ZERO;
-    return { month, revenue: czk(r), expenses: czk(e), profit: czk(BigDecimal.subtract(r, e)) };
-  });
-  const r = sumAll(rows.map((row) => row.revenue.amount));
-  const e = sumAll(rows.map((row) => row.expenses.amount));
-  return {
-    report: "profit",
-    period,
-    rows,
-    totals: { revenue: czk(r), expenses: czk(e), profit: czk(BigDecimal.subtract(r, e)) },
-  };
-};
+export const profit: {
+  (
+    records: ReadonlyArray<ReportExpense>,
+    regimes: ReadonlyArray<TaxRegimePeriod>,
+    period: Period,
+  ): (documents: ReadonlyArray<ReportDocument>) => ProfitView;
+  (
+    documents: ReadonlyArray<ReportDocument>,
+    records: ReadonlyArray<ReportExpense>,
+    regimes: ReadonlyArray<TaxRegimePeriod>,
+    period: Period,
+  ): ProfitView;
+} = Fn.dual(
+  4,
+  (
+    documents: ReadonlyArray<ReportDocument>,
+    records: ReadonlyArray<ReportExpense>,
+    regimes: ReadonlyArray<TaxRegimePeriod>,
+    period: Period,
+  ): ProfitView => {
+    const rev = revenue(documents, period, "month");
+    const revByMonth = new Map(EffectArray.map(rev.rows, (row) => [row.key, row.net.amount]));
+    const expByMonth = costByMonth(records, regimes, period);
+    const rows = EffectArray.map(monthsBetween(period.from, period.to), (month) => {
+      const r = revByMonth.get(month) ?? ZERO;
+      const e = expByMonth.get(month) ?? ZERO;
+      return { month, revenue: czk(r), expenses: czk(e), profit: czk(BigDecimal.subtract(r, e)) };
+    });
+    const r = sumAll(EffectArray.map(rows, (row) => row.revenue.amount));
+    const e = sumAll(EffectArray.map(rows, (row) => row.expenses.amount));
+    return {
+      report: "profit",
+      period,
+      rows,
+      totals: { revenue: czk(r), expenses: czk(e), profit: czk(BigDecimal.subtract(r, e)) },
+    };
+  },
+);
 
 // Cashflow ------------------------------------------------------------------------------------
 
-export const cashflowPoints = (
-  payments: ReadonlyArray<ReportPayment>,
-  months: ReadonlyArray<string>,
-): ReadonlyArray<CashflowPoint> => {
-  const sums = new Map(
-    months.map((m) => [
-      m,
-      { in: [] as Array<BigDecimal.BigDecimal>, out: [] as Array<BigDecimal.BigDecimal> },
-    ]),
-  );
-  for (const p of payments) {
-    const slot = sums.get(monthOf(p.paidOn));
-    if (slot === undefined) continue;
-    slot[p.direction].push(toCzk(p.amount.amount, p.amount.currency, p.fx));
-  }
-  return months.map((month) => {
-    const slot = sums.get(month);
-    const inflow = sumAll(slot?.in ?? []);
-    const outflow = sumAll(slot?.out ?? []);
-    return {
-      month,
-      in: czk(inflow),
-      out: czk(outflow),
-      net: czk(BigDecimal.subtract(inflow, outflow)),
-    };
-  });
-};
+export const cashflowPoints: {
+  (
+    months: ReadonlyArray<string>,
+  ): (payments: ReadonlyArray<ReportPayment>) => ReadonlyArray<CashflowPoint>;
+  (
+    payments: ReadonlyArray<ReportPayment>,
+    months: ReadonlyArray<string>,
+  ): ReadonlyArray<CashflowPoint>;
+} = Fn.dual(
+  2,
+  (
+    payments: ReadonlyArray<ReportPayment>,
+    months: ReadonlyArray<string>,
+  ): ReadonlyArray<CashflowPoint> => {
+    const sums = new Map<
+      string,
+      { in: Array<BigDecimal.BigDecimal>; out: Array<BigDecimal.BigDecimal> }
+    >(EffectArray.map(months, (month) => [month, { in: [], out: [] }]));
+    for (const p of payments) {
+      const slot = sums.get(monthOf(p.paidOn));
+      if (slot === undefined) continue;
+      slot[p.direction].push(toCzk(p.amount.amount, p.amount.currency, p.fx));
+    }
+    return EffectArray.map(months, (month) => {
+      const slot = sums.get(month);
+      const inflow = sumAll(slot?.in ?? []);
+      const outflow = sumAll(slot?.out ?? []);
+      return {
+        month,
+        in: czk(inflow),
+        out: czk(outflow),
+        net: czk(BigDecimal.subtract(inflow, outflow)),
+      };
+    });
+  },
+);
 
-export const cashflow = (payments: ReadonlyArray<ReportPayment>, period: Period): CashflowView => {
+export const cashflow: {
+  (period: Period): (payments: ReadonlyArray<ReportPayment>) => CashflowView;
+  (payments: ReadonlyArray<ReportPayment>, period: Period): CashflowView;
+} = Fn.dual(2, (payments: ReadonlyArray<ReportPayment>, period: Period): CashflowView => {
   const points = cashflowPoints(
-    payments.filter((p) => period.from <= p.paidOn && p.paidOn <= period.to),
+    EffectArray.filter(payments, (p) => period.from <= p.paidOn && p.paidOn <= period.to),
     monthsBetween(period.from, period.to),
   );
-  const inflow = sumAll(points.map((p) => p.in.amount));
-  const outflow = sumAll(points.map((p) => p.out.amount));
+  const inflow = sumAll(EffectArray.map(points, (p) => p.in.amount));
+  const outflow = sumAll(EffectArray.map(points, (p) => p.out.amount));
   return {
     report: "cashflow",
     period,
     points,
     totals: { in: czk(inflow), out: czk(outflow), net: czk(BigDecimal.subtract(inflow, outflow)) },
   };
-};
+});
 
 // Receivables aging ---------------------------------------------------------------------------
 
@@ -534,37 +628,42 @@ const compareReceivables = (a: ReceivableRow, b: ReceivableRow) =>
   compareStrings(a.number ?? "", b.number ?? "") ||
   compareStrings(a.id, b.id);
 
-export const receivables = (
-  open: ReadonlyArray<ReportDocument>,
-  period: Period,
-  asOf: IsoDate,
-): ReceivablesView => {
-  const rows = open
-    .filter((d) => d.status === "issued" && BigDecimal.isPositive(d.outstanding))
-    .map((d) => receivableRow(d, asOf))
-    .sort(compareReceivables);
-  const buckets = AGING_BUCKETS.map((bucket) => {
-    const documents = rows.filter((r) => agingBucket(r.daysOverdue) === bucket);
+export const receivables: {
+  (period: Period, asOf: IsoDate): (open: ReadonlyArray<ReportDocument>) => ReceivablesView;
+  (open: ReadonlyArray<ReportDocument>, period: Period, asOf: IsoDate): ReceivablesView;
+} = Fn.dual(
+  3,
+  (open: ReadonlyArray<ReportDocument>, period: Period, asOf: IsoDate): ReceivablesView => {
+    const rows = EffectArray.map(
+      EffectArray.filter(
+        open,
+        (d) => d.status === "issued" && BigDecimal.isPositive(d.outstanding),
+      ),
+      (d) => receivableRow(d, asOf),
+    ).sort(compareReceivables);
+    const buckets = EffectArray.map(AGING_BUCKETS, (bucket) => {
+      const documents = EffectArray.filter(rows, (r) => agingBucket(r.daysOverdue) === bucket);
+      return {
+        bucket,
+        count: documents.length,
+        total: czk(sumAll(EffectArray.map(documents, (r) => r.outstandingCzk.amount))),
+        documents,
+      };
+    });
+    const overdue = EffectArray.filter(rows, (r) => r.daysOverdue > 0);
     return {
-      bucket,
-      count: documents.length,
-      total: czk(sumAll(documents.map((r) => r.outstandingCzk.amount))),
-      documents,
+      report: "receivables",
+      period,
+      asOf,
+      buckets,
+      total: czk(sumAll(EffectArray.map(rows, (r) => r.outstandingCzk.amount))),
+      overdue: {
+        total: czk(sumAll(EffectArray.map(overdue, (r) => r.outstandingCzk.amount))),
+        count: overdue.length,
+      },
     };
-  });
-  const overdue = rows.filter((r) => r.daysOverdue > 0);
-  return {
-    report: "receivables",
-    period,
-    asOf,
-    buckets,
-    total: czk(sumAll(rows.map((r) => r.outstandingCzk.amount))),
-    overdue: {
-      total: czk(sumAll(overdue.map((r) => r.outstandingCzk.amount))),
-      count: overdue.length,
-    },
-  };
-};
+  },
+);
 
 // VAT summary ---------------------------------------------------------------------------------
 
@@ -607,8 +706,8 @@ const treatmentOrder = (t: VatTreatment) => TREATMENTS.indexOf(t);
 
 /** Month, then treatment in `TREATMENTS` order, then rate descending; sources by kind then id. */
 const finish = (lines: Map<string, VatAccumulator>): ReadonlyArray<VatLine> =>
-  [...lines.values()]
-    .sort(
+  EffectArray.map(
+    [...lines.values()].sort(
       (a, b) =>
         compareStrings(a.month, b.month) ||
         treatmentOrder(a.treatment) - treatmentOrder(b.treatment) ||
@@ -617,17 +716,19 @@ const finish = (lines: Map<string, VatAccumulator>): ReadonlyArray<VatLine> =>
           : BigDecimal.isGreaterThan(a.ratePercent, b.ratePercent)
             ? -1
             : 0),
-    )
-    .map((l) => ({
+    ),
+    (l) => ({
       month: l.month,
       treatment: l.treatment,
       ratePercent: l.ratePercent,
       base: czk(sumAll(l.base)),
       vat: czk(sumAll(l.vat)),
-      documents: [...l.sources.entries()]
-        .sort(([a], [b]) => compareStrings(a, b))
-        .map(([, source]) => source),
-    }));
+      documents: EffectArray.map(
+        [...l.sources.entries()].sort(([a], [b]) => compareStrings(a, b)),
+        ([, source]) => source,
+      ),
+    }),
+  );
 
 /**
  * Output VAT per tax-point month and rate bucket from issued tax documents (Credit Notes signed
@@ -635,52 +736,67 @@ const finish = (lines: Map<string, VatAccumulator>): ReadonlyArray<VatLine> =>
  * Expenses; input VAT from Expenses, by the Tax Regime in force at each Expense's tax point
  * (`expenseVat`).
  */
-export const vatSummary = (
-  documents: ReadonlyArray<ReportDocument>,
-  records: ReadonlyArray<ReportExpense>,
-  regimes: ReadonlyArray<TaxRegimePeriod>,
-  period: Period,
-): VatSummaryView => {
-  const output = new Map<string, VatAccumulator>();
-  const input = new Map<string, VatAccumulator>();
-  const inPeriod = (date: IsoDate | null): date is IsoDate =>
-    date !== null && period.from <= date && date <= period.to;
+export const vatSummary: {
+  (
+    records: ReadonlyArray<ReportExpense>,
+    regimes: ReadonlyArray<TaxRegimePeriod>,
+    period: Period,
+  ): (documents: ReadonlyArray<ReportDocument>) => VatSummaryView;
+  (
+    documents: ReadonlyArray<ReportDocument>,
+    records: ReadonlyArray<ReportExpense>,
+    regimes: ReadonlyArray<TaxRegimePeriod>,
+    period: Period,
+  ): VatSummaryView;
+} = Fn.dual(
+  4,
+  (
+    documents: ReadonlyArray<ReportDocument>,
+    records: ReadonlyArray<ReportExpense>,
+    regimes: ReadonlyArray<TaxRegimePeriod>,
+    period: Period,
+  ): VatSummaryView => {
+    const output = new Map<string, VatAccumulator>();
+    const input = new Map<string, VatAccumulator>();
+    const inPeriod = (date: IsoDate | null): date is IsoDate =>
+      date !== null && period.from <= date && date <= period.to;
 
-  for (const d of documents) {
-    if (d.status !== "issued" || !TAX_DOCUMENT_KINDS.has(d.kind) || !inPeriod(d.taxPoint)) {
-      continue;
+    for (const d of documents) {
+      if (d.status !== "issued" || !TAX_DOCUMENT_KINDS.has(d.kind) || !inPeriod(d.taxPoint)) {
+        continue;
+      }
+      const month = monthOf(d.taxPoint);
+      for (const b of taxableBucketsCzk(d)) {
+        addLine(output, month, b, b.base, b.vat, { _tag: "Document", id: d.id });
+      }
     }
-    const month = monthOf(d.taxPoint);
-    for (const b of taxableBucketsCzk(d)) {
-      addLine(output, month, b, b.base, b.vat, { _tag: "Document", id: d.id });
+
+    for (const e of records) {
+      if (!inPeriod(e.taxPoint)) continue;
+      const month = monthOf(e.taxPoint);
+      const source: VatSource = { _tag: "Expense", id: e.id };
+      const vat = expenseVat(e, regimeOn(regimes, e.taxPoint));
+      for (const l of vat.output) addLine(output, month, l.bucket, l.base, l.vat, source);
+      for (const l of vat.input) addLine(input, month, l.bucket, l.base, l.vat, source);
     }
-  }
 
-  for (const e of records) {
-    if (!inPeriod(e.taxPoint)) continue;
-    const month = monthOf(e.taxPoint);
-    const source: VatSource = { _tag: "Expense", id: e.id };
-    const vat = expenseVat(e, regimeOn(regimes, e.taxPoint));
-    for (const l of vat.output) addLine(output, month, l.bucket, l.base, l.vat, source);
-    for (const l of vat.input) addLine(input, month, l.bucket, l.base, l.vat, source);
-  }
-
-  const outputLines = finish(output);
-  const inputLines = finish(input);
-  const outputVat = sumAll(outputLines.map((l) => l.vat.amount));
-  const inputVat = sumAll(inputLines.map((l) => l.vat.amount));
-  return {
-    report: "vat_summary",
-    period,
-    output: outputLines,
-    input: inputLines,
-    totals: {
-      output: czk(outputVat),
-      input: czk(inputVat),
-      payable: czk(BigDecimal.subtract(outputVat, inputVat)),
-    },
-  };
-};
+    const outputLines = finish(output);
+    const inputLines = finish(input);
+    const outputVat = sumAll(EffectArray.map(outputLines, (l) => l.vat.amount));
+    const inputVat = sumAll(EffectArray.map(inputLines, (l) => l.vat.amount));
+    return {
+      report: "vat_summary",
+      period,
+      output: outputLines,
+      input: inputLines,
+      totals: {
+        output: czk(outputVat),
+        input: czk(inputVat),
+        payable: czk(BigDecimal.subtract(outputVat, inputVat)),
+      },
+    };
+  },
+);
 
 // Dashboard -----------------------------------------------------------------------------------
 
@@ -717,6 +833,6 @@ export const twelveMonthsEnding = (
 ): { readonly months: ReadonlyArray<string>; readonly from: IsoDate } | null => {
   const first = monthIndex(to) - 11;
   if (first < 0) return null;
-  const from = `${monthAt(first)}-01` as IsoDate;
+  const from = IsoDate.make(`${monthAt(first)}-01`);
   return { months: monthsBetween(from, to), from };
 };

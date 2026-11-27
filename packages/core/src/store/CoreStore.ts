@@ -23,8 +23,9 @@ import type {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { Effect } from "effect";
-import { Context, Data } from "effect";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 // Errors ------------------------------------------------------------------------------------
 
@@ -32,9 +33,12 @@ import { Context, Data } from "effect";
  * The store could not answer (connection, deadlock after retries, serialization failure).
  * Internal; `orUnavailable` turns it into `Unavailable{database}`.
  */
-export class StoreUnavailable extends Data.TaggedError("StoreUnavailable")<{
-  readonly cause?: unknown;
-}> {}
+export class StoreUnavailable extends Schema.TaggedError<
+  StoreUnavailable,
+  { readonly brand: unique symbol }
+>()("StoreUnavailable", {
+  cause: Schema.optionalKey(Schema.Unknown),
+}) {}
 
 /**
  * An insert or update broke a declared unique constraint. Internal; the module maps it to the
@@ -42,10 +46,13 @@ export class StoreUnavailable extends Data.TaggedError("StoreUnavailable")<{
  * `constraint` is the constraint's name, or `"primary"` for a duplicate id. In SQL the
  * transaction is aborted after this error, so a module fails the transaction with it.
  */
-export class UniqueViolation extends Data.TaggedError("UniqueViolation")<{
-  readonly collection: string;
-  readonly constraint: string;
-}> {}
+export class UniqueViolation extends Schema.TaggedError<
+  UniqueViolation,
+  { readonly brand: unique symbol }
+>()("UniqueViolation", {
+  collection: Schema.String,
+  constraint: Schema.String,
+}) {}
 
 // Numbering (S3) ----------------------------------------------------------------------------
 
@@ -155,5 +162,5 @@ export interface CoreStoreShape {
 }
 
 export class CoreStore extends Context.Service<CoreStore, CoreStoreShape>()(
-  "kvitbit/core/CoreStore",
+  "@kvitbit/core/store/CoreStore",
 ) {}

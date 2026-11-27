@@ -8,17 +8,25 @@
  * - `DocumentSender` (documents' delivery seam): authorizes `document.send` like the real one and
  *   records each send as a queued delivery row; `previewSend` dies.
  */
-import type {
-  Conflict,
-  CurrencyCode,
-  DeliveryId,
+
+import type { Conflict, CurrencyCode, Invalid } from "@kvitbit/domain/contract";
+import {
+  CurrencyCode as CurrencyCodeSchema,
+  CurrentCaller,
+  DeliveryId as DeliveryIdSchema,
   DocumentId,
   ExpenseId,
-  Invalid,
+  MoneyMath,
+  NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrencyCode as CurrencyCodeSchema, MoneyMath, NotFound } from "@kvitbit/domain/contract";
-import { BigDecimal, Context, Effect, Layer, Ref, Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import type { IdGenerator } from "../../shared/ids";
 import { newId } from "../../shared/ids";
@@ -30,34 +38,34 @@ import { ExpensePayables, PaymentSettings } from "./ports";
 
 const FakeExpense = Schema.Struct({
   id: Schema.String,
-  workspaceId: Schema.String,
-  revision: Schema.Number,
+  workspaceId: WorkspaceId,
+  revision: Schema.Finite,
   status: Schema.Literals(["complete", "incomplete"]),
   currency: Schema.NullOr(CurrencyCodeSchema),
   gross: Schema.NullOr(Schema.BigDecimal),
   paid: Schema.BigDecimal,
-  payments: Schema.Number,
+  payments: Schema.Finite,
 });
-type FakeExpense = typeof FakeExpense.Type & { readonly workspaceId: WorkspaceId };
+type FakeExpense = typeof FakeExpense.Type;
 
 const FakeExpensesTable = defineCollection<FakeExpense>({
   name: "fake_payment_expenses",
   entity: "Expense",
-  schema: FakeExpense as unknown as Schema.Codec<FakeExpense, unknown>,
+  schema: FakeExpense,
 });
 
 const FakeDelivery = Schema.Struct({
   id: Schema.String,
-  workspaceId: Schema.String,
-  revision: Schema.Number,
+  workspaceId: WorkspaceId,
+  revision: Schema.Finite,
   documentId: Schema.String,
 });
-type FakeDelivery = typeof FakeDelivery.Type & { readonly workspaceId: WorkspaceId };
+type FakeDelivery = typeof FakeDelivery.Type;
 
 const FakeDeliveriesTable = defineCollection<FakeDelivery>({
   name: "fake_payment_deliveries",
   entity: "Document",
-  schema: FakeDelivery as unknown as Schema.Codec<FakeDelivery, unknown>,
+  schema: FakeDelivery,
 });
 
 export interface SeedExpense {
@@ -96,7 +104,7 @@ export class PaymentFixtures extends Context.Service<
     /** Documents sent through the fake `DocumentSender`, in order. */
     readonly sent: (workspaceId: WorkspaceId) => Effect.Effect<ReadonlyArray<DocumentId>>;
   }
->()("kvitbit/core/testing/PaymentFixtures") {}
+>()("@kvitbit/core/modules/payments/fakes/PaymentFixtures") {}
 
 export const PaymentFakesLive: Layer.Layer<
   ExpensePayables | PaymentSettings | DocumentSender | PaymentFixtures,
@@ -111,10 +119,10 @@ export const PaymentFakesLive: Layer.Layer<
     const deliveries = tables.collection(FakeDeliveriesTable);
     const autoSend = yield* Ref.make(new Map<WorkspaceId, boolean>());
     const sendFailure = yield* Ref.make<Conflict | Invalid | NotFound | null>(null);
-    const missing = (id: string) => new NotFound({ entity: "Expense", id });
+    const missing = (id: string) => NotFound.make({ entity: "Expense", id });
 
     const payable = (row: FakeExpense) => ({
-      id: row.id as ExpenseId,
+      id: ExpenseId.make(row.id),
       workspaceId: row.workspaceId,
       revision: row.revision,
       status: row.status,
@@ -133,50 +141,54 @@ export const PaymentFakesLive: Layer.Layer<
     return Context.make(
       ExpensePayables,
       ExpensePayables.of({
-        lock: (workspaceId, id) =>
+        lock: Effect.fn("ExpensePayables.lock")((workspaceId, id) =>
           expenses.lock(workspaceId, id).pipe(
             Effect.catchTag("NotFound", () => Effect.fail(missing(id))),
             Effect.map(payable),
           ),
-        settle: (workspaceId, id, paid) =>
-          Effect.gen(function* () {
-            const row = yield* expenses.lock(workspaceId, id);
-            const next = yield* expenses
-              .update({ ...row, paid: paid.amount.amount, payments: paid.payments }, row.revision)
-              .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
-            return expenseSettlement(next);
-          }),
+        ),
+        settle: Effect.fn("ExpensePayables.settle")(function* (workspaceId, id, paid) {
+          const row = yield* expenses.lock(workspaceId, id);
+          const next = yield* expenses
+            .update({ ...row, paid: paid.amount.amount, payments: paid.payments }, row.revision)
+            .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
+          return expenseSettlement(next);
+        }),
       }),
     ).pipe(
       Context.add(
         PaymentSettings,
         PaymentSettings.of({
-          autoSendPaymentTaxDocument: (workspaceId) =>
-            Effect.map(Ref.get(autoSend), (m) => m.get(workspaceId) ?? false),
+          autoSendPaymentTaxDocument: Effect.fn("PaymentSettings.autoSendPaymentTaxDocument")(
+            (workspaceId) => Effect.map(Ref.get(autoSend), (m) => m.get(workspaceId) ?? false),
+          ),
         }),
       ),
       Context.add(
         DocumentSender,
         DocumentSender.of({
-          send: (id) =>
-            Effect.gen(function* () {
-              const { workspaceId } = yield* authorizeInWorkspace("document.send");
-              const deliveryId = yield* Effect.provideContext(newId<DeliveryId>(), idGen);
-              yield* deliveries
-                .insert({ id: deliveryId, workspaceId, revision: 1, documentId: id })
-                .pipe(Effect.orDie);
-              // A refusal after the delivery row is written: the caller's savepoint must drop it.
-              const failure = yield* Ref.get(sendFailure);
-              if (failure !== null) return yield* Effect.fail(failure);
-              return { deliveryId, status: "queued" as const };
-            }),
-          previewSend: () => Effect.die(new Error("previewSend: not faked for Payments")),
+          send: Effect.fn("DocumentSender.send")(function* (caller, id) {
+            const { workspaceId } = yield* authorizeInWorkspace("document.send").pipe(
+              Effect.provideService(CurrentCaller, caller),
+            );
+            const deliveryId = yield* Effect.provideContext(newId(DeliveryIdSchema.make), idGen);
+            yield* deliveries
+              .insert({ id: deliveryId, workspaceId, revision: 1, documentId: id })
+              .pipe(Effect.orDie);
+            // A refusal after the delivery row is written: the caller's savepoint must drop it.
+            const failure = yield* Ref.get(sendFailure);
+            if (failure !== null) return yield* failure;
+            return { deliveryId, status: "queued" as const };
+          }),
+          previewSend: Effect.fn("DocumentSender.previewSend")(() =>
+            Effect.die(new Error("previewSend: not faked for Payments")),
+          ),
         }),
       ),
       Context.add(
         PaymentFixtures,
         PaymentFixtures.of({
-          putExpense: (seed) =>
+          putExpense: Effect.fn("PaymentFixtures.putExpense")((seed) =>
             orDie(
               store.transaction(
                 expenses.insert({
@@ -191,20 +203,24 @@ export const PaymentFakesLive: Layer.Layer<
                 }),
               ),
             ).pipe(Effect.asVoid),
-          expense: (workspaceId, id) =>
+          ),
+          expense: Effect.fn("PaymentFixtures.expense")((workspaceId, id) =>
             Effect.map(orDie(expenses.get(workspaceId, id)), (row) => ({
               revision: row.revision,
               paid: row.paid,
               payments: row.payments,
               settlement: expenseSettlement(row),
             })),
-          setAutoSend: (workspaceId, on) =>
+          ),
+          setAutoSend: Effect.fn("PaymentFixtures.setAutoSend")((workspaceId, on) =>
             Ref.update(autoSend, (m) => new Map(m).set(workspaceId, on)),
-          failSends: (error) => Ref.set(sendFailure, error),
-          sent: (workspaceId) =>
+          ),
+          failSends: Effect.fn("PaymentFixtures.failSends")((error) => Ref.set(sendFailure, error)),
+          sent: Effect.fn("PaymentFixtures.sent")((workspaceId) =>
             Effect.map(orDie(deliveries.list(workspaceId)), (rows) =>
-              rows.map((r) => r.documentId as DocumentId),
+              EffectArray.map(rows, (r) => DocumentId.make(r.documentId)),
             ),
+          ),
         }),
       ),
     );

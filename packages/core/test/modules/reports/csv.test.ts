@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
-import { Effect, Stream } from "effect";
+import { IsoDate } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import {
   BOM,
   csvStream,
@@ -30,6 +32,7 @@ describe("formatDecimal", () => {
 });
 
 describe("encodeCsv", () => {
+  const hyperlink = "HYPERLINK";
   const table = {
     header: ["name", "amount", "count"],
     rows: [
@@ -37,7 +40,7 @@ describe("encodeCsv", () => {
       [text("line\nbreak"), money(d("-2")), int(0)],
       [text("a,b"), money(d("0")), int(1)],
       [text(null), num(d("12")), int(2)],
-      [text('=HYPERLINK("x")'), money(d("-1.5")), int(4)],
+      [text(`=${hyperlink}("x")`), money(d("-1.5")), int(4)],
     ],
   };
 
@@ -46,8 +49,8 @@ describe("encodeCsv", () => {
       `${BOM}name;amount;count\r\n` +
         `"Firma ""Alfa""; s.r.o.";1234,50;3\r\n` +
         `"line\nbreak";-2,00;0\r\n` +
-        `a,b;0,00;1\r\n` +
-        `;12;2\r\n` +
+        "a,b;0,00;1\r\n" +
+        ";12;2\r\n" +
         `"'=HYPERLINK(""x"")";-1,50;4\r\n`,
     );
   });
@@ -58,7 +61,7 @@ describe("encodeCsv", () => {
         `"Firma ""Alfa""; s.r.o.",1234.50,3\r\n` +
         `"line\nbreak",-2.00,0\r\n` +
         `"a,b",0.00,1\r\n` +
-        `,12,2\r\n` +
+        ",12,2\r\n" +
         `"'=HYPERLINK(""x"")",-1.50,4\r\n`,
     );
   });
@@ -72,23 +75,28 @@ describe("encodeCsv", () => {
   });
 
   test("the stream carries the same bytes, one chunk per record", async () => {
-    const chunks = await Effect.runPromise(Stream.runCollect(csvStream(table, "cs")));
+    const chunks = await csvStream(table, "cs").pipe(Stream.runCollect, Effect.runPromise);
     const decoder = new TextDecoder("utf-8", { ignoreBOM: true });
     expect(chunks.length).toBe(6);
-    expect(chunks.map((c) => decoder.decode(c)).join("")).toBe(encodeCsv(table, "cs"));
+    expect(
+      EffectArray.join(
+        EffectArray.map(chunks, (c) => decoder.decode(c)),
+        "",
+      ),
+    ).toBe(encodeCsv(table, "cs"));
     // UTF-8 BOM bytes first
     expect([...(chunks[0] ?? new Uint8Array()).slice(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
   });
 });
 
 describe("report tables", () => {
-  const nov = { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate };
+  const nov = { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") };
 
   test("deterministic: the same rows in any input order give identical CSV", () => {
     const docs = [
       document(1, { contact: { id: contactId(2), name: "Beta; a.s." } }),
       document(2, { buckets: [bucket("reduced", "12", "99.99", "12")] }),
-      document(3, { issuedOn: "2026-11-20" as IsoDate }),
+      document(3, { issuedOn: IsoDate.make("2026-11-20") }),
     ];
     const a = encodeCsv(reportTable(ReportCompute.revenue(docs, nov, "contact")), "cs");
     const b = encodeCsv(
@@ -112,7 +120,7 @@ describe("report tables", () => {
     );
     expect(encodeCsv(reportTable(view), "en")).toBe(
       `${BOM}section,month,treatment,rate_percent,base_czk,vat_czk,documents\r\n` +
-        `output,2026-11,standard,21,1000.00,210.00,1\r\n`,
+        "output,2026-11,standard,21,1000.00,210.00,1\r\n",
     );
   });
 });

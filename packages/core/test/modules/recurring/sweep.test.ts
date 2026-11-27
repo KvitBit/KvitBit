@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { IsoDate, ScheduleId, TemplateId } from "@kvitbit/domain/contract";
+import { IsoDate, ScheduleId, TemplateId } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Option from "effect/Option";
+import * as EffectString from "effect/String";
 import type { ScheduleRow } from "../../../src/modules/recurring";
 import {
   decideDue,
@@ -10,15 +13,15 @@ import {
 } from "../../../src/modules/recurring";
 import { WORKSPACE_A, WORKSPACE_B } from "../../helpers";
 
-const d = (s: string) => s as IsoDate;
+const d = (s: string) => IsoDate.make(s);
 const sid = (n: number) =>
-  `01900000-0000-7000-8000-0000000e${String(n).padStart(4, "0")}` as ScheduleId;
+  ScheduleId.make(`01900000-0000-7000-8000-0000000e${EffectString.padStart(4, "0")(String(n))}`);
 
 const row = (n: number, overrides: Partial<ScheduleRow> = {}): ScheduleRow => ({
   id: sid(n),
   workspaceId: WORKSPACE_A,
   revision: 1,
-  templateId: "01900000-0000-7000-8000-0000000f0001" as TemplateId,
+  templateId: TemplateId.make("01900000-0000-7000-8000-0000000f0001"),
   cadenceUnit: "months",
   cadenceInterval: 1,
   startOn: d("2026-01-31"),
@@ -55,14 +58,19 @@ describe("decideDue", () => {
       ],
       today,
     );
-    expect<unknown>(decisions.map((x) => [x.scheduleId, x.occurrence, x.action])).toEqual([
+    expect<unknown>(
+      EffectArray.map(decisions, (x) => [x.scheduleId, x.occurrence, x.action]),
+    ).toEqual([
       [sid(8), "2026-10-01", "issue"],
       [sid(4), "2026-11-15", "pause_missed"],
       [sid(3), "2026-11-16", "issue"],
       [sid(1), "2026-11-23", "issue"],
       [sid(9), "2026-11-23", "issue"],
     ]);
-    expect(decisions.find((x) => x.scheduleId === sid(9))?.workspaceId).toBe(WORKSPACE_B);
+    expect(
+      Option.getOrUndefined(EffectArray.findFirst(decisions, (x) => x.scheduleId === sid(9)))
+        ?.workspaceId,
+    ).toBe(WORKSPACE_B);
   });
 
   test("a resume only covers occurrences up to its date", () => {

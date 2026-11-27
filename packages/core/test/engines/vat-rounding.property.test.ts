@@ -8,25 +8,27 @@
  * The oracle uses only bigint arithmetic and never calls the engine's rounding, so it cannot
  * repeat an engine bug.
  */
+
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
-import { VatTreatment } from "@kvitbit/domain/contract";
-import { BigDecimal } from "effect";
+import { CurrencyCode, IsoDate, VatTreatment } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as BigIntMath from "effect/BigInt";
 import { roundAt } from "../../src/engines/decimal";
 import { toCzk } from "../../src/engines/fx";
 import { type VatInput, VatMath } from "../../src/engines/vat";
 import { rng } from "./random";
 
-const CZK = "CZK" as CurrencyCode;
-const EUR = "EUR" as CurrencyCode;
-const TAX_POINT = "2026-11-23" as IsoDate;
+const CZK = CurrencyCode.make("CZK");
+const EUR = CurrencyCode.make("EUR");
+const TAX_POINT = IsoDate.make("2026-11-23");
 
 // Oracle ------------------------------------------------------------------------------------
 
 /** n / d rounded half away from zero to an integer (d > 0). */
 const roundHalf = (n: bigint, d: bigint): bigint => {
   const a = n < 0n ? -n : n;
-  const q = (2n * a + d) / (2n * d);
+  const q = BigIntMath.sum(2n * a, d) / (2n * d);
   return n < 0n ? -q : q;
 };
 const pow10 = (k: number) => 10n ** BigInt(k);
@@ -41,26 +43,28 @@ const minor = (u: bigint) => BigDecimal.make(u, 2);
  * Treatments and their order come from the domain contract (`VatTreatment` literals), not from
  * the engine's `TREATMENTS`, so a treatment the engine drops is still generated.
  */
-const ORACLE_TREATMENTS: ReadonlyArray<VatTreatment> = VatTreatment.literals;
+const ORACLE_TREATMENTS = VatTreatment.literals;
 /** Rate the oracle expects on the 2026 tax point (the table's single entry, 2024-01-01). */
-const ORACLE_RATE: Record<VatTreatment, bigint> = {
+const ORACLE_RATE = {
   standard: 21n,
   reduced: 12n,
   exempt_intra_eu_goods: 0n,
   reverse_charge: 0n,
   outside_scope: 0n,
-};
+} satisfies Record<VatTreatment, bigint>;
 
 /** Fails with the seed in the message, so a red run can be replayed. */
 const forSeeds = (count: number, base: number, body: (seed: number) => void) => {
-  for (let i = 0; i < count; i++) {
-    const seed = base + i * 7919;
+  let checked = 0;
+  for (; checked < count; checked++) {
+    const seed = base + checked * 7919;
     try {
       body(seed);
     } catch (e) {
-      throw new Error(`seed=${seed}: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`seed=${seed}: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
   }
+  return checked;
 };
 
 const same = (label: string, actual: BigDecimal.BigDecimal | null, expectedMinor: bigint) => {
@@ -84,7 +88,7 @@ describe("VatMath rounding step (verification: exhaustive residue space)", () =>
         for (const int of [0n, 7n, 123_456_789_012_345n]) {
           for (const cents of [0n, 50n, 99n]) {
             for (let r = 0n; r < sub; r++) {
-              const scaled = sign * ((int * 100n + cents) * sub + r);
+              const scaled = sign * BigIntMath.sum(BigIntMath.sum(int * 100n, cents) * sub, r);
               const got = roundAt(BigDecimal.make(scaled, s), 2);
               const want = roundHalf(scaled, sub);
               if (!BigDecimal.equals(got, minor(want))) {
@@ -104,6 +108,7 @@ describe("VatMath rounding step (verification: exhaustive residue space)", () =>
   test("bottom-up bucket VAT = round(base x rate / 100) for every base residue mod 100, both rates and signs", () => {
     // base x rate / 100 in minor units depends on base mod 100: 2 periods each side of zero
     // plus a far offset cover every residue class with and without sign.
+    let checked = 0;
     for (const treatment of ["standard", "reduced"] as const) {
       const rate = ORACLE_RATE[treatment];
       for (const offset of [0n, 98_765_432_100n]) {
@@ -121,18 +126,21 @@ describe("VatMath rounding step (verification: exhaustive residue space)", () =>
           if (bucket === undefined) throw new Error("no bucket");
           same(`${treatment} base ${base}`, bucket.vat, roundHalf(base * rate, 100n));
           same(`${treatment} gross ${base}`, bucket.gross, base + roundHalf(base * rate, 100n));
+          checked++;
         }
       }
     }
+    expect(checked).toBe(2 * 2 * 401);
   });
 
   test("top-down bucket VAT = round(gross x rate / (100 + rate)) for every gross residue mod 100 + rate, both signs", () => {
+    let checked = 0;
     for (const treatment of ["standard", "reduced"] as const) {
       const rate = ORACLE_RATE[treatment];
-      const period = 100n + rate;
+      const period = BigIntMath.sum(100n, rate);
       for (const offset of [0n, 12_345_678_900n]) {
         for (let g = -2n * period; g <= 2n * period; g++) {
-          const gross = g + (g < 0n ? -offset : offset);
+          const gross = BigIntMath.sum(g, g < 0n ? -offset : offset);
           const out = VatMath.calculate({
             lines: [{ quantity: BigDecimal.fromBigInt(1n), unitPrice: minor(gross), treatment }],
             currency: CZK,
@@ -146,14 +154,17 @@ describe("VatMath rounding step (verification: exhaustive residue space)", () =>
           const vat = roundHalf(gross * rate, period);
           same(`${treatment} vat of gross ${gross}`, bucket.vat, vat);
           same(`${treatment} base of gross ${gross}`, bucket.base, gross - vat);
+          checked++;
         }
       }
     }
+    expect(checked).toBe(2 * (4 * 121 + 1 + 4 * 112 + 1));
   });
 
   test("toCzk = round2(amount x rate / quantity) for every residue of a 3-decimal CNB rate, quantity 1 and 100, both signs", () => {
     // amount 0.01: amount x rate has 5 decimals (q = 1: 1,000 residues) or 7 after / 100
     // (q = 100: 100,000 residues). Rates k/1000 for k up to the period, and one large amount.
+    let checked = 0;
     for (const quantity of [1n, 100n]) {
       const period = 1000n * quantity;
       for (const amountMinor of [1n, -1n, 987_654_321n, -987_654_321n]) {
@@ -168,10 +179,12 @@ describe("VatMath rounding step (verification: exhaustive residue space)", () =>
             got,
             roundHalf(amountMinor * k, period),
           );
+          checked++;
         }
       }
     }
-  });
+    expect(checked).toBe(2 * (1_000 + 100_000) + 4 * 2_000);
+  }, 30_000);
 });
 
 // 2. Generated inputs: buckets, rounding and CZK per bucket ---------------------------------
@@ -196,7 +209,7 @@ const oracle = (input: VatInput) => {
     const key = `${l.treatment}|${rate}`;
     const amount = units(l.quantity, 3) * units(l.unitPrice, 4);
     const prev = sums.get(key);
-    sums.set(key, { treatment: l.treatment, rate, sum: (prev?.sum ?? 0n) + amount });
+    sums.set(key, { treatment: l.treatment, rate, sum: BigIntMath.sum(prev?.sum ?? 0n, amount) });
   }
   const order = (t: VatTreatment) => ORACLE_TREATMENTS.indexOf(t);
   const groups = [...sums.values()].sort(
@@ -206,18 +219,18 @@ const oracle = (input: VatInput) => {
   const foreign = input.currency !== "CZK" && input.fx !== null;
   const fxRate = input.fx === null ? 0n : units(input.fx.rate, 3);
   const fxQ = input.fx === null ? 1n : BigInt(input.fx.quantity);
-  const buckets: Array<OracleBucket> = groups.map(({ treatment, rate, sum }) => {
+  const buckets: Array<OracleBucket> = EffectArray.map(groups, ({ treatment, rate, sum }) => {
     let base: bigint;
     let vat: bigint;
     let gross: bigint;
     if (input.pricesIncludeVat) {
       gross = roundHalf(sum, toMinor);
-      vat = rate === 0n ? 0n : roundHalf(gross * rate, 100n + rate);
+      vat = rate === 0n ? 0n : roundHalf(gross * rate, BigIntMath.sum(100n, rate));
       base = gross - vat;
     } else {
       base = roundHalf(sum, toMinor);
       vat = roundHalf(base * rate, 100n);
-      gross = base + vat;
+      gross = BigIntMath.sum(base, vat);
     }
     return {
       treatment,
@@ -228,8 +241,8 @@ const oracle = (input: VatInput) => {
       vatCzk: foreign ? roundHalf(vat * fxRate, 1000n * fxQ) : null,
     };
   });
-  const net = buckets.reduce((a, b) => a + b.base, 0n);
-  const vat = buckets.reduce((a, b) => a + b.vat, 0n);
+  const net = EffectArray.reduce(buckets, 0n, (a, b) => a + b.base);
+  const vat = EffectArray.reduce(buckets, 0n, (a, b) => a + b.vat);
   const total = net + vat;
   const toPay = input.paymentRounding === "whole_unit" ? roundHalf(total, 100n) * 100n : total;
   return {
@@ -238,7 +251,7 @@ const oracle = (input: VatInput) => {
     vat,
     gross: toPay,
     adjustment: toPay - total,
-    vatCzk: foreign ? buckets.reduce((a, b) => a + (b.vatCzk ?? 0n), 0n) : null,
+    vatCzk: foreign ? EffectArray.reduce(buckets, 0n, (a, b) => a + (b.vatCzk ?? 0n)) : null,
   };
 };
 
@@ -265,20 +278,23 @@ const generate = (seed: number): VatInput => {
 
 describe("VatMath buckets (property: seeded, 400 inputs)", () => {
   test("bucket keys, order, per-bucket rounding, CZK per bucket and totals equal the oracle", () => {
-    forSeeds(400, 0xa7a7, (seed) => {
+    const checked = forSeeds(400, 0xa7a7, (seed) => {
       const input = generate(seed);
       const got = VatMath.calculate(input);
       const want = oracle(input);
       const keys = (bs: ReadonlyArray<{ treatment: string; rate: string }>) =>
-        bs.map((b) => `${b.treatment}|${b.rate}`).join(",");
+        EffectArray.join(
+          EffectArray.map(bs, (b) => `${b.treatment}|${b.rate}`),
+          ",",
+        );
       const gotKeys = keys(
-        got.buckets.map((b) => ({
+        EffectArray.map(got.buckets, (b) => ({
           treatment: b.treatment,
-          rate: BigDecimal.format(BigDecimal.normalize(b.ratePercent)),
+          rate: b.ratePercent.pipe(BigDecimal.normalize, BigDecimal.format),
         })),
       );
       const wantKeys = keys(
-        want.buckets.map((b) => ({ treatment: b.treatment, rate: String(b.rate) })),
+        EffectArray.map(want.buckets, (b) => ({ treatment: b.treatment, rate: String(b.rate) })),
       );
       if (gotKeys !== wantKeys) throw new Error(`buckets ${gotKeys}, oracle ${wantKeys}`);
       for (const [i, w] of want.buckets.entries()) {
@@ -303,10 +319,11 @@ describe("VatMath buckets (property: seeded, 400 inputs)", () => {
         same("document vatCzk", got.vatCzk?.amount ?? null, want.vatCzk);
       }
     });
+    expect(checked).toBe(400);
   });
 
   test("documented residue: engine CZK VAT per bucket within 0.005 CZK of exact; the document within 0.005 x buckets", () => {
-    forSeeds(400, 0xc2c2, (seed) => {
+    const checked = forSeeds(400, 0xc2c2, (seed) => {
       const input = generate(seed);
       if (input.fx === null || input.currency === "CZK") return;
       const got = VatMath.calculate(input);
@@ -328,5 +345,6 @@ describe("VatMath buckets (property: seeded, 400 inputs)", () => {
         throw new Error("document CZK residue above 0.005 x buckets");
       }
     });
+    expect(checked).toBe(400);
   });
 });

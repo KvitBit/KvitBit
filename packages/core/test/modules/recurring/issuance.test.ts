@@ -1,23 +1,30 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  IsoDate,
-  ScheduleId,
-  TemplateId,
-  TemplateInput,
-  TemplateSchedule,
-} from "@kvitbit/domain/contract";
+import type { TemplateInput, TemplateSchedule } from "@kvitbit/domain/contract";
 import {
   Conflict,
   Documents,
   Forbidden,
   Invalid,
+  IsoDate,
   NotFound,
+  RequestKey,
+  type ScheduleId,
+  type TemplateId,
   Templates,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Cause, Context, Effect, Exit, Layer, Ref } from "effect";
-import { TestClock } from "effect/testing";
-import type { TemplateViewValue } from "../../../src/modules/recurring";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+import type { SweepDecision } from "../../../src/modules/recurring";
 import {
   FakeDeliveryStatuses,
   FakeDocumentLinks,
@@ -27,7 +34,10 @@ import {
   RecurringRepoMemory,
   TemplatesLive,
 } from "../../../src/modules/recurring";
+import { sha256Hex } from "../../../src/shared/hash";
+import { CoreStore } from "../../../src/store/CoreStore";
 import { member, runTest, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { withoutStackTrace } from "../../helpers/run";
 import {
   as,
   DocumentsStub,
@@ -37,11 +47,11 @@ import {
   ok,
   scenario,
   templateInput,
+  templateView,
 } from "./fixtures";
 
-const d = (s: string) => s as IsoDate;
+const d = (s: string) => IsoDate.make(s);
 const at = (iso: string) => TestClock.setTime(Date.parse(iso));
-const view = (v: unknown) => v as TemplateViewValue;
 
 const MONTHLY: TemplateSchedule = {
   every: { months: 1 },
@@ -54,17 +64,16 @@ const MONTHLY: TemplateSchedule = {
 const setup = (schedule: TemplateSchedule, input: TemplateInput = templateInput()) =>
   Effect.gen(function* () {
     const t = yield* Templates;
-    const created = view(yield* t.save(input));
-    const scheduled = view(yield* t.schedule(created.id as TemplateId, schedule, 1));
-    return {
-      templateId: created.id as TemplateId,
-      scheduleId: scheduled.schedule?.id as ScheduleId,
-      next: scheduled.schedule?.nextOccurrence ?? null,
-    };
+    const saveResult = yield* t.save(input);
+    const created = yield* templateView(saveResult);
+    const scheduleResult = yield* t.schedule(created.id, schedule, 1);
+    const scheduled = yield* templateView(scheduleResult);
+    if (scheduled.schedule === null) return yield* Effect.die("Expected an attached schedule");
+    return { templateId: created.id, scheduleId: scheduled.schedule.id };
   });
 
 const runOccurrence = (scheduleId: ScheduleId, occurrence: IsoDate) =>
-  as(job(scheduleId, occurrence))(
+  as(job(scheduleId)(occurrence))(
     Effect.flatMap(RecurringIssuance, (r) => r.run(scheduleId, occurrence)),
   );
 
@@ -74,9 +83,9 @@ const sweep = Effect.flatMap(RecurringIssuance, (r) =>
 );
 
 const getTemplate = (id: TemplateId) =>
-  Effect.map(
-    Effect.flatMap(Templates, (t) => t.get(id)),
-    view,
+  Templates.pipe(
+    Effect.flatMap((t) => t.get(id)),
+    Effect.flatMap(templateView),
   );
 const runsOf = (id: TemplateId, page?: { cursor?: string; limit?: number }) =>
   Effect.flatMap(Templates, (t) => t.runs(id, page));
@@ -85,35 +94,43 @@ const deliveries = Effect.flatMap(DocumentsStub, (s) => s.deliveries(WORKSPACE_A
 
 describe("Templates.schedule", () => {
   test("validates the rule through Schedules.validate", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        const saveResult = yield* t.save(templateInput());
+        const id = (yield* templateView(saveResult)).id;
+        // Simulate malformed data reaching the scheduler without a transport decoder.
+        const invalidDate = IsoDate.make("2026-02-30", { disableChecks: true });
+        const invalidKind = { ...MONTHLY };
+        Reflect.set(invalidKind, "issueAs", "credit_note");
         return [
           yield* Effect.exit(t.schedule(id, { ...MONTHLY, every: { months: 0 } }, 1)),
           yield* Effect.exit(t.schedule(id, { ...MONTHLY, endOn: d("2026-11-01") }, 1)),
-          yield* Effect.exit(t.schedule(id, { ...MONTHLY, startOn: d("2026-02-30") }, 1)),
-          yield* Effect.exit(t.schedule(id, { ...MONTHLY, issueAs: "credit_note" as never }, 1)),
+          yield* Effect.exit(t.schedule(id, { ...MONTHLY, startOn: invalidDate }, 1)),
+          yield* Effect.exit(t.schedule(id, invalidKind, 1)),
         ];
       }),
     );
     for (const result of ok(exit)) {
       expect(Exit.isFailure(result)).toBe(true);
-      const error = Exit.isFailure(result) ? JSON.stringify(result.cause) : "";
-      expect(error).toContain("schedule.cadence_invalid");
+      const error = result.pipe(Exit.findErrorOption, Option.getOrUndefined);
+      expect(
+        error?._tag === "Invalid" && EffectArray.map(error.issues, (issue) => issue.code),
+      ).toContain("schedule.cadence_invalid");
     }
   });
 
   test("attaches at the next occurrence (month end), bumps the revision, detaches with null", async () => {
-    const exit = await scenario(
-      member("member"),
+    const exit = await scenario(member("member"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const id = view(yield* t.save(templateInput())).id as TemplateId;
-        const attached = view(yield* t.schedule(id, { ...MONTHLY, startOn: d("2026-01-31") }, 1));
+        const saveResult = yield* t.save(templateInput());
+        const id = (yield* templateView(saveResult)).id;
+        const scheduleResult = yield* t.schedule(id, { ...MONTHLY, startOn: d("2026-01-31") }, 1);
+        const attached = yield* templateView(scheduleResult);
         const stale = yield* Effect.exit(t.schedule(id, null, 1));
-        const detached = view(yield* t.schedule(id, null, 2));
+        const scheduleResult2 = yield* t.schedule(id, null, 2);
+        const detached = yield* templateView(scheduleResult2);
         return { attached, stale, detached };
       }),
     );
@@ -122,33 +139,35 @@ describe("Templates.schedule", () => {
     expect(attached.schedule?.nextOccurrence).toBe(d("2026-11-30"));
     expect(attached.schedule?.paused).toBe(false);
     expect(attached.schedule?.pausedReason).toBeNull();
-    expect(Exit.isFailure(stale) && JSON.stringify(stale.cause)).toContain("revision_changed");
+    const error = stale.pipe(Exit.findErrorOption, Option.getOrUndefined);
+    expect(error?._tag === "Conflict" && error.reason).toBe("revision_changed");
     expect(detached.revision).toBe(3);
     expect(detached.schedule).toBeNull();
   });
 
   test("resume of a running schedule changes nothing; without a schedule it conflicts", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const bare = view(yield* t.save(templateInput())).id as TemplateId;
+        const saveResult = yield* t.save(templateInput());
+        const bare = (yield* templateView(saveResult)).id;
         const { templateId } = yield* setup(MONTHLY);
-        const running = view(yield* t.resume(templateId));
+        const resumeResult = yield* t.resume(templateId);
+        const running = yield* templateView(resumeResult);
         const none = yield* Effect.exit(t.resume(bare));
         return { running, none };
       }),
     );
     const { running, none } = ok(exit);
     expect(running.revision).toBe(2);
-    expect(Exit.isFailure(none) && JSON.stringify(none.cause)).toContain("illegal_transition");
+    const error = none.pipe(Exit.findErrorOption, Option.getOrUndefined);
+    expect(error?._tag === "Conflict" && error.reason).toBe("illegal_transition");
   });
 });
 
 describe("RecurringIssuance: exactly once", () => {
   test("a due occurrence issues one document as System and advances the schedule", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup(MONTHLY);
         const decisions = yield* sweep;
@@ -167,7 +186,7 @@ describe("RecurringIssuance: exactly once", () => {
       }),
     );
     const r = ok(exit);
-    expect<unknown>(r.decisions.map((x) => [x.occurrence, x.action])).toEqual([
+    expect<unknown>(EffectArray.map(r.decisions, (x) => [x.occurrence, x.action])).toEqual([
       ["2026-11-23", "issue"],
     ]);
     expect(r.again).toEqual([]);
@@ -175,18 +194,18 @@ describe("RecurringIssuance: exactly once", () => {
     expect(r.rerun.issue._tag === "Issued" && r.rerun.issue.replayed).toBe(true);
     expect(r.docs).toHaveLength(1);
     expect(r.attempts.issue).toBe(1);
-    const doc = r.docs[0];
-    expect(doc?.actor).toBe("System:RecurringIssuance");
-    expect(doc?.input.issuedOn).toBe(d("2026-11-23"));
-    expect(doc?.input.taxableSupplyOn).toBe(d("2026-11-23"));
-    expect(doc?.input.due).toEqual({ inDays: 14 });
+    const doc = Option.getOrThrow(EffectArray.head(r.docs));
+    expect(doc.actor).toBe("System:RecurringIssuance");
+    expect(doc.input.issuedOn).toBe(d("2026-11-23"));
+    expect(doc.input.taxableSupplyOn).toBe(d("2026-11-23"));
+    expect(doc.input.due).toEqual({ inDays: 14 });
     expect(r.template.schedule?.nextOccurrence).toBe(d("2026-12-23"));
     expect(r.runs.items).toEqual([
       {
         occurrence: d("2026-11-23"),
         outcome: "issued",
         at: "2026-11-23T09:00:00.000Z",
-        document: { id: doc?.id as never, number: "2026-0001" },
+        document: { id: doc.id, number: "2026-0001" },
         delivery: null,
         failure: null,
       },
@@ -194,8 +213,7 @@ describe("RecurringIssuance: exactly once", () => {
   });
 
   test("concurrent runs of one occurrence issue one document", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { scheduleId } = yield* setup(MONTHLY);
         const results = yield* Effect.all(
@@ -207,12 +225,17 @@ describe("RecurringIssuance: exactly once", () => {
     );
     const { results, docs } = ok(exit);
     expect(docs).toHaveLength(1);
-    const replayed = results.map((x) => x.issue._tag === "Issued" && x.issue.replayed).sort();
+    const replayed = EffectArray.map(
+      results,
+      (x) => x.issue._tag === "Issued" && x.issue.replayed,
+    ).sort();
     expect(replayed).toEqual([false, true]);
   });
 
   test("a crash inside the issue transaction rolls the document back; the rerun issues one", async () => {
-    class Crash extends Context.Service<Crash, Ref.Ref<boolean>>()("test/Crash") {}
+    class Crash extends Context.Service<Crash, Ref.Ref<boolean>>()(
+      "@kvitbit/core/test/modules/recurring/issuance.test/Crash",
+    ) {}
     const crashingRepo = Layer.effectContext(
       Effect.gen(function* () {
         const repo = yield* RecurringRepo;
@@ -239,7 +262,8 @@ describe("RecurringIssuance: exactly once", () => {
       member("owner"),
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup(MONTHLY);
-        yield* Ref.set(yield* Crash, true);
+        const crash = yield* Crash;
+        yield* Ref.set(crash, true);
         const crashed = yield* Effect.exit(runOccurrence(scheduleId, d("2026-11-23")));
         const afterCrash = { docs: yield* documents, template: yield* getTemplate(templateId) };
         const rerun = yield* runOccurrence(scheduleId, d("2026-11-23"));
@@ -255,22 +279,23 @@ describe("RecurringIssuance: exactly once", () => {
   });
 
   test("a crash between issue and send: the rerun sends only, once", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup({ ...MONTHLY, autoSend: true });
         const occurrence = d("2026-11-23");
         // The workflow died after the "issue" Activity committed.
-        const issuedOnly = yield* as(job(scheduleId, occurrence))(
-          Effect.flatMap(RecurringIssuance, (r) => r.issue(scheduleId, occurrence)),
+        const issuedOnly = yield* as(job(scheduleId)(occurrence))(
+          Effect.flatMap(RecurringIssuance, (issuance) => issuance.issue(scheduleId, occurrence)),
         );
         const pendingRuns = yield* runsOf(templateId);
         const resumed = yield* runOccurrence(scheduleId, occurrence);
         const replay = yield* runOccurrence(scheduleId, occurrence);
         const stub = yield* DocumentsStub;
         const sent = yield* deliveries;
+        const delivery = sent[0];
+        if (delivery === undefined) return yield* Effect.die("Expected a queued delivery");
         const fake = yield* FakeDeliveryStatuses;
-        yield* fake.set(WORKSPACE_A, sent[0]?.id as never, "sent");
+        yield* fake.set(WORKSPACE_A, delivery.id, "sent");
         return {
           issuedOnly,
           pendingRuns,
@@ -278,6 +303,7 @@ describe("RecurringIssuance: exactly once", () => {
           replay,
           docs: yield* documents,
           sent,
+          deliveryId: delivery.id,
           attempts: yield* Ref.get(stub.attempts),
           runs: yield* runsOf(templateId),
         };
@@ -292,12 +318,11 @@ describe("RecurringIssuance: exactly once", () => {
     expect(r.docs).toHaveLength(1);
     expect(r.sent).toHaveLength(1);
     expect(r.attempts).toEqual({ issue: 1, send: 1 });
-    expect(r.runs.items[0]?.delivery).toEqual({ id: r.sent[0]?.id as never, status: "sent" });
+    expect(r.runs.items[0]?.delivery).toEqual({ id: r.deliveryId, status: "sent" });
   });
 
   test("a crash inside the send step rolls the delivery back; the rerun queues one", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { scheduleId } = yield* setup({ ...MONTHLY, autoSend: true });
         const stub = yield* DocumentsStub;
@@ -319,14 +344,13 @@ describe("RecurringIssuance: exactly once", () => {
 
 describe("RecurringIssuance: failures pause the schedule", () => {
   test("Invalid from Documents pauses with its code; resume issues the same occurrence", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId } = yield* setup(MONTHLY);
         const stub = yield* DocumentsStub;
         yield* Ref.set(
           stub.failNextIssue,
-          new Invalid({ issues: [{ path: ["contact"], code: "document.buyer_vat_id_required" }] }),
+          Invalid.make({ issues: [{ path: ["contact"], code: "document.buyer_vat_id_required" }] }),
         );
         yield* sweep;
         const paused = yield* getTemplate(templateId);
@@ -338,7 +362,7 @@ describe("RecurringIssuance: failures pause the schedule", () => {
           paused,
           failedRuns,
           whilePaused,
-          resumed: view(resumed),
+          resumed: yield* templateView(resumed),
           docs: yield* documents,
           runs: yield* runsOf(templateId),
         };
@@ -347,21 +371,20 @@ describe("RecurringIssuance: failures pause the schedule", () => {
     const r = ok(exit);
     expect(r.paused.schedule?.paused).toBe(true);
     expect(r.paused.schedule?.pausedReason).toBe("document.buyer_vat_id_required");
-    expect(r.failedRuns.items.map((x) => [x.outcome, x.failure, x.document])).toEqual([
+    expect(EffectArray.map(r.failedRuns.items, (x) => [x.outcome, x.failure, x.document])).toEqual([
       ["failed", "document.buyer_vat_id_required", null],
     ]);
     expect(r.whilePaused).toEqual([]);
     expect(r.resumed.schedule?.paused).toBe(false);
     expect(r.resumed.revision).toBe(3);
-    expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
-    expect<unknown>(r.runs.items.map((x) => [x.occurrence, x.outcome, x.failure])).toEqual([
-      ["2026-11-23", "issued", null],
-    ]);
+    expect(EffectArray.map(r.docs, (x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
+    expect<unknown>(
+      EffectArray.map(r.runs.items, (x) => [x.occurrence, x.outcome, x.failure]),
+    ).toEqual([["2026-11-23", "issued", null]]);
   });
 
   test("NotFound from Documents pauses with no IssueCode", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId } = yield* setup(MONTHLY, templateInput({ contact: MISSING_CONTACT }));
         yield* sweep;
@@ -374,12 +397,11 @@ describe("RecurringIssuance: failures pause the schedule", () => {
   });
 
   test("Unavailable fails the step for retry without pausing", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup(MONTHLY);
         const stub = yield* DocumentsStub;
-        yield* Ref.set(stub.failNextIssue, new Unavailable({ dependency: "database" }));
+        yield* Ref.set(stub.failNextIssue, Unavailable.make({ dependency: "database" }));
         const failed = yield* Effect.exit(runOccurrence(scheduleId, d("2026-11-23")));
         const between = {
           template: yield* getTemplate(templateId),
@@ -390,21 +412,22 @@ describe("RecurringIssuance: failures pause the schedule", () => {
       }),
     );
     const r = ok(exit);
-    expect(r.failed).toEqual(Exit.fail(new Unavailable({ dependency: "database" })));
+    expect(r.failed.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Unavailable.make({ dependency: "database" })),
+    );
     expect(r.between.template.schedule?.paused).toBe(false);
     expect(r.between.runs.items).toEqual([]);
     expect(r.retried.issue._tag).toBe("Issued");
   });
 
   test("a refused send keeps the document and pauses the schedule", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup({ ...MONTHLY, autoSend: true });
         const stub = yield* DocumentsStub;
         yield* Ref.set(
           stub.failNextSend,
-          new Invalid({ issues: [{ path: ["to"], code: "request.malformed" }] }),
+          Invalid.make({ issues: [{ path: ["to"], code: "request.malformed" }] }),
         );
         const result = yield* runOccurrence(scheduleId, d("2026-11-23"));
         const rerun = yield* runOccurrence(scheduleId, d("2026-11-23"));
@@ -424,7 +447,7 @@ describe("RecurringIssuance: failures pause the schedule", () => {
     expect(r.docs).toHaveLength(1);
     expect(r.sent).toHaveLength(0);
     expect(r.template.schedule?.pausedReason).toBe("request.malformed");
-    expect(r.runs.items.map((x) => [x.outcome, x.failure])).toEqual([
+    expect(EffectArray.map(r.runs.items, (x) => [x.outcome, x.failure])).toEqual([
       ["issued", "request.malformed"],
     ]);
   });
@@ -432,8 +455,7 @@ describe("RecurringIssuance: failures pause the schedule", () => {
 
 describe("RecurringSweep: due occurrences on the Prague calendar", () => {
   test("up to 7 days late issues; more pauses with schedule.missed_occurrences; resume catches up in order", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         yield* at("2026-11-01T09:00:00Z");
         const weekly = { ...MONTHLY, every: { weeks: 1 }, startOn: d("2026-11-01") };
@@ -441,20 +463,25 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
         const missed = yield* setup(weekly);
         yield* at("2026-11-08T09:00:00Z");
         // `late`: 2026-11-01 is exactly 7 days late; pause `missed` by hand via the cap later.
-        const onTime = yield* as(job(late.scheduleId, d("2026-11-01")))(
-          Effect.flatMap(RecurringIssuance, (r) => r.run(late.scheduleId, d("2026-11-01"))),
+        const onTime = yield* as(job(late.scheduleId)(d("2026-11-01")))(
+          Effect.flatMap(RecurringIssuance, (issuance) =>
+            issuance.run(late.scheduleId, d("2026-11-01")),
+          ),
         );
         yield* at("2026-11-23T09:00:00Z");
-        const capped = yield* as(job(missed.scheduleId, d("2026-11-01")))(
-          Effect.flatMap(RecurringIssuance, (r) =>
-            r.pauseMissed(missed.scheduleId, d("2026-11-01")),
+        const capped = yield* as(job(missed.scheduleId)(d("2026-11-01")))(
+          Effect.flatMap(RecurringIssuance, (issuance) =>
+            issuance.pauseMissed(missed.scheduleId, d("2026-11-01")),
           ),
         );
         const pausedView = yield* getTemplate(missed.templateId);
         const cappedRuns = yield* runsOf(missed.templateId);
         yield* Effect.flatMap(Templates, (t) => t.resume(missed.templateId));
-        const ticks = [];
-        for (let i = 0; i < 5; i++) ticks.push(yield* sweep);
+        const ticks: Array<ReadonlyArray<SweepDecision>> = [];
+        for (let i = 0; i < 5; i++) {
+          const decisions = yield* sweep;
+          ticks.push(decisions);
+        }
         return { onTime, capped, pausedView, cappedRuns, ticks, docs: yield* documents };
       }),
     );
@@ -462,17 +489,17 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
     expect(r.onTime.issue._tag).toBe("Issued");
     expect(r.capped._tag).toBe("Paused");
     expect(r.pausedView.schedule?.pausedReason).toBe("schedule.missed_occurrences");
-    expect<unknown>(r.cappedRuns.items.map((x) => [x.occurrence, x.outcome, x.failure])).toEqual([
-      ["2026-11-01", "skipped_missed", "schedule.missed_occurrences"],
-    ]);
+    expect<unknown>(
+      EffectArray.map(r.cappedRuns.items, (x) => [x.occurrence, x.outcome, x.failure]),
+    ).toEqual([["2026-11-01", "skipped_missed", "schedule.missed_occurrences"]]);
     // `late` (next 11-08, 15 days late on 11-23) pauses on the first tick; `missed` catches up.
     const first = r.ticks[0] ?? [];
-    expect<unknown>(first.map((x) => [x.occurrence, x.action])).toEqual([
+    expect<unknown>(EffectArray.map(first, (x) => [x.occurrence, x.action])).toEqual([
       ["2026-11-01", "issue"],
       ["2026-11-08", "pause_missed"],
     ]);
-    expect(r.ticks.map((t) => t.length)).toEqual([2, 1, 1, 1, 0]);
-    const missedDocs = r.docs.map((x) => x.input.issuedOn).sort();
+    expect(EffectArray.map(r.ticks, (t) => t.length)).toEqual([2, 1, 1, 1, 0]);
+    const missedDocs = EffectArray.map(r.docs, (x) => x.input.issuedOn).sort();
     expect(missedDocs).toEqual([
       d("2026-11-01"),
       d("2026-11-01"),
@@ -483,8 +510,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
   });
 
   test("the sweep tick pauses a schedule past the cap", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         yield* at("2026-11-01T09:00:00Z");
         const { templateId } = yield* setup({ ...MONTHLY, startOn: d("2026-11-01") });
@@ -494,7 +520,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
       }),
     );
     const r = ok(exit);
-    expect(r.decisions.map((x) => x.action)).toEqual(["pause_missed"]);
+    expect(EffectArray.map(r.decisions, (x) => x.action)).toEqual(["pause_missed"]);
     expect(r.template.schedule?.pausedReason).toBe("schedule.missed_occurrences");
     expect(r.docs).toHaveLength(0);
   });
@@ -505,8 +531,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
         at(iso),
         Effect.flatMap(RecurringIssuance, (r) => r.due),
       );
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         yield* at("2026-03-28T09:00:00Z");
         yield* setup({ ...MONTHLY, startOn: d("2026-03-29") });
@@ -517,8 +542,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
         return { spring };
       }),
     );
-    const autumn = await scenario(
-      member("owner"),
+    const autumn = await scenario(member("owner"))(
       Effect.gen(function* () {
         yield* at("2026-10-24T09:00:00Z");
         yield* setup({ ...MONTHLY, startOn: d("2026-10-25") });
@@ -528,16 +552,15 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
         ];
       }),
     );
-    expect(ok(exit).spring.map((x) => x.length)).toEqual([0, 1]);
-    expect<unknown>(ok(autumn).map((x) => x.map((y) => y.occurrence))).toEqual([
-      [],
-      ["2026-10-25"],
-    ]);
+    expect(EffectArray.map(ok(exit).spring, (x) => x.length)).toEqual([0, 1]);
+    const autumnTicks = ok(autumn);
+    expect(
+      EffectArray.map(autumnTicks, (tick) => EffectArray.map(tick, (x) => x.occurrence)),
+    ).toEqual([[], [d("2026-10-25")]]);
   });
 
   test("a monthly schedule from the 31st issues on month ends; endOn ends it", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId } = yield* setup({
           ...MONTHLY,
@@ -552,21 +575,26 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
       }),
     );
     const r = ok(exit);
-    expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-30"), d("2026-12-31")]);
+    expect(EffectArray.map(r.docs, (x) => x.input.issuedOn)).toEqual([
+      d("2026-11-30"),
+      d("2026-12-31"),
+    ]);
     expect(r.template.schedule?.nextOccurrence).toBeNull();
   });
 
   test("changing a schedule affects future occurrences only", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId } = yield* setup(MONTHLY);
         yield* sweep;
         const t = yield* Templates;
         const current = yield* getTemplate(templateId);
-        const changed = view(
-          yield* t.schedule(templateId, { ...MONTHLY, issueAs: "proforma" }, current.revision),
+        const scheduleResult = yield* t.schedule(
+          templateId,
+          { ...MONTHLY, issueAs: "proforma" },
+          current.revision,
         );
+        const changed = yield* templateView(scheduleResult);
         const tick = yield* sweep;
         return { changed, tick, docs: yield* documents };
       }),
@@ -579,8 +607,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
   });
 
   test("a stale or detached occurrence is a no-op", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup(MONTHLY);
         const stale = yield* runOccurrence(scheduleId, d("2026-10-23"));
@@ -598,8 +625,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
 
 describe("RecurringIssuance authorization (R4, R5)", () => {
   test("only the System caller of this occurrence's job may run its steps", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { scheduleId } = yield* setup(MONTHLY);
         const r = yield* RecurringIssuance;
@@ -609,25 +635,35 @@ describe("RecurringIssuance authorization (R4, R5)", () => {
           memberIssue: yield* Effect.exit(r.issue(scheduleId, occurrence)),
           memberSend: yield* Effect.exit(r.send(scheduleId, occurrence)),
           memberPause: yield* Effect.exit(r.pauseMissed(scheduleId, occurrence)),
-          otherJob: yield* Effect.exit(as(system())(r.issue(scheduleId, occurrence))),
-          otherOccurrence: yield* Effect.exit(
-            as(job(scheduleId, d("2026-12-23")))(r.issue(scheduleId, occurrence)),
-          ),
-          otherWorkspace: yield* Effect.exit(
-            as(job(scheduleId, occurrence, WORKSPACE_B))(r.issue(scheduleId, occurrence)),
-          ),
+          otherJob: yield* r.issue(scheduleId, occurrence).pipe(as(system()), Effect.exit),
+          otherOccurrence: yield* r
+            .issue(scheduleId, occurrence)
+            .pipe(as(job(scheduleId)(d("2026-12-23"))), Effect.exit),
+          otherWorkspace: yield* r
+            .issue(scheduleId, occurrence)
+            .pipe(as(job(scheduleId)(occurrence, WORKSPACE_B)), Effect.exit),
           docs: yield* documents,
         };
       }),
     );
     const r = ok(exit);
-    expect(r.memberIssue).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
-    expect(r.memberSend).toEqual(Exit.fail(new Forbidden({ action: "document.send" })));
-    expect(r.memberPause).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
-    expect(r.otherJob).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
-    expect(r.otherOccurrence).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
-    expect(r.otherWorkspace).toEqual(
-      Exit.fail(new NotFound({ entity: "Schedule", id: r.scheduleId })),
+    expect(r.memberIssue.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.issue" })),
+    );
+    expect(r.memberSend.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.send" })),
+    );
+    expect(r.memberPause.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.issue" })),
+    );
+    expect(r.otherJob.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.issue" })),
+    );
+    expect(r.otherOccurrence.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.issue" })),
+    );
+    expect(r.otherWorkspace.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(NotFound.make({ entity: "Schedule", id: r.scheduleId })),
     );
     expect(r.docs).toHaveLength(0);
   });
@@ -635,8 +671,7 @@ describe("RecurringIssuance authorization (R4, R5)", () => {
 
 describe("Templates.runs", () => {
   test("pages newest occurrence first; a cursor is bound to its template", async () => {
-    const exit = await scenario(
-      member("accountant"),
+    const exit = await scenario(member("accountant"))(
       Effect.gen(function* () {
         const owner = as(member("owner"));
         yield* at("2026-11-01T09:00:00Z");
@@ -657,12 +692,15 @@ describe("Templates.runs", () => {
       }),
     );
     const r = ok(exit);
-    expect<unknown>(r.first.items.map((x) => x.occurrence)).toEqual(["2026-11-15", "2026-11-08"]);
+    expect<unknown>(EffectArray.map(r.first.items, (x) => x.occurrence)).toEqual([
+      "2026-11-15",
+      "2026-11-08",
+    ]);
     expect(r.first.nextCursor).not.toBeNull();
-    expect<unknown>(r.second.items.map((x) => x.occurrence)).toEqual(["2026-11-01"]);
+    expect<unknown>(EffectArray.map(r.second.items, (x) => x.occurrence)).toEqual(["2026-11-01"]);
     expect(r.second.nextCursor).toBeNull();
-    expect(r.foreign).toEqual(
-      Exit.fail(new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] })),
+    expect(r.foreign.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Invalid.make({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] })),
     );
     // Out-of-range limits are clamped (PageRequest bounds are checked at decode).
     expect(Exit.isSuccess(r.badLimit)).toBe(true);
@@ -671,8 +709,7 @@ describe("Templates.runs", () => {
 
 describe("council follow-ups", () => {
   test("an issued document is linked to its schedule and occurrence", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { scheduleId } = yield* setup(MONTHLY);
         yield* sweep;
@@ -681,14 +718,14 @@ describe("council follow-ups", () => {
       }),
     );
     const r = ok(exit);
+    const doc = Option.getOrThrow(EffectArray.head(r.docs));
     expect(r.links).toEqual([
-      { document: r.docs[0]?.id as string, scheduleId: r.scheduleId, occurrence: d("2026-11-23") },
+      { document: doc.id, scheduleId: r.scheduleId, occurrence: d("2026-11-23") },
     ]);
   });
 
   test("a run that starts past the catch-up cap pauses instead of issuing", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         yield* at("2026-11-01T09:00:00Z");
         const { templateId, scheduleId } = yield* setup({ ...MONTHLY, startOn: d("2026-11-01") });
@@ -704,19 +741,18 @@ describe("council follow-ups", () => {
   });
 
   test("permanent Conflicts and NotFound pause with a visible error; a revision race retries", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const stub = yield* DocumentsStub;
         const a = yield* setup(MONTHLY);
-        yield* Ref.set(stub.failNextIssue, new Conflict({ reason: "duplicate" }));
+        yield* Ref.set(stub.failNextIssue, Conflict.make({ reason: "duplicate" }));
         yield* runOccurrence(a.scheduleId, d("2026-11-23"));
         const b = yield* setup(MONTHLY, templateInput({ contact: MISSING_CONTACT }));
         yield* runOccurrence(b.scheduleId, d("2026-11-23"));
         const c = yield* setup(MONTHLY);
         yield* Ref.set(
           stub.failNextIssue,
-          new Conflict({ reason: "revision_changed", currentRevision: 2 }),
+          Conflict.make({ reason: "revision_changed", currentRevision: 2 }),
         );
         const race = yield* Effect.exit(runOccurrence(c.scheduleId, d("2026-11-23")));
         return {
@@ -735,12 +771,11 @@ describe("council follow-ups", () => {
   });
 
   test("pendingSends lists issued occurrences whose send is still pending", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const { scheduleId } = yield* setup({ ...MONTHLY, autoSend: true });
         const r = yield* RecurringIssuance;
-        yield* as(job(scheduleId, d("2026-11-23")))(r.issue(scheduleId, d("2026-11-23")));
+        yield* as(job(scheduleId)(d("2026-11-23")))(r.issue(scheduleId, d("2026-11-23")));
         const fresh = yield* r.pendingSends(60_000);
         yield* TestClock.adjust(120_000);
         const stale = yield* r.pendingSends(60_000);
@@ -758,8 +793,7 @@ describe("council follow-ups", () => {
   });
 
   test("an interrupted start stops the sweep tick instead of being logged", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         yield* setup(MONTHLY);
         const r = yield* RecurringIssuance;
@@ -771,35 +805,40 @@ describe("council follow-ups", () => {
   });
 
   test("use authorizes the document action before reading the template", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        const saveResult = yield* t.save(templateInput());
+        const id = (yield* templateView(saveResult)).id;
         return {
-          accountant: yield* Effect.exit(as(member("accountant"))(t.use(id))),
-          readToken: yield* Effect.exit(
-            as(member("owner", { scopes: ["templates:read"] }))(t.use(id, { as: "issued" })),
-          ),
+          accountant: yield* t.use(id).pipe(as(member("accountant")), Effect.exit),
+          readToken: yield* t
+            .use(id, { as: "issued" })
+            .pipe(as(member("owner", { scopes: ["templates:read"] })), Effect.exit),
         };
       }),
     );
     const r = ok(exit);
-    expect(r.accountant).toEqual(Exit.fail(new Forbidden({ action: "document.draft" })));
-    expect(r.readToken).toEqual(Exit.fail(new Forbidden({ action: "document.issue" })));
+    expect(r.accountant.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.draft" })),
+    );
+    expect(r.readToken.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "document.issue" })),
+    );
   });
 });
 
 describe("review round 1 regressions", () => {
   test("detaching and reattaching never bills an issued date twice", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
         const { templateId } = yield* setup(MONTHLY);
         yield* sweep;
-        const detached = view(yield* t.schedule(templateId, null, 2));
-        const reattached = view(yield* t.schedule(templateId, MONTHLY, detached.revision));
+        const scheduleResult = yield* t.schedule(templateId, null, 2);
+        const detached = yield* templateView(scheduleResult);
+        const scheduleResult2 = yield* t.schedule(templateId, MONTHLY, detached.revision);
+        const reattached = yield* templateView(scheduleResult2);
         const tick = yield* sweep;
         return { reattached, tick, docs: yield* documents };
       }),
@@ -807,12 +846,11 @@ describe("review round 1 regressions", () => {
     const r = ok(exit);
     expect(r.reattached.schedule?.nextOccurrence).toBe(d("2026-12-23"));
     expect(r.tick).toEqual([]);
-    expect(r.docs.map((x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
+    expect(EffectArray.map(r.docs, (x) => x.input.issuedOn)).toEqual([d("2026-11-23")]);
   });
 
   test("an edit waits while an occurrence is due; settings-only edits keep the next date", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
         const weekly = { ...MONTHLY, every: { weeks: 1 } };
@@ -824,13 +862,16 @@ describe("review round 1 regressions", () => {
         // The due backlog issues under the rule and settings it was due under.
         yield* sweep;
         yield* sweep;
-        const sendOn = view(yield* t.schedule(templateId, { ...weekly, autoSend: true }, 2));
+        const scheduleResult = yield* t.schedule(templateId, { ...weekly, autoSend: true }, 2);
+        const sendOn = yield* templateView(scheduleResult);
         return { blocked, sendOn, docs: yield* documents, sent: yield* deliveries };
       }),
     );
     const r = ok(exit);
-    expect(r.blocked).toEqual(Exit.fail(new Conflict({ reason: "illegal_transition" })));
-    expect(r.docs.map((x) => [x.kind, x.input.issuedOn])).toEqual([
+    expect(r.blocked.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Conflict.make({ reason: "illegal_transition" })),
+    );
+    expect(EffectArray.map(r.docs, (x) => [x.kind, x.input.issuedOn])).toEqual([
       ["invoice", d("2026-11-23")],
       ["invoice", d("2026-11-30")],
     ]);
@@ -840,53 +881,89 @@ describe("review round 1 regressions", () => {
   });
 
   test("a stale or foreign schedule call reports the revision or NotFound before Invalid", async () => {
-    const exit = await scenario(
-      member("owner"),
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        const saveResult = yield* t.save(templateInput());
+        const id = (yield* templateView(saveResult)).id;
         const bad = { ...MONTHLY, every: { months: 0 } };
         return {
           id,
           stale: yield* Effect.exit(t.schedule(id, bad, 7)),
-          foreign: yield* Effect.exit(
-            as(member("owner", { workspaceId: WORKSPACE_B }))(t.schedule(id, bad, 1)),
-          ),
+          foreign: yield* t
+            .schedule(id, bad, 1)
+            .pipe(as(member("owner", { workspaceId: WORKSPACE_B })), Effect.exit),
         };
       }),
     );
     const r = ok(exit);
-    expect(r.stale).toEqual(
-      Exit.fail(new Conflict({ reason: "revision_changed", currentRevision: 1 })),
+    expect(r.stale.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Conflict.make({ reason: "revision_changed", currentRevision: 1 })),
     );
-    expect(r.foreign).toEqual(Exit.fail(new NotFound({ entity: "Template", id: r.id })));
+    expect(r.foreign.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(NotFound.make({ entity: "Template", id: r.id })),
+    );
   });
 
   test("keyed use replays the original view, decimals and all, even after a discard", async () => {
-    const KEY = "req-use-1" as never;
-    const exit = await scenario(
-      member("owner"),
+    const KEY = RequestKey.make("req-use-1");
+    const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const id = view(yield* t.save(templateInput())).id as TemplateId;
+        const saveResult = yield* t.save(templateInput());
+        const id = (yield* templateView(saveResult)).id;
         const first = yield* t.use(id, {}, { requestKey: KEY });
         const docs = yield* Documents;
         yield* docs.discardDraft(first.id, first.revision);
         const replay = yield* t.use(id, {}, { requestKey: KEY });
+        const legacyKey = RequestKey.make("req-use-legacy");
+        const store = yield* CoreStore;
+        const scope = { _tag: "Workspace", workspaceId: WORKSPACE_A } as const;
+        const now = "2026-11-23T09:00:00.000Z";
+        const claim = yield* store.transaction(store.requestLog.claim(scope, KEY, now));
+        if (claim._tag !== "Existing") return yield* Effect.die("Expected a committed snapshot");
+        const stored = yield* Schema.decodeUnknownEffect(Schema.Struct({ json: Schema.String }))(
+          claim.entry.result,
+        );
+        const snapshot = yield* Schema.decodeEffect(
+          Schema.fromJsonString(Schema.Record(Schema.String, Schema.Json)),
+        )(stored.json);
+        const legacyJson = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Json))({
+          ...snapshot,
+          legacyField: "retained",
+        });
+        // The previous payload omitted `patch` when absent.
+        const fingerprint = yield* sha256Hex(`["Templates.use",{"as":"draft","template":"${id}"}]`);
+        yield* store.transaction(
+          Effect.andThen(
+            store.requestLog.claim(scope, legacyKey, now),
+            store.requestLog.complete({
+              ...claim.entry,
+              key: legacyKey,
+              fingerprint,
+              result: { json: legacyJson },
+            }),
+          ),
+        );
+        const legacy = yield* t.use(id, undefined, { requestKey: legacyKey });
         const mismatch = yield* Effect.exit(
           t.use(id, { patch: { note: "x" } }, { requestKey: KEY }),
         );
-        return { first, replay, mismatch, left: yield* documents };
+        return { first, replay, legacy, mismatch, left: yield* documents };
       }),
     );
     const r = ok(exit);
     expect(r.replay).toEqual(r.first);
-    const line = (
-      r.replay as unknown as { lines: ReadonlyArray<{ unitPrice: BigDecimal.BigDecimal }> }
-    ).lines[0];
-    expect(BigDecimal.isBigDecimal(line?.unitPrice)).toBe(true);
-    expect(line?.unitPrice).toEqual(BigDecimal.fromStringUnsafe("1250.50"));
+    const legacyView = { ...r.first, legacyField: "retained" };
+    expect(r.legacy).toEqual(legacyView);
+    const hasUnitPrice = Schema.is(Schema.Struct({ unitPrice: Schema.Unknown }));
+    const line = r.replay.lines[0];
+    const unitPrice = hasUnitPrice(line) ? line.unitPrice : undefined;
+    expect(BigDecimal.isBigDecimal(unitPrice)).toBe(true);
+    expect(unitPrice).toEqual(BigDecimal.fromStringUnsafe("1250.50"));
     expect(r.left).toHaveLength(0);
-    expect(r.mismatch).toEqual(Exit.fail(new Conflict({ reason: "idempotency_mismatch" })));
+    expect(r.mismatch.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Conflict.make({ reason: "idempotency_mismatch" })),
+    );
   });
 });

@@ -1,9 +1,14 @@
 /** The seam bindings of src/compose/bindings.ts on TestCore (board IDs in each test name). */
+
 import { describe, expect, test } from "bun:test";
-import type { MemberCaller, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Workspaces } from "@kvitbit/domain/contract";
+import type { MemberCaller } from "@kvitbit/domain/contract";
+import { IsoDate, NumberingSeriesId, Workspaces } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
-import { Effect, Exit } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { ContactSeriesLookup } from "../../src/modules/contacts";
 import { ExpenseSuppliers } from "../../src/modules/expenses";
 import { NumberingSeries } from "../../src/modules/numbering";
@@ -20,9 +25,7 @@ const RECORD: RegistryRecord = {
   terminatedOn: null,
 };
 
-const newWorkspace = Effect.flatMap(Workspaces, (ws) =>
-  ws.create({ name: "Kvitbit s.r.o." } as never),
-);
+const newWorkspace = Effect.flatMap(Workspaces, (ws) => ws.create({ name: "Kvitbit s.r.o." }));
 
 /** The tag of the effect's expected failure. */
 const failureTag = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
@@ -38,13 +41,15 @@ describe("bindings", () => {
           owner,
           Effect.flatMap(Workspaces, (ws) => ws.listSeries),
         );
-        const invoice = series.find((s) => s.kind === "invoice");
+        const invoice = Option.getOrThrow(
+          EffectArray.findFirst(series, (s) => s.kind === "invoice"),
+        );
         const lookup = yield* ContactSeriesLookup;
         const own = yield* lookup.kindsOf(owner.workspaceId, [
-          invoice?.id as NumberingSeriesId,
-          "01900000-0000-7000-8000-0000000000ff" as NumberingSeriesId,
+          invoice.id,
+          NumberingSeriesId.make("01900000-0000-7000-8000-0000000000ff"),
         ]);
-        const foreign = yield* lookup.kindsOf(WORKSPACE_B, [invoice?.id as NumberingSeriesId]);
+        const foreign = yield* lookup.kindsOf(WORKSPACE_B, [invoice.id]);
         return [[...own.values()], foreign.size];
       }),
     );
@@ -57,7 +62,7 @@ describe("bindings", () => {
       Effect.gen(function* () {
         const owner = yield* newWorkspace;
         const numbering = yield* NumberingSeries;
-        return (yield* numbering.list(owner.workspaceId, "2026-11-23" as never)).length;
+        return (yield* numbering.list(owner.workspaceId, IsoDate.make("2026-11-23"))).length;
       }),
     );
     expect(exit).toEqual(Exit.succeed(3));
@@ -71,12 +76,12 @@ describe("bindings", () => {
         const settings = yield* PaymentSettings;
         const own = yield* asCaller(owner, settings.autoSendPaymentTaxDocument(owner.workspaceId));
         const other = yield* failureTag(
-          asCaller(owner, settings.autoSendPaymentTaxDocument(WORKSPACE_B as WorkspaceId)),
+          asCaller(owner, settings.autoSendPaymentTaxDocument(WORKSPACE_B)),
         );
-        return [typeof own, other];
+        return [Schema.is(Schema.Boolean)(own), other];
       }),
     );
-    expect(exit).toEqual(Exit.succeed(["boolean", "NotFound"]));
+    expect(exit).toEqual(Exit.succeed([true, "NotFound"]));
   });
 
   test("ExpenseSuppliers goes through Contacts as the caller: IČO creates a supplier, scope applies", async () => {
@@ -85,16 +90,16 @@ describe("bindings", () => {
       Effect.gen(function* () {
         const owner = yield* newWorkspace;
         const suppliers = yield* ExpenseSuppliers;
-        const created = yield* asCaller(owner, suppliers.fromIco(ICO));
-        const again = yield* asCaller(owner, suppliers.contact(created.contactId as never));
+        const created = yield* suppliers.fromIco(owner, ICO);
+        if (created.contactId === null)
+          return yield* Effect.die("Expected a saved supplier Contact");
+        const again = yield* suppliers.contact(owner, created.contactId);
         const scoped: MemberCaller = member("owner", {
           workspaceId: owner.workspaceId,
           userId: owner.userId,
-          scopes: ["expenses"] as never,
+          scopes: ["expenses:write"],
         });
-        const denied = yield* failureTag(
-          asCaller(scoped, suppliers.contact(created.contactId as never)),
-        );
+        const denied = yield* failureTag(suppliers.contact(scoped, created.contactId));
         return [created.name, created.ico, again.contactId === created.contactId, denied];
       }),
       { registry: { [ICO]: RECORD } },

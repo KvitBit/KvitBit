@@ -2,9 +2,11 @@
  * Membership change guard for the Workspaces module (rules R1c and R3). Pure: it judges one
  * change against the actor's permissions and the target's current role.
  */
+
 import type { Caller, Role } from "@kvitbit/domain/contract";
 import { Conflict, Forbidden } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import { can, scopesAllow } from "./can";
 
 export type MembershipChange =
@@ -19,7 +21,7 @@ export type MembershipChange =
 
 const illegal = (detail?: "member.owner_cannot_leave") =>
   Effect.fail(
-    new Conflict(
+    Conflict.make(
       detail === undefined
         ? { reason: "illegal_transition" }
         : { reason: "illegal_transition", detail },
@@ -28,7 +30,7 @@ const illegal = (detail?: "member.owner_cannot_leave") =>
 
 const forbidden = (
   action: "member.invite" | "member.setRole" | "member.leave" | "member.manageAdmins",
-) => Effect.fail(new Forbidden({ action }));
+) => Effect.fail(Forbidden.make({ action }));
 
 /**
  * - Invite needs `member.invite`; SetRole and Remove need `member.setRole`.
@@ -40,37 +42,40 @@ const forbidden = (
  *   through a preceding `authorize("member.leave")`.
  * - Any change that makes or touches an `admin` also needs `member.manageAdmins` (R1c).
  */
-export const checkMembershipChange = (
-  caller: Caller,
-  change: MembershipChange,
-): Effect.Effect<void, Forbidden | Conflict> => {
-  switch (change._tag) {
-    case "Leave":
-      if (caller._tag === "Member" && caller.role === "owner") {
-        return scopesAllow(caller, "members", "write")
-          ? illegal("member.owner_cannot_leave")
-          : forbidden("member.leave");
+export const checkMembershipChange: {
+  (change: MembershipChange): (caller: Caller) => Effect.Effect<void, Forbidden | Conflict>;
+  (caller: Caller, change: MembershipChange): Effect.Effect<void, Forbidden | Conflict>;
+} = Fn.dual(
+  2,
+  (caller: Caller, change: MembershipChange): Effect.Effect<void, Forbidden | Conflict> => {
+    switch (change._tag) {
+      case "Leave":
+        if (caller._tag === "Member" && caller.role === "owner") {
+          return scopesAllow(caller, "members", "write")
+            ? illegal("member.owner_cannot_leave")
+            : forbidden("member.leave");
+        }
+        return can(caller, "member.leave") ? Effect.void : forbidden("member.leave");
+      case "Invite":
+        if (!can(caller, "member.invite")) return forbidden("member.invite");
+        if (change.role === "owner") return illegal();
+        if (change.role === "admin" && !can(caller, "member.manageAdmins")) {
+          return forbidden("member.manageAdmins");
+        }
+        return Effect.void;
+      case "SetRole":
+      case "Remove": {
+        if (!can(caller, "member.setRole")) return forbidden("member.setRole");
+        const next = change._tag === "SetRole" ? change.role : undefined;
+        if (change.targetRole === "owner" || next === "owner") return illegal();
+        if (
+          (change.targetRole === "admin" || next === "admin") &&
+          !can(caller, "member.manageAdmins")
+        ) {
+          return forbidden("member.manageAdmins");
+        }
+        return Effect.void;
       }
-      return can(caller, "member.leave") ? Effect.void : forbidden("member.leave");
-    case "Invite":
-      if (!can(caller, "member.invite")) return forbidden("member.invite");
-      if (change.role === "owner") return illegal();
-      if (change.role === "admin" && !can(caller, "member.manageAdmins")) {
-        return forbidden("member.manageAdmins");
-      }
-      return Effect.void;
-    case "SetRole":
-    case "Remove": {
-      if (!can(caller, "member.setRole")) return forbidden("member.setRole");
-      const next = change._tag === "SetRole" ? change.role : undefined;
-      if (change.targetRole === "owner" || next === "owner") return illegal();
-      if (
-        (change.targetRole === "admin" || next === "admin") &&
-        !can(caller, "member.manageAdmins")
-      ) {
-        return forbidden("member.manageAdmins");
-      }
-      return Effect.void;
     }
-  }
-};
+  },
+);

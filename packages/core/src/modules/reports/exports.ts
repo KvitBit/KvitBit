@@ -1,3 +1,6 @@
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+
 /**
  * Full data export jobs (core-ports 4.9, 7.2 DataExport, flow 9.7): the `exports` table, the
  * `ExportWorkflow` starter port, and `ExportJobs`, the core-internal service the DataExport
@@ -8,20 +11,27 @@ import type {
   Conflict,
   ExportId,
   ExportJobView,
-  IsoDate,
   Locale,
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import {
   ExportId as ExportIdSchema,
+  IsoDate,
   NotFound as NotFoundError,
   WorkspaceId as WorkspaceIdSchema,
 } from "@kvitbit/domain/contract";
-import type { BlobKey, BlobUnavailable } from "@kvitbit/domain/ports";
-import { BlobStorage } from "@kvitbit/domain/ports";
-import type { Stream } from "effect";
-import { Clock, Context, Effect, Layer, type Option, Ref, Schema } from "effect";
+import type { BlobUnavailable } from "@kvitbit/domain/ports";
+import { BlobKey, BlobStorage } from "@kvitbit/domain/ports";
+import * as EffectArray from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import type * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import type * as Stream from "effect/Stream";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { CoreStore } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
@@ -36,7 +46,7 @@ export const EXPORT_RETENTION_MILLIS = 7 * 24 * 60 * 60 * 1000;
 export const ExportRow = Schema.Struct({
   id: ExportIdSchema,
   workspaceId: WorkspaceIdSchema,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   status: Schema.Literals(["running", "ready", "failed"]),
   createdAt: Schema.String,
   readyAt: Schema.NullOr(Schema.String),
@@ -51,7 +61,7 @@ export const ONE_RUNNING_EXPORT = "exports_one_running_per_workspace";
 export const ExportsTable = defineCollection<ExportRow>({
   name: "exports",
   entity: "Export",
-  schema: ExportRow as unknown as Schema.Codec<ExportRow, unknown>,
+  schema: ExportRow,
   unique: [
     {
       name: ONE_RUNNING_EXPORT,
@@ -71,8 +81,14 @@ export const toExportJobView = (row: ExportRow): ExportJobView => ({
 });
 
 /** Deterministic, overwrite-safe ZIP key (7.2). */
-export const exportBlobKey = (workspaceId: WorkspaceId, id: ExportId): BlobKey =>
-  `exports/${workspaceId}/${id}.zip` as BlobKey;
+export const exportBlobKey: {
+  (id: ExportId): (workspaceId: WorkspaceId) => BlobKey;
+  (workspaceId: WorkspaceId, id: ExportId): BlobKey;
+} = Fn.dual(
+  2,
+  (workspaceId: WorkspaceId, id: ExportId): BlobKey =>
+    BlobKey.make(`exports/${workspaceId}/${id}.zip`),
+);
 
 export class ExportsRepo extends Context.Service<
   ExportsRepo,
@@ -107,7 +123,7 @@ export class ExportsRepo extends Context.Service<
       expectedRevision: number,
     ) => Effect.Effect<void, NotFound | Conflict | StoreUnavailable>;
   }
->()("kvitbit/core/ExportsRepo") {}
+>()("@kvitbit/core/modules/reports/exports/ExportsRepo") {}
 
 /** In-memory `ExportsRepo` on `MemoryTables` (tests). */
 export const ExportsRepoMemory: Layer.Layer<ExportsRepo, never, MemoryTables> = Layer.effect(
@@ -122,7 +138,8 @@ export const ExportsRepoMemory: Layer.Layer<ExportsRepo, never, MemoryTables> = 
       update: table.update,
       listExpired: (nowIso, failedBefore) =>
         Effect.map(table.listGlobal(), (rows) =>
-          rows.filter(
+          EffectArray.filter(
+            rows,
             (r) =>
               (r.status === "ready" && r.expiresAt !== null && r.expiresAt <= nowIso) ||
               (r.status === "failed" && r.createdAt < failedBefore),
@@ -147,7 +164,7 @@ export class ExportWorkflow extends Context.Service<
       readonly exportId: ExportId;
     }) => Effect.Effect<void>;
   }
->()("kvitbit/core/ExportWorkflow") {}
+>()("@kvitbit/core/modules/reports/exports/ExportWorkflow") {}
 
 export class FakeExportWorkflow extends Context.Service<
   FakeExportWorkflow,
@@ -156,7 +173,7 @@ export class FakeExportWorkflow extends Context.Service<
       ReadonlyArray<{ readonly workspaceId: WorkspaceId; readonly exportId: ExportId }>
     >;
   }
->()("kvitbit/core/testing/FakeExportWorkflow") {
+>()("@kvitbit/core/modules/reports/exports/FakeExportWorkflow") {
   static readonly layer: Layer.Layer<ExportWorkflow | FakeExportWorkflow> = Layer.effect(
     ExportWorkflow,
     Effect.map(FakeExportWorkflow, (fake) => ({
@@ -186,7 +203,7 @@ export interface ExportFile {
   readonly bytes: Stream.Stream<Uint8Array>;
 }
 
-const ALL_TIME = { from: "0000-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
+const ALL_TIME = { from: IsoDate.make("0000-01-01"), to: IsoDate.make("9999-12-31") };
 
 /**
  * Archive paths of `reportingTables`. They are reporting views (issued and cancelled documents,
@@ -227,7 +244,7 @@ export interface ExportJobsShape {
 }
 
 export class ExportJobs extends Context.Service<ExportJobs, ExportJobsShape>()(
-  "kvitbit/core/ExportJobs",
+  "@kvitbit/core/modules/reports/exports/ExportJobs",
 ) {}
 
 /** Under the row lock a revision conflict or a running-index clash is a bug, never a user error. */
@@ -257,7 +274,8 @@ export const ExportJobsLive: Layer.Layer<
           const row = yield* repo.lock(workspaceId, id);
           if (row.status !== "running") return toExportJobView(row);
           const now = yield* Clock.currentTimeMillis;
-          return toExportJobView(yield* orDieConflict(repo.update(next(row, now), row.revision)));
+          const value = yield* orDieConflict(repo.update(next(row, now), row.revision));
+          return toExportJobView(value);
         }),
       );
 
@@ -268,7 +286,7 @@ export const ExportJobsLive: Layer.Layer<
     });
 
     return {
-      reportingTables: (workspaceId, locale) =>
+      reportingTables: Effect.fn("ExportJobs.reportingTables")((workspaceId, locale) =>
         store.transaction(
           Effect.gen(function* () {
             const documents = yield* source.documents(workspaceId, {
@@ -287,21 +305,24 @@ export const ExportJobsLive: Layer.Layer<
             ];
           }),
         ),
-      finish: (workspaceId, id, sizeBytes) =>
+      ),
+      finish: Effect.fn("ExportJobs.finish")((workspaceId, id, sizeBytes) =>
         transition(workspaceId, id, (row, now) => ({
           ...row,
           status: "ready",
-          readyAt: new Date(now).toISOString(),
-          expiresAt: new Date(now + EXPORT_RETENTION_MILLIS).toISOString(),
+          readyAt: DateTime.formatIso(DateTime.makeUnsafe(now)),
+          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + EXPORT_RETENTION_MILLIS)),
           sizeBytes,
         })),
-      fail: (workspaceId, id) =>
+      ),
+      fail: Effect.fn("ExportJobs.fail")((workspaceId, id) =>
         transition(workspaceId, id, (row) => ({ ...row, status: "failed" })),
+      ),
       purgeExpired: Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         const expired = yield* repo.listExpired(
-          new Date(now).toISOString(),
-          new Date(now - EXPORT_RETENTION_MILLIS).toISOString(),
+          DateTime.formatIso(DateTime.makeUnsafe(now)),
+          DateTime.formatIso(DateTime.makeUnsafe(now - EXPORT_RETENTION_MILLIS)),
         );
         for (const row of expired) {
           // Blob first: a crash in between leaves the row, and the next run retries both.
@@ -320,4 +341,4 @@ export const ExportJobsLive: Layer.Layer<
   }),
 );
 
-export const notFoundExport = (id: ExportId) => new NotFoundError({ entity: "Export", id });
+export const notFoundExport = (id: ExportId) => NotFoundError.make({ entity: "Export", id });

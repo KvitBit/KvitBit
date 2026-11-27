@@ -3,8 +3,10 @@
  * withIdempotency (C3, `record`) or transaction -> lock the target (S4: the Proforma first) ->
  * rules -> payment row -> the target's paid state + audit (one entry on the target) -> P2.
  */
+
 import type {
   AuditEntry,
+  Caller,
   CurrencyCode,
   DocumentId,
   DocumentView,
@@ -17,8 +19,22 @@ import type {
   RequestOptions,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Conflict, CurrentCaller, Invalid, MoneyMath, Payments } from "@kvitbit/domain/contract";
-import { BigDecimal, Context, Effect, Layer } from "effect";
+import {
+  Conflict,
+  type CurrentCaller,
+  Invalid,
+  MoneyMath,
+  PaymentId as PaymentIdSchema,
+  Payments,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { can } from "../../policy/can";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
@@ -45,13 +61,13 @@ export type PaymentsDeps =
   | PaymentSettings;
 
 type Settled = "partially_paid" | "paid" | "overpaid";
-const SETTLED: ReadonlyArray<string> = ["partially_paid", "paid", "overpaid"];
+const SettledSchema = Schema.Literals(["partially_paid", "paid", "overpaid"]);
 
 const malformed = (path: string, reason: string) =>
-  new Invalid({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
 
 const currencyMismatch = (expected: CurrencyCode) =>
-  new Invalid({
+  Invalid.make({
     issues: [
       { path: ["amount", "currency"], code: "payment.currency_mismatch", params: { expected } },
     ],
@@ -61,7 +77,9 @@ const ZERO = BigDecimal.fromBigInt(0n);
 
 /** Paid total and count of live rows (every row is in the target's currency, P1). */
 const paidOf = (rows: ReadonlyArray<PaymentRecord>) => ({
-  amount: BigDecimal.normalize(rows.reduce((sum, r) => BigDecimal.sum(sum, r.amount), ZERO)),
+  amount: BigDecimal.normalize(
+    EffectArray.reduce(rows, ZERO, (sum, r) => BigDecimal.sum(sum, r.amount)),
+  ),
   payments: rows.length,
 });
 
@@ -71,7 +89,7 @@ const paidOf = (rows: ReadonlyArray<PaymentRecord>) => ({
  */
 const particulars = (row: PaymentRecord) => ({
   id: row.id,
-  amount: BigDecimal.format(BigDecimal.normalize(row.amount)),
+  amount: row.amount.pipe(BigDecimal.normalize, BigDecimal.format),
   currency: row.currency,
   paidOn: row.paidOn,
   method: row.method,
@@ -79,8 +97,8 @@ const particulars = (row: PaymentRecord) => ({
 });
 
 const asSettled = (settlement: string): Effect.Effect<Settled> =>
-  SETTLED.includes(settlement)
-    ? Effect.succeed(settlement as Settled)
+  Schema.is(SettledSchema)(settlement)
+    ? Effect.succeed(settlement)
     : Effect.die(new Error(`Payments.record: settlement ${settlement} after a positive payment`));
 
 /** The `payments.amount` column: numeric(18,2). */
@@ -92,75 +110,77 @@ const COLUMN_SCALE = 2;
  * target's currency (P1), within the currency's minor unit and the column's range; nothing
  * outstanding and no amount is `Invalid{amount, required}`.
  */
-const amountFor = (
+const amountFor = Effect.fn("amountFor")(function* (
   given: Money | undefined,
   currency: CurrencyCode,
   outstanding: BigDecimal.BigDecimal,
-) =>
-  Effect.gen(function* () {
-    if (given === undefined && !BigDecimal.isPositive(outstanding)) {
-      return yield* malformed("amount", "required");
-    }
-    const amount = BigDecimal.normalize(given?.amount ?? outstanding);
-    if (
-      !BigDecimal.isPositive(amount) ||
-      amount.scale > Math.min(MoneyMath.minorUnitScale(currency), COLUMN_SCALE) ||
-      BigDecimal.isGreaterThan(amount, MAX_AMOUNT)
-    ) {
-      return yield* malformed("amount", "out_of_range");
-    }
-    if (given !== undefined && given.currency !== currency) {
-      return yield* currencyMismatch(currency);
-    }
-    return amount;
-  });
+) {
+  if (given === undefined && !BigDecimal.isPositive(outstanding)) {
+    return yield* malformed("amount", "required");
+  }
+  const amount = BigDecimal.normalize(given?.amount ?? outstanding);
+  if (
+    !BigDecimal.isPositive(amount) ||
+    amount.scale > Math.min(MoneyMath.minorUnitScale(currency), COLUMN_SCALE) ||
+    BigDecimal.isGreaterThan(amount, MAX_AMOUNT)
+  ) {
+    return yield* malformed("amount", "out_of_range");
+  }
+  if (given !== undefined && given.currency !== currency) {
+    return yield* currencyMismatch(currency);
+  }
+  return amount;
+});
 
-const newRow = (
+const newRow = Effect.fn("newRow")(function* (
   workspaceId: WorkspaceId,
   target: { readonly documentId: DocumentId | null; readonly expenseId: ExpenseId | null },
   amount: BigDecimal.BigDecimal,
   currency: CurrencyCode,
   input: RecordPaymentInput,
   defaultMethod: PaymentMethod,
-) =>
-  Effect.gen(function* () {
-    const { today, at } = yield* now;
-    const row: PaymentRecord = {
-      id: yield* newId<PaymentId>(),
-      workspaceId,
-      revision: 1,
-      ...target,
-      amount,
-      currency,
-      paidOn: input.paidOn ?? today,
-      method: input.method ?? defaultMethod,
-      note: input.note ?? null,
-      taxDocumentId: null,
-      removedAt: null,
-      createdAt: at,
-      updatedAt: at,
-    };
-    return yield* (yield* PaymentsRepo)
-      .insert(row)
-      .pipe(Effect.catchTag("UniqueViolation", Effect.die));
-  });
+) {
+  const { today, at } = yield* now;
+  const row: PaymentRecord = {
+    id: yield* newId(PaymentIdSchema.make),
+    workspaceId,
+    revision: 1,
+    ...target,
+    amount,
+    currency,
+    paidOn: input.paidOn ?? today,
+    method: input.method ?? defaultMethod,
+    note: input.note ?? null,
+    taxDocumentId: null,
+    removedAt: null,
+    createdAt: at,
+    updatedAt: at,
+  };
+  return yield* (yield* PaymentsRepo)
+    .insert(row)
+    .pipe(Effect.catchTag("UniqueViolation", Effect.die));
+});
 
 /** P2: the PTD for an advance on a Proforma, linked to the payment, sent when configured. */
-const taxDocumentFor = (workspaceId: WorkspaceId, proforma: DocumentId, row: PaymentRecord) =>
-  Effect.gen(function* () {
-    const seam = yield* DocumentPayments;
-    const repo = yield* PaymentsRepo;
-    const ptd = yield* seam.issuePaymentTaxDocument(workspaceId, proforma, {
-      amount: row.amount,
-      paidOn: row.paidOn,
-    });
-    if (ptd === null) return { row, issued: [] as ReadonlyArray<DocumentView> };
-    const ptdId = (ptd as unknown as { readonly id: DocumentId }).id as DocumentId;
-    const linked = yield* repo
-      .update({ ...row, taxDocumentId: ptdId }, row.revision)
-      .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
-    return { row: linked, issued: [yield* autoSend(workspaceId, ptdId, ptd)] };
+const taxDocumentFor = Effect.fn("taxDocumentFor")(function* (
+  caller: Caller,
+  workspaceId: WorkspaceId,
+  proforma: DocumentId,
+  row: PaymentRecord,
+) {
+  const seam = yield* DocumentPayments;
+  const repo = yield* PaymentsRepo;
+  const ptd = yield* seam.issuePaymentTaxDocument(caller, workspaceId, proforma, {
+    amount: row.amount,
+    paidOn: row.paidOn,
   });
+  if (ptd === null) return { row, issued: [] };
+  const ptdId = ptd.id;
+  const linked = yield* repo
+    .update({ ...row, taxDocumentId: ptdId }, row.revision)
+    .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
+  return { row: linked, issued: [yield* autoSend(caller, workspaceId, ptdId, ptd)] };
+});
 
 /** A send refusal about the recipients only (`SendOptions.to`, defaulted from the Contact). */
 const isRecipientIssue = (issue: Invalid["issues"][number]) => issue.path[0] === "to";
@@ -183,86 +203,99 @@ const skipped = (workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
  * on the PTD, the savepoint dropping any partial delivery; NotFound, other Conflicts and
  * infrastructure failures roll the payment back. Returns the PTD view as of the send.
  */
-const autoSend = (workspaceId: WorkspaceId, ptdId: DocumentId, ptd: DocumentView) =>
-  Effect.gen(function* () {
-    if (!(yield* (yield* PaymentSettings).autoSendPaymentTaxDocument(workspaceId))) return ptd;
-    if (!can(yield* CurrentCaller, "document.send")) {
-      yield* skipped(workspaceId, ptdId, "caller_cannot_send");
-      return ptd;
-    }
-    const store = yield* CoreStore;
-    const sender = yield* DocumentSender;
-    const sent = yield* store.transaction(sender.send(ptdId)).pipe(
-      Effect.as(true),
-      // Recoverable delivery refusals only: the PTD's state (illegal_transition) or an Invalid
-      // whose every issue is about the recipients (`to`, defaulted from the Contact). A missing
-      // PTD, a revision race or any other validation issue is an invariant failure.
-      Effect.catchTags({
-        Conflict: (e) =>
-          e.reason === "illegal_transition"
-            ? Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false)
-            : Effect.fail(e),
-        Invalid: (e) =>
-          e.issues.length > 0 && e.issues.every(isRecipientIssue)
-            ? Effect.as(
-                skipped(
-                  workspaceId,
-                  ptdId,
-                  `Invalid:${e.issues.map((i) => `${i.path.join(".")}:${i.code}`).join(",")}`,
-                ),
-                false,
-              )
-            : Effect.fail(e),
-      }),
-    );
-    if (!sent) return ptd;
-    return yield* (yield* PaymentDocuments).view(workspaceId, ptdId);
-  });
+const autoSend = Effect.fn("autoSend")(function* (
+  caller: Caller,
+  workspaceId: WorkspaceId,
+  ptdId: DocumentId,
+  ptd: DocumentView,
+) {
+  if (!(yield* (yield* PaymentSettings).autoSendPaymentTaxDocument(workspaceId))) return ptd;
+  if (!can(caller, "document.send")) {
+    yield* skipped(workspaceId, ptdId, "caller_cannot_send");
+    return ptd;
+  }
+  const store = yield* CoreStore;
+  const sender = yield* DocumentSender;
+  const sent = yield* store.transaction(sender.send(caller, ptdId)).pipe(
+    Effect.as(true),
+    // Recoverable delivery refusals only: the PTD's state (illegal_transition) or an Invalid
+    // whose every issue is about the recipients (`to`, defaulted from the Contact). A missing
+    // PTD, a revision race or any other validation issue is an invariant failure.
+    Effect.catchTags({
+      Conflict: (e) =>
+        e.reason === "illegal_transition"
+          ? Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false)
+          : Effect.fail(e),
+      Invalid: (e) =>
+        e.issues.length > 0 && EffectArray.every(e.issues, isRecipientIssue)
+          ? Effect.as(
+              skipped(
+                workspaceId,
+                ptdId,
+                `Invalid:${EffectArray.join(
+                  EffectArray.map(
+                    e.issues,
+                    (i) => `${EffectArray.join(EffectArray.map(i.path, String), ".")}:${i.code}`,
+                  ),
+                  ",",
+                )}`,
+              ),
+              false,
+            )
+          : Effect.fail(e),
+    }),
+  );
+  if (!sent) return ptd;
+  return yield* (yield* PaymentDocuments).view(workspaceId, ptdId);
+});
 
-const recordOnDocument = (workspaceId: WorkspaceId, id: DocumentId, input: RecordPaymentInput) =>
-  Effect.gen(function* () {
-    const seam = yield* DocumentPayments;
-    const repo = yield* PaymentsRepo;
-    // S4/P2a: the Proforma row first; a Proforma with a Final Invoice settles on it (D8).
-    const targets = yield* seam.lock(workspaceId, id);
-    const on = targets.settleOn;
-    // State before amounts: only issued Invoices and Proformas that are not fully credited take
-    // payments; a document lock does not matter (P4).
-    if (
-      on.status !== "issued" ||
-      on.settlement === "credited" ||
-      (on.kind !== "invoice" && on.kind !== "proforma")
-    ) {
-      return yield* new Conflict({ reason: "illegal_transition" });
-    }
-    const outstanding = BigDecimal.subtract(on.owed.amount, on.paid.amount);
-    const amount = yield* amountFor(input.amount, on.currency, outstanding);
-    // The method defaults to the one the document prints (C4).
-    const printed = yield* (yield* PaymentDocuments).paymentMethod(workspaceId, on.id);
-    const inserted = yield* newRow(
-      workspaceId,
-      { documentId: on.id, expenseId: null },
-      amount,
-      on.currency,
-      input,
-      printed,
-    );
-    const details: AuditEntry["changes"] = [
-      { path: "payment", before: null, after: particulars(inserted) },
-      ...(on.id === id ? [] : [{ path: "payment.recordedOn", before: null, after: id }]),
-    ];
-    const settled = yield* seam.settle(
-      workspaceId,
-      on.id,
-      paidOf(yield* repo.liveFor(workspaceId, { document: on.id })),
-      { action: "payment.record", details },
-    );
-    const { row, issued } =
-      on.kind === "proforma"
-        ? yield* taxDocumentFor(workspaceId, on.id, inserted)
-        : { row: inserted, issued: [] as ReadonlyArray<DocumentView> };
-    return { payment: toView(row), settlement: yield* asSettled(settled.settlement), issued };
+const recordOnDocument = Effect.fn("recordOnDocument")(function* (
+  caller: Caller,
+  workspaceId: WorkspaceId,
+  id: DocumentId,
+  input: RecordPaymentInput,
+) {
+  const seam = yield* DocumentPayments;
+  const repo = yield* PaymentsRepo;
+  // S4/P2a: the Proforma row first; a Proforma with a Final Invoice settles on it (D8).
+  const targets = yield* seam.lock(workspaceId, id);
+  const on = targets.settleOn;
+  // State before amounts: only issued Invoices and Proformas that are not fully credited take
+  // payments; a document lock does not matter (P4).
+  if (
+    on.status !== "issued" ||
+    on.settlement === "credited" ||
+    (on.kind !== "invoice" && on.kind !== "proforma")
+  ) {
+    return yield* Conflict.make({ reason: "illegal_transition" });
+  }
+  const outstanding = BigDecimal.subtract(on.owed.amount, on.paid.amount);
+  const amount = yield* amountFor(input.amount, on.currency, outstanding);
+  // The method defaults to the one the document prints (C4).
+  const printed = yield* (yield* PaymentDocuments).paymentMethod(workspaceId, on.id);
+  const inserted = yield* newRow(
+    workspaceId,
+    { documentId: on.id, expenseId: null },
+    amount,
+    on.currency,
+    input,
+    printed,
+  );
+  const details: AuditEntry["changes"] = [
+    { path: "payment", before: null, after: particulars(inserted) },
+    ...(on.id === id ? [] : [{ path: "payment.recordedOn", before: null, after: id }]),
+  ];
+  const value_1 = yield* repo.liveFor(workspaceId, { document: on.id });
+  const settled = yield* seam.settle(caller, workspaceId, on.id, paidOf(value_1), {
+    action: "payment.record",
+    details,
   });
+  const { row, issued } =
+    on.kind === "proforma"
+      ? yield* taxDocumentFor(caller, workspaceId, on.id, inserted)
+      : { row: inserted, issued: [] };
+  return { payment: toView(row), settlement: yield* asSettled(settled.settlement), issued };
+});
 
 /** Audit on the Expense subject: Expenses' paid state is not audited by ExpensePayables. */
 const auditExpense = (
@@ -291,8 +324,8 @@ const auditExpense = (
     changes: [
       {
         path: "paidAmount",
-        before: BigDecimal.format(BigDecimal.normalize(before.paid)),
-        after: BigDecimal.format(BigDecimal.normalize(after.paid)),
+        before: before.paid.pipe(BigDecimal.normalize, BigDecimal.format),
+        after: after.paid.pipe(BigDecimal.normalize, BigDecimal.format),
       },
       { path: "payments", before: before.payments, after: after.payments },
       { path: "settlement", before: before.settlement, after: after.settlement },
@@ -301,52 +334,56 @@ const auditExpense = (
     reason,
   });
 
-const recordOnExpense = (workspaceId: WorkspaceId, id: ExpenseId, input: RecordPaymentInput) =>
-  Effect.gen(function* () {
-    const expenses = yield* ExpensePayables;
-    const repo = yield* PaymentsRepo;
-    const expense = yield* expenses.lock(workspaceId, id);
-    if (expense.status === "incomplete" || expense.currency === null || expense.gross === null) {
-      return yield* new Invalid({ issues: [{ path: ["target"], code: "expense.incomplete" }] });
-    }
-    const paidBefore = expense.paid?.amount ?? ZERO;
-    const amount = yield* amountFor(
-      input.amount,
-      expense.currency,
-      BigDecimal.subtract(expense.gross.amount, paidBefore),
-    );
-    const inserted = yield* newRow(
-      workspaceId,
-      { documentId: null, expenseId: id },
-      amount,
-      expense.currency,
-      input,
-      "bank_transfer",
-    );
-    const paid = paidOf(yield* repo.liveFor(workspaceId, { expense: id }));
-    const settlement = yield* expenses.settle(workspaceId, id, {
-      amount: MoneyMath.make(paid.amount, expense.currency),
-      payments: paid.payments,
-    });
-    yield* auditExpense(
-      workspaceId,
-      id,
-      { ...expense, paid: paidBefore },
-      { ...paid, paid: paid.amount, settlement },
-      "payment.record",
-      { path: "payment", before: null, after: particulars(inserted) },
-      null,
-    );
-    return {
-      payment: toView(inserted),
-      settlement: yield* asSettled(settlement),
-      issued: [] as ReadonlyArray<DocumentView>,
-    };
+const recordOnExpense = Effect.fn("recordOnExpense")(function* (
+  workspaceId: WorkspaceId,
+  id: ExpenseId,
+  input: RecordPaymentInput,
+) {
+  const expenses = yield* ExpensePayables;
+  const repo = yield* PaymentsRepo;
+  const expense = yield* expenses.lock(workspaceId, id);
+  if (expense.status === "incomplete" || expense.currency === null || expense.gross === null) {
+    return yield* Invalid.make({ issues: [{ path: ["target"], code: "expense.incomplete" }] });
+  }
+  const paidBefore = expense.paid?.amount ?? ZERO;
+  const amount = yield* amountFor(
+    input.amount,
+    expense.currency,
+    BigDecimal.subtract(expense.gross.amount, paidBefore),
+  );
+  const inserted = yield* newRow(
+    workspaceId,
+    { documentId: null, expenseId: id },
+    amount,
+    expense.currency,
+    input,
+    "bank_transfer",
+  );
+  const value_1 = yield* repo.liveFor(workspaceId, { expense: id });
+  const paid = paidOf(value_1);
+  const settlement = yield* expenses.settle(workspaceId, id, {
+    amount: MoneyMath.make(paid.amount, expense.currency),
+    payments: paid.payments,
   });
+  yield* auditExpense(
+    workspaceId,
+    id,
+    { ...expense, paid: paidBefore },
+    { ...paid, paid: paid.amount, settlement },
+    "payment.record",
+    { path: "payment", before: null, after: particulars(inserted) },
+    null,
+  );
+  return {
+    payment: toView(inserted),
+    settlement: yield* asSettled(settlement),
+    issued: [],
+  };
+});
 
-export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("payment.write");
+export const record = Effect.fn("record")(
+  function* (input: RecordPaymentInput, opts?: RequestOptions) {
+    const { caller, workspaceId } = yield* authorizeInWorkspace("payment.write");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -358,20 +395,22 @@ export const record = (input: RecordPaymentInput, opts?: RequestOptions) =>
       Effect.gen(function* () {
         const target = input.target;
         return "document" in target
-          ? yield* recordOnDocument(workspaceId, target.document, input)
+          ? yield* recordOnDocument(caller, workspaceId, target.document, input)
           : yield* recordOnExpense(workspaceId, target.expense, input);
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /**
  * Soft-deletes a payment (idempotent by state, C6). Locks the target first (S4), then the row;
  * P3: blocked while a Final Invoice deducts the advance or its PTD is not fully credited.
  */
-export const remove = (id: PaymentId, reason: string) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("payment.write");
-    const why = reason.trim();
+export const remove = Effect.fn("remove")(
+  function* (id: PaymentId, reason: string) {
+    const { caller, workspaceId } = yield* authorizeInWorkspace("payment.write");
+    const why = EffectString.trim(reason);
     if (why === "") return yield* malformed("reason", "required");
     const store = yield* CoreStore;
     const repo = yield* PaymentsRepo;
@@ -388,7 +427,7 @@ export const remove = (id: PaymentId, reason: string) =>
           if (row.removedAt !== null) return;
           const block = yield* seam.removalBlocked(workspaceId, documentId, row.taxDocumentId);
           if (block !== null) {
-            return yield* new Conflict({
+            return yield* Conflict.make({
               reason: "illegal_transition",
               detail: "payment.has_tax_document",
             });
@@ -396,25 +435,21 @@ export const remove = (id: PaymentId, reason: string) =>
           yield* repo
             .update({ ...row, removedAt: at, updatedAt: at }, row.revision)
             .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
-          yield* seam.settle(
-            workspaceId,
-            documentId,
-            paidOf(yield* repo.liveFor(workspaceId, { document: documentId })),
-            {
-              action: "payment.remove",
-              reason: why,
-              details: [
-                {
-                  path: "payment",
-                  before: { ...particulars(row), taxDocument: row.taxDocumentId },
-                  after: null,
-                },
-              ],
-            },
-          );
+          const value_1 = yield* repo.liveFor(workspaceId, { document: documentId });
+          yield* seam.settle(caller, workspaceId, documentId, paidOf(value_1), {
+            action: "payment.remove",
+            reason: why,
+            details: [
+              {
+                path: "payment",
+                before: { ...particulars(row), taxDocument: row.taxDocumentId },
+                after: null,
+              },
+            ],
+          });
           return;
         }
-        const expenseId = peek.expenseId as ExpenseId;
+        const expenseId = Option.getOrThrow(Option.fromNullOr(peek.expenseId));
         const expenses = yield* ExpensePayables;
         const expense = yield* expenses.lock(workspaceId, expenseId);
         const row = yield* repo.lock(workspaceId, id);
@@ -422,7 +457,8 @@ export const remove = (id: PaymentId, reason: string) =>
         yield* repo
           .update({ ...row, removedAt: at, updatedAt: at }, row.revision)
           .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
-        const paid = paidOf(yield* repo.liveFor(workspaceId, { expense: expenseId }));
+        const value_1 = yield* repo.liveFor(workspaceId, { expense: expenseId });
+        const paid = paidOf(value_1);
         const settlement = yield* expenses.settle(workspaceId, expenseId, {
           amount: MoneyMath.make(paid.amount, row.currency),
           payments: paid.payments,
@@ -438,11 +474,13 @@ export const remove = (id: PaymentId, reason: string) =>
         );
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /** Live payments of a target, oldest first. Another Workspace's target is NotFound. */
-export const listFor = (target: PaymentTarget) =>
-  Effect.gen(function* () {
+export const listFor = Effect.fn("listFor")(
+  function* (target: PaymentTarget) {
     const { workspaceId } = yield* authorizeInWorkspace("payment.read");
     const store = yield* CoreStore;
     const repo = yield* PaymentsRepo;
@@ -450,18 +488,23 @@ export const listFor = (target: PaymentTarget) =>
       Effect.gen(function* () {
         if ("document" in target) {
           yield* (yield* PaymentDocuments).exists(workspaceId, target.document);
-          return (yield* repo.liveFor(workspaceId, target)).map(toView);
+          const value_2 = yield* repo.liveFor(workspaceId, target);
+          return EffectArray.map(value_2, toView);
         }
         // ExpensePayables exposes no plain read; its row lock is the existence check.
         yield* (yield* ExpensePayables).lock(workspaceId, target.expense);
-        return (yield* repo.liveFor(workspaceId, target)).map(toView);
+        const value_2 = yield* repo.liveFor(workspaceId, target);
+        return EffectArray.map(value_2, toView);
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 const make = Effect.gen(function* () {
   // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
+  const buildContext = yield* Effect.context<PaymentsDeps>();
   const context = Context.pick(
     CoreStore,
     IdGenerator,
@@ -471,16 +514,16 @@ const make = Effect.gen(function* () {
     DocumentSender,
     ExpensePayables,
     PaymentSettings,
-  )(yield* Effect.context<PaymentsDeps>());
+  )(buildContext);
   // The call site's context wins: its caller, RequestOutcome and CoreStore transaction frame.
   const run = <A, E>(effect: Effect.Effect<A, E, PaymentsDeps | CurrentCaller>) =>
     Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
   return Payments.of({
-    record: (input, opts) => run(record(input, opts)),
-    remove: (id, reason) => run(remove(id, reason)),
-    listFor: (target) => run(listFor(target)),
+    record: Effect.fn("Payments.record")((input, opts) => run(record(input, opts))),
+    remove: Effect.fn("Payments.remove")((id, reason) => run(remove(id, reason))),
+    listFor: Effect.fn("Payments.listFor")((target) => run(listFor(target))),
   });
 });
 

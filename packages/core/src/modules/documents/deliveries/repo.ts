@@ -3,6 +3,7 @@
  * src/store/tables.ts (Workspace-scoped, row lock, compare-and-set `update`, `UniqueViolation`
  * per index name, `StoreUnavailable`), plus `DeliveriesRepoMemory`.
  */
+
 import type {
   Conflict,
   DeliveryId,
@@ -11,8 +12,11 @@ import type {
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { Option } from "effect";
-import { Context, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import type * as Option from "effect/Option";
 import type { StoreUnavailable, UniqueViolation } from "../../../store/CoreStore";
 import { MemoryTables } from "../../../store/tables";
 import type { DeliveryRecord, DeliveryStatus } from "./record";
@@ -66,7 +70,7 @@ export class DeliveriesRepo extends Context.Service<
       before: string,
     ) => Effect.Effect<ReadonlyArray<DeliveryRecord>, StoreUnavailable>;
   }
->()("kvitbit/core/DeliveriesRepo") {}
+>()("@kvitbit/core/modules/documents/deliveries/repo/DeliveriesRepo") {}
 
 /** In-memory `DeliveriesRepo` on `MemoryTables` (tests). */
 export const DeliveriesRepoMemory: Layer.Layer<DeliveriesRepo, never, MemoryTables> = Layer.effect(
@@ -74,31 +78,32 @@ export const DeliveriesRepoMemory: Layer.Layer<DeliveriesRepo, never, MemoryTabl
   Effect.map(MemoryTables, (tables) => {
     const table = tables.collection(DeliveriesTable);
     return DeliveriesRepo.of({
-      get: (workspaceId, id) => table.get(workspaceId, id),
-      lock: (workspaceId, id) => table.lock(workspaceId, id),
+      get: Effect.fn("DeliveriesRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+      lock: Effect.fn("DeliveriesRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
       insert: table.insert,
       update: table.update,
-      byDocument: (workspaceId, documentId) =>
+      byDocument: Effect.fn("DeliveriesRepo.byDocument")((workspaceId, documentId) =>
         table.list(workspaceId, { where: { documentId }, orderBy: ["sequence"] }),
-      reminderStep: (workspaceId, step) =>
+      ),
+      reminderStep: Effect.fn("DeliveriesRepo.reminderStep")((workspaceId, step) =>
         table.findUnique(
           REMINDER_STEP,
           [step.documentId, step.dueOn, step.offsetDays, step.armedBy],
           workspaceId,
         ),
-      statuses: (workspaceId, ids) =>
-        ids.length === 0
-          ? Effect.succeed(new Map())
-          : Effect.map(
-              table.list(workspaceId, { whereIn: { id: ids } }),
-              (rows) => new Map(rows.map((row) => [row.id, row.status] as const)),
-            ),
-      findStaleQueuedOrSending: (before) =>
+      ),
+      statuses: Effect.fn("DeliveriesRepo.statuses")(function* (workspaceId, ids) {
+        if (ids.length === 0) return new Map<DeliveryId, DeliveryStatus>();
+        const rows = yield* table.list(workspaceId, { whereIn: { id: ids } });
+        return new Map(EffectArray.map(rows, (row) => [row.id, row.status] as const));
+      }),
+      findStaleQueuedOrSending: Effect.fn("DeliveriesRepo.findStaleQueuedOrSending")((before) =>
         table.listGlobal({
           whereIn: { status: ["queued", "sending"] },
           range: { updatedAt: { lt: before } },
           orderBy: ["updatedAt"],
         }),
+      ),
     });
   }),
 );

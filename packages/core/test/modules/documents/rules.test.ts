@@ -1,23 +1,37 @@
 /** Documents P1: replay, references, D9 edge cases, list filters, pdf language, seams. */
+
 import { describe, expect, test } from "bun:test";
-import type {
+import type { Caller, DocumentView } from "@kvitbit/domain/contract";
+import {
+  BankAccountId,
+  ContactId,
   DeliveryId,
   DocumentId,
-  DocumentView,
+  Documents,
+  Forbidden,
   IsoDate,
+  NotFound,
   NumberingSeriesId,
+  PriceListItemId,
   RequestKey,
   ScheduleId,
+  StatutoryCode,
+  Unavailable,
 } from "@kvitbit/domain/contract";
-import { Documents, Forbidden, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Effect, Exit, Layer, Ref } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import {
   DocumentActivityNone,
   DocumentFakesLive,
   DocumentFixtures,
   DocumentSender,
   DocumentSenderStub,
+  DocumentSummaryData,
   DocumentsLive,
   DocumentsRepo,
   DocumentsRepoMemory,
@@ -30,6 +44,8 @@ import { member, runTest } from "../../helpers";
 import {
   as,
   CZ_BUYER,
+  CZK,
+  concreteView,
   contact,
   DE_BUYER,
   dec,
@@ -48,7 +64,8 @@ const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
 };
 const WS = member("owner").workspaceId;
 const MISSING = "01900000-0000-7000-8000-0000deadbeef";
-const noteTexts = (view: DocumentView) => view.statutoryNotes.map((n) => n.text);
+const STUB_DELIVERY_ID = DeliveryId.make("d-1", { disableChecks: true });
+const noteTexts = (view: DocumentView) => EffectArray.map(view.statutoryNotes, (n) => n.text);
 
 /** Runs `effect` with a fresh per-request RequestOutcome; returns [result, replayed]. */
 const withOutcome = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
@@ -60,24 +77,28 @@ const withOutcome = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 
 describe("idempotency (C3) and audit", () => {
   test("a replay is marked replayed and still authorizes first (R1a)", async () => {
-    const key = "req-replay" as RequestKey;
+    const key = RequestKey.make("req-replay");
     const [first, second, denied] = ok(
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const first = yield* withOutcome(docs.createDraft(invoiceInput(), { requestKey: key }));
-          const second = yield* withOutcome(docs.createDraft(invoiceInput(), { requestKey: key }));
-          const denied = yield* Effect.flip(
+          const firstResult = yield* withOutcome(
+            docs.createDraft(invoiceInput(), { requestKey: key }),
+          );
+          const secondResult = yield* withOutcome(
+            docs.createDraft(invoiceInput(), { requestKey: key }),
+          );
+          const deniedResult = yield* Effect.flip(
             as(member("accountant"), docs.createDraft(invoiceInput(), { requestKey: key })),
           );
-          return [first, second, denied] as const;
+          return [firstResult, secondResult, deniedResult] as const;
         }),
       ),
     );
     expect(first[1]).toBe(false);
     expect(second[1]).toBe(true);
     expect(second[0].id).toBe(first[0].id);
-    expect(denied).toEqual(new Forbidden({ action: "document.draft" }));
+    expect(denied).toEqual(Forbidden.make({ action: "document.draft" }));
   });
 
   test("editing a draft writes no audit entry", async () => {
@@ -91,7 +112,7 @@ describe("idempotency (C3) and audit", () => {
         }),
       ),
     );
-    expect(history.map((e) => e.action)).toEqual(["document.create"]);
+    expect(EffectArray.map(history, (e) => e.action)).toEqual(["document.create"]);
   });
 });
 
@@ -102,16 +123,22 @@ describe("referenced records", () => {
         Effect.gen(function* () {
           const docs = yield* Documents;
           return [
-            yield* Effect.flip(docs.preview(invoiceInput({ lines: [{ item: MISSING as never }] }))),
-            yield* Effect.flip(docs.preview(invoiceInput({ bankAccount: MISSING as never }))),
-            yield* Effect.flip(docs.preview(invoiceInput({ series: MISSING as never }))),
+            yield* Effect.flip(
+              docs.preview(invoiceInput({ lines: [{ item: PriceListItemId.make(MISSING) }] })),
+            ),
+            yield* Effect.flip(
+              docs.preview(invoiceInput({ bankAccount: BankAccountId.make(MISSING) })),
+            ),
+            yield* Effect.flip(
+              docs.preview(invoiceInput({ series: NumberingSeriesId.make(MISSING) })),
+            ),
           ] as const;
         }),
       ),
     );
-    expect(item as unknown).toEqual(new NotFound({ entity: "PriceListItem", id: MISSING }));
-    expect(bank as unknown).toEqual(new NotFound({ entity: "BankAccount", id: MISSING }));
-    expect(series as unknown).toEqual(new NotFound({ entity: "NumberingSeries", id: MISSING }));
+    expect(item).toEqual(NotFound.make({ entity: "PriceListItem", id: MISSING }));
+    expect(bank).toEqual(NotFound.make({ entity: "BankAccount", id: MISSING }));
+    expect(series).toEqual(NotFound.make({ entity: "NumberingSeries", id: MISSING }));
   });
 
   test("createDraft: missing series or bank account is NotFound; an explicit series is kept", async () => {
@@ -124,22 +151,26 @@ describe("referenced records", () => {
             (yield* NumberingSeries).configure(
               WS,
               { kind: "invoice", name: "Jiná", pattern: "X-YYYY-NNN" },
-              "2026-11-23" as IsoDate,
+              IsoDate.make("2026-11-23"),
             ),
           );
-          const id = created.view.id as NumberingSeriesId;
+          const id = NumberingSeriesId.make(created.view.id);
           const view = yield* docs.createDraft(invoiceInput({ series: id }));
           const row = yield* (yield* DocumentsRepo).get(WS, view.id);
           return [
-            yield* Effect.flip(docs.createDraft(invoiceInput({ series: MISSING as never }))),
-            yield* Effect.flip(docs.createDraft(invoiceInput({ bankAccount: MISSING as never }))),
+            yield* Effect.flip(
+              docs.createDraft(invoiceInput({ series: NumberingSeriesId.make(MISSING) })),
+            ),
+            yield* Effect.flip(
+              docs.createDraft(invoiceInput({ bankAccount: BankAccountId.make(MISSING) })),
+            ),
             [row.seriesId, id] as const,
           ] as const;
         }),
       ),
     );
-    expect(series).toEqual(new NotFound({ entity: "NumberingSeries", id: MISSING }));
-    expect(bank).toEqual(new NotFound({ entity: "BankAccount", id: MISSING }));
+    expect(series).toEqual(NotFound.make({ entity: "NumberingSeries", id: MISSING }));
+    expect(bank).toEqual(NotFound.make({ entity: "BankAccount", id: MISSING }));
     expect(kept[0]).toBe(kept[1]);
   });
 
@@ -153,7 +184,7 @@ describe("referenced records", () => {
             description: "  ",
             unit: null,
             unitPrice: dec("100"),
-            currency: "CZK" as never,
+            currency: CZK,
             vat: null,
             archived: false,
             revision: 1,
@@ -170,7 +201,7 @@ describe("referenced records", () => {
         }),
       ),
     );
-    expect((fromName.lines[0] as unknown as { description: string }).description).toBe("Hodina");
+    expect(concreteView(fromName).lines[0]?.description).toBe("Hodina");
     expect(blank).toMatchObject({
       _tag: "Invalid",
       issues: [{ path: ["lines", 0, "description"] }],
@@ -195,8 +226,8 @@ describe("rule D9 edge cases", () => {
         }),
       ),
     );
-    expect(eu.statutoryNotes.map((n) => n.code as unknown as string)).toContain(
-      "exempt_intra_eu_goods",
+    expect(EffectArray.map(eu.statutoryNotes, (n) => n.code)).toContain(
+      StatutoryCode.make("exempt_intra_eu_goods"),
     );
     expect(domestic).toMatchObject({ issues: [{ code: "vat.not_allowed_for_regime" }] });
   });
@@ -237,23 +268,29 @@ describe("list filters", () => {
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
           const a = yield* docs.createDraft(
-            invoiceInput({ issuedOn: "2026-10-01" as IsoDate, due: { inDays: 14 } }),
+            invoiceInput({ issuedOn: IsoDate.make("2026-10-01"), due: { inDays: 14 } }),
           );
-          yield* docs.createDraft(invoiceInput({ issuedOn: "2026-11-20" as IsoDate }));
+          yield* docs.createDraft(invoiceInput({ issuedOn: IsoDate.make("2026-11-20") }));
           const row = yield* repo.get(WS, a.id);
           yield* store.transaction(
             repo.update({ ...row, status: "issued", number: "2026-0001" }, 1),
           );
           const ids = (p: { items: ReadonlyArray<unknown> }) =>
-            p.items.map((i) => (i as { id: DocumentId }).id);
-          return [
-            ids(yield* docs.list({ status: "issued" })),
-            (yield* docs.list({ settlement: "unpaid" })).items.length,
-            (yield* docs.list({ from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate })).items
-              .length,
-            ids(yield* docs.list({ overdue: true })),
-            (yield* docs.list({ overdue: false })).items.length,
-          ] as const;
+            EffectArray.map(p.items, (item) => {
+              Schema.asserts(DocumentSummaryData, item);
+              return item.id;
+            });
+          const issuedPage = yield* docs.list({ status: "issued" });
+          const issuedIds = ids(issuedPage);
+          const unpaidCount = (yield* docs.list({ settlement: "unpaid" })).items.length;
+          const periodCount = (yield* docs.list({
+            from: IsoDate.make("2026-11-01"),
+            to: IsoDate.make("2026-11-30"),
+          })).items.length;
+          const overduePage = yield* docs.list({ overdue: true });
+          const overdueIds = ids(overduePage);
+          const notOverdueCount = (yield* docs.list({ overdue: false })).items.length;
+          return [issuedIds, unpaidCount, periodCount, overdueIds, notOverdueCount] as const;
         }),
       ),
     );
@@ -302,18 +339,19 @@ describe("pdf", () => {
 
 describe("seams", () => {
   test("send and previewSend delegate to DocumentSender unchanged", async () => {
-    const calls: Array<string> = [];
+    const caller = member("owner");
+    const calls: Array<{ caller: Caller; operation: string }> = [];
     const sender = Layer.succeed(
       DocumentSender,
       DocumentSender.of({
-        send: (id) =>
+        send: (requestCaller, documentId) =>
           Effect.sync(() => {
-            calls.push(`send:${id}`);
-            return { deliveryId: "d-1" as DeliveryId, status: "queued" as const };
+            calls.push({ caller: requestCaller, operation: `send:${documentId}` });
+            return { deliveryId: STUB_DELIVERY_ID, status: "queued" as const };
           }),
-        previewSend: (id) =>
+        previewSend: (requestCaller, documentId) =>
           Effect.sync(() => {
-            calls.push(`preview:${id}`);
+            calls.push({ caller: requestCaller, operation: `preview:${documentId}` });
             return {
               purpose: "document" as const,
               to: [],
@@ -336,27 +374,31 @@ describe("seams", () => {
         ),
       ),
     );
-    const id = MISSING as DocumentId;
+    const id = DocumentId.make(MISSING);
     const exit = await runTest(
-      member("owner"),
+      caller,
       Effect.gen(function* () {
         yield* seed();
         const docs = yield* Documents;
         return [yield* docs.send(id), (yield* docs.previewSend(id)).subject] as const;
       }).pipe(Effect.provide(layer)),
     );
-    expect(ok(exit)).toEqual([{ deliveryId: "d-1" as DeliveryId, status: "queued" }, "s"]);
-    expect(calls).toEqual([`send:${id}`, `preview:${id}`]);
+    exit.pipe(ok, expect).toEqual([{ deliveryId: STUB_DELIVERY_ID, status: "queued" }, "s"]);
+    expect(EffectArray.map(calls, (call) => call.operation)).toEqual([
+      `send:${id}`,
+      `preview:${id}`,
+    ]);
+    for (const call of calls) expect(call.caller).toBe(caller);
   });
 
   test("the default sender stub dies clearly", async () => {
-    const exit = await scenario(Effect.flatMap(Documents, (d) => d.send(MISSING as DocumentId)));
+    const exit = await scenario(Effect.flatMap(Documents, (d) => d.send(DocumentId.make(MISSING))));
     expect(Exit.isFailure(exit) && String(exit.cause)).toContain("not implemented (stage 2");
   });
 
   test("linkSchedule sets the occurrence once per schedule (board #450)", async () => {
-    const schedule = "01900000-0000-7000-8000-00005c4ed001" as ScheduleId;
-    const occurrence = "2026-12-01" as IsoDate;
+    const schedule = ScheduleId.make("01900000-0000-7000-8000-00005c4ed001");
+    const occurrence = IsoDate.make("2026-12-01");
     const [row, dup] = ok(
       await scenario(
         Effect.gen(function* () {
@@ -368,16 +410,16 @@ describe("seams", () => {
           yield* store.transaction(
             repo.linkSchedule(WS, a.id, { scheduleId: schedule, occurrence }),
           );
-          const dup = yield* Effect.flip(
+          const duplicate = yield* Effect.flip(
             store.transaction(repo.linkSchedule(WS, b.id, { scheduleId: schedule, occurrence })),
           );
-          return [yield* repo.get(WS, a.id), dup] as const;
+          return [yield* repo.get(WS, a.id), duplicate] as const;
         }),
       ),
     );
     expect([row.scheduleId, row.occurrence, row.revision]).toEqual([schedule, occurrence, 2]);
     expect(dup).toBeInstanceOf(UniqueViolation);
-    expect((dup as UniqueViolation).constraint).toBe(SCHEDULE_OCCURRENCE);
+    expect(dup).toHaveProperty("constraint", SCHEDULE_OCCURRENCE);
   });
 });
 
@@ -390,7 +432,7 @@ describe("review round 1 regressions", () => {
         description: null,
         unit: null,
         unitPrice: dec("100"),
-        currency: "CZK" as never,
+        currency: CZK,
         vat,
         archived: false,
         revision: 1,
@@ -409,7 +451,7 @@ describe("review round 1 regressions", () => {
         { fixings: [fixing("2026-11-20", "25")] },
       ),
     );
-    expect(str(created.totals.gross.amount)).toBe("121");
+    created.totals.gross.amount.pipe(str, expect).toBe("121");
     expect(edited).toMatchObject({
       _tag: "Invalid",
       issues: [{ path: ["lines", 0, "unitPrice"], params: { currency: "CZK" } }],
@@ -422,19 +464,22 @@ describe("review round 1 regressions", () => {
         Effect.gen(function* () {
           yield* putItem();
           const docs = yield* Documents;
-          const inclusive = yield* docs.preview(
+          const inclusiveResult = yield* docs.preview(
             invoiceInput({ lines: [{ item: ITEM }], pricesIncludeVat: true }),
           );
           const draft = yield* docs.createDraft(invoiceInput({ lines: [{ item: ITEM }] }));
-          const toggled = yield* docs.edit(draft.id, { pricesIncludeVat: true }, 1);
-          return [inclusive, toggled] as const;
+          const toggledResult = yield* docs.edit(draft.id, { pricesIncludeVat: true }, 1);
+          return [inclusiveResult, toggledResult] as const;
         }),
       ),
     );
     for (const view of [inclusive, toggled]) {
-      expect(str(view.totals.net.amount)).toBe("100");
-      expect(str(view.totals.vat.amount)).toBe("21");
-      expect(str(view.totals.gross.amount)).toBe("121");
+      const net = str(view.totals.net.amount);
+      const vat = str(view.totals.vat.amount);
+      const gross = str(view.totals.gross.amount);
+      expect(net).toBe("100");
+      expect(vat).toBe("21");
+      expect(gross).toBe("121");
     }
   });
 
@@ -442,7 +487,7 @@ describe("review round 1 regressions", () => {
     const err = ok(
       await scenario(
         Effect.gen(function* () {
-          const us = "01900000-0000-7000-8000-0000c00000u5".replace("u5", "05") as never;
+          const us = ContactId.make("01900000-0000-7000-8000-0000c0000005");
           yield* (yield* DocumentFixtures).putContact(
             WS,
             contact(us, { country: "US", dic: "12-3456789" }),
@@ -462,7 +507,7 @@ describe("review round 1 regressions", () => {
     expect(err).toMatchObject({ issues: [{ code: "vat.not_allowed_for_regime" }] });
   });
 
-  test("a missing Issuing Entity is NotFound{Workspace}, not a defect", async () => {
+  test("returns NotFound for a missing Issuing Entity", async () => {
     const err = ok(
       await scenario(
         Effect.gen(function* () {
@@ -471,17 +516,15 @@ describe("review round 1 regressions", () => {
         }),
       ),
     );
-    expect(err).toEqual(new NotFound({ entity: "Workspace", id: WS }));
+    expect(err).toEqual(NotFound.make({ entity: "Workspace", id: WS }));
   });
 
   test("a computed due date beyond 9999-12-31 is Invalid at due", async () => {
     const err = ok(
-      await scenario(
-        Effect.flip(
-          Effect.flatMap(Documents, (d) =>
-            d.preview(invoiceInput({ due: { inDays: 10_000_000 } })),
-          ),
-        ),
+      await Documents.pipe(
+        Effect.flatMap((d) => d.preview(invoiceInput({ due: { inDays: 10000000 } }))),
+        Effect.flip,
+        scenario,
       ),
     );
     expect(err).toMatchObject({ _tag: "Invalid", issues: [{ path: ["due"] }] });
@@ -513,9 +556,9 @@ describe("store outages", () => {
       Effect.map(DocumentsRepo, (repo) =>
         DocumentsRepo.of({
           ...repo,
-          get: () => Effect.fail(new StoreUnavailable({})),
-          getForUpdate: () => Effect.fail(new StoreUnavailable({})),
-          search: () => Effect.fail(new StoreUnavailable({})),
+          get: () => Effect.fail(StoreUnavailable.make({})),
+          getForUpdate: () => Effect.fail(StoreUnavailable.make({})),
+          search: () => Effect.fail(StoreUnavailable.make({})),
         }),
       ),
     ).pipe(Layer.provide(DocumentsRepoMemory));
@@ -530,7 +573,7 @@ describe("store outages", () => {
         ),
       ),
     );
-    const id = MISSING as DocumentId;
+    const id = DocumentId.make(MISSING);
     const exit = await runTest(
       member("owner"),
       Effect.gen(function* () {
@@ -545,7 +588,7 @@ describe("store outages", () => {
       }).pipe(Effect.provide(layer)),
     );
     for (const err of ok(exit)) {
-      expect(err as unknown).toEqual(new Unavailable({ dependency: "database" }));
+      expect(err).toEqual(Unavailable.make({ dependency: "database" }));
     }
   });
 });
@@ -556,18 +599,20 @@ describe("variable symbol and payment QR (P1 scope)", () => {
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const kept = yield* docs.createDraft(invoiceInput({ variableSymbol: "0012345678" }));
-          const tooLong = yield* Effect.flip(
+          const keptResult = yield* docs.createDraft(
+            invoiceInput({ variableSymbol: "0012345678" }),
+          );
+          const tooLongResult = yield* Effect.flip(
             docs.createDraft(invoiceInput({ variableSymbol: "12345678901" })),
           );
-          const letters = yield* Effect.flip(
+          const lettersResult = yield* Effect.flip(
             docs.preview(invoiceInput({ variableSymbol: "VS-1" })),
           );
-          const row = yield* (yield* DocumentsRepo).get(WS, kept.id);
+          const row = yield* (yield* DocumentsRepo).get(WS, keptResult.id);
           return [
             row.variableSymbol,
-            tooLong,
-            letters,
+            tooLongResult,
+            lettersResult,
             (yield* docs.list({})).items.length,
           ] as const;
         }),

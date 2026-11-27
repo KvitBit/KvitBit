@@ -1,12 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import type { DocumentView, IsoDate, RequestKey } from "@kvitbit/domain/contract";
-import { Conflict, Documents, Forbidden, NotFound, Unavailable } from "@kvitbit/domain/contract";
-import { Effect, Exit, Ref, Schema, Stream } from "effect";
-import type { ContactSnapshotRecord, LineViewData } from "../../../src/modules/documents";
+import type { DocumentView } from "@kvitbit/domain/contract";
+import {
+  Conflict,
+  Documents,
+  Forbidden,
+  IsoDate,
+  NotFound,
+  RequestKey,
+  StatutoryCode,
+  Unavailable,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import {
   DocumentFixtures,
+  DocumentSummaryData,
   DocumentsRepo,
-  DocumentViewData,
   fakePdfBytes,
 } from "../../../src/modules/documents";
 import { CoreStore } from "../../../src/store/CoreStore";
@@ -16,15 +29,19 @@ import {
   B_BUYER,
   CZ_BUYER,
   CZ_NO_DIC,
+  CZK,
   CZK_ACCOUNT,
+  concreteView,
   contact,
   DE_BUYER,
   dec,
   EUR,
   EUR_ACCOUNT,
+  encodedView,
   fixing,
   ITEM,
   invoiceInput,
+  present,
   scenario,
   str,
 } from "./fixtures";
@@ -34,9 +51,9 @@ const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
   return exit.value;
 };
 
-const lines = (view: DocumentView) => view.lines as unknown as ReadonlyArray<LineViewData>;
-const buyer = (view: DocumentView) => view.contact as unknown as ContactSnapshotRecord;
-const codes = (view: DocumentView) => view.statutoryNotes.map((n) => n.code as unknown as string);
+const lines = (view: DocumentView) => concreteView(view).lines;
+const buyer = (view: DocumentView) => concreteView(view).contact;
+const codes = (view: DocumentView) => EffectArray.map(view.statutoryNotes, (n) => n.code);
 
 describe("createDraft", () => {
   test("stores an unnumbered draft with VatMath totals and audits its creation", async () => {
@@ -44,8 +61,12 @@ describe("createDraft", () => {
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput());
-          return [view, yield* docs.get(view.id), yield* docs.history(view.id)] as const;
+          const documentView = yield* docs.createDraft(invoiceInput());
+          return [
+            documentView,
+            yield* docs.get(documentView.id),
+            yield* docs.history(documentView.id),
+          ] as const;
         }),
       ),
     );
@@ -56,22 +77,24 @@ describe("createDraft", () => {
     expect(view.settlement).toBe("unpaid");
     expect(view.taxDocument).toBe(true);
     expect(view.dates).toEqual({
-      issuedOn: "2026-11-23" as IsoDate,
-      taxableSupplyOn: "2026-11-23" as IsoDate,
-      dueOn: "2026-12-07" as IsoDate,
+      issuedOn: IsoDate.make("2026-11-23"),
+      taxableSupplyOn: IsoDate.make("2026-11-23"),
+      dueOn: IsoDate.make("2026-12-07"),
     });
-    expect(lines(view).map((l) => [l.treatment, str(l.ratePercent)])).toEqual([
+    expect(EffectArray.map(lines(view), (l) => [l.treatment, str(l.ratePercent)])).toEqual([
       ["standard", "21"],
       ["reduced", "12"],
     ]);
-    expect(str(view.totals.net.amount)).toBe("2500");
-    expect(str(view.totals.vat.amount)).toBe("480");
-    expect(str(view.totals.gross.amount)).toBe("2980");
+    view.totals.net.amount.pipe(str, expect).toBe("2500");
+    view.totals.vat.amount.pipe(str, expect).toBe("480");
+    view.totals.gross.amount.pipe(str, expect).toBe("2980");
     expect(view.totals.vatCzk).toBeNull();
     expect(view.fx).toBeNull();
     expect(buyer(view).name).toBe("Odběratel a.s.");
     expect(got).toEqual(view);
-    expect(history.map((e) => [e.action, e.revision])).toEqual([["document.create", 1]]);
+    expect(EffectArray.map(history, (e) => [e.action, e.revision])).toEqual([
+      ["document.create", 1],
+    ]);
   });
 
   test("defaults resolve Document → Contact → Workspace", async () => {
@@ -94,9 +117,9 @@ describe("createDraft", () => {
       ),
     );
     const [fromContact, fromDocument] = view;
-    expect(fromContact.dates.dueOn).toBe("2026-12-23" as IsoDate);
+    expect(fromContact.dates.dueOn).toBe(IsoDate.make("2026-12-23"));
     expect(fromContact.paymentMethod).toBe("card");
-    expect(fromDocument.dates.dueOn).toBe("2026-11-30" as IsoDate);
+    expect(fromDocument.dates.dueOn).toBe(IsoDate.make("2026-11-30"));
     const repoRows = ok(
       await scenario(
         Effect.gen(function* () {
@@ -121,14 +144,16 @@ describe("createDraft", () => {
   });
 
   test("a due date before the issue date is Invalid", async () => {
-    const exit = await scenario(
-      Effect.flip(
-        Effect.flatMap(Documents, (d) =>
-          d.createDraft(invoiceInput({ due: { on: "2026-11-01" as IsoDate } })),
-        ),
+    const exit = await Documents.pipe(
+      Effect.flatMap((d) =>
+        d.createDraft(invoiceInput({ due: { on: IsoDate.make("2026-11-01") } })),
       ),
+      Effect.flip,
+      present,
+      scenario,
     );
-    expect(ok(exit)).toMatchObject({
+    const failure = ok(exit);
+    expect(failure).toMatchObject({
       _tag: "Invalid",
       issues: [{ path: ["due"], code: "document.due_before_issue" }],
     });
@@ -144,7 +169,7 @@ describe("createDraft", () => {
             description: "Hodina práce",
             unit: "h",
             unitPrice: dec("850"),
-            currency: "CZK" as never,
+            currency: CZK,
             vat: "reduced",
             archived: false,
             revision: 1,
@@ -162,28 +187,27 @@ describe("createDraft", () => {
       "850",
     ]);
     expect(line?.treatment).toBe("reduced");
-    expect(str(view.totals.gross.amount)).toBe("2856");
+    view.totals.gross.amount.pipe(str, expect).toBe("2856");
   });
 
   test("a requestKey replays the first result; another payload is Conflict", async () => {
-    const key = "req-1" as RequestKey;
+    const key = RequestKey.make("req-1");
     const [first, second, mismatch, all] = ok(
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const first = yield* docs.createDraft(invoiceInput(), { requestKey: key });
-          const second = yield* docs.createDraft(invoiceInput(), { requestKey: key });
-          const mismatch = yield* Effect.flip(
+          const firstResult = yield* docs.createDraft(invoiceInput(), { requestKey: key });
+          const secondResult = yield* docs.createDraft(invoiceInput(), { requestKey: key });
+          const mismatchResult = yield* Effect.flip(
             docs.createDraft(invoiceInput({ note: "other" }), { requestKey: key }),
           );
-          return [first, second, mismatch, yield* docs.list({})] as const;
+          return [firstResult, secondResult, mismatchResult, yield* docs.list({})] as const;
         }),
       ),
     );
-    const json = Schema.encodeSync(Schema.toCodecJson(DocumentViewData));
-    expect(json(second as never)).toEqual(json(first as never));
+    expect(await encodedView(second)).toEqual(await encodedView(first));
     expect(all.items).toHaveLength(1);
-    expect(mismatch as unknown).toEqual(new Conflict({ reason: "idempotency_mismatch" }));
+    expect(mismatch).toEqual(Conflict.make({ reason: "idempotency_mismatch" }));
   });
 });
 
@@ -194,12 +218,12 @@ describe("nesting", () => {
         Effect.gen(function* () {
           const docs = yield* Documents;
           const store = yield* CoreStore;
-          const failed = yield* Effect.flip(
+          const failedResult = yield* Effect.flip(
             store.transaction(
               Effect.andThen(docs.createDraft(invoiceInput()), Effect.fail("abort" as const)),
             ),
           );
-          return [failed, (yield* docs.list({})).items.length] as const;
+          return [failedResult, (yield* docs.list({})).items.length] as const;
         }),
       ),
     );
@@ -229,11 +253,11 @@ describe("authorization and tenancy", () => {
       }),
     );
     const [draft, token, edit, discard, preview, read, listed, history] = ok(exit);
-    expect(draft).toEqual(new Forbidden({ action: "document.draft" }));
-    expect(token).toEqual(new Forbidden({ action: "document.draft" }));
-    expect(edit).toEqual(new Forbidden({ action: "document.edit" }));
-    expect(discard).toEqual(new Forbidden({ action: "document.draft" }));
-    expect(preview).toEqual(new Forbidden({ action: "document.draft" }));
+    expect(draft).toEqual(Forbidden.make({ action: "document.draft" }));
+    expect(token).toEqual(Forbidden.make({ action: "document.draft" }));
+    expect(edit).toEqual(Forbidden.make({ action: "document.edit" }));
+    expect(discard).toEqual(Forbidden.make({ action: "document.draft" }));
+    expect(preview).toEqual(Forbidden.make({ action: "document.draft" }));
     expect([read, listed, history]).toEqual([true, 1, 1]);
   });
 
@@ -256,7 +280,7 @@ describe("authorization and tenancy", () => {
         }),
       ),
     );
-    expect(contactMiss).toEqual(new NotFound({ entity: "Contact", id: B_BUYER }));
+    expect(contactMiss).toEqual(NotFound.make({ entity: "Contact", id: B_BUYER }));
     for (const miss of [getMiss, editMiss, discardMiss, pdfMiss, historyMiss]) {
       expect(miss).toMatchObject({ _tag: "NotFound", entity: "Document" });
     }
@@ -276,9 +300,9 @@ describe("authorization and tenancy", () => {
         }),
       ),
     );
-    expect(miss as unknown).toEqual(new NotFound({ entity: "Contact", id: B_BUYER }));
+    expect(miss).toEqual(NotFound.make({ entity: "Contact", id: B_BUYER }));
     expect(view.number).toBeNull();
-    expect(str(view.totals.gross.amount)).toBe("2980");
+    view.totals.gross.amount.pipe(str, expect).toBe("2980");
     expect(listed).toBe(0);
   });
 });
@@ -298,25 +322,26 @@ describe("VAT regimes (rule D9)", () => {
       ),
     );
     expect(lines(view)[0]?.treatment).toBe("reverse_charge");
-    expect(str(view.totals.vat.amount)).toBe("0");
-    expect(str(view.totals.gross.amount)).toBe("1000");
+    view.totals.vat.amount.pipe(str, expect).toBe("0");
+    view.totals.gross.amount.pipe(str, expect).toBe("1000");
     expect(view.taxDocument).toBe(true);
-    expect(codes(view)).toContain("reverse_charge");
+    expect(codes(view)).toContain(StatutoryCode.make("reverse_charge"));
   });
 
   test("reverse charge without the buyer's VAT ID is Invalid", async () => {
     const err = ok(
-      await scenario(
-        Effect.flip(
-          Effect.flatMap(Documents, (d) =>
-            d.createDraft(
-              invoiceInput({
-                contact: CZ_NO_DIC,
-                lines: [{ description: "Stavba", unitPrice: dec("1"), vat: "reverse_charge" }],
-              }),
-            ),
+      await Documents.pipe(
+        Effect.flatMap((d) =>
+          d.createDraft(
+            invoiceInput({
+              contact: CZ_NO_DIC,
+              lines: [{ description: "Stavba", unitPrice: dec("1"), vat: "reverse_charge" }],
+            }),
           ),
         ),
+        Effect.flip,
+        present,
+        scenario,
       ),
     );
     expect(err).toMatchObject({
@@ -330,19 +355,19 @@ describe("VAT regimes (rule D9)", () => {
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(
+          const documentView = yield* docs.createDraft(
             invoiceInput({ lines: [{ description: "Služba", unitPrice: dec("1000") }] }),
           );
-          const err = yield* Effect.flip(docs.createDraft(invoiceInput()));
-          return [view, err] as const;
+          const failure = yield* Effect.flip(docs.createDraft(invoiceInput()));
+          return [documentView, failure] as const;
         }),
         { regimeA: "non_vat_payer" },
       ),
     );
     expect(lines(view)[0]?.treatment).toBe("outside_scope");
-    expect(str(view.totals.gross.amount)).toBe("1000");
+    view.totals.gross.amount.pipe(str, expect).toBe("1000");
     expect(view.taxDocument).toBe(false);
-    expect(codes(view)).toContain("not_vat_payer");
+    expect(codes(view)).toContain(StatutoryCode.make("not_vat_payer"));
     expect(err).toMatchObject({
       _tag: "Invalid",
       issues: [{ path: ["lines", 1, "vat"], code: "vat.not_allowed_for_regime" }],
@@ -376,7 +401,7 @@ describe("VAT regimes (rule D9)", () => {
       ),
     );
     expect([lines(domestic)[0]?.treatment, domestic.taxDocument]).toEqual(["outside_scope", false]);
-    expect(codes(domestic)).toContain("identified_person");
+    expect(codes(domestic)).toContain(StatutoryCode.make("identified_person"));
     expect([lines(eu)[0]?.treatment, eu.taxDocument]).toEqual(["reverse_charge", true]);
     expect(rejected).toMatchObject({ issues: [{ code: "vat.not_allowed_for_regime" }] });
   });
@@ -389,7 +414,7 @@ describe("VAT regimes (rule D9)", () => {
     );
     expect(view.taxDocument).toBe(false);
     expect(view.dates.taxableSupplyOn).toBe(view.dates.issuedOn);
-    expect(codes(view)).toContain("proforma_not_tax_document");
+    expect(codes(view)).toContain(StatutoryCode.make("proforma_not_tax_document"));
   });
 });
 
@@ -397,7 +422,7 @@ describe("FX (rule D11)", () => {
   const fixings = [fixing("2026-11-20", "25.125"), fixing("2026-11-23", "26")];
   const eurInput = invoiceInput({
     currency: EUR,
-    taxableSupplyOn: "2026-11-22" as IsoDate,
+    taxableSupplyOn: IsoDate.make("2026-11-22"),
     lines: [{ description: "Služba", unitPrice: dec("100") }],
   });
 
@@ -411,15 +436,15 @@ describe("FX (rule D11)", () => {
     expect(view.fx).toEqual({
       rate: dec("25.125"),
       quantity: 1,
-      fixingDate: "2026-11-20" as IsoDate,
+      fixingDate: IsoDate.make("2026-11-20"),
       source: "cnb",
     });
-    expect(str(view.totals.vat.amount)).toBe("21");
-    expect(view.totals.buckets.map((b) => str(b.vatCzk ?? dec("-1")))).toEqual(["527.63"]);
-    expect(str(view.totals.vatCzk?.amount ?? dec("-1"))).toBe("527.63");
-    expect((view.issuer as unknown as { bankAccount: { id: string } }).bankAccount.id).toBe(
-      EUR_ACCOUNT,
-    );
+    view.totals.vat.amount.pipe(str, expect).toBe("21");
+    expect(EffectArray.map(view.totals.buckets, (b) => str(b.vatCzk ?? dec("-1")))).toEqual([
+      "527.63",
+    ]);
+    (view.totals.vatCzk?.amount ?? dec("-1")).pipe(str, expect).toBe("527.63");
+    expect(present(concreteView(view).issuer.bankAccount).id).toBe(EUR_ACCOUNT);
   });
 
   test("a manual rate overrides the fixing; fx: null returns to it", async () => {
@@ -427,12 +452,12 @@ describe("FX (rule D11)", () => {
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const manual = yield* docs.createDraft({
+          const manualResult = yield* docs.createDraft({
             ...eurInput,
             fx: { manual: { rate: dec("24.5"), quantity: 1 } },
           });
-          const back = yield* docs.edit(manual.id, { fx: null }, manual.revision);
-          return [manual, back] as const;
+          const backResult = yield* docs.edit(manualResult.id, { fx: null }, manualResult.revision);
+          return [manualResult, backResult] as const;
         }),
         { fixings },
       ),
@@ -443,7 +468,7 @@ describe("FX (rule D11)", () => {
       fixingDate: null,
       source: "manual",
     });
-    expect(str(manual.totals.vatCzk?.amount ?? dec("-1"))).toBe("514.5");
+    (manual.totals.vatCzk?.amount ?? dec("-1")).pipe(str, expect).toBe("514.5");
     expect(back.fx?.source).toBe("cnb");
     expect(back.revision).toBe(2);
   });
@@ -461,7 +486,7 @@ describe("FX (rule D11)", () => {
               docs.createDraft({ ...eurInput, fx: { manual: { rate: dec("0"), quantity: 1 } } }),
             ),
             yield* Effect.flip(
-              docs.createDraft({ ...eurInput, taxableSupplyOn: "2026-11-01" as IsoDate }),
+              docs.createDraft({ ...eurInput, taxableSupplyOn: IsoDate.make("2026-11-01") }),
             ),
           ] as const;
         }),
@@ -470,7 +495,7 @@ describe("FX (rule D11)", () => {
     );
     expect(czk).toMatchObject({ issues: [{ code: "fx.manual_not_allowed_for_czk" }] });
     expect(bad).toMatchObject({ issues: [{ code: "fx.manual_rate_invalid" }] });
-    expect(missing).toEqual(new Unavailable({ dependency: "exchange_rates" }));
+    expect(missing).toEqual(Unavailable.make({ dependency: "exchange_rates" }));
   });
 });
 
@@ -481,16 +506,16 @@ describe("edit and discard of drafts", () => {
         Effect.gen(function* () {
           const docs = yield* Documents;
           const view = yield* docs.createDraft(invoiceInput());
-          const edited = yield* docs.edit(
+          const editedResult = yield* docs.edit(
             view.id,
             { lines: [{ description: "Jiné", unitPrice: dec("100") }], contact: DE_BUYER },
             1,
           );
-          const stale = yield* Effect.flip(docs.edit(view.id, { note: "late" }, 1));
+          const staleResult = yield* Effect.flip(docs.edit(view.id, { note: "late" }, 1));
           return [
-            edited,
-            stale,
-            (edited.issuer as unknown as { bankAccount: { id: string } }).bankAccount.id,
+            editedResult,
+            staleResult,
+            present(concreteView(editedResult).issuer.bankAccount).id,
           ] as const;
         }),
       ),
@@ -498,8 +523,8 @@ describe("edit and discard of drafts", () => {
     expect(edited.revision).toBe(2);
     expect(lines(edited)[0]?.treatment).toBe("reverse_charge");
     expect(buyer(edited).contactId).toBe(DE_BUYER);
-    expect(str(edited.totals.gross.amount)).toBe("100");
-    expect(stale).toEqual(new Conflict({ reason: "revision_changed", currentRevision: 2 }));
+    edited.totals.gross.amount.pipe(str, expect).toBe("100");
+    expect(stale).toEqual(Conflict.make({ reason: "revision_changed", currentRevision: 2 }));
     expect(czkAccount).toBe(CZK_ACCOUNT);
   });
 
@@ -513,7 +538,7 @@ describe("edit and discard of drafts", () => {
         }),
       ),
     );
-    expect(err).toEqual(new Conflict({ reason: "illegal_transition" }));
+    expect(err).toEqual(Conflict.make({ reason: "illegal_transition" }));
   });
 
   test("discardDraft deletes a draft, audits it, and refuses issued documents", async () => {
@@ -525,29 +550,38 @@ describe("edit and discard of drafts", () => {
           const store = yield* CoreStore;
           const ws = member("owner").workspaceId;
           const a = yield* docs.createDraft(invoiceInput());
-          const stale = yield* Effect.flip(docs.discardDraft(a.id, 7));
+          const staleResult2 = yield* Effect.flip(docs.discardDraft(a.id, 7));
           yield* docs.discardDraft(a.id, 1);
-          const gone = yield* Effect.flip(docs.get(a.id));
+          const removedDocument = yield* Effect.flip(docs.get(a.id));
           const b = yield* docs.createDraft(invoiceInput());
           const row = yield* repo.get(ws, b.id);
           const issued = yield* store.transaction(
             repo.update({ ...row, status: "issued", number: "2026-0001" }, 1),
           );
-          const issuedDiscard = yield* Effect.flip(docs.discardDraft(b.id, issued.revision));
+          const issuedDiscardResult = yield* Effect.flip(docs.discardDraft(b.id, issued.revision));
           const c = yield* docs.createDraft(invoiceInput());
           const cRow = yield* repo.get(ws, c.id);
           yield* store.transaction(repo.update({ ...cRow, status: "cancelled", locked: true }, 1));
-          const cancelledEdit = yield* Effect.flip(docs.edit(c.id, { note: "x" }, 2));
-          const history = yield* store.audit.history(ws, { entity: "Document", id: a.id });
-          return [gone, stale, issuedDiscard, cancelledEdit, history] as const;
+          const cancelledEditResult = yield* Effect.flip(docs.edit(c.id, { note: "x" }, 2));
+          const historyResult = yield* store.audit.history(ws, { entity: "Document", id: a.id });
+          return [
+            removedDocument,
+            staleResult2,
+            issuedDiscardResult,
+            cancelledEditResult,
+            historyResult,
+          ] as const;
         }),
       ),
     );
     expect(gone).toMatchObject({ _tag: "NotFound", entity: "Document" });
-    expect(stale).toEqual(new Conflict({ reason: "revision_changed", currentRevision: 1 }));
-    expect(issuedDiscard).toEqual(new Conflict({ reason: "illegal_transition" }));
-    expect(cancelledEdit).toEqual(new Conflict({ reason: "illegal_transition" }));
-    expect(history.map((e) => e.action)).toEqual(["document.create", "document.discard"]);
+    expect(stale).toEqual(Conflict.make({ reason: "revision_changed", currentRevision: 1 }));
+    expect(issuedDiscard).toEqual(Conflict.make({ reason: "illegal_transition" }));
+    expect(cancelledEdit).toEqual(Conflict.make({ reason: "illegal_transition" }));
+    expect(EffectArray.map(history, (e) => e.action)).toEqual([
+      "document.create",
+      "document.discard",
+    ]);
   });
 });
 
@@ -557,34 +591,37 @@ describe("list and pdf", () => {
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          yield* docs.createDraft(invoiceInput({ issuedOn: "2026-11-01" as IsoDate }));
+          yield* docs.createDraft(invoiceInput({ issuedOn: IsoDate.make("2026-11-01") }));
           yield* docs.createDraft(
-            invoiceInput({ issuedOn: "2026-11-02" as IsoDate, kind: "proforma" }),
+            invoiceInput({ issuedOn: IsoDate.make("2026-11-02"), kind: "proforma" }),
           );
           yield* docs.createDraft(
             invoiceInput({
-              issuedOn: "2026-11-03" as IsoDate,
+              issuedOn: IsoDate.make("2026-11-03"),
               contact: DE_BUYER,
               lines: [{ description: "x", unitPrice: dec("1") }],
             }),
           );
-          const invoices = yield* docs.list({ kind: "invoice" });
-          const page1 = yield* docs.list({ kind: "invoice", limit: 1 });
-          const page2 = yield* docs.list({
+          const invoicesResult = yield* docs.list({ kind: "invoice" });
+          const firstPage = yield* docs.list({ kind: "invoice", limit: 1 });
+          const secondPage = yield* docs.list({
             kind: "invoice",
             limit: 1,
-            cursor: page1.nextCursor ?? "",
+            cursor: firstPage.nextCursor ?? "",
           });
-          const mismatch = yield* Effect.flip(
-            docs.list({ kind: "proforma", limit: 1, cursor: page1.nextCursor ?? "" }),
+          const mismatchResult = yield* Effect.flip(
+            docs.list({ kind: "proforma", limit: 1, cursor: firstPage.nextCursor ?? "" }),
           );
-          const byText = yield* docs.list({ text: "ODBĚRATEL", contact: CZ_BUYER });
-          return [invoices, page1, page2, mismatch, byText] as const;
+          const byTextResult = yield* docs.list({ text: "ODBĚRATEL", contact: CZ_BUYER });
+          return [invoicesResult, firstPage, secondPage, mismatchResult, byTextResult] as const;
         }),
       ),
     );
-    const issuedOn = (p: typeof invoices) =>
-      p.items.map((i) => (i as unknown as { issuedOn: string }).issuedOn);
+    const issuedOn = (p: typeof invoices): ReadonlyArray<string> =>
+      EffectArray.map(p.items, (item) => {
+        Schema.asserts(DocumentSummaryData, item);
+        return item.issuedOn;
+      });
     expect(issuedOn(invoices)).toEqual(["2026-11-03", "2026-11-01"]);
     expect(issuedOn(page1)).toEqual(["2026-11-03"]);
     expect(page1.nextCursor).not.toBeNull();
@@ -599,18 +636,18 @@ describe("list and pdf", () => {
       await scenario(
         Effect.gen(function* () {
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput());
-          const download = yield* docs.pdf(view.id, { template: "modern_minimal" });
-          const chunks = yield* Stream.runCollect(download.bytes);
-          const renders = yield* Ref.get((yield* DocumentFixtures).renders);
-          return [view, download, Array.from(chunks), renders] as const;
+          const documentView = yield* docs.createDraft(invoiceInput());
+          const downloadResult = yield* docs.pdf(documentView.id, { template: "modern_minimal" });
+          const chunks = yield* Stream.runCollect(downloadResult.bytes);
+          const rendersResult = yield* Ref.get((yield* DocumentFixtures).renders);
+          return [documentView, downloadResult, Array.from(chunks), rendersResult] as const;
         }),
       ),
     );
     expect(download.filename).toBe(`draft-${view.id}.pdf`);
     expect(download.contentType).toBe("application/pdf");
     expect(bytes).toEqual([fakePdfBytes(view, { template: "modern_minimal", language: "cs" })]);
-    expect(renders.map((r) => [r.view.id, r.options])).toEqual([
+    expect(EffectArray.map(renders, (r) => [r.view.id, r.options])).toEqual([
       [view.id, { template: "modern_minimal", language: "cs" }],
     ]);
   });

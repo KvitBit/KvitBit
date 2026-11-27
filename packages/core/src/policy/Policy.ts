@@ -10,7 +10,7 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { CurrentCaller, Forbidden } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { can } from "./can";
 
 /** A caller that acts inside one Workspace. */
@@ -18,8 +18,10 @@ export type WorkspaceCaller = MemberCaller | SystemCaller;
 
 /** Fails with `Forbidden{action}` unless the current caller may perform `action`. */
 export const authorize = (action: Action): Effect.Effect<Caller, Forbidden, CurrentCaller> =>
-  Effect.flatMap(CurrentCaller, (caller) =>
-    can(caller, action) ? Effect.succeed(caller) : Effect.fail(new Forbidden({ action })),
+  Effect.filterOrFail(
+    CurrentCaller,
+    (caller) => can(caller, action),
+    () => Forbidden.make({ action }),
   );
 
 /**
@@ -36,5 +38,5 @@ export const authorizeInWorkspace = (
   Effect.flatMap(authorize(action), (caller) =>
     caller._tag === "Member" || caller._tag === "System"
       ? Effect.succeed({ caller, workspaceId: caller.workspaceId })
-      : Effect.fail(new Forbidden({ action })),
+      : Effect.fail(Forbidden.make({ action })),
   );

@@ -11,7 +11,7 @@ import {
   VisitorHash,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { defineCollection } from "../../store/tables";
 
 /** Share link ids are UUIDv7 like every entity id; the domain has no `ShareLinkId` brand. */
@@ -33,7 +33,7 @@ export const ShareLink = Schema.Struct({
 });
 export type ShareLink = typeof ShareLink.Type;
 
-export const ShareEventKind = Schema.Literals(["view", "download"]);
+const ShareEventKind = Schema.Literals(["view", "download"]);
 export const ShareDevice = Schema.Literals(["desktop", "mobile", "tablet", "unknown"]);
 export type ShareDevice = typeof ShareDevice.Type;
 
@@ -58,7 +58,7 @@ export const SHARE_ONE_ACTIVE_PER_DOCUMENT = "share_links_one_active_per_documen
 export const ShareLinksTable = defineCollection<Revisioned<ShareLink>>({
   name: "share_links",
   entity: "ShareLink",
-  schema: ShareLink as unknown as Schema.Codec<Revisioned<ShareLink>, unknown>,
+  schema: Schema.Struct({ ...ShareLink.fields, revision: Schema.Finite }),
   unique: [
     { name: SHARE_TOKEN_HASH_UNIQUE, scope: "global", key: (r) => [r.tokenHash] },
     {
@@ -72,5 +72,5 @@ export const ShareLinksTable = defineCollection<Revisioned<ShareLink>>({
 export const ShareViewsTable = defineCollection<Revisioned<ShareViewEventRow>>({
   name: "share_view_events",
   entity: "ShareLink",
-  schema: ShareViewEventRow as unknown as Schema.Codec<Revisioned<ShareViewEventRow>, unknown>,
+  schema: Schema.Struct({ ...ShareViewEventRow.fields, revision: Schema.Finite }),
 });

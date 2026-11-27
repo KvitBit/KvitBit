@@ -12,7 +12,12 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import type { BlobUnavailable } from "@kvitbit/domain/ports";
-import { Context, Effect, Layer, Option, Ref, Stream } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 import { StoreUnavailable } from "../../store/CoreStore";
 import type { ShareDevice } from "./record";
 
@@ -21,8 +26,8 @@ import type { ShareDevice } from "./record";
  * current version is valid: rotating the key version invalidates every old link, so tokens of
  * any other version are expired and return `NotFound`.
  */
-export class ShareLinkKeys extends Context.Service<
-  ShareLinkKeys,
+class TokenKeys extends Context.Service<
+  TokenKeys,
   {
     readonly version: number;
     readonly secret: Uint8Array;
@@ -31,7 +36,9 @@ export class ShareLinkKeys extends Context.Service<
     /** The page's PDF download link. */
     readonly pdfUrl: (token: ShareToken) => string;
   }
->()("kvitbit/core/sharelinks/ShareLinkKeys") {}
+>()("@kvitbit/core/modules/sharelinks/ports/TokenKeys") {}
+
+export { TokenKeys as ShareLinkKeys };
 
 /** What the share page needs about the issuing Workspace. No authorize; Workspace scoped. */
 export class ShareWorkspaces extends Context.Service<
@@ -50,7 +57,7 @@ export class ShareWorkspaces extends Context.Service<
       workspaceId: WorkspaceId,
     ) => Effect.Effect<Option.Option<FileDownload>, StoreUnavailable | BlobUnavailable>;
   }
->()("kvitbit/core/sharelinks/ShareWorkspaces") {}
+>()("@kvitbit/core/modules/sharelinks/ports/ShareWorkspaces") {}
 
 /**
  * The visitor's coarse device class, derived from the user agent by the share route (the
@@ -62,16 +69,16 @@ export const ShareVisitorDevice = Context.Reference<ShareDevice>(
 );
 
 /** Test keys for `version` (default 1); a test rotates by providing `shareLinkKeysTest(2)`. */
-export const shareLinkKeysTest = (version = 1): ShareLinkKeys["Service"] =>
-  ShareLinkKeys.of({
+export const shareLinkKeysTest = (version = 1): TokenKeys["Service"] =>
+  TokenKeys.of({
     version,
     secret: new TextEncoder().encode(`test-share-key-v${version}`),
     pageUrl: (token) => `https://share.test/s/${token}`,
     pdfUrl: (token) => `https://share.test/s/${token}/pdf`,
   });
 
-export const ShareLinkKeysTest: Layer.Layer<ShareLinkKeys> = Layer.succeed(
-  ShareLinkKeys,
+export const ShareLinkKeysTest: Layer.Layer<TokenKeys> = Layer.succeed(
+  TokenKeys,
   shareLinkKeysTest(),
 );
 
@@ -84,7 +91,10 @@ export const DEFAULT_BRANDING: WorkspaceBranding = {
   stamp: null,
 };
 
-type Logo = { readonly contentType: string; readonly bytes: Uint8Array };
+interface Logo {
+  readonly contentType: string;
+  readonly bytes: Uint8Array;
+}
 
 /** State of the `ShareWorkspaces` fake; tests seed it. */
 export class ShareFixtures extends Context.Service<
@@ -103,7 +113,7 @@ export class ShareFixtures extends Context.Service<
     ) => Effect.Effect<void>;
     readonly setLogo: (workspaceId: WorkspaceId, logo: Logo) => Effect.Effect<void>;
   }
->()("kvitbit/core/sharelinks/ShareFixtures") {}
+>()("@kvitbit/core/modules/sharelinks/ports/ShareFixtures") {}
 
 const memberKey = (workspaceId: WorkspaceId, userId: UserId) => `${workspaceId}/${userId}`;
 
@@ -119,12 +129,15 @@ const fixtures = Layer.effect(
       brandings,
       logos,
       unavailable,
-      addMember: (workspaceId, userId) =>
+      addMember: Effect.fn("ShareFixtures.addMember")((workspaceId, userId) =>
         Ref.update(members, (all) => new Set(all).add(memberKey(workspaceId, userId))),
-      setBranding: (workspaceId, branding) =>
+      ),
+      setBranding: Effect.fn("ShareFixtures.setBranding")((workspaceId, branding) =>
         Ref.update(brandings, (all) => new Map(all).set(workspaceId, branding)),
-      setLogo: (workspaceId, logo) =>
+      ),
+      setLogo: Effect.fn("ShareFixtures.setLogo")((workspaceId, logo) =>
         Ref.update(logos, (all) => new Map(all).set(workspaceId, logo)),
+      ),
     });
   }),
 );
@@ -136,23 +149,36 @@ export const ShareWorkspacesFake: Layer.Layer<ShareWorkspaces | ShareFixtures> =
     Effect.map(ShareFixtures, (f) => {
       const up = <A>(effect: Effect.Effect<A>) =>
         Effect.flatMap(Ref.get(f.unavailable), (down) =>
-          down ? Effect.fail(new StoreUnavailable({})) : effect,
+          down ? Effect.fail(StoreUnavailable.make({})) : effect,
         );
       return ShareWorkspaces.of({
-        isMember: (workspaceId, userId) =>
-          up(Effect.map(Ref.get(f.members), (all) => all.has(memberKey(workspaceId, userId)))),
-        branding: (workspaceId) =>
-          up(Effect.map(Ref.get(f.brandings), (all) => all.get(workspaceId) ?? DEFAULT_BRANDING)),
-        logo: (workspaceId) =>
-          up(
-            Effect.map(Ref.get(f.logos), (all) =>
+        isMember: Effect.fn("ShareWorkspaces.isMember")((workspaceId, userId) =>
+          f.members.pipe(
+            Ref.get,
+            Effect.map((all) => all.has(memberKey(workspaceId, userId))),
+            up,
+          ),
+        ),
+        branding: Effect.fn("ShareWorkspaces.branding")((workspaceId) =>
+          f.brandings.pipe(
+            Ref.get,
+            Effect.map((all) => all.get(workspaceId) ?? DEFAULT_BRANDING),
+            up,
+          ),
+        ),
+        logo: Effect.fn("ShareWorkspaces.logo")((workspaceId) =>
+          f.logos.pipe(
+            Ref.get,
+            Effect.map((all) =>
               Option.map(Option.fromNullishOr(all.get(workspaceId)), (logo) => ({
                 filename: "logo",
                 contentType: logo.contentType,
                 bytes: Stream.make(logo.bytes),
               })),
             ),
+            up,
           ),
+        ),
       });
     }),
   ),

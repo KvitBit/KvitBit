@@ -15,7 +15,10 @@
  *
  * Requires ShareLinksRepo | ShareLinkKeys | DeliveriesRepo.
  */
-import { Effect, Layer, Option } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { DeliveriesRepo, DocumentActivity } from "../modules/documents";
 import { deriveToken, ShareLinkKeys, ShareLinksRepo } from "../modules/sharelinks";
 
@@ -30,17 +33,16 @@ export const DocumentActivityLive: Layer.Layer<
     const keys = yield* ShareLinkKeys;
     const deliveries = yield* DeliveriesRepo;
     return DocumentActivity.of({
-      share: (workspaceId, id) =>
-        Effect.gen(function* () {
-          const active = yield* links.activeFor(workspaceId, id);
-          if (Option.isNone(active) || active.value.keyVersion !== keys.version) return null;
-          const token = yield* deriveToken(active.value.id, keys.version, keys.secret);
-          const stats = yield* links.viewStats(workspaceId, active.value.id);
-          return { url: keys.pageUrl(token), ...stats };
-        }),
-      deliveries: (workspaceId, id) =>
+      share: Effect.fn("DocumentActivity.share")(function* (workspaceId, id) {
+        const active = yield* links.activeFor(workspaceId, id);
+        if (Option.isNone(active) || active.value.keyVersion !== keys.version) return null;
+        const token = yield* deriveToken(active.value.id, keys.version, keys.secret);
+        const stats = yield* links.viewStats(workspaceId, active.value.id);
+        return { url: keys.pageUrl(token), ...stats };
+      }),
+      deliveries: Effect.fn("DocumentActivity.deliveries")((workspaceId, id) =>
         Effect.map(deliveries.byDocument(workspaceId, id), (rows) =>
-          rows.map((row) => ({
+          EffectArray.map(rows, (row) => ({
             id: row.id,
             to: row.to,
             purpose: row.purpose,
@@ -48,6 +50,7 @@ export const DocumentActivityLive: Layer.Layer<
             at: row.updatedAt,
           })),
         ),
+      ),
     });
   }),
 );

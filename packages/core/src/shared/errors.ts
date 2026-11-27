@@ -2,9 +2,12 @@
  * Translation of internal port failures to the shared `Unavailable` error (core-ports 3, 6), so
  * provider details never cross the seam.
  */
+
 import type { UnavailableDependency } from "@kvitbit/domain/contract";
 import { Unavailable } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
 
 const DEPENDENCY = {
   StoreUnavailable: "database",
@@ -13,23 +16,25 @@ const DEPENDENCY = {
   BlobUnavailable: "blob_storage",
 } as const satisfies Record<string, UnavailableDependency>;
 
-type PortFailure = { readonly _tag: keyof typeof DEPENDENCY };
+interface PortFailure {
+  readonly _tag: keyof typeof DEPENDENCY;
+}
 
-const isPortFailure = (error: unknown): error is PortFailure =>
-  typeof error === "object" &&
-  error !== null &&
-  "_tag" in error &&
-  typeof error._tag === "string" &&
-  Object.hasOwn(DEPENDENCY, error._tag);
+const isPortFailure = <E>(error: E): error is E & PortFailure =>
+  Predicate.hasProperty(error, "_tag") &&
+  Predicate.isString(error._tag) &&
+  EffectRecord.has<string, UnavailableDependency>(DEPENDENCY, error._tag);
 
 /** The `Unavailable` a port failure becomes. */
-export const toUnavailable = (error: PortFailure): Unavailable =>
-  new Unavailable({ dependency: DEPENDENCY[error._tag] });
+const toUnavailable = (error: PortFailure): Unavailable =>
+  Unavailable.make({ dependency: DEPENDENCY[error._tag] });
 
 /** Maps every port failure in the error channel to `Unavailable`; other errors pass through. */
-export const orUnavailable = <A, E, R>(
+export function orUnavailable<A, E, R>(
   effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, Exclude<E, PortFailure> | Unavailable, R> =>
-  Effect.mapError(effect, (error) =>
-    isPortFailure(error) ? toUnavailable(error) : (error as Exclude<E, PortFailure>),
-  );
+): Effect.Effect<A, Exclude<E, PortFailure> | Unavailable, R>;
+export function orUnavailable<A, E, R>(
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | Unavailable, R> {
+  return Effect.mapError(effect, (error) => (isPortFailure(error) ? toUnavailable(error) : error));
+}

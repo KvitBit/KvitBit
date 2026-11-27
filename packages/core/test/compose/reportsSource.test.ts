@@ -2,20 +2,32 @@
  * `ReportsSourceLive` over the real module layers on in-memory ports: documents, payments and
  * expenses built through their services (an Expense payment row through `PaymentsRepo`).
  */
+
 import { describe, expect, test } from "bun:test";
-import type {
+import type { DocumentView, ExpenseView } from "@kvitbit/domain/contract";
+import {
   CurrencyCode,
   CurrentCaller,
   DocumentId,
-  DocumentView,
+  Documents,
   ExpenseId,
-  ExpenseView,
   IsoDate,
+  IssuingEntityPatch,
+  MoneyMath,
   PaymentId,
+  Payments,
+  Workspaces,
 } from "@kvitbit/domain/contract";
-import { Documents, MoneyMath, Payments, Workspaces } from "@kvitbit/domain/contract";
-import { BigDecimal, Cause, Effect, Exit, Layer, Ref } from "effect";
-import { TestClock } from "effect/testing";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 import { ReportsSourceLive } from "../../src/compose/reportsSource";
 import {
   DocumentFixtures,
@@ -33,7 +45,7 @@ import {
 import { NumberingSeries } from "../../src/modules/numbering";
 import { PaymentsRepo, PaymentsRepoMemory, PaymentsTestLayer } from "../../src/modules/payments";
 import { ReportCompute } from "../../src/modules/reports";
-import type { DateRange, ReportDocument, StoredFx } from "../../src/modules/reports/source";
+import type { DateRange, StoredFx } from "../../src/modules/reports/source";
 import { ReportsSource } from "../../src/modules/reports/source";
 import { WorkspacesTestLayer } from "../../src/modules/workspaces";
 import { WorkspacesRepoMemory } from "../../src/modules/workspaces/repo";
@@ -60,9 +72,9 @@ import {
 } from "../modules/expenses/fixtures";
 import { accountOf, OWNER, USERS } from "../modules/workspaces/harness";
 
-const NOV: DateRange = { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate };
-const OCT_31: DateRange = { from: "2026-10-31" as IsoDate, to: "2026-10-31" as IsoDate };
-const OUT_PAYMENT = "01900000-0000-7000-8000-00000000f001" as PaymentId;
+const NOV: DateRange = { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") };
+const OCT_31: DateRange = { from: IsoDate.make("2026-10-31"), to: IsoDate.make("2026-10-31") };
+const OUT_PAYMENT = PaymentId.make("01900000-0000-7000-8000-00000000f001");
 const ownerB = member("owner", { workspaceId: WORKSPACE_B });
 
 const series = Effect.flatMap(CoreStore, (store) =>
@@ -126,9 +138,7 @@ const run = <A, E>(
 
 const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
   if (exit._tag === "Failure")
-    throw new Error(
-      `expected success, got ${JSON.stringify(exit.cause, (_, v) => (typeof v === "bigint" ? String(v) : v))}`,
-    );
+    throw new Error("Expected reports source to succeed", { cause: exit.cause });
   return exit.value;
 };
 
@@ -141,33 +151,40 @@ const read = <A, E, R>(f: (s: ReportsSource["Service"]) => Effect.Effect<A, E, R
   });
 
 /** A stored fixing's rate as a string; null without one. */
-const rateOf = (fx: StoredFx | null | undefined) => (fx == null ? null : str(fx.rate));
+const rateOf = (fx: StoredFx | null | undefined) =>
+  fx === null || fx === undefined ? null : str(fx.rate);
 
-const id = (v: DocumentView) => v.id as DocumentId;
+const id = (v: DocumentView) => DocumentId.make(v.id);
 const issue = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
   Effect.flatMap(Documents, (d) => d.issue({ input: invoiceInput(extra) }));
-const pay = (document: DocumentId, amount: string, currency = "CZK" as CurrencyCode) =>
+const pay = (document: DocumentId, amount: string, currency = CurrencyCode.make("CZK")) =>
   Effect.flatMap(Payments, (p) =>
     p.record({ target: { document }, amount: MoneyMath.make(dec(amount), currency) }),
   );
-const recordExpense = (input: Record<string, unknown>) =>
-  Effect.map(record(input), (v: ExpenseView) => fields(v).id as ExpenseId);
+const recordExpense = (input: Parameters<typeof record>[0]) =>
+  Effect.map(record(input), (v: ExpenseView) => ExpenseId.make(fields(v).id));
 
-const MISSING = "01900000-0000-7000-8000-00000000dead" as DocumentId;
+const MISSING = DocumentId.make("01900000-0000-7000-8000-00000000dead");
 
 const grossOf = (buckets: ReadonlyArray<{ readonly gross: BigDecimal.BigDecimal }>) =>
-  str(buckets.reduce((sum, b) => BigDecimal.sum(sum, b.gross), BigDecimal.fromBigInt(0n)));
+  str(
+    EffectArray.reduce(buckets, BigDecimal.fromBigInt(0n), (sum, b) =>
+      BigDecimal.sum(sum, b.gross),
+    ),
+  );
 
 /** A Proforma paid 1000 with a PTD plus 400 recorded without one (user-flows 3.8: unticked). */
 const finalInvoiceWithUncoveredCash = Effect.gen(function* () {
   const d = yield* Documents;
   const store = yield* CoreStore;
   const seam = yield* DocumentPayments;
+  const caller = yield* CurrentCaller;
   const proforma = yield* issue({ kind: "proforma" });
   yield* pay(id(proforma), "1000");
   yield* store.transaction(
     Effect.andThen(seam.lock(WORKSPACE_A, id(proforma)), () =>
       seam.settle(
+        caller,
         WORKSPACE_A,
         id(proforma),
         { amount: dec("1400"), payments: 2 },
@@ -202,8 +219,8 @@ describe("ReportsSourceLive", () => {
           const inv = yield* issue();
           yield* pay(id(inv), "1000");
           const early = yield* issue({
-            issuedOn: "2026-11-02" as IsoDate,
-            taxableSupplyOn: "2026-10-31" as IsoDate,
+            issuedOn: IsoDate.make("2026-11-02"),
+            taxableSupplyOn: IsoDate.make("2026-10-31"),
           });
           const credited = yield* issue();
           const cn = yield* d.correct(id(credited), { reason: "sleva", lines: "full" });
@@ -242,7 +259,7 @@ describe("ReportsSourceLive", () => {
                 expenseId: expense,
                 amount: dec("121"),
                 currency: EUR,
-                paidOn: "2026-11-23" as IsoDate,
+                paidOn: IsoDate.make("2026-11-23"),
                 method: "bank_transfer",
                 note: null,
                 taxDocumentId: null,
@@ -279,7 +296,7 @@ describe("ReportsSourceLive", () => {
       ),
     );
     const { ids } = r;
-    const byId = new Map(r.byIssued.map((doc) => [doc.id, doc] as const));
+    const byId = new Map(EffectArray.map(r.byIssued, (row) => [row.id, row] as const));
     const doc = (v: DocumentView) => {
       const found = byId.get(id(v));
       if (found === undefined) throw new Error(`missing ${v.kind} ${v.id}`);
@@ -289,8 +306,8 @@ describe("ReportsSourceLive", () => {
     // Issued and cancelled, never drafts; other Workspaces never.
     expect(byId.has(id(ids.draft))).toBe(false);
     expect(byId.has(id(ids.other))).toBe(false);
-    expect(r.byIssued.every((row) => row.workspaceId === WORKSPACE_A)).toBe(true);
-    expect(r.ofB.map((row) => row.id)).toEqual([id(ids.other)]);
+    expect(EffectArray.every(r.byIssued, (row) => row.workspaceId === WORKSPACE_A)).toBe(true);
+    expect(EffectArray.map(r.ofB, (row) => row.id)).toEqual([id(ids.other)]);
     expect(doc(ids.cancelled).status).toBe("cancelled");
     expect(doc(ids.inv)).toMatchObject({ status: "issued", kind: "invoice", finalInvoice: false });
     expect(doc(ids.inv).number).toBe(ids.inv.number);
@@ -298,62 +315,70 @@ describe("ReportsSourceLive", () => {
 
     // issuedOn vs tax point, both inclusive.
     expect(doc(ids.early)).toMatchObject({ issuedOn: "2026-11-02", taxPoint: "2026-10-31" });
-    expect(r.byTaxOct.map((row) => row.id)).toEqual([id(ids.early)]);
+    expect(EffectArray.map(r.byTaxOct, (row) => row.id)).toEqual([id(ids.early)]);
     expect(r.byIssuedOct).toEqual([]);
-    expect(r.byTaxNov.some((row) => row.id === id(ids.early))).toBe(false);
+    expect(EffectArray.some(r.byTaxNov, (row) => row.id === id(ids.early))).toBe(false);
     // A Proforma has no tax point: in the issuedOn range only.
     expect(doc(ids.proforma).taxPoint).toBeNull();
-    expect(r.byTaxNov.some((row) => row.id === id(ids.proforma))).toBe(false);
-    expect(r.byTaxNov.some((row) => row.id === id(ids.inv))).toBe(true);
+    expect(EffectArray.some(r.byTaxNov, (row) => row.id === id(ids.proforma))).toBe(false);
+    expect(EffectArray.some(r.byTaxNov, (row) => row.id === id(ids.inv))).toBe(true);
 
     // Final Invoice: full supply plus the deducted advance.
     const fi = doc(ids.fi);
     expect(fi.finalInvoice).toBe(true);
-    expect(str(fi.totals.gross.amount)).toBe("2980");
+    fi.totals.gross.amount.pipe(str, expect).toBe("2980");
     expect(fi.advanceDeductions.length).toBeGreaterThan(0);
-    const deducted = fi.advanceDeductions.reduce(
-      (sum, b) => BigDecimal.sum(sum, b.gross),
-      BigDecimal.fromBigInt(0n),
+    const deducted = EffectArray.reduce(fi.advanceDeductions, BigDecimal.fromBigInt(0n), (sum, b) =>
+      BigDecimal.sum(sum, b.gross),
     );
-    expect(str(deducted)).toBe("2980");
+    deducted.pipe(str, expect).toBe("2980");
     expect(doc(ids.inv).advanceDeductions).toEqual([]);
 
     // Credit Note: negative totals, the corrected kind; the credited invoice owes nothing.
     const cn = doc(ids.cn);
     expect(cn.kind).toBe("credit_note");
     expect(cn.correctsKind).toBe("invoice");
-    expect(str(cn.totals.gross.amount)).toBe("-2980");
-    expect(str(doc(ids.credited).outstanding)).toBe("0");
+    cn.totals.gross.amount.pipe(str, expect).toBe("-2980");
+    doc(ids.credited).outstanding.pipe(str, expect).toBe("0");
 
     // Outstanding and open receivables.
-    expect(str(doc(ids.inv).outstanding)).toBe("1980");
-    expect(str(doc(ids.proforma).outstanding)).toBe("0");
-    expect(str(doc(ids.fi).outstanding)).toBe("0");
+    doc(ids.inv).outstanding.pipe(str, expect).toBe("1980");
+    doc(ids.proforma).outstanding.pipe(str, expect).toBe("0");
+    doc(ids.fi).outstanding.pipe(str, expect).toBe("0");
     // Unpaid `early`, part-paid `inv` and the EUR invoice (121 EUR, 10 paid).
-    expect(r.open.map((row) => row.id).sort()).toEqual(
-      [id(ids.early), id(ids.inv), id(ids.eur)].sort(),
-    );
-    expect(str(doc(ids.eur).outstanding)).toBe("111");
-    expect(str(r.open.find((row) => row.id === id(ids.inv))?.outstanding ?? dec("-1"))).toBe(
-      "1980",
-    );
+    expect(
+      EffectArray.sort(
+        EffectArray.map(r.open, (row) => row.id),
+        Order.String,
+      ),
+    ).toEqual(EffectArray.sort([id(ids.early), id(ids.inv), id(ids.eur)], Order.String));
+    doc(ids.eur).outstanding.pipe(str, expect).toBe("111");
+    (
+      Option.getOrUndefined(EffectArray.findFirst(r.open, (row) => row.id === id(ids.inv)))
+        ?.outstanding ?? dec("-1")
+    )
+      .pipe(str, expect)
+      .toBe("1980");
 
     // Payments: both directions, the target's stored fixing.
-    expect(r.payments.every((p) => p.workspaceId === WORKSPACE_A)).toBe(true);
+    expect(EffectArray.every(r.payments, (p) => p.workspaceId === WORKSPACE_A)).toBe(true);
     const into = (target: DocumentView) =>
-      r.payments.filter((p) => "document" in p.target && p.target.document === id(target));
-    expect(into(ids.inv).map((p) => [p.direction, str(p.amount.amount), p.fx])).toEqual([
-      ["in", "1000", null],
-    ]);
-    expect(into(ids.fi).map((p) => str(p.amount.amount))).toEqual(["10"]);
-    expect(into(ids.proforma).map((p) => str(p.amount.amount))).toEqual(["2980"]);
+      EffectArray.filter(
+        r.payments,
+        (p) => "document" in p.target && p.target.document === id(target),
+      );
+    expect(
+      EffectArray.map(into(ids.inv), (p) => [p.direction, str(p.amount.amount), p.fx]),
+    ).toEqual([["in", "1000", null]]);
+    expect(EffectArray.map(into(ids.fi), (p) => str(p.amount.amount))).toEqual(["10"]);
+    expect(EffectArray.map(into(ids.proforma), (p) => str(p.amount.amount))).toEqual(["2980"]);
     const eurIn = into(ids.eur);
     expect(eurIn.length).toBe(1);
     expect(eurIn[0]?.amount.currency).toBe(EUR);
     expect(rateOf(eurIn[0]?.fx)).toBe("25");
     expect(rateOf(doc(ids.eur).fx)).toBe("25");
-    const out = r.payments.filter((p) => p.direction === "out");
-    expect(out.map((p) => [p.id, p.target, str(p.amount.amount), p.paidOn])).toEqual([
+    const out = EffectArray.filter(r.payments, (p) => p.direction === "out");
+    expect(EffectArray.map(out, (p) => [p.id, p.target, str(p.amount.amount), p.paidOn])).toEqual([
       [OUT_PAYMENT, { expense: ids.expense }, "121", "2026-11-23"],
     ]);
     expect(rateOf(out[0]?.fx)).toBe("25.125");
@@ -362,9 +387,9 @@ describe("ReportsSourceLive", () => {
     expect(r.paymentsOct).toEqual([]);
 
     // Expenses: complete ones in range; the incomplete one is counted.
-    expect(r.expenses.map((e) => [e.id, e.workspaceId, e.taxPoint, e.currency])).toEqual([
-      [ids.expense, WORKSPACE_A, "2026-11-22" as IsoDate, EUR],
-    ]);
+    expect(
+      EffectArray.map(r.expenses, (e) => [e.id, e.workspaceId, e.taxPoint, e.currency]),
+    ).toEqual([[ids.expense, WORKSPACE_A, IsoDate.make("2026-11-22"), EUR]]);
     expect(rateOf(r.expenses[0]?.fx)).toBe("25.125");
     expect(r.expensesB).toEqual([]);
     expect(r.incomplete).toBe(1);
@@ -380,16 +405,17 @@ describe("ReportsSourceLive", () => {
         Effect.gen(function* () {
           const ids = yield* finalInvoiceWithUncoveredCash;
           const docs = yield* read((s) => s.documents(WORKSPACE_A, { ...NOV, field: "issuedOn" }));
-          const doc = (docId: DocumentId) => docs.find((x) => x.id === docId) as ReportDocument;
+          const doc = (docId: DocumentId) =>
+            Option.getOrThrow(EffectArray.findFirst(docs, (x) => x.id === docId));
           return { fi: doc(ids.fi), cn: doc(ids.cn) };
         }),
       ),
     );
     const treatments = (buckets: ReadonlyArray<{ readonly treatment: string }>) =>
-      buckets.map((b) => b.treatment);
+      EffectArray.map(buckets, (b) => b.treatment);
     // The Final Invoice deducts 1000 from its PTD and 400 of uncovered cash (outside_scope).
     expect(r.fi.finalInvoice).toBe(true);
-    expect(str(r.fi.totals.gross.amount)).toBe("2980");
+    r.fi.totals.gross.amount.pipe(str, expect).toBe("2980");
     expect(treatments(r.fi.totals.buckets)).toEqual(["standard", "reduced"]);
     expect(treatments(r.fi.advanceDeductions)).toEqual(["standard", "reduced"]);
     expect(grossOf(r.fi.advanceDeductions)).toBe("1000");
@@ -398,7 +424,7 @@ describe("ReportsSourceLive", () => {
     expect(treatments(taxable)).toEqual(["standard", "reduced"]);
     // The Credit Note reversing it keeps the deducts targets, so it classifies the same way.
     expect(r.cn.correctsKind).toBe("invoice");
-    expect(str(r.cn.totals.gross.amount)).toBe("-2980");
+    r.cn.totals.gross.amount.pipe(str, expect).toBe("-2980");
     expect(treatments(r.cn.totals.buckets)).toEqual(["standard", "reduced"]);
     expect(treatments(r.cn.advanceDeductions)).toEqual(["standard", "reduced"]);
     expect(grossOf(r.cn.advanceDeductions)).toBe("-1000");
@@ -418,7 +444,9 @@ describe("ReportsSourceLive", () => {
       (ids) =>
         corrupt(ids.cn, (row) => ({
           ...row,
-          links: row.links.map((l) => (l.relation === "corrects" ? { ...l, id: MISSING } : l)),
+          links: EffectArray.map(row.links, (l) =>
+            l.relation === "corrects" ? { ...l, id: MISSING } : l,
+          ),
         })),
     ],
     [
@@ -434,7 +462,9 @@ describe("ReportsSourceLive", () => {
       (ids) =>
         corrupt(ids.fi, (row) => ({
           ...row,
-          lines: row.lines.map((l) => (l.deducts === null ? l : { ...l, deducts: MISSING })),
+          lines: EffectArray.map(row.lines, (l) =>
+            l.deducts === null ? l : { ...l, deducts: MISSING },
+          ),
         })),
     ],
   ];
@@ -449,8 +479,8 @@ describe("ReportsSourceLive", () => {
       );
       expect(Exit.isFailure(exit)).toBe(true);
       if (Exit.isFailure(exit)) {
-        expect(Cause.hasDies(exit.cause)).toBe(true);
-        expect(Cause.pretty(exit.cause)).toContain(`${reference} target ${MISSING} not found`);
+        exit.cause.pipe(Cause.hasDies, expect).toBe(true);
+        exit.cause.pipe(Cause.pretty, expect).toContain(`${reference} target ${MISSING} not found`);
       }
     });
   }
@@ -473,8 +503,10 @@ describe("ReportsSourceLive", () => {
       Effect.gen(function* () {
         yield* TestClock.setTime(TEST_NOW);
         const ws = yield* Workspaces;
-        const owner = yield* as(accountOf(OWNER), ws.create({ name: "Acme s.r.o." } as never));
-        const change = { taxRegime: { regime: "vat_payer", effectiveFrom: "2027-01-01" } } as never;
+        const owner = yield* as(accountOf(OWNER), ws.create({ name: "Acme s.r.o." }));
+        const change = IssuingEntityPatch.make({
+          taxRegime: { regime: "vat_payer", effectiveFrom: "2027-01-01" },
+        });
         yield* as(owner, ws.updateIssuingEntity(change, 1));
         return {
           mine: yield* read((s) => s.taxRegimes(owner.workspaceId)),
@@ -486,10 +518,11 @@ describe("ReportsSourceLive", () => {
         ),
       ),
     );
-    expect(ok(exit)).toEqual({
+    const regimes = exit.pipe(ok);
+    expect(regimes).toEqual({
       mine: [
-        { regime: "non_vat_payer", effectiveFrom: "2026-11-23" as IsoDate },
-        { regime: "vat_payer", effectiveFrom: "2027-01-01" as IsoDate },
+        { regime: "non_vat_payer", effectiveFrom: IsoDate.make("2026-11-23") },
+        { regime: "vat_payer", effectiveFrom: IsoDate.make("2027-01-01") },
       ],
       other: [],
     });

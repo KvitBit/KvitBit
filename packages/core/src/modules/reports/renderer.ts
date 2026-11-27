@@ -5,7 +5,10 @@
  * returns deterministic bytes.
  */
 import type { Locale, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Ref } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import type { ReportViewData } from "./views";
 
 export interface ReportPdfInput {
@@ -17,12 +20,12 @@ export interface ReportPdfInput {
 export class ReportPdfRenderer extends Context.Service<
   ReportPdfRenderer,
   { readonly render: (input: ReportPdfInput) => Effect.Effect<Uint8Array> }
->()("kvitbit/core/ReportPdfRenderer") {}
+>()("@kvitbit/core/modules/reports/renderer/ReportPdfRenderer") {}
 
 export class FakeReportPdfRenderer extends Context.Service<
   FakeReportPdfRenderer,
   { readonly calls: Ref.Ref<ReadonlyArray<ReportPdfInput>> }
->()("kvitbit/core/testing/FakeReportPdfRenderer") {
+>()("@kvitbit/core/modules/reports/renderer/FakeReportPdfRenderer") {
   /** Bytes: `%PDF-FAKE <report> <locale> <workspaceId>`. */
   static readonly layer: Layer.Layer<ReportPdfRenderer | FakeReportPdfRenderer> = Layer.effect(
     ReportPdfRenderer,

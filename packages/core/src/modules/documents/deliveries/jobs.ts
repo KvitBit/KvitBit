@@ -6,7 +6,10 @@
  * records the started ids so tests run the job steps themselves.
  */
 import type { DeliveryId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Ref } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 
 export interface StartedDelivery {
   readonly workspaceId: WorkspaceId;
@@ -27,19 +30,20 @@ export class DeliveryJobs extends Context.Service<
      */
     readonly start: (workspaceId: WorkspaceId, deliveryId: DeliveryId) => Effect.Effect<void>;
   }
->()("kvitbit/core/documents/DeliveryJobs") {}
+>()("@kvitbit/core/modules/documents/deliveries/jobs/DeliveryJobs") {}
 
 export class StartedDeliveries extends Context.Service<
   StartedDeliveries,
   Ref.Ref<ReadonlyArray<StartedDelivery>>
->()("kvitbit/core/testing/StartedDeliveries") {}
+>()("@kvitbit/core/modules/documents/deliveries/jobs/StartedDeliveries") {}
 
 export const DeliveryJobsMemory: Layer.Layer<DeliveryJobs | StartedDeliveries> = Layer.effect(
   DeliveryJobs,
   Effect.map(StartedDeliveries, (started) =>
     DeliveryJobs.of({
-      start: (workspaceId, deliveryId) =>
+      start: Effect.fn("DeliveryJobs.start")((workspaceId, deliveryId) =>
         Ref.update(started, (all) => [...all, { workspaceId, deliveryId }]),
+      ),
     }),
   ),
 ).pipe(

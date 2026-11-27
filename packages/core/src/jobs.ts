@@ -5,16 +5,16 @@
  */
 import type {
   DeliveryId,
-  DocumentId,
   ExportId,
   InvitationId,
-  IsoDate,
   Locale,
   ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
-import { Cause, Effect, Stream } from "effect";
+import { CurrentCaller, DocumentId, Documents, IsoDate } from "@kvitbit/domain/contract";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 import { systemCaller } from "./internal/system";
 import * as deliveries from "./modules/documents/deliveries/steps";
 import type { DueReminder } from "./modules/documents/reminders/select";
@@ -24,7 +24,6 @@ import { CSV_CONTENT_TYPE, type CsvTable, csvStream } from "./modules/reports/cs
 import { ExportJobs, REPORTING_FILES } from "./modules/reports/exports";
 import { ReportsSource } from "./modules/reports/source";
 import { documentsTable, expensesTable, paymentsTable } from "./modules/reports/tables";
-import type { InvitationRow } from "./modules/workspaces/model";
 import { WorkspacesRepo } from "./modules/workspaces/repo";
 import { CoreStore, type StoreUnavailable } from "./store/CoreStore";
 
@@ -33,6 +32,9 @@ const asDeliverySystem = (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
     CurrentCaller,
     systemCaller(workspaceId, { _tag: "DocumentDelivery", deliveryId }),
   );
+
+// The workspace selection phase has no individual document.
+const workspaceReminderDocument = DocumentId.make("00000000-0000-7000-8000-000000000000");
 
 const asReminderSystem = (workspaceId: WorkspaceId, documentId: DocumentId) =>
   Effect.provideService(
@@ -63,7 +65,7 @@ export const deliveryJob = {
   /** `sending -> failed` once retries are exhausted, run as `System{DocumentDelivery, deliveryId}`. */
   giveUp: (workspaceId: WorkspaceId, deliveryId: DeliveryId, reason = "retries_exhausted") =>
     deliveries
-      .giveUp(workspaceId, deliveryId, reason)
+      .giveUpWithReason(workspaceId, deliveryId, reason)
       .pipe(asDeliverySystem(workspaceId, deliveryId)),
 
   /** `claim`, then `dispatch` when claimed, run as `System{DocumentDelivery, deliveryId}`. */
@@ -82,72 +84,80 @@ export interface WorkspaceReminderSweepResult {
   readonly deliveryIds: ReadonlyArray<DeliveryId>;
 }
 
+/**
+ * Selects and enqueues every due reminder in `workspaceId` on `today`. One document's
+ * non-interrupt failure is logged and does not stop the remaining reminders.
+ */
+const sweepWorkspace = Effect.fn("sweepWorkspace")(function* (
+  workspaceId: WorkspaceId,
+  today: IsoDate,
+) {
+  const due = yield* selectDueReminders(workspaceId, today).pipe(
+    asReminderSystem(workspaceId, workspaceReminderDocument),
+  );
+  const deliveryIds: Array<DeliveryId> = [];
+  for (const reminder of due) {
+    const queued = yield* enqueueReminder(workspaceId, reminder).pipe(
+      asReminderSystem(workspaceId, reminder.documentId),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.interrupt
+          : Effect.logWarning(
+              "PaymentReminders: enqueue failed",
+              { workspaceId, documentId: reminder.documentId },
+              cause,
+            ).pipe(Effect.as(null)),
+      ),
+    );
+    if (queued !== null) deliveryIds.push(queued);
+  }
+  return { workspaceId, deliveryIds } satisfies WorkspaceReminderSweepResult;
+});
+
 export const reminderJob = {
   /** Selects all reminders due in `workspaceId` on `today`, run as `System{PaymentReminders}`. */
   selectDue: (workspaceId: WorkspaceId, today: IsoDate) =>
-    selectDueReminders(workspaceId, today).pipe(asReminderSystem(workspaceId, "" as DocumentId)),
+    selectDueReminders(workspaceId, today).pipe(
+      asReminderSystem(workspaceId, workspaceReminderDocument),
+    ),
 
   /** Enqueues one due reminder, run as `System{PaymentReminders, documentId}`. */
   enqueue: (workspaceId: WorkspaceId, reminder: DueReminder) =>
     enqueueReminder(workspaceId, reminder).pipe(asReminderSystem(workspaceId, reminder.documentId)),
 
-  /**
-   * Selects and enqueues every due reminder in `workspaceId` on `today`. One document's
-   * non-interrupt failure is logged and does not stop the remaining reminders.
-   */
-  sweepWorkspace: (workspaceId: WorkspaceId, today: IsoDate) =>
-    Effect.gen(function* () {
-      const due = yield* selectDueReminders(workspaceId, today).pipe(
-        asReminderSystem(workspaceId, "" as DocumentId),
-      );
-      const deliveryIds: Array<DeliveryId> = [];
-      for (const reminder of due) {
-        const queued = yield* enqueueReminder(workspaceId, reminder).pipe(
-          asReminderSystem(workspaceId, reminder.documentId),
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause)
-              ? Effect.interrupt
-              : Effect.logWarning(
-                  "PaymentReminders: enqueue failed",
-                  { workspaceId, documentId: reminder.documentId },
-                  cause,
-                ).pipe(Effect.as(null as DeliveryId | null)),
-          ),
-        );
-        if (queued !== null) deliveryIds.push(queued);
-      }
-      return { workspaceId, deliveryIds } satisfies WorkspaceReminderSweepResult;
-    }),
+  sweepWorkspace,
 
   /**
    * Cross-tenant sweep over caller-supplied active workspace ids (the server queries active
    * workspace ids from SQL and passes them here). One workspace's non-interrupt failure is
    * logged and does not stop the others.
    */
-  sweepWorkspaces: (workspaceIds: ReadonlyArray<WorkspaceId>, today: IsoDate) =>
-    Effect.gen(function* () {
-      const results: Array<WorkspaceReminderSweepResult> = [];
-      for (const workspaceId of workspaceIds) {
-        const res = yield* reminderJob.sweepWorkspace(workspaceId, today).pipe(
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause)
-              ? Effect.interrupt
-              : Effect.logWarning(
-                  "PaymentReminders: workspace sweep failed",
-                  { workspaceId },
-                  cause,
-                ).pipe(
-                  Effect.as({
-                    workspaceId,
-                    deliveryIds: [],
-                  } satisfies WorkspaceReminderSweepResult),
-                ),
-          ),
-        );
-        results.push(res);
-      }
-      return results;
-    }),
+  sweepWorkspaces: Effect.fn("sweepWorkspaces")(function* (
+    workspaceIds: ReadonlyArray<WorkspaceId>,
+    today: IsoDate,
+  ) {
+    const results: Array<WorkspaceReminderSweepResult> = [];
+    for (const workspaceId of workspaceIds) {
+      const res = yield* sweepWorkspace(workspaceId, today).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.interrupt
+            : Effect.logWarning(
+                "PaymentReminders: workspace sweep failed",
+                { workspaceId },
+                cause,
+              ).pipe(
+                Effect.as({
+                  workspaceId,
+                  deliveryIds: [],
+                } satisfies WorkspaceReminderSweepResult),
+              ),
+        ),
+      );
+      results.push(res);
+    }
+    return results;
+  }),
 } as const;
 
 // 3. RecurringIssuance ------------------------------------------------------------------------
@@ -181,27 +191,26 @@ export const recurringJob = {
    * Cross-tenant OutboxReconcile for issued recurring runs whose `send` is still pending
    * past `olderThanMillis`. Reruns `run` as each occurrence's System caller (sends only).
    */
-  reconcilePendingSends: (olderThanMillis: number) =>
-    Effect.gen(function* () {
-      const svc = yield* RecurringIssuance;
-      const pending = yield* svc.pendingSends(olderThanMillis);
-      for (const item of pending) {
-        yield* svc.run(item.scheduleId, item.occurrence).pipe(
-          asRecurringSystem(item.workspaceId, item.scheduleId, item.occurrence),
-          Effect.catchCause((cause) =>
-            Cause.hasInterrupts(cause)
-              ? Effect.interrupt
-              : Effect.logWarning("OutboxReconcile: recurring pending send failed", item, cause),
-          ),
-        );
-      }
-      return pending;
-    }),
+  reconcilePendingSends: Effect.fn("reconcilePendingSends")(function* (olderThanMillis: number) {
+    const svc = yield* RecurringIssuance;
+    const pending = yield* svc.pendingSends(olderThanMillis);
+    for (const item of pending) {
+      yield* svc.run(item.scheduleId, item.occurrence).pipe(
+        asRecurringSystem(item.workspaceId, item.scheduleId, item.occurrence),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.interrupt
+            : Effect.logWarning("OutboxReconcile: recurring pending send failed", item, cause),
+        ),
+      );
+    }
+    return pending;
+  }),
 } as const;
 
 // 4. DataExport -------------------------------------------------------------------------------
 
-const allReportDates = { from: "0000-01-01" as IsoDate, to: "9999-12-31" as IsoDate };
+const allReportDates = { from: IsoDate.make("0000-01-01"), to: IsoDate.make("9999-12-31") };
 const issuedReportDates = { ...allReportDates, field: "issuedOn" } as const;
 
 export const exportJob = {
@@ -279,7 +288,7 @@ export const invitationJob = {
           const repo = yield* WorkspacesRepo;
           const row = yield* repo
             .getInvitation(workspaceId, invitationId)
-            .pipe(Effect.catchTag("NotFound", () => Effect.succeed(null as InvitationRow | null)));
+            .pipe(Effect.catchTag("NotFound", () => Effect.succeed(null)));
           if (row === null || row.status !== "pending" || row.expiresAt <= nowIso) {
             return null;
           }
@@ -299,7 +308,7 @@ export const invitationJob = {
           const repo = yield* WorkspacesRepo;
           const row = yield* repo
             .lockInvitation(workspaceId, invitationId)
-            .pipe(Effect.catchTag("NotFound", () => Effect.succeed(null as InvitationRow | null)));
+            .pipe(Effect.catchTag("NotFound", () => Effect.succeed(null)));
           if (row === null || row.status !== "pending" || row.expiresAt > nowIso) {
             return false;
           }

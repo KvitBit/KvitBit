@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { Caller } from "@kvitbit/domain/contract";
 import { Conflict, Forbidden } from "@kvitbit/domain/contract";
-import { Effect, Exit } from "effect";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import type { MembershipChange } from "../src/policy";
 import { checkMembershipChange } from "../src/policy";
 import { member } from "./helpers/callers";
@@ -9,10 +10,10 @@ import { member } from "./helpers/callers";
 const check = (caller: Caller, change: MembershipChange) =>
   Effect.runSyncExit(checkMembershipChange(caller, change));
 const ok = Exit.void;
-const illegal = Exit.fail(new Conflict({ reason: "illegal_transition" }));
+const illegal = Exit.fail(Conflict.make({ reason: "illegal_transition" }));
 const forbidden = (
   action: "member.invite" | "member.setRole" | "member.leave" | "member.manageAdmins",
-) => Exit.fail(new Forbidden({ action }));
+) => Exit.fail(Forbidden.make({ action }));
 
 describe("checkMembershipChange (R1c, R3)", () => {
   const owner = member("owner");
@@ -21,7 +22,7 @@ describe("checkMembershipChange (R1c, R3)", () => {
   test("the owner cannot leave", () => {
     expect(check(owner, { _tag: "Leave" })).toEqual(
       Exit.fail(
-        new Conflict({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
+        Conflict.make({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
       ),
     );
   });
@@ -32,7 +33,7 @@ describe("checkMembershipChange (R1c, R3)", () => {
     );
     expect(check(member("owner", { scopes: ["members:write"] }), { _tag: "Leave" })).toEqual(
       Exit.fail(
-        new Conflict({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
+        Conflict.make({ reason: "illegal_transition", detail: "member.owner_cannot_leave" }),
       ),
     );
     expect(check(member("member", { scopes: ["members:read"] }), { _tag: "Leave" })).toEqual(

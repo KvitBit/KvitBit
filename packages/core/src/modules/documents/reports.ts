@@ -3,8 +3,11 @@
  * stored record. The record keeps a Final Invoice's totals net of its deduction lines (D8);
  * Reports wants the FULL supply plus the buckets deducted from Payment Tax Documents.
  */
+
 import type { DocumentId, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
-import { BigDecimal } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
 import { Fx } from "../../engines/fx";
 import { VatMath } from "../../engines/vat";
 import { mergeBuckets } from "./compose";
@@ -12,12 +15,12 @@ import { deductionBucketsOf, withRounding } from "./credit";
 import type { DocumentRecord } from "./record";
 
 const keyOf = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
-  `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
+  `${b.treatment}|${b.ratePercent.pipe(BigDecimal.normalize, BigDecimal.format)}`;
 
-const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate(v));
+const neg = (v: BigDecimal.BigDecimal) => v.pipe(BigDecimal.negate, BigDecimal.normalize);
 
 const positive = (deducted: ReadonlyArray<VatBucket>): ReadonlyArray<VatBucket> =>
-  deducted.map((b) => ({
+  EffectArray.map(deducted, (b) => ({
     ...b,
     base: neg(b.base),
     vat: neg(b.vat),
@@ -40,49 +43,64 @@ const positive = (deducted: ReadonlyArray<VatBucket>): ReadonlyArray<VatBucket> 
  * round2(full VAT x rate) by at most 0.01 CZK per bucket (two roundings), never by a PTD's
  * fixing difference.
  */
-export const reportFigures = (
-  row: Pick<DocumentRecord, "lines" | "totals" | "currency" | "pricesIncludeVat" | "fx">,
-  deductsPtd: (target: DocumentId) => boolean,
-): { readonly totals: VatBreakdown; readonly advanceDeductions: ReadonlyArray<VatBucket> } => {
-  const fx = row.currency === "CZK" ? null : row.fx;
-  // A bucket whose stored net has no CZK VAT gets none on its deductions either: the VAT report
-  // then converts the net VAT itself instead of reading a partial sum.
-  const storedCzk = new Map(row.totals.buckets.map((b) => [keyOf(b), b.vatCzk]));
-  const atOwnFixing = (buckets: ReadonlyArray<VatBucket>): ReadonlyArray<VatBucket> =>
-    buckets.map((b) => ({
-      ...b,
-      vatCzk:
-        fx === null || (storedCzk.get(keyOf(b)) ?? null) === null ? null : Fx.toCzk(b.vat, fx),
-    }));
-  const deducted = atOwnFixing(deductionBucketsOf(row));
-  if (deducted.length === 0) return { totals: row.totals, advanceDeductions: [] };
-  const advanceDeductions = positive(
-    atOwnFixing(
-      deductionBucketsOf({
-        ...row,
-        lines: row.lines.filter((l) => l.deducts !== null && deductsPtd(l.deducts)),
-      }),
-    ),
-  );
-  // The stored whole-unit adjustment is kept as is (never rounded a second time).
-  const full = withRounding(
-    VatMath.fromBuckets(
-      // A bucket closed in the document currency can keep a CZK residual (a closing Credit
-      // Note's exact CZK VAT against the deductions at its fixing): it stays, so the VAT report
-      // and revenue close exactly.
-      mergeBuckets(row.totals.buckets, positive(deducted)).filter(
-        (b) =>
-          !(
-            BigDecimal.isZero(b.base) &&
-            BigDecimal.isZero(b.vat) &&
-            BigDecimal.isZero(b.gross) &&
-            (b.vatCzk === null || BigDecimal.isZero(b.vatCzk))
-          ),
+export const reportFigures: {
+  (
+    deductsPtd: (target: DocumentId) => boolean,
+  ): (row: Pick<DocumentRecord, "lines" | "totals" | "currency" | "pricesIncludeVat" | "fx">) => {
+    readonly totals: VatBreakdown;
+    readonly advanceDeductions: ReadonlyArray<VatBucket>;
+  };
+  (
+    row: Pick<DocumentRecord, "lines" | "totals" | "currency" | "pricesIncludeVat" | "fx">,
+    deductsPtd: (target: DocumentId) => boolean,
+  ): { readonly totals: VatBreakdown; readonly advanceDeductions: ReadonlyArray<VatBucket> };
+} = Fn.dual(
+  2,
+  (
+    row: Pick<DocumentRecord, "lines" | "totals" | "currency" | "pricesIncludeVat" | "fx">,
+    deductsPtd: (target: DocumentId) => boolean,
+  ): { readonly totals: VatBreakdown; readonly advanceDeductions: ReadonlyArray<VatBucket> } => {
+    const fx = row.currency === "CZK" ? null : row.fx;
+    // A bucket whose stored net has no CZK VAT gets none on its deductions either: the VAT report
+    // then converts the net VAT itself instead of reading a partial sum.
+    const storedCzk = new Map(EffectArray.map(row.totals.buckets, (b) => [keyOf(b), b.vatCzk]));
+    const atOwnFixing = (buckets: ReadonlyArray<VatBucket>): ReadonlyArray<VatBucket> =>
+      EffectArray.map(buckets, (b) => ({
+        ...b,
+        vatCzk:
+          fx === null || (storedCzk.get(keyOf(b)) ?? null) === null ? null : Fx.toCzk(b.vat, fx),
+      }));
+    const deducted = atOwnFixing(deductionBucketsOf(row));
+    if (deducted.length === 0) return { totals: row.totals, advanceDeductions: [] };
+    const advanceDeductions = positive(
+      atOwnFixing(
+        deductionBucketsOf({
+          ...row,
+          lines: EffectArray.filter(row.lines, (l) => l.deducts !== null && deductsPtd(l.deducts)),
+        }),
       ),
-      row.currency,
-      "none",
-    ),
-    row.totals.roundingAdjustment.amount,
-  );
-  return { totals: full, advanceDeductions };
-};
+    );
+    // The stored whole-unit adjustment is kept as is (never rounded a second time).
+    const full = withRounding(
+      VatMath.fromBuckets(
+        // A bucket closed in the document currency can keep a CZK residual (a closing Credit
+        // Note's exact CZK VAT against the deductions at its fixing): it stays, so the VAT report
+        // and revenue close exactly.
+        EffectArray.filter(
+          mergeBuckets(row.totals.buckets, positive(deducted)),
+          (b) =>
+            !(
+              BigDecimal.isZero(b.base) &&
+              BigDecimal.isZero(b.vat) &&
+              BigDecimal.isZero(b.gross) &&
+              (b.vatCzk === null || BigDecimal.isZero(b.vatCzk))
+            ),
+        ),
+        row.currency,
+        "none",
+      ),
+      row.totals.roundingAdjustment.amount,
+    );
+    return { totals: full, advanceDeductions };
+  },
+);

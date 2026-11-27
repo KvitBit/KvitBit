@@ -3,7 +3,7 @@
  * read seam (board #397, #404, #477), the FX fixing cache port, the PDF renderer port, export jobs (`ExportJobs` for the
  * DataExport workflow and Housekeeping, `ExportWorkflow` starter port) and the pure builders.
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { FxFixingsLive } from "../../shared/fx";
 import { ExportJobsLive, ExportsRepoMemory, FakeExportWorkflow } from "./exports";
 import { FxFixingCacheMemory } from "./fxcache";

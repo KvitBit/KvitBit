@@ -5,11 +5,15 @@
  * runs read through it without writing (core-ports 4: dry runs write nothing).
  */
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
-import { Documents, Expenses, Reports, Unavailable } from "@kvitbit/domain/contract";
-import { Effect, Exit, Option, Ref } from "effect";
+import type { DocumentInput } from "@kvitbit/domain/contract";
+import { Documents, Expenses, IsoDate, Reports, Unavailable } from "@kvitbit/domain/contract";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import { FxFixingCache } from "../../src";
 import { FixtureRates } from "../../src/testing";
+import { withoutStackTrace } from "../helpers/run";
 import {
   dec,
   docId,
@@ -34,40 +38,41 @@ describe("FX fixings read through one shared cache", () => {
           );
           yield* Ref.set((yield* FixtureRates).unavailable, true);
 
-          const invoice = yield* issueInvoice(customer, {
+          const invoice = yield* issueInvoice({
+            contact: customer,
             currency: EUR,
             lines: [{ description: "Služby", unitPrice: dec("100") }],
-          } as never);
-          const proforma = yield* issueInvoice(customer, {
+          });
+          const proforma = yield* issueInvoice({
+            contact: customer,
             kind: "proforma",
             currency: EUR,
             lines: [{ description: "Služby", unitPrice: dec("100") }],
-          } as never);
-          yield* payDocument(docId(proforma), "121", EUR);
+          });
+          yield* payDocument({ document: docId(proforma), amount: "121", currency: EUR });
           const ptds = yield* Effect.flatMap(Documents, (d) =>
-            d.list({ kind: "payment_tax_document" } as never),
+            d.list({ kind: "payment_tax_document" }),
           );
-          const expense = expenseFields(
-            yield* Effect.flatMap(Expenses, (e) =>
-              e.record({ ...expenseInput(supplier), currency: "EUR" } as never),
-            ),
+          const flatMapResult = yield* Effect.flatMap(Expenses, (e) =>
+            e.record({ ...expenseInput(supplier), currency: "EUR" }),
           );
+          const expense = expenseFields(flatMapResult);
           const uncached = yield* Effect.exit(
             Effect.flatMap(Reports, (rep) =>
-              rep.fxRate({ currency: EUR, on: "2026-11-02" as IsoDate }),
+              rep.fxRate({ currency: EUR, on: IsoDate.make("2026-11-02") }),
             ),
           );
           return { rate, invoice, ptds, expense, uncached };
         }),
       ),
     );
-    expect(str(r.rate.rate)).toBe("25");
-    const fxOf = (v: unknown) => (v as { readonly fx: { readonly rate: never } | null }).fx;
-    expect(str(fxOf(r.invoice)?.rate ?? dec("0"))).toBe("25");
-    const ptd = (r.ptds as unknown as { readonly items: ReadonlyArray<unknown> }).items;
-    expect(ptd.length).toBe(1);
+    r.rate.rate.pipe(str, expect).toBe("25");
+    (r.invoice.fx?.rate ?? dec("0")).pipe(str, expect).toBe("25");
+    expect(r.ptds.items).toHaveLength(1);
     expect(r.expense.fx?.fixingDate).toBe(TODAY);
-    expect(r.uncached).toEqual(Exit.fail(new Unavailable({ dependency: "exchange_rates" })));
+    expect(r.uncached.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Unavailable.make({ dependency: "exchange_rates" })),
+    );
   });
 
   test("a foreign-currency preview fetches the fixing without caching it; issuing caches it", async () => {
@@ -75,30 +80,30 @@ describe("FX fixings read through one shared cache", () => {
       await inWorkspace(({ customer }) =>
         Effect.gen(function* () {
           const cache = yield* FxFixingCache;
-          const input = {
+          const input: DocumentInput = {
             kind: "invoice",
             contact: customer,
             currency: EUR,
             issuedOn: TODAY,
             lines: [{ description: "Služby", unitPrice: dec("100") }],
-          } as never;
+          };
           const before = yield* cache.get(TODAY);
           const preview = yield* Effect.flatMap(Documents, (d) => d.preview(input));
           const afterPreview = yield* cache.get(TODAY);
-          const invoice = yield* issueInvoice(customer, {
+          const invoice = yield* issueInvoice({
+            contact: customer,
             currency: EUR,
             lines: [{ description: "Služby", unitPrice: dec("100") }],
-          } as never);
+          });
           const afterIssue = yield* cache.get(TODAY);
           return { before, preview, afterPreview, invoice, afterIssue };
         }),
       ),
     );
-    const fxOf = (v: unknown) => (v as { readonly fx: { readonly rate: never } | null }).fx;
-    expect(str(fxOf(r.preview)?.rate ?? dec("0"))).toBe("25");
+    (r.preview.fx?.rate ?? dec("0")).pipe(str, expect).toBe("25");
     expect(r.before).toEqual(Option.none());
     expect(r.afterPreview).toEqual(Option.none());
-    expect(str(fxOf(r.invoice)?.rate ?? dec("0"))).toBe("25");
+    (r.invoice.fx?.rate ?? dec("0")).pipe(str, expect).toBe("25");
     expect(Option.isSome(r.afterIssue)).toBe(true);
   });
 });

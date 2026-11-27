@@ -5,4 +5,6 @@ test("a replay step that runs", () => {
   expect(1 + 1).toBe(2);
 });
 
-test.skip("a replay step that never runs", () => {});
+test.skipIf(true)("a replay step that never runs", () => {
+  throw new Error("skipped replay fixture ran");
+});

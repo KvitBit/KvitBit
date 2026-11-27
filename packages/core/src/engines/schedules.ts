@@ -5,20 +5,25 @@
  * from `startOn`: a monthly rule from 31 Jan gives 31 Jan, 28 Feb, 31 Mar (day clamped to the
  * month's end, never drifting). Yearly from 29 Feb gives 28 Feb in common years.
  */
+
 import type { IsoDate } from "@kvitbit/domain/contract";
-import { Invalid, ScheduleRule } from "@kvitbit/domain/contract";
-import { Result } from "effect";
+import { Invalid, type ScheduleRule } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import {
   addDays,
+  addDaysWithinRange,
   addMonths,
+  addMonthsWithinRange,
   daysBetween,
   isCalendarDate,
-  isInIsoRange,
   parseIsoDate,
   pragueStartOfDay,
 } from "./calendar";
 
-export { ScheduleRule };
+export { ScheduleRule } from "@kvitbit/domain/contract";
 
 const stepOf = (rule: ScheduleRule): { unit: "weeks" | "months" | "years"; n: number } =>
   "weeks" in rule.every
@@ -27,13 +32,25 @@ const stepOf = (rule: ScheduleRule): { unit: "weeks" | "months" | "years"; n: nu
       ? { unit: "months", n: rule.every.months }
       : { unit: "years", n: rule.every.years };
 
-/** Occurrence k of the rule (ignores `endOn`). */
-export const occurrence = (rule: ScheduleRule, k: number): IsoDate => {
+const occurrenceShift = (rule: ScheduleRule, k: number) => {
   const { unit, n } = stepOf(rule);
   return unit === "weeks"
-    ? addDays(rule.startOn, 7 * n * k)
-    : addMonths(rule.startOn, (unit === "months" ? n : 12 * n) * k);
+    ? { unit: "days" as const, amount: 7 * n * k }
+    : { unit: "months" as const, amount: (unit === "months" ? n : 12 * n) * k };
 };
+
+/** Occurrence k of the rule (ignores `endOn`). */
+const occurrence: {
+  (k: number): (rule: ScheduleRule) => IsoDate;
+  (rule: ScheduleRule, k: number): IsoDate;
+} = Fn.dual(2, (rule: ScheduleRule, k: number): IsoDate => {
+  const shift = occurrenceShift(rule, k);
+  return shift.unit === "days"
+    ? addDays(rule.startOn, shift.amount)
+    : addMonths(rule.startOn, shift.amount);
+});
+
+const PositiveCadence = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
 /** The smallest k whose occurrence may be on or after `from` (a lower bound, never too high). */
 const firstCandidate = (rule: ScheduleRule, from: IsoDate): number => {
@@ -47,34 +64,33 @@ const firstCandidate = (rule: ScheduleRule, from: IsoDate): number => {
 };
 
 /** Up to n occurrences on or after `from`, in order; fewer when `endOn` comes first. */
-export const nextOccurrences = (
-  rule: ScheduleRule,
-  from: IsoDate,
-  n: number,
-): ReadonlyArray<IsoDate> => {
-  const { n: step } = stepOf(rule);
-  if (!Number.isInteger(step) || step < 1) {
-    throw new Error("Schedules.nextOccurrences: invalid cadence; run Schedules.validate first");
-  }
+const nextOccurrences: {
+  (from: IsoDate, n: number): (rule: ScheduleRule) => ReadonlyArray<IsoDate>;
+  (rule: ScheduleRule, from: IsoDate, n: number): ReadonlyArray<IsoDate>;
+} = Fn.dual(3, (rule: ScheduleRule, from: IsoDate, n: number): ReadonlyArray<IsoDate> => {
+  PositiveCadence.make(stepOf(rule).n);
   const out: Array<IsoDate> = [];
   for (let k = firstCandidate(rule, from); out.length < n; k++) {
-    const date = occurrence(rule, k);
-    // Past 9999-12-31 the date no longer fits IsoDate: the calendar ends there.
-    if (!isInIsoRange(date)) break;
+    const shift = occurrenceShift(rule, k);
+    const date =
+      shift.unit === "days"
+        ? addDaysWithinRange(rule.startOn, shift.amount)
+        : addMonthsWithinRange(rule.startOn, shift.amount);
+    if (date === null) break;
     if (rule.endOn !== undefined && date > rule.endOn) break;
     if (date >= from) out.push(date);
   }
   return out;
-};
+});
 
 /**
  * `Invalid{schedule.cadence_invalid}` unless the step is a positive integer, the
  * dates are calendar dates and `endOn` (when set) is not before `startOn`.
  */
-export const validate = (rule: ScheduleRule): Result.Result<ScheduleRule, Invalid> => {
+const validate = (rule: ScheduleRule): Result.Result<ScheduleRule, Invalid> => {
   const fail = (path: ReadonlyArray<string>, reason: string) =>
     Result.fail(
-      new Invalid({
+      Invalid.make({
         issues: [{ path: [...path], code: "schedule.cadence_invalid", params: { reason } }],
       }),
     );
@@ -100,22 +116,24 @@ export interface ReminderStep {
 }
 
 /** The Prague dates of each reminder step for a due date. */
-export const reminderSteps = (
-  dueOn: IsoDate,
-  offsetsDays: ReadonlyArray<number>,
-): ReadonlyArray<ReminderStep> =>
-  offsetsDays.map((offsetDays, step) => ({ step, offsetDays, date: addDays(dueOn, offsetDays) }));
+const reminderSteps: {
+  (offsetsDays: ReadonlyArray<number>): (dueOn: IsoDate) => ReadonlyArray<ReminderStep>;
+  (dueOn: IsoDate, offsetsDays: ReadonlyArray<number>): ReadonlyArray<ReminderStep>;
+} = Fn.dual(
+  2,
+  (dueOn: IsoDate, offsetsDays: ReadonlyArray<number>): ReadonlyArray<ReminderStep> =>
+    EffectArray.flatMap(offsetsDays, (offsetDays, step) => {
+      const date = addDaysWithinRange(dueOn, offsetDays);
+      return date === null ? [] : [{ step, offsetDays, date }];
+    }),
+);
 
 /**
  * Milliseconds from `nowMillis` until `hour`:00 Prague time on `dueOn + offsetDays` (default
  * midnight), never negative: the `untilPrague(dueOn + offset_i)` of the PaymentReminders
  * workflow (core-ports 7.2). A step already in the past fires immediately (0).
  */
-export const untilReminder = (
-  dueOn: IsoDate,
-  offsetDays: number,
-  nowMillis: number,
-  hour = 0,
-): number => Math.max(0, pragueStartOfDay(addDays(dueOn, offsetDays), hour) - nowMillis);
+const untilReminder = (dueOn: IsoDate, offsetDays: number, nowMillis: number, hour = 0): number =>
+  Math.max(0, pragueStartOfDay(addDays(dueOn, offsetDays), hour) - nowMillis);
 
 export const Reminders = { reminderSteps, untilReminder } as const;

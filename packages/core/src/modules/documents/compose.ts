@@ -13,6 +13,7 @@
  * today / the current Contact and Workspace defaults again on every recompute (each edit, and
  * issue); only the caller's own values (`given`) persist. Issue pins the resolved values.
  */
+
 import type {
   BankAccountId,
   ContactId,
@@ -34,15 +35,23 @@ import type {
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Invalid, NotFound } from "@kvitbit/domain/contract";
+import { Invalid, LineId as LineIdSchema, NotFound } from "@kvitbit/domain/contract";
 import type { RatesUnavailable } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Result } from "effect";
-import { addDays, isCalendarDate, MAX_ISO_DATE } from "../../engines/calendar";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+import { addDaysWithinRange, isCalendarDate } from "../../engines/calendar";
 import { HUNDRED, ZERO } from "../../engines/decimal";
 import { Fx } from "../../engines/fx";
 import { VatMath } from "../../engines/vat";
 import { FxFixings } from "../../shared/fx";
-import { IdGenerator } from "../../shared/ids";
+import { type IdGenerator, newId } from "../../shared/ids";
 import { resolveDocumentDefaults } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import { NumberingSeries } from "../numbering";
@@ -53,12 +62,13 @@ import type {
   ContactSnapshotRecord,
   DocumentRecord,
   FxRecord,
-  GivenFields,
   IssuerSnapshotRecord,
   LineRecord,
   PaymentRounding,
 } from "./record";
+import { GivenFields } from "./record";
 
+const VARIABLE_SYMBOL = /^\d{1,10}$/;
 const ONE = BigDecimal.fromBigInt(1n);
 
 /** A line before treatment resolution. */
@@ -169,73 +179,110 @@ export type ComposeServices =
   | IdGenerator;
 
 const issue = (path: Issue["path"], code: Issue["code"], params?: Record<string, string>): Issue =>
-  params ? { path, code, params } : { path, code };
+  params !== undefined ? { path, code, params } : { path, code };
 
-const invalid = (issues: ReadonlyArray<Issue>) =>
-  new Invalid({ issues: issues as [Issue, ...Array<Issue>] });
+const invalid = (issues: readonly [Issue, ...Array<Issue>]) => Invalid.make({ issues });
 
 // Specs -------------------------------------------------------------------------------------
 
 /** Expands `LineInput`s (Price List Item fill-in) into line specs. */
-export const expandLines = (
-  workspaceId: WorkspaceId,
-  lines: ReadonlyArray<LineInput>,
-): Effect.Effect<
-  ReadonlyArray<LineSpec>,
-  Invalid | NotFound | StoreUnavailable,
-  DocumentPriceList
-> =>
-  Effect.gen(function* () {
-    const priceList = yield* DocumentPriceList;
-    const issues: Array<Issue> = [];
-    const out: Array<LineSpec> = [];
-    for (const [i, line] of lines.entries()) {
-      const item =
-        line.item === undefined ? null : yield* priceList.forLine(workspaceId, line.item);
-      // Blank values fall back to the item (description, then name); a blank result is invalid.
-      const description = [line.description, item?.description, item?.name]
-        .map((d) => d?.trim())
-        .find((d) => d !== undefined && d !== "");
-      const unitPrice = line.unitPrice ?? item?.unitPrice;
-      if (description === undefined)
-        issues.push(
-          issue(["lines", i, "description"], "request.malformed", { reason: "required" }),
+export const expandLines: {
+  (
+    lines: ReadonlyArray<LineInput>,
+  ): (
+    workspaceId: WorkspaceId,
+  ) => Effect.Effect<
+    ReadonlyArray<LineSpec>,
+    Invalid | NotFound | StoreUnavailable,
+    DocumentPriceList
+  >;
+  (
+    workspaceId: WorkspaceId,
+    lines: ReadonlyArray<LineInput>,
+  ): Effect.Effect<
+    ReadonlyArray<LineSpec>,
+    Invalid | NotFound | StoreUnavailable,
+    DocumentPriceList
+  >;
+} = Fn.dual(
+  2,
+  (
+    workspaceId: WorkspaceId,
+    lines: ReadonlyArray<LineInput>,
+  ): Effect.Effect<
+    ReadonlyArray<LineSpec>,
+    Invalid | NotFound | StoreUnavailable,
+    DocumentPriceList
+  > =>
+    Effect.gen(function* () {
+      const priceList = yield* DocumentPriceList;
+      const issues: Array<Issue> = [];
+      const out: Array<LineSpec> = [];
+      for (const [i, line] of lines.entries()) {
+        const item =
+          line.item === undefined ? null : yield* priceList.forLine(workspaceId, line.item);
+        // Blank values fall back to the item (description, then name); a blank result is invalid.
+        const description = Option.getOrUndefined(
+          EffectArray.findFirst(
+            EffectArray.map([line.description, item?.description, item?.name], (d) =>
+              d === undefined || d === null ? undefined : EffectString.trim(d),
+            ),
+            (d) => d !== undefined && d !== "",
+          ),
         );
-      if (unitPrice === undefined)
-        issues.push(issue(["lines", i, "unitPrice"], "request.malformed", { reason: "required" }));
-      if (description === undefined || unitPrice === undefined) continue;
-      out.push({
-        id: null,
-        item: line.item ?? null,
-        description,
-        quantity: line.quantity ?? ONE,
-        unit: line.unit ?? item?.unit ?? null,
-        unitPrice,
-        vat: line.vat ?? null,
-        itemVat: item?.vat ?? null,
-        itemPrice:
-          line.unitPrice === undefined && item
-            ? { currency: item.currency, net: item.unitPrice }
-            : null,
-        deducts: null,
-        deduction: null,
-      });
-    }
-    if (issues.length > 0) return yield* invalid(issues);
-    return out;
-  });
+        const unitPrice = line.unitPrice ?? item?.unitPrice;
+        if (description === undefined)
+          issues.push(
+            issue(["lines", i, "description"], "request.malformed", { reason: "required" }),
+          );
+        if (unitPrice === undefined)
+          issues.push(
+            issue(["lines", i, "unitPrice"], "request.malformed", { reason: "required" }),
+          );
+        if (description === undefined || unitPrice === undefined) continue;
+        out.push({
+          id: null,
+          item: line.item ?? null,
+          description,
+          quantity: line.quantity ?? ONE,
+          unit: line.unit ?? item?.unit ?? null,
+          unitPrice,
+          vat: line.vat ?? null,
+          itemVat: item?.vat ?? null,
+          itemPrice:
+            line.unitPrice === undefined && item !== null
+              ? { currency: item.currency, net: item.unitPrice }
+              : null,
+          deducts: null,
+          deduction: null,
+        });
+      }
+      if (EffectArray.isArrayNonEmpty(issues)) return yield* invalid(issues);
+      return out;
+    }),
+);
 
-const definedOnly = <A extends object>(value: A): A =>
-  Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as A;
+const decodeGiven = Schema.decodeUnknownOption(GivenFields);
+const definedGiven = (given: GivenFields): GivenFields =>
+  Option.getOrThrow(
+    decodeGiven(
+      EffectRecord.fromEntries(
+        EffectArray.filter(
+          EffectRecord.toEntries<string, GivenFields[keyof GivenFields]>(given),
+          ([, value]) => value !== undefined,
+        ),
+      ),
+    ),
+  );
 
 /** The spec of a new document. */
-export const specFromInput = (workspaceId: WorkspaceId, input: DocumentInput) =>
+const specFromInputImpl = (workspaceId: WorkspaceId, input: DocumentInput) =>
   Effect.map(
     expandLines(workspaceId, input.lines),
     (lines): DocumentSpec => ({
       kind: input.kind,
       contactId: input.contact,
-      given: definedOnly({
+      given: definedGiven({
         currency: input.currency,
         issuedOn: input.issuedOn,
         taxableSupplyOn: input.taxableSupplyOn,
@@ -253,13 +300,17 @@ export const specFromInput = (workspaceId: WorkspaceId, input: DocumentInput) =>
       fxOverride: input.fx ?? null,
     }),
   );
+export const specFromInput: {
+  (input: DocumentInput): (workspaceId: WorkspaceId) => ReturnType<typeof specFromInputImpl>;
+  (workspaceId: WorkspaceId, input: DocumentInput): ReturnType<typeof specFromInputImpl>;
+} = Fn.dual(2, specFromInputImpl);
 
 /** The spec a stored record was composed from (for recomputes). */
 export const specFromRecord = (row: DocumentRecord): DocumentSpec => ({
   kind: row.kind,
   contactId: row.contactId,
   given: row.given,
-  lines: row.lines.map((l) => ({
+  lines: EffectArray.map(row.lines, (l) => ({
     id: l.id,
     item: l.item,
     description: l.description,
@@ -291,44 +342,47 @@ export const specFromRecord = (row: DocumentRecord): DocumentSpec => ({
 });
 
 /** The fields of `DocumentPatch` that `applyPatch` handles (number/refreshParties are P2's). */
-export const applyPatch = (workspaceId: WorkspaceId, spec: DocumentSpec, patch: DocumentPatch) =>
-  Effect.gen(function* () {
-    // A Final Invoice keeps its deduction lines (D8) whatever lines the patch gives.
-    const lines =
-      patch.lines === undefined
-        ? spec.lines
-        : [
-            ...(yield* expandLines(workspaceId, patch.lines)),
-            ...spec.lines.filter((l) => l.deduction !== null),
-          ];
-    const given: GivenFields = definedOnly({
-      ...spec.given,
-      currency: patch.currency ?? spec.given.currency,
-      issuedOn: patch.issuedOn ?? spec.given.issuedOn,
-      taxableSupplyOn: patch.taxableSupplyOn ?? spec.given.taxableSupplyOn,
-      due: patch.due ?? spec.given.due,
-      language: patch.language ?? spec.given.language,
-      series: patch.series ?? spec.given.series,
-      bankAccount: patch.bankAccount ?? spec.given.bankAccount,
-      note: patch.note ?? spec.given.note,
-      paymentMethod: patch.paymentMethod ?? spec.given.paymentMethod,
-      variableSymbol: patch.variableSymbol ?? spec.given.variableSymbol,
-    });
-    return {
-      ...spec,
-      contactId: patch.contact ?? spec.contactId,
-      given,
-      lines,
-      pricesIncludeVat: patch.pricesIncludeVat ?? spec.pricesIncludeVat,
-      orderNumber: patch.orderNumber ?? spec.orderNumber,
-      fxOverride: patch.fx === undefined ? spec.fxOverride : patch.fx,
-    } satisfies DocumentSpec;
+export const applyPatch = Effect.fn("applyPatch")(function* (
+  workspaceId: WorkspaceId,
+  spec: DocumentSpec,
+  patch: DocumentPatch,
+) {
+  // A Final Invoice keeps its deduction lines (D8) whatever lines the patch gives.
+  const lines =
+    patch.lines === undefined
+      ? spec.lines
+      : [
+          ...(yield* expandLines(workspaceId, patch.lines)),
+          ...EffectArray.filter(spec.lines, (l) => l.deduction !== null),
+        ];
+  const given: GivenFields = definedGiven({
+    ...spec.given,
+    currency: patch.currency ?? spec.given.currency,
+    issuedOn: patch.issuedOn ?? spec.given.issuedOn,
+    taxableSupplyOn: patch.taxableSupplyOn ?? spec.given.taxableSupplyOn,
+    due: patch.due ?? spec.given.due,
+    language: patch.language ?? spec.given.language,
+    series: patch.series ?? spec.given.series,
+    bankAccount: patch.bankAccount ?? spec.given.bankAccount,
+    note: patch.note ?? spec.given.note,
+    paymentMethod: patch.paymentMethod ?? spec.given.paymentMethod,
+    variableSymbol: patch.variableSymbol ?? spec.given.variableSymbol,
   });
+  return {
+    ...spec,
+    contactId: patch.contact ?? spec.contactId,
+    given,
+    lines,
+    pricesIncludeVat: patch.pricesIncludeVat ?? spec.pricesIncludeVat,
+    orderNumber: patch.orderNumber ?? spec.orderNumber,
+    fxOverride: patch.fx === undefined ? spec.fxOverride : patch.fx,
+  } satisfies DocumentSpec;
+});
 
 // Rule D9 -----------------------------------------------------------------------------------
 
 /** A caller's variable symbol (Czech payment reference) must be 1-10 digits. */
-const isValidVariableSymbol = (vs: string): boolean => /^\d{1,10}$/.test(vs);
+const isValidVariableSymbol = (vs: string): boolean => VARIABLE_SYMBOL.test(vs);
 
 /** EU member states (ISO 3166-1 alpha-2, Greece as GR) other than CZ. */
 const EU = new Set([
@@ -361,21 +415,24 @@ const EU = new Set([
 ]);
 
 const countryOf = (contact: ContactForDocument) =>
-  contact.party.address.country.trim().toUpperCase();
+  EffectString.toUpperCase(EffectString.trim(contact.party.address.country));
 const isDomestic = (contact: ContactForDocument) => countryOf(contact) === "CZ";
 const isOtherEu = (contact: ContactForDocument) => EU.has(countryOf(contact));
-const hasVatId = (contact: ContactForDocument) => (contact.party.dic ?? "").trim() !== "";
+const hasVatId = (contact: ContactForDocument) => EffectString.trim(contact.party.dic ?? "") !== "";
 
 /**
  * Default treatment (rule D9): vat_payer + domestic Contact → standard; vat_payer + EU
  * business Contact with a VAT ID → reverse_charge (services); everyone else → outside_scope.
  */
-export const defaultTreatment = (regime: TaxRegime, contact: ContactForDocument): VatTreatment => {
+export const defaultTreatment: {
+  (contact: ContactForDocument): (regime: TaxRegime) => VatTreatment;
+  (regime: TaxRegime, contact: ContactForDocument): VatTreatment;
+} = Fn.dual(2, (regime: TaxRegime, contact: ContactForDocument): VatTreatment => {
   if (regime !== "vat_payer") return "outside_scope";
   if (isDomestic(contact)) return "standard";
   if (isOtherEu(contact) && hasVatId(contact)) return "reverse_charge";
   return "outside_scope";
-};
+});
 
 /**
  * Treatment of one line: the caller's `vat`; else, for a vat_payer, the Price List Item's;
@@ -396,7 +453,7 @@ const regimeIssues = (
   contact: ContactForDocument,
   treatments: ReadonlyArray<VatTreatment>,
 ): ReadonlyArray<Issue> =>
-  treatments.flatMap((treatment, i): ReadonlyArray<Issue> => {
+  EffectArray.flatMap(treatments, (treatment, i): ReadonlyArray<Issue> => {
     const path = ["lines", i, "vat"];
     const allowed =
       regime === "vat_payer" ||
@@ -416,14 +473,25 @@ const regimeIssues = (
   });
 
 /** Tax document (rule D6): a vat_payer's, or an identified_person's carrying VAT; never a Proforma. */
-export const isTaxDocument = (
+const isTaxDocumentImpl = (
   kind: DocumentKind,
   regime: TaxRegime,
   treatments: ReadonlyArray<VatTreatment>,
 ) =>
   kind !== "proforma" &&
   (regime === "vat_payer" ||
-    (regime === "identified_person" && treatments.some((t) => t !== "outside_scope")));
+    (regime === "identified_person" && EffectArray.some(treatments, (t) => t !== "outside_scope")));
+export const isTaxDocument: {
+  (
+    regime: TaxRegime,
+    treatments: ReadonlyArray<VatTreatment>,
+  ): (kind: DocumentKind) => ReturnType<typeof isTaxDocumentImpl>;
+  (
+    kind: DocumentKind,
+    regime: TaxRegime,
+    treatments: ReadonlyArray<VatTreatment>,
+  ): ReturnType<typeof isTaxDocumentImpl>;
+} = Fn.dual(3, isTaxDocumentImpl);
 
 // Compose -----------------------------------------------------------------------------------
 
@@ -432,9 +500,14 @@ const pickBankAccount = (
   currency: string,
   given: BankAccountId | undefined,
 ) => {
-  if (given !== undefined) return issuer.bankAccounts.find((a) => a.id === given);
-  const inCurrency = issuer.bankAccounts.filter((a) => a.currency === currency);
-  return inCurrency.find((a) => a.isDefault) ?? inCurrency[0] ?? null;
+  if (given !== undefined)
+    return Option.getOrUndefined(EffectArray.findFirst(issuer.bankAccounts, (a) => a.id === given));
+  const inCurrency = EffectArray.filter(issuer.bankAccounts, (a) => a.currency === currency);
+  return (
+    Option.getOrUndefined(EffectArray.findFirst(inCurrency, (a) => a.isDefault)) ??
+    inCurrency[0] ??
+    null
+  );
 };
 
 const contactSnapshot = (contact: ContactForDocument): ContactSnapshotRecord => ({
@@ -453,7 +526,7 @@ const sameOverride = (a: FxOverride | null, b: FxOverride | null) =>
     : BigDecimal.equals(a.manual.rate, b.manual.rate) && a.manual.quantity === b.manual.quantity;
 
 const bucketKey = (b: Pick<VatBucket, "treatment" | "ratePercent">) =>
-  `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
+  `${b.treatment}|${b.ratePercent.pipe(BigDecimal.normalize, BigDecimal.format)}`;
 
 const addOpt = (a: BigDecimal.BigDecimal | null, b: BigDecimal.BigDecimal | null) =>
   a === null ? b : b === null ? a : BigDecimal.normalize(BigDecimal.sum(a, b));
@@ -482,276 +555,294 @@ export const mergeBuckets = (
   return [...byKey.values()];
 };
 
-export const compose = (
-  workspaceId: WorkspaceId,
-  spec: DocumentSpec,
-  options: ComposeOptions,
-): Effect.Effect<Composed, ComposeError, ComposeServices> =>
-  Effect.gen(function* () {
-    const { given, kind } = spec;
-    const contact = yield* (yield* DocumentContacts).forDocument(workspaceId, spec.contactId);
-    const issuedOn = given.issuedOn ?? options.today;
-    // DocumentInput: default issuedOn, for every kind; it drives the VAT rate and CNB fixing.
-    const taxableSupplyOn = given.taxableSupplyOn ?? issuedOn;
-    const taxPoint = taxableSupplyOn;
-    // NotFound{Workspace} (agreements #414/#418) passes through.
-    const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, taxPoint);
-    const frozen = options.freeze;
-    const samePoint = frozen !== undefined && frozen.taxableSupplyOn === taxPoint;
-    // D10: an issued document's tax results follow its frozen parties, not live changes.
-    const regime = samePoint ? frozen.regime : issuer.regime;
-    const buyer: ContactForDocument =
-      frozen?.contact === undefined
-        ? contact
-        : {
-            ...contact,
-            party: {
-              contactId: frozen.contact.contactId,
-              name: frozen.contact.name,
-              ico: frozen.contact.ico,
-              dic: frozen.contact.dic,
-              legalForm: frozen.contact.legalForm,
-              address: frozen.contact.address,
-            },
-          };
+export const compose: {
+  (
+    spec: DocumentSpec,
+    options: ComposeOptions,
+  ): (workspaceId: WorkspaceId) => Effect.Effect<Composed, ComposeError, ComposeServices>;
+  (
+    workspaceId: WorkspaceId,
+    spec: DocumentSpec,
+    options: ComposeOptions,
+  ): Effect.Effect<Composed, ComposeError, ComposeServices>;
+} = Fn.dual(
+  3,
+  (
+    workspaceId: WorkspaceId,
+    spec: DocumentSpec,
+    options: ComposeOptions,
+  ): Effect.Effect<Composed, ComposeError, ComposeServices> =>
+    Effect.gen(function* () {
+      const { given, kind } = spec;
+      const contact = yield* (yield* DocumentContacts).forDocument(workspaceId, spec.contactId);
+      const issuedOn = given.issuedOn ?? options.today;
+      // DocumentInput: default issuedOn, for every kind; it drives the VAT rate and CNB fixing.
+      const taxPoint = given.taxableSupplyOn ?? issuedOn;
+      // NotFound{Workspace} (agreements #414/#418) passes through.
+      const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, taxPoint);
+      const frozen = options.freeze;
+      const samePoint = frozen !== undefined && frozen.taxableSupplyOn === taxPoint;
+      // D10: an issued document's tax results follow its frozen parties, not live changes.
+      const regime = samePoint ? frozen.regime : issuer.regime;
+      const buyer: ContactForDocument =
+        frozen?.contact === undefined
+          ? contact
+          : {
+              ...contact,
+              party: {
+                contactId: frozen.contact.contactId,
+                name: frozen.contact.name,
+                ico: frozen.contact.ico,
+                dic: frozen.contact.dic,
+                legalForm: frozen.contact.legalForm,
+                address: frozen.contact.address,
+              },
+            };
 
-    const defaults = resolveDocumentDefaults({
-      kind,
-      document: {
-        currency: given.currency,
-        language: given.language,
-        dueDays: given.due !== undefined && "inDays" in given.due ? given.due.inDays : undefined,
-        paymentMethod: given.paymentMethod,
-        series: given.series,
-        note: given.note ?? undefined,
-      },
-      contact: contact.defaults,
-      workspace: issuer.billing,
-    });
-    const currency = defaults.currency;
+      const defaults = resolveDocumentDefaults({
+        kind,
+        document: {
+          currency: given.currency,
+          language: given.language,
+          dueDays: given.due !== undefined && "inDays" in given.due ? given.due.inDays : undefined,
+          paymentMethod: given.paymentMethod,
+          series: given.series,
+          note: given.note ?? undefined,
+        },
+        contact: contact.defaults,
+        workspace: issuer.billing,
+      });
+      const currency = defaults.currency;
 
-    const issues: Array<Issue> = [];
-    const dueOn =
-      given.due !== undefined && "on" in given.due
-        ? given.due.on
-        : addDays(issuedOn, defaults.dueDays);
-    if (!isCalendarDate(dueOn) || dueOn > MAX_ISO_DATE) {
-      // e.g. a huge `inDays`: the result must still be an IsoDate (four-digit year).
-      issues.push(issue(["due"], "request.malformed", { reason: "out_of_range" }));
-    } else if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
+      const issues: Array<Issue> = [];
+      const dueOn =
+        given.due !== undefined && "on" in given.due
+          ? given.due.on
+          : addDaysWithinRange(issuedOn, defaults.dueDays);
+      if (dueOn === null || !isCalendarDate(dueOn)) {
+        // e.g. a huge `inDays`: the result must still be an IsoDate (four-digit year).
+        issues.push(issue(["due"], "request.malformed", { reason: "out_of_range" }));
+      } else if (dueOn < issuedOn) issues.push(issue(["due"], "document.due_before_issue"));
 
-    // Deduction lines keep the deducted document's treatment and rate (D8): no D9 checks.
-    const treatments = spec.lines.map(
-      (l) => l.deduction?.treatment ?? treatmentOf(l, regime, buyer),
-    );
-    const supplyTreatments = treatments.filter((_, i) => spec.lines[i]?.deduction === null);
-    issues.push(...regimeIssues(regime, buyer, supplyTreatments));
-    spec.lines.forEach((l, i) => {
-      // A price copied from the Price List is in the item's currency: it must match (also
-      // after an edit changes the document currency); else the caller gives a unitPrice.
-      if (l.itemPrice !== null && l.itemPrice.currency !== currency) {
-        issues.push(
-          issue(["lines", i, "unitPrice"], "request.malformed", {
-            reason: "currency_mismatch",
-            currency: l.itemPrice.currency,
-          }),
-        );
-      }
-    });
-    spec.lines.forEach((l) => {
-      // Deducted amounts are in the deducted document's currency.
-      if (l.deduction !== null && l.deduction.currency !== currency) {
-        issues.push(
-          issue(["currency"], "request.malformed", {
-            reason: "currency_mismatch",
-            currency: l.deduction.currency,
-          }),
-        );
-      }
-    });
-    if (supplyTreatments.length === 0) issues.push(issue(["lines"], "document.lines_required"));
-    if (given.variableSymbol !== undefined && !isValidVariableSymbol(given.variableSymbol)) {
-      issues.push(
-        issue(["variableSymbol"], "request.malformed", { reason: "variable_symbol_invalid" }),
+      // Deduction lines keep the deducted document's treatment and rate (D8): no D9 checks.
+      const treatments = EffectArray.map(
+        spec.lines,
+        (l) => l.deduction?.treatment ?? treatmentOf(l, regime, buyer),
       );
-    }
-    if (issues.length > 0) return yield* invalid(issues);
+      const supplyTreatments = EffectArray.filter(
+        treatments,
+        (_, i) => spec.lines[i]?.deduction === null,
+      );
+      issues.push(...regimeIssues(regime, buyer, supplyTreatments));
+      EffectArray.forEach(spec.lines, (l, i) => {
+        // A price copied from the Price List is in the item's currency: it must match (also
+        // after an edit changes the document currency); else the caller gives a unitPrice.
+        if (l.itemPrice !== null && l.itemPrice.currency !== currency) {
+          issues.push(
+            issue(["lines", i, "unitPrice"], "request.malformed", {
+              reason: "currency_mismatch",
+              currency: l.itemPrice.currency,
+            }),
+          );
+        }
+      });
+      EffectArray.forEach(spec.lines, (l) => {
+        // Deducted amounts are in the deducted document's currency.
+        if (l.deduction !== null && l.deduction.currency !== currency) {
+          issues.push(
+            issue(["currency"], "request.malformed", {
+              reason: "currency_mismatch",
+              currency: l.deduction.currency,
+            }),
+          );
+        }
+      });
+      if (supplyTreatments.length === 0) issues.push(issue(["lines"], "document.lines_required"));
+      if (given.variableSymbol !== undefined && !isValidVariableSymbol(given.variableSymbol)) {
+        issues.push(
+          issue(["variableSymbol"], "request.malformed", { reason: "variable_symbol_invalid" }),
+        );
+      }
+      if (EffectArray.isArrayNonEmpty(issues)) return yield* invalid(issues);
+      if (dueOn === null) return yield* Effect.die(new Error("Missing due date after validation"));
 
-    // Series: an explicit (Document or Contact) choice must be a series of this kind here.
-    let seriesId: NumberingSeriesId | null = defaults.series;
-    if (seriesId !== null && seriesId !== issuer.billing.seriesByKind[kind]) {
-      const series = yield* (yield* NumberingSeries).resolve(workspaceId, kind, seriesId);
-      seriesId = series.id;
-    }
+      // Series: an explicit (Document or Contact) choice must be a series of this kind here.
+      let seriesId: NumberingSeriesId | null = defaults.series;
+      if (seriesId !== null && seriesId !== issuer.billing.seriesByKind[kind]) {
+        const series = yield* (yield* NumberingSeries).resolve(workspaceId, kind, seriesId);
+        seriesId = series.id;
+      }
 
-    const kept = frozen?.bankAccount;
-    const account =
-      kept !== undefined &&
-      frozen?.currency === currency &&
-      (given.bankAccount === undefined || given.bankAccount === kept?.id)
-        ? kept === null
-          ? null
-          : { ...kept, isDefault: false }
-        : pickBankAccount(issuer, currency, given.bankAccount);
-    if (account === undefined) {
-      return yield* new NotFound({ entity: "BankAccount", id: given.bankAccount ?? "" });
-    }
-    // Payments go to an account in the document currency.
-    if (account !== null && account.currency !== currency) {
-      return yield* invalid([
-        issue(["bankAccount"], "request.malformed", {
-          reason: "currency_mismatch",
-          currency: account.currency,
-        }),
-      ]);
-    }
-    const bankAccount: BankAccountRecord | null =
-      account === null
-        ? null
-        : {
-            id: account.id,
-            name: account.name,
+      const kept = frozen?.bankAccount;
+      const account =
+        kept !== undefined &&
+        frozen?.currency === currency &&
+        (given.bankAccount === undefined || given.bankAccount === kept?.id)
+          ? kept === null
+            ? null
+            : { ...kept, isDefault: false }
+          : pickBankAccount(issuer, currency, given.bankAccount);
+      if (account === undefined) {
+        return yield* NotFound.make({ entity: "BankAccount", id: given.bankAccount ?? "" });
+      }
+      // Payments go to an account in the document currency.
+      if (account !== null && account.currency !== currency) {
+        return yield* invalid([
+          issue(["bankAccount"], "request.malformed", {
+            reason: "currency_mismatch",
             currency: account.currency,
-            accountNumber: account.accountNumber,
-            iban: account.iban,
-            bic: account.bic,
-          };
+          }),
+        ]);
+      }
+      const bankAccount: BankAccountRecord | null =
+        account === null
+          ? null
+          : {
+              id: account.id,
+              name: account.name,
+              currency: account.currency,
+              accountNumber: account.accountNumber,
+              iban: account.iban,
+              bic: account.bic,
+            };
 
-    // Rule D11: manual rate, else the CNB fixing valid on the tax point (carried back).
-    let fx: FxRecord | null;
-    if (
-      samePoint &&
-      frozen.currency === currency &&
-      sameOverride(frozen.fxOverride, spec.fxOverride)
-    ) {
-      fx = frozen.fx;
-    } else {
-      const fixing = Fx.needsFixing(currency, spec.fxOverride)
-        ? yield* (yield* FxFixings).fixing(taxPoint)
-        : null;
-      const fxResult = Fx.resolve({ currency, override: spec.fxOverride, fixing });
-      if (Result.isFailure(fxResult)) return yield* fxResult.failure;
-      fx = fxResult.success;
-    }
-    const paymentRounding = frozen?.paymentRounding ?? issuer.paymentRounding;
+      // Rule D11: manual rate, else the CNB fixing valid on the tax point (carried back).
+      let fx: FxRecord | null;
+      if (
+        samePoint &&
+        frozen.currency === currency &&
+        sameOverride(frozen.fxOverride, spec.fxOverride)
+      ) {
+        fx = frozen.fx;
+      } else {
+        const fixing = Fx.needsFixing(currency, spec.fxOverride)
+          ? yield* (yield* FxFixings).fixing(taxPoint)
+          : null;
+        const fxResult = Fx.resolve({ currency, override: spec.fxOverride, fixing });
+        if (Result.isFailure(fxResult)) return yield* fxResult.failure;
+        fx = fxResult.success;
+      }
+      const paymentRounding = frozen?.paymentRounding ?? issuer.paymentRounding;
 
-    // A Price List price is net (excl. VAT): with pricesIncludeVat it is grossed up at the
-    // line's rate, so the top-down math (§37(b)) sees a gross unit price.
-    const unitPrices = spec.lines.map((l, i) => {
-      // A deduction line prints quantity -1 at the deducted base (gross with VAT-inclusive prices).
-      if (l.deduction !== null) {
+      // A Price List price is net (excl. VAT): with pricesIncludeVat it is grossed up at the
+      // line's rate, so the top-down math (§37(b)) sees a gross unit price.
+      const unitPrices = EffectArray.map(spec.lines, (l, i) => {
+        // A deduction line prints quantity -1 at the deducted base (gross with VAT-inclusive prices).
+        if (l.deduction !== null) {
+          const price = spec.pricesIncludeVat
+            ? BigDecimal.sum(l.deduction.base, l.deduction.vat)
+            : l.deduction.base;
+          return price.pipe(BigDecimal.negate, BigDecimal.normalize);
+        }
+        if (l.itemPrice === null) return l.unitPrice;
+        if (!spec.pricesIncludeVat) return l.itemPrice.net;
+        const rate = VatMath.rateFor(treatments[i] ?? "outside_scope", taxPoint);
         return BigDecimal.normalize(
-          BigDecimal.negate(
-            spec.pricesIncludeVat
-              ? BigDecimal.sum(l.deduction.base, l.deduction.vat)
-              : l.deduction.base,
+          BigDecimal.divideUnsafe(
+            BigDecimal.multiply(l.itemPrice.net, BigDecimal.sum(HUNDRED, rate)),
+            HUNDRED,
           ),
         );
-      }
-      if (l.itemPrice === null) return l.unitPrice;
-      if (!spec.pricesIncludeVat) return l.itemPrice.net;
-      const rate = VatMath.rateFor(treatments[i] ?? "outside_scope", taxPoint);
-      return BigDecimal.normalize(
-        BigDecimal.divideUnsafe(
-          BigDecimal.multiply(l.itemPrice.net, BigDecimal.sum(HUNDRED, rate)),
-          HUNDRED,
-        ),
-      );
-    });
-    const supply = spec.lines.flatMap((l, i) =>
-      l.deduction === null
-        ? [
-            {
-              quantity: l.quantity,
-              unitPrice: unitPrices[i] ?? l.unitPrice,
-              treatment: treatments[i] ?? "outside_scope",
-            },
-          ]
-        : [],
-    );
-    const deductions = spec.lines.flatMap((l) => (l.deduction === null ? [] : [l.deduction]));
-    const calculated = VatMath.calculate({
-      lines: supply,
-      currency,
-      taxPoint,
-      pricesIncludeVat: spec.pricesIncludeVat,
-      fx,
-      paymentRounding,
-    });
-    // D8 (§37a ZDPH, VatMath rule 9): the deducted buckets are subtracted as stored in the
-    // document currency (never re-derived), and each net bucket's VAT is converted once at this
-    // document's own fixing, as the VAT report declares it. The PTDs keep their own CZK VAT.
-    const totals =
-      deductions.length === 0
-        ? calculated
-        : VatMath.fromBuckets(
-            VatMath.netDeductions(
-              calculated.buckets,
-              deductions.map((d) => ({
-                treatment: d.treatment,
-                ratePercent: d.ratePercent,
-                base: d.base,
-                vat: d.vat,
-                gross: BigDecimal.normalize(BigDecimal.sum(d.base, d.vat)),
-                vatCzk: null,
-              })),
-              currency,
-              fx,
-            ),
-            currency,
-            paymentRounding,
-          );
-
-    const ids = yield* IdGenerator;
-    const lines: Array<LineRecord> = [];
-    for (const [i, l] of spec.lines.entries()) {
-      const treatment = treatments[i] ?? "outside_scope";
-      const unitPrice = unitPrices[i] ?? l.unitPrice;
-      lines.push({
-        id: l.id ?? ((yield* ids.next) as LineId),
-        item: l.item,
-        description: l.description,
-        quantity: l.quantity,
-        unit: l.unit,
-        unitPrice,
-        itemPrice: l.itemPrice,
-        vat: l.vat,
-        itemVat: l.itemVat,
-        treatment,
-        ratePercent: l.deduction?.ratePercent ?? VatMath.rateFor(treatment, taxPoint),
-        amount: BigDecimal.normalize(BigDecimal.multiply(l.quantity, unitPrice)),
-        deducts: l.deducts,
-        deductedVat: l.deduction?.vat ?? null,
-        deductedVatCzk: l.deduction?.vatCzk ?? null,
       });
-    }
+      const supply = EffectArray.flatMap(spec.lines, (l, i) =>
+        l.deduction === null
+          ? [
+              {
+                quantity: l.quantity,
+                unitPrice: unitPrices[i] ?? l.unitPrice,
+                treatment: treatments[i] ?? "outside_scope",
+              },
+            ]
+          : [],
+      );
+      const deductions = EffectArray.flatMap(spec.lines, (l) =>
+        l.deduction === null ? [] : [l.deduction],
+      );
+      const calculated = VatMath.calculate({
+        lines: supply,
+        currency,
+        taxPoint,
+        pricesIncludeVat: spec.pricesIncludeVat,
+        fx,
+        paymentRounding,
+      });
+      // D8 (§37a ZDPH, VatMath rule 9): the deducted buckets are subtracted as stored in the
+      // document currency (never re-derived), and each net bucket's VAT is converted once at this
+      // document's own fixing, as the VAT report declares it. The PTDs keep their own CZK VAT.
+      const totals =
+        deductions.length === 0
+          ? calculated
+          : VatMath.fromBuckets(
+              VatMath.netDeductions(
+                calculated.buckets,
+                EffectArray.map(deductions, (d) => ({
+                  treatment: d.treatment,
+                  ratePercent: d.ratePercent,
+                  base: d.base,
+                  vat: d.vat,
+                  gross: BigDecimal.normalize(BigDecimal.sum(d.base, d.vat)),
+                  vatCzk: null,
+                })),
+                currency,
+                fx,
+              ),
+              currency,
+              paymentRounding,
+            );
 
-    return {
-      kind,
-      contactId: spec.contactId,
-      contact: options.freeze?.contact ?? contactSnapshot(contact),
-      issuer: { ...(frozen?.issuer ?? issuer.party), regime, bankAccount },
-      given,
-      seriesId,
-      currency,
-      language: defaults.language,
-      paymentMethod: defaults.paymentMethod,
-      note: given.note === null ? null : defaults.note,
-      issuedOn,
-      taxableSupplyOn,
-      dueOn,
-      pricesIncludeVat: spec.pricesIncludeVat,
-      variableSymbol: given.variableSymbol ?? null,
-      orderNumber: spec.orderNumber,
-      lines,
-      totals,
-      fx,
-      fxOverride: spec.fxOverride,
-      // D6: deducted advance VAT makes an identified_person document carry VAT too.
-      taxDocument: isTaxDocument(kind, regime, [
-        ...supplyTreatments,
-        ...deductions.filter((d) => !BigDecimal.isZero(d.vat)).map((d) => d.treatment),
-      ]),
-      paymentRounding,
-    };
-  });
+      const lines: Array<LineRecord> = [];
+      for (const [i, l] of spec.lines.entries()) {
+        const treatment = treatments[i] ?? "outside_scope";
+        const unitPrice = unitPrices[i] ?? l.unitPrice;
+        lines.push({
+          id: l.id ?? (yield* newId(LineIdSchema.make)),
+          item: l.item,
+          description: l.description,
+          quantity: l.quantity,
+          unit: l.unit,
+          unitPrice,
+          itemPrice: l.itemPrice,
+          vat: l.vat,
+          itemVat: l.itemVat,
+          treatment,
+          ratePercent: l.deduction?.ratePercent ?? VatMath.rateFor(treatment, taxPoint),
+          amount: BigDecimal.normalize(BigDecimal.multiply(l.quantity, unitPrice)),
+          deducts: l.deducts,
+          deductedVat: l.deduction?.vat ?? null,
+          deductedVatCzk: l.deduction?.vatCzk ?? null,
+        });
+      }
+
+      return {
+        kind,
+        contactId: spec.contactId,
+        contact: options.freeze?.contact ?? contactSnapshot(contact),
+        issuer: { ...(frozen?.issuer ?? issuer.party), regime, bankAccount },
+        given,
+        seriesId,
+        currency,
+        language: defaults.language,
+        paymentMethod: defaults.paymentMethod,
+        note: given.note === null ? null : defaults.note,
+        issuedOn,
+        taxableSupplyOn: taxPoint,
+        dueOn,
+        pricesIncludeVat: spec.pricesIncludeVat,
+        variableSymbol: given.variableSymbol ?? null,
+        orderNumber: spec.orderNumber,
+        lines,
+        totals,
+        fx,
+        fxOverride: spec.fxOverride,
+        // D6: deducted advance VAT makes an identified_person document carry VAT too.
+        taxDocument: isTaxDocument(kind, regime, [
+          ...supplyTreatments,
+          ...EffectArray.map(
+            EffectArray.filter(deductions, (d) => !BigDecimal.isZero(d.vat)),
+            (d) => d.treatment,
+          ),
+        ]),
+        paymentRounding,
+      };
+    }),
+);

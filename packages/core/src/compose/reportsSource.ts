@@ -18,8 +18,13 @@
  * repository cannot find (a payment's target, a Credit Note's `corrects` / `corrected_by`, a
  * deduction line's `deducts`; issued documents are never deleted) is a defect, not a failure.
  */
+
 import type { DocumentId, DocumentKind, ExpenseId, WorkspaceId } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { outstandingOf } from "../modules/documents/credit";
 import type { DocumentRecord } from "../modules/documents/record";
 import { DocumentsRepo, reportTaxPoint } from "../modules/documents/repo";
@@ -48,11 +53,18 @@ const storedFx = (
 ) => (fx === null ? null : ({ rate: fx.rate, quantity: fx.quantity } satisfies StoredFx));
 
 const linked = (rows: ReadonlyArray<DocumentRecord>, relation: "corrected_by" | "corrects") =>
-  rows.flatMap((row) => row.links.filter((l) => l.relation === relation).map((l) => l.id));
+  EffectArray.flatMap(rows, (row) =>
+    EffectArray.map(
+      EffectArray.filter(row.links, (l) => l.relation === relation),
+      (l) => l.id,
+    ),
+  );
 
 /** The documents the rows' deduction lines deduct (PTDs, or a Proforma for uncovered cash). */
 const deducted = (rows: ReadonlyArray<DocumentRecord>) =>
-  rows.flatMap((row) => row.lines.flatMap((l) => (l.deducts === null ? [] : [l.deducts])));
+  EffectArray.flatMap(rows, (row) =>
+    EffectArray.flatMap(row.lines, (l) => (l.deducts === null ? [] : [l.deducts])),
+  );
 
 const unique = <A>(values: ReadonlyArray<A>): ReadonlyArray<A> => [...new Set(values)];
 
@@ -75,10 +87,13 @@ const toReportDocument = (
 ): Effect.Effect<ReportDocument> =>
   Effect.gen(function* () {
     const creditNotes = yield* Effect.forEach(
-      row.links.filter((l) => l.relation === "corrected_by"),
+      EffectArray.filter(row.links, (l) => l.relation === "corrected_by"),
       (l) => relatedDocument(related, row, l.id, "corrected_by"),
+      { concurrency: 1 },
     );
-    const corrects = row.links.find((l) => l.relation === "corrects");
+    const corrects = Option.getOrUndefined(
+      EffectArray.findFirst(row.links, (l) => l.relation === "corrects"),
+    );
     const correctsKind: DocumentKind | null =
       row.kind === "credit_note" && corrects !== undefined
         ? (yield* relatedDocument(related, row, corrects.id, "corrects")).kind
@@ -93,7 +108,8 @@ const toReportDocument = (
       id: row.id,
       workspaceId: row.workspaceId,
       kind: row.kind,
-      finalInvoice: row.kind === "invoice" && row.links.some((l) => l.relation === "advance_of"),
+      finalInvoice:
+        row.kind === "invoice" && EffectArray.some(row.links, (l) => l.relation === "advance_of"),
       correctsKind,
       status: row.status,
       number: row.number,
@@ -147,13 +163,13 @@ export const ReportsSourceLive: Layer.Layer<
           workspaceId,
           unique([...linked(rows, "corrected_by"), ...linked(rows, "corrects"), ...deducted(rows)]),
         ),
-        (found) => new Map(found.map((d) => [d.id, d] as const)),
+        (found) => new Map(EffectArray.map(found, (d) => [d.id, d] as const)),
       );
 
     const toReportDocuments = (workspaceId: WorkspaceId, rows: ReadonlyArray<DocumentRecord>) => {
-      const reportable = rows.filter(isReportable);
+      const reportable = EffectArray.filter(rows, isReportable);
       return Effect.flatMap(relatedOf(workspaceId, reportable), (related) =>
-        Effect.forEach(reportable, (row) => toReportDocument(row, related)),
+        Effect.forEach(reportable, (row) => toReportDocument(row, related), { concurrency: 1 }),
       );
     };
 
@@ -172,21 +188,20 @@ export const ReportsSourceLive: Layer.Layer<
         Effect.flatMap(documentsRepo.receivable(workspaceId), (rows) =>
           toReportDocuments(workspaceId, rows),
         ),
-        (docs) => docs.filter((d) => BigDecimal.isPositive(d.outstanding)),
+        (docs) => EffectArray.filter(docs, (d) => BigDecimal.isPositive(d.outstanding)),
       );
 
-    const payments: ReportsSourceShape["payments"] = (workspaceId, range) =>
-      Effect.gen(function* () {
+    const payments: ReportsSourceShape["payments"] = Effect.fn("payments")(
+      function* (workspaceId, range) {
         const rows = yield* paymentsRepo.paidBetween(workspaceId, range);
         const documentIds = unique(
-          rows.flatMap((p) => (p.documentId === null ? [] : [p.documentId])),
+          EffectArray.flatMap(rows, (p) => (p.documentId === null ? [] : [p.documentId])),
         );
-        const expenseIds = unique(rows.flatMap((p) => (p.expenseId === null ? [] : [p.expenseId])));
-        const docFx = new Map(
-          (yield* documentsRepo.getMany(workspaceId, documentIds)).map(
-            (d) => [d.id, storedFx(d.fx)] as const,
-          ),
+        const expenseIds = unique(
+          EffectArray.flatMap(rows, (p) => (p.expenseId === null ? [] : [p.expenseId])),
         );
+        const value = yield* documentsRepo.getMany(workspaceId, documentIds);
+        const docFx = new Map(EffectArray.map(value, (d) => [d.id, storedFx(d.fx)] as const));
         const expenseFx = new Map<ExpenseId, StoredFx | null>();
         for (const id of expenseIds) {
           const expense = yield* expensesRepo
@@ -194,18 +209,23 @@ export const ReportsSourceLive: Layer.Layer<
             .pipe(Effect.catchTag("NotFound", (e) => Effect.die(e)));
           expenseFx.set(id, storedFx(expense.figures?.fx ?? null));
         }
-        return yield* Effect.forEach(rows, (row) => {
-          const fx =
-            row.documentId !== null
-              ? docFx.get(row.documentId)
-              : row.expenseId !== null
-                ? expenseFx.get(row.expenseId)
-                : undefined;
-          return fx === undefined
-            ? Effect.die(new Error(`payment ${row.id}: target not found`))
-            : Effect.succeed<ReportPayment>({ ...reportPayment(row, fx), workspaceId });
-        });
-      });
+        return yield* Effect.forEach(
+          rows,
+          (row) => {
+            const fx =
+              row.documentId !== null
+                ? docFx.get(row.documentId)
+                : row.expenseId !== null
+                  ? expenseFx.get(row.expenseId)
+                  : undefined;
+            return fx === undefined
+              ? Effect.die(new Error(`payment ${row.id}: target not found`))
+              : Effect.succeed<ReportPayment>({ ...reportPayment(row, fx), workspaceId });
+          },
+          { concurrency: 1 },
+        );
+      },
+    );
 
     const expenses: ReportsSourceShape["expenses"] = (workspaceId, range) =>
       Effect.map(
@@ -214,13 +234,16 @@ export const ReportsSourceLive: Layer.Layer<
           from: range.from,
           to: range.to,
         }),
-        (rows) => rows.map((e) => toReportExpense(workspaceId, e)),
+        (rows) => EffectArray.map(rows, (e) => toReportExpense(workspaceId, e)),
       );
 
     const taxRegimes: ReportsSourceShape["taxRegimes"] = (workspaceId) =>
       workspacesRepo.getWorkspace(workspaceId).pipe(
         Effect.map((row) =>
-          row.taxRegimes.map(({ effectiveFrom, regime }) => ({ effectiveFrom, regime })),
+          EffectArray.map(row.taxRegimes, ({ effectiveFrom, regime }) => ({
+            effectiveFrom,
+            regime,
+          })),
         ),
         Effect.catchTag("NotFound", () => Effect.succeed([])),
       );
@@ -230,7 +253,9 @@ export const ReportsSourceLive: Layer.Layer<
       openReceivables,
       payments,
       expenses,
-      incompleteExpenses: (workspaceId) => expenseRecords.incompleteCount(workspaceId),
+      incompleteExpenses: Effect.fn("ReportsSource.incompleteExpenses")((workspaceId) =>
+        expenseRecords.incompleteCount(workspaceId),
+      ),
       taxRegimes,
     });
   }),

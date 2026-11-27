@@ -10,6 +10,7 @@
  * - One run row per (schedule, occurrence) (`schedule_runs_schedule_occurrence_unique`); a run
  *   with outcome `issued` is the exactly-once record of that occurrence.
  */
+
 import type {
   BankAccountId,
   Conflict,
@@ -29,18 +30,22 @@ import {
   TemplateInput,
   WorkspaceId as WorkspaceIdSchema,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import { UniqueViolation } from "../../store/CoreStore";
-import type { Scalar } from "../../store/tables";
-import { defineCollection, MemoryTables } from "../../store/tables";
+import { defineCollection, MemoryTables, type Query } from "../../store/tables";
 
 // Rows --------------------------------------------------------------------------------------
 
 export const TemplateRow = Schema.Struct({
   id: TemplateIdSchema,
   workspaceId: WorkspaceIdSchema,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   name: Schema.String,
   /** The saved `TemplateInput`, name included. */
   input: TemplateInput,
@@ -56,10 +61,10 @@ export type CadenceUnit = typeof CadenceUnit.Type;
 export const ScheduleRow = Schema.Struct({
   id: ScheduleIdSchema,
   workspaceId: WorkspaceIdSchema,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   templateId: TemplateIdSchema,
   cadenceUnit: CadenceUnit,
-  cadenceInterval: Schema.Number,
+  cadenceInterval: Schema.Finite,
   startOn: IsoDateSchema,
   endOn: Schema.NullOr(IsoDateSchema),
   issueAs: Schema.Literals(["invoice", "proforma"]),
@@ -100,7 +105,7 @@ export type RunSend = typeof RunSend.Type;
 export const RunRow = Schema.Struct({
   id: Schema.String,
   workspaceId: WorkspaceIdSchema,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   scheduleId: ScheduleIdSchema,
   occurrence: IsoDateSchema,
   outcome: RunOutcome,
@@ -120,18 +125,16 @@ export type RunRow = typeof RunRow.Type;
 export const ONE_ATTACHED_PER_TEMPLATE = "schedules_one_attached_per_template";
 export const RUN_PER_OCCURRENCE = "schedule_runs_schedule_occurrence_unique";
 
-const codec = <A>(schema: Schema.Codec<A, unknown>) => schema;
-
 export const TemplatesTable = defineCollection<TemplateRow>({
   name: "templates",
   entity: "Template",
-  schema: codec(TemplateRow as unknown as Schema.Codec<TemplateRow, unknown>),
+  schema: TemplateRow,
 });
 
 export const SchedulesTable = defineCollection<ScheduleRow>({
   name: "schedules",
   entity: "Schedule",
-  schema: codec(ScheduleRow as unknown as Schema.Codec<ScheduleRow, unknown>),
+  schema: ScheduleRow,
   unique: [
     {
       name: ONE_ATTACHED_PER_TEMPLATE,
@@ -144,7 +147,7 @@ export const SchedulesTable = defineCollection<ScheduleRow>({
 export const ScheduleRunsTable = defineCollection<RunRow>({
   name: "schedule_runs",
   entity: "Schedule",
-  schema: codec(RunRow as unknown as Schema.Codec<RunRow, unknown>),
+  schema: RunRow,
   unique: [
     {
       name: RUN_PER_OCCURRENCE,
@@ -256,7 +259,7 @@ export class RecurringRepo extends Context.Service<
       bankAccountId: BankAccountId,
     ) => Effect.Effect<ReadonlyArray<TemplateRow>, StoreUnavailable>;
   }
->()("kvitbit/core/RecurringRepo") {}
+>()("@kvitbit/core/modules/recurring/repo/RecurringRepo") {}
 
 /** In-memory `RecurringRepo` on `MemoryTables` (tests). */
 export const RecurringRepoMemory: Layer.Layer<RecurringRepo, never, MemoryTables> = Layer.effect(
@@ -266,28 +269,38 @@ export const RecurringRepoMemory: Layer.Layer<RecurringRepo, never, MemoryTables
     const schedules = tables.collection(SchedulesTable);
     const runs = tables.collection(ScheduleRunsTable);
     return RecurringRepo.of({
-      getTemplate: (ws, id) => templates.get(ws, id),
-      lockTemplate: (ws, id, expectedRevision) => templates.getForUpdate(ws, id, expectedRevision),
-      lockTemplateState: (ws, id) => templates.lock(ws, id),
-      listTemplates: (ws) => templates.list(ws, { where: { archivedAt: null }, orderBy: ["name"] }),
+      getTemplate: Effect.fn("RecurringRepo.getTemplate")((ws, id) => templates.get(ws, id)),
+      lockTemplate: Effect.fn("RecurringRepo.lockTemplate")((ws, id, expectedRevision) =>
+        templates.getForUpdate(ws, id, expectedRevision),
+      ),
+      lockTemplateState: Effect.fn("RecurringRepo.lockTemplateState")((ws, id) =>
+        templates.lock(ws, id),
+      ),
+      listTemplates: Effect.fn("RecurringRepo.listTemplates")((ws) =>
+        templates.list(ws, { where: { archivedAt: null }, orderBy: ["name"] }),
+      ),
       insertTemplate: templates.insert,
       updateTemplate: templates.update,
-      attachedSchedule: (ws, templateId) =>
+      attachedSchedule: Effect.fn("RecurringRepo.attachedSchedule")((ws, templateId) =>
         schedules.findUnique(ONE_ATTACHED_PER_TEMPLATE, [templateId], ws),
-      schedulesOfTemplate: (ws, templateId) =>
+      ),
+      schedulesOfTemplate: Effect.fn("RecurringRepo.schedulesOfTemplate")((ws, templateId) =>
         schedules.list(ws, { where: { templateId }, orderBy: ["createdAt"] }),
-      lockSchedule: (ws, id) => schedules.lock(ws, id),
+      ),
+      lockSchedule: Effect.fn("RecurringRepo.lockSchedule")((ws, id) => schedules.lock(ws, id)),
       insertSchedule: schedules.insert,
       updateSchedule: schedules.update,
-      dueSchedules: (today) =>
+      dueSchedules: Effect.fn("RecurringRepo.dueSchedules")((today) =>
         schedules.listGlobal({
           where: { detachedAt: null, pausedAt: null },
           range: { nextOccurrence: { lte: today } },
           orderBy: ["nextOccurrence"],
         }),
-      findRun: (ws, scheduleId, occurrence) =>
+      ),
+      findRun: Effect.fn("RecurringRepo.findRun")((ws, scheduleId, occurrence) =>
         runs.findUnique(RUN_PER_OCCURRENCE, [scheduleId, occurrence], ws),
-      lastIssuedRun: (ws, scheduleId) =>
+      ),
+      lastIssuedRun: Effect.fn("RecurringRepo.lastIssuedRun")((ws, scheduleId) =>
         Effect.map(
           runs.list(ws, {
             where: { scheduleId, outcome: "issued" },
@@ -297,41 +310,47 @@ export const RecurringRepoMemory: Layer.Layer<RecurringRepo, never, MemoryTables
           }),
           (rows) => Option.fromNullishOr(rows[0]),
         ),
-      pendingSendRuns: (before) =>
+      ),
+      pendingSendRuns: Effect.fn("RecurringRepo.pendingSendRuns")((before) =>
         runs.listGlobal({
           where: { outcome: "issued", send: "pending" },
           range: { at: { lt: before } },
           orderBy: ["at"],
         }),
+      ),
       insertRun: runs.insert,
       updateRun: runs.update,
-      listRuns: (ws, query) =>
-        runs.list(ws, {
+      listRuns: Effect.fn("RecurringRepo.listRuns")((ws, query) => {
+        const spec: Query<RunRow> = {
           whereIn: { scheduleId: query.scheduleIds },
           orderBy: ["occurrence"],
           direction: "desc",
-          ...(query.after !== undefined ? { after: query.after as ReadonlyArray<Scalar> } : {}),
           limit: query.limit,
-        }),
+        };
+        return runs.list(ws, query.after === undefined ? spec : { ...spec, after: query.after });
+      }),
 
       // Bank account references --------------------------------------------------------------
-      templatesUsingBankAccount: (ws, bankAccountId) =>
-        Effect.map(templates.list(ws, { where: { archivedAt: null }, orderBy: ["name"] }), (rows) =>
-          rows.filter((row) => row.input.bankAccount === bankAccountId),
-        ),
+      templatesUsingBankAccount: Effect.fn("RecurringRepo.templatesUsingBankAccount")(
+        (ws, bankAccountId) =>
+          Effect.map(
+            templates.list(ws, { where: { archivedAt: null }, orderBy: ["name"] }),
+            (rows) => EffectArray.filter(rows, (row) => row.input.bankAccount === bankAccountId),
+          ),
+      ),
     });
   }),
 );
+
+const isUniqueViolation = Schema.is(UniqueViolation);
 
 /**
  * Every unique index of this module is guarded by a row lock taken first (the Template for
  * `schedules`, the schedule for `schedule_runs`), so a violation is a bug: a defect.
  */
-export const dieOnUnique = <A, E, R>(
-  effect: Effect.Effect<A, E, R>,
-): Effect.Effect<A, Exclude<E, UniqueViolation>, R> =>
+export const dieOnUnique = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.catchIf(
     effect,
-    (error): error is E & UniqueViolation => error instanceof UniqueViolation,
-    (error) => Effect.die(error),
-  ) as Effect.Effect<A, Exclude<E, UniqueViolation>, R>;
+    (error): error is E & UniqueViolation => isUniqueViolation(error),
+    Effect.die,
+  );

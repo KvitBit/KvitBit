@@ -4,7 +4,9 @@
  */
 import type { DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
 import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { can } from "../../policy/can";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { orUnavailable } from "../../shared/errors";
@@ -44,8 +46,8 @@ export type DocumentsDeps =
  * locked documents fail with `document_locked` and cancelled ones with `illegal_transition`.
  * A `number` needs `document.overrideNumber` (owner/admin, D4) on top of `document.edit`.
  */
-const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
-  Effect.gen(function* () {
+const edit = Effect.fn("edit")(
+  function* (id: DocumentId, patch: DocumentPatch, expectedRevision: number) {
     const { workspaceId } = yield* authorizeInWorkspace("document.edit");
     if (patch.number !== undefined) yield* authorizeInWorkspace("document.overrideNumber");
     const store = yield* CoreStore;
@@ -59,26 +61,31 @@ const edit = (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
           : yield* editIssued(row, patch);
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /**
  * The owner-facing view of a read or dry run: `share` and `deliveries` added after the method.
  * Write results are never enriched (`share: null`, `deliveries: []`), so a keyed replay
  * returns exactly the stored result (rule C3) and an activity read never touches a write.
  */
-const enriched = <E, R>(effect: Effect.Effect<DocumentView, E, R>) =>
-  Effect.gen(function* () {
+const enriched = Effect.fn("enriched")(
+  function* <E, R>(effect: Effect.Effect<DocumentView, E, R>) {
     const view = yield* effect;
     const caller = yield* CurrentCaller;
     // A successful method had a Workspace caller (authorizeInWorkspace).
     return caller._tag === "Member" || caller._tag === "System"
       ? yield* withActivity(caller.workspaceId, view, can(caller, "share.read"))
       : view;
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 const make = Effect.gen(function* () {
   // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
+  const buildContext = yield* Effect.context<DocumentsDeps>();
   const context = Context.pick(
     CoreStore,
     IdGenerator,
@@ -91,7 +98,7 @@ const make = Effect.gen(function* () {
     DocumentRenderer,
     DocumentSender,
     DocumentActivity,
-  )(yield* Effect.context<DocumentsDeps>());
+  )(buildContext);
   const sender = yield* DocumentSender;
   /**
    * Provides the captured dependencies under the call-time context, which wins: the caller,
@@ -110,25 +117,40 @@ const make = Effect.gen(function* () {
    * `request.malformed` + `params.reason` (#430/#478).
    */
   return Documents.of({
-    preview: (input) => run(enriched(preview(input))),
-    createDraft: (input, opts) => run(createDraft(input, opts)),
-    discardDraft: (id, expectedRevision) => run(discardDraft(id, expectedRevision)),
-    edit: (id, patch, expectedRevision) => run(edit(id, patch, expectedRevision)),
-    get: (id) => run(enriched(get(id))),
-    list: (q) => run(list(q)),
-    history: (id) => run(history(id)),
-    pdf: (id, opts) => run(pdf(id, opts)),
-    // Delivery seam (stage 2): delegated unchanged.
-    send: (id, input, opts) => sender.send(id, input, opts),
-    previewSend: (id, input) => sender.previewSend(id, input),
-    issue: (from, opts) => run(issue(from, opts)),
-    lock: (id) => run(lock(id)),
-    unlock: (id, reason) => run(unlock(id, reason)),
-    cancel: (id, input, opts) => run(cancel(id, input, opts)),
-    correct: (id, input, opts) => run(correct(id, input, opts)),
-    previewCorrection: (id, input) => run(enriched(previewCorrection(id, input))),
-    issueFinalInvoice: (proforma, input, opts) => run(issueFinalInvoice(proforma, input, opts)),
-    previewFinalInvoice: (proforma, input) => run(enriched(previewFinalInvoice(proforma, input))),
+    preview: Effect.fn("Documents.preview")((input) => preview(input).pipe(enriched, run)),
+    createDraft: Effect.fn("Documents.createDraft")((input, opts) => run(createDraft(input, opts))),
+    discardDraft: Effect.fn("Documents.discardDraft")((id, expectedRevision) =>
+      run(discardDraft(id, expectedRevision)),
+    ),
+    edit: Effect.fn("Documents.edit")((id, patch, expectedRevision) =>
+      run(edit(id, patch, expectedRevision)),
+    ),
+    get: Effect.fn("Documents.get")((id) => get(id).pipe(enriched, run)),
+    list: Effect.fn("Documents.list")((q) => run(list(q))),
+    history: Effect.fn("Documents.history")((id) => run(history(id))),
+    pdf: Effect.fn("Documents.pdf")((id, opts) => run(pdf(id, opts))),
+    send: Effect.fn("Documents.send")(function* (id, input, opts) {
+      const caller = yield* CurrentCaller;
+      return yield* sender.send(caller, id, input, opts);
+    }),
+    previewSend: Effect.fn("Documents.previewSend")(function* (id, input) {
+      const caller = yield* CurrentCaller;
+      return yield* sender.previewSend(caller, id, input);
+    }),
+    issue: Effect.fn("Documents.issue")((from, opts) => run(issue(from, opts))),
+    lock: Effect.fn("Documents.lock")((id) => run(lock(id))),
+    unlock: Effect.fn("Documents.unlock")((id, reason) => run(unlock(id, reason))),
+    cancel: Effect.fn("Documents.cancel")((id, input, opts) => run(cancel(id, input, opts))),
+    correct: Effect.fn("Documents.correct")((id, input, opts) => run(correct(id, input, opts))),
+    previewCorrection: Effect.fn("Documents.previewCorrection")((id, input) =>
+      previewCorrection(id, input).pipe(enriched, run),
+    ),
+    issueFinalInvoice: Effect.fn("Documents.issueFinalInvoice")((proforma, input, opts) =>
+      run(issueFinalInvoice(proforma, input, opts)),
+    ),
+    previewFinalInvoice: Effect.fn("Documents.previewFinalInvoice")((proforma, input) =>
+      previewFinalInvoice(proforma, input).pipe(enriched, run),
+    ),
   });
 });
 

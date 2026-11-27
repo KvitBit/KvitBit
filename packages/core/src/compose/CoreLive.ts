@@ -34,7 +34,7 @@ import type {
   EmailSender,
   ExchangeRates,
 } from "@kvitbit/domain/ports";
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { ContactSnapshotsLive, ContactsLive, type ContactsRepo } from "../modules/contacts";
 import {
   type DeliveriesRepo,

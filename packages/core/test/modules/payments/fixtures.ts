@@ -1,8 +1,9 @@
 /** Runners for the Payments tests: `PaymentsTestLayer` on in-memory ports, documents seeded. */
 import type { Caller, CurrentCaller, TaxRegime } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
-import type { Exit, Layer } from "effect";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
+import type * as Layer from "effect/Layer";
 import { NumberingSeries } from "../../../src/modules/numbering";
 import { PaymentsTestLayer } from "../../../src/modules/payments";
 import { CoreStore } from "../../../src/store/CoreStore";
@@ -31,19 +32,23 @@ const series = Effect.flatMap(CoreStore, (store) =>
   ),
 ).pipe(Effect.orDie);
 
-/** Runs `body` as `caller` (default owner) after seeding Workspaces A and B and their series. */
-export const run = <A, E>(
-  body: Effect.Effect<A, E, Services>,
-  options: {
-    readonly caller?: Caller;
-    readonly regimeA?: TaxRegime;
-    readonly fixings?: ReadonlyArray<CnbFixing>;
-  } = {},
-): Promise<Exit.Exit<A, E>> =>
+interface RunOptions {
+  readonly caller?: Caller;
+  readonly regimeA?: TaxRegime;
+  readonly fixings?: ReadonlyArray<CnbFixing>;
+}
+
+/** Runs `body` as `caller` (default owner) after seeding both Workspaces and their series. */
+export const run = <A, E>({
+  body,
+  caller = member("owner"),
+  regimeA,
+  fixings = [],
+}: RunOptions & { readonly body: Effect.Effect<A, E, Services> }): Promise<Exit.Exit<A, E>> =>
   runTest(
-    options.caller ?? member("owner"),
-    Effect.andThen(Effect.andThen(seed(options.regimeA, { seriesByKind: {} }), series), body).pipe(
+    caller,
+    Effect.andThen(Effect.andThen(seed(regimeA, { seriesByKind: {} }), series), body).pipe(
       Effect.provide(PaymentsTestLayer),
     ),
-    { fixings: options.fixings ?? [] },
+    { fixings },
   );

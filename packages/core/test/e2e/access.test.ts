@@ -2,46 +2,53 @@
  * Cross-module access and request-safety scenarios on TestCore (all modules on real layers).
  * (h) workspace isolation and API-key scopes; (i) stale revision and requestKey replay.
  */
+
 import { describe, expect, test } from "bun:test";
-import type {
-  Caller,
-  ContactId,
-  DocumentId,
-  ExpenseId,
-  IsoDate,
-  MemberCaller,
-  RequestKey,
-  TemplateId,
-  UserId,
-} from "@kvitbit/domain/contract";
+import type { Caller, ContactView, DocumentInput, MemberCaller } from "@kvitbit/domain/contract";
 import {
+  ContactId,
   Contacts,
+  DocumentId,
   Documents,
+  ExpenseId,
   Expenses,
+  IsoDate,
   Payments,
   PublicShareLinks,
   Reports,
+  RequestKey,
+  TemplateId,
   Templates,
+  UserId,
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Effect, Exit } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Formatter from "effect/Formatter";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { makeRequestOutcome } from "../../src/shared/requestOutcome";
 import { account, asCaller, runCore } from "../helpers";
 import { dec } from "../modules/documents/fixtures";
 import { templateInput } from "../modules/recurring/fixtures";
 
-const USER_B = "01900000-0000-7000-8000-00000000c002" as UserId;
-const NOV = { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate };
+const USER_B = UserId.make("01900000-0000-7000-8000-00000000c002");
+const NOV = { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") };
 
-const idOf = (view: unknown): string => (view as { readonly id: string }).id;
-const contactIdOf = (view: unknown) => idOf(view) as ContactId;
-const ids = (views: ReadonlyArray<unknown>) => views.map(idOf);
+const decodeId = Schema.decodeUnknownResult(Schema.Struct({ id: Schema.String }));
+const idOf = <A>(view: A): string => Result.getOrThrow(decodeId(view)).id;
+const contactIdOf = (view: ContactView) => ContactId.make(idOf(view));
+const ids = <A>(views: ReadonlyArray<A>) => EffectArray.map(views, idOf);
 
 /** The failure's tag and conflict reason, or "ok" when `effect` succeeds. */
-const outcome = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
+const outcome = <A, E extends { readonly _tag: string; readonly reason?: string }, R>(
+  effect: Effect.Effect<A, E, R>,
+) =>
   Effect.match(effect, {
-    onFailure: (e) => ({ _tag: e._tag, reason: (e as { readonly reason?: string }).reason }),
+    onFailure: (e) => ({ _tag: e._tag, reason: e.reason }),
     onSuccess: () => ({ _tag: "ok", reason: undefined }),
   });
 
@@ -49,31 +56,29 @@ const outcome = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effec
 const openWorkspace = (name: string, userId?: UserId) =>
   asCaller(
     account(userId === undefined ? {} : { userId, email: `${name}@example.cz` }),
-    Effect.flatMap(Workspaces, (ws) => ws.create({ name } as never)),
+    Effect.flatMap(Workspaces, (ws) => ws.create({ name })),
   );
 
-const contactInput = (name: string) => ({ name, billingEmails: ["fakturace@acme.cz"] }) as never;
+const contactInput = (name: string) => ({ name, billingEmails: ["fakturace@acme.cz"] });
 
-const invoiceInput = (contact: ContactId) =>
-  ({
-    kind: "invoice",
-    contact,
-    lines: [{ description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") }],
-    issuedOn: "2026-11-23",
-  }) as never;
+const invoiceInput = (contact: ContactId): DocumentInput => ({
+  kind: "invoice",
+  contact,
+  lines: [{ description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") }],
+  issuedOn: IsoDate.make("2026-11-23"),
+});
 
-const expenseInput = (contact: ContactId) =>
-  ({
-    supplier: { contact },
-    supplierDocumentNumber: "FV-2026-001",
-    issuedOn: "2026-11-20",
-    taxableSupplyOn: "2026-11-19",
-    dueOn: "2026-12-04",
-    currency: "CZK",
-    total: "121.00",
-    vat: [{ treatment: "standard", base: "100.00", vat: "21.00" }],
-    category: "software",
-  }) as never;
+const expenseInput = (contact: ContactId) => ({
+  supplier: { contact },
+  supplierDocumentNumber: "FV-2026-001",
+  issuedOn: "2026-11-20",
+  taxableSupplyOn: "2026-11-19",
+  dueOn: "2026-12-04",
+  currency: "CZK",
+  total: "121.00",
+  vat: [{ treatment: "standard", base: "100.00", vat: "21.00" }],
+  category: "software",
+});
 
 /** Workspace B with one row in every module: contact, issued invoice + payment, expense, template. */
 const seedWorkspaceB = (ownerB: Caller) =>
@@ -94,19 +99,23 @@ const seedWorkspaceB = (ownerB: Caller) =>
       return {
         contact: contactIdOf(contact),
         document: doc.id,
-        expense: idOf(expense) as ExpenseId,
-        template: idOf(template) as TemplateId,
+        expense: ExpenseId.make(idOf(expense)),
+        template: TemplateId.make(idOf(template)),
       };
     }),
   );
 
 /** What a caller of workspace A sees of every module's lists. */
 const listEverything = Effect.gen(function* () {
+  const contacts = yield* Effect.flatMap(Contacts, (c) => c.search({}));
+  const documents = yield* Effect.flatMap(Documents, (d) => d.list({}));
+  const expenses = yield* Effect.flatMap(Expenses, (e) => e.list({}));
+  const templates = yield* Effect.flatMap(Templates, (t) => t.list);
   return {
-    contacts: ids((yield* Effect.flatMap(Contacts, (c) => c.search({}))).items),
-    documents: ids((yield* Effect.flatMap(Documents, (d) => d.list({}))).items),
-    expenses: ids((yield* Effect.flatMap(Expenses, (e) => e.list({}))).items),
-    templates: ids(yield* Effect.flatMap(Templates, (t) => t.list)),
+    contacts: ids(contacts.items),
+    documents: ids(documents.items),
+    expenses: ids(expenses.items),
+    templates: ids(templates),
   };
 });
 
@@ -140,29 +149,31 @@ describe("(h) workspace isolation", () => {
             const payments = yield* Payments;
             const expenses = yield* Expenses;
             const templates = yield* Templates;
+            const reads = {
+              contact: yield* outcome(contacts.get(b.contact)),
+              document: yield* outcome(docs.get(b.document)),
+              documentHistory: yield* outcome(docs.history(b.document)),
+              payments: yield* outcome(payments.listFor({ document: b.document })),
+              expense: yield* outcome(expenses.get(b.expense)),
+              template: yield* outcome(templates.get(b.template)),
+            };
+            const writes = {
+              contactSave: yield* outcome(
+                contacts.save({
+                  ...contactInput("Hijack"),
+                  id: b.contact,
+                  expectedRevision: 1,
+                }),
+              ),
+              paymentRecord: yield* outcome(payments.record({ target: { document: b.document } })),
+            };
+            const lists = yield* listEverything;
+            const reportAfter = yield* revenue;
             return {
-              reads: {
-                contact: yield* outcome(contacts.get(b.contact)),
-                document: yield* outcome(docs.get(b.document)),
-                documentHistory: yield* outcome(docs.history(b.document)),
-                payments: yield* outcome(payments.listFor({ document: b.document })),
-                expense: yield* outcome(expenses.get(b.expense)),
-                template: yield* outcome(templates.get(b.template)),
-              },
-              writes: {
-                contactSave: yield* outcome(
-                  contacts.save({
-                    ...(contactInput("Hijack") as object),
-                    id: b.contact,
-                    expectedRevision: 1,
-                  } as never),
-                ),
-                paymentRecord: yield* outcome(
-                  payments.record({ target: { document: b.document } }),
-                ),
-              },
-              lists: yield* listEverything,
-              reportUnchanged: JSON.stringify(yield* revenue) === JSON.stringify(reportBefore),
+              reads,
+              writes,
+              lists,
+              reportUnchanged: Formatter.format(reportAfter) === Formatter.format(reportBefore),
               ownA,
             };
           }),
@@ -292,7 +303,7 @@ describe("(h) workspace isolation", () => {
     expect(result.read).toEqual({ get: seeded.doc, list: [seeded.doc] });
     expect(result.share).toBeNull();
     expect(shareRead).toEqual({ key: seeded.url, owner: seeded.url });
-    for (const [name, o] of Object.entries(result.writes)) {
+    for (const [name, o] of EffectRecord.toEntries(result.writes)) {
       expect({ name, tag: o._tag }).toEqual({ name, tag: "Forbidden" });
     }
     expect(result.contactGet._tag).toBe("Forbidden");
@@ -315,7 +326,7 @@ const withOutcome = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 
 describe("(i) stale revision and requestKey on Documents.issue from a draft", () => {
   test("stale expectedRevision is revision_changed with no state change; same requestKey replays; another payload is idempotency_mismatch", async () => {
-    const key = "issue-draft-1" as RequestKey;
+    const key = RequestKey.make("issue-draft-1");
     const exit = await runCore(
       account(),
       Effect.gen(function* () {
@@ -326,7 +337,7 @@ describe("(i) stale revision and requestKey on Documents.issue from a draft", ()
             const docs = yield* Documents;
             const contact = yield* Effect.flatMap(Contacts, (c) => c.save(contactInput("Acme")));
             const draft = yield* docs.createDraft(invoiceInput(contactIdOf(contact)));
-            const edited = yield* docs.edit(draft.id, { note: "Edited" } as never, draft.revision);
+            const edited = yield* docs.edit(draft.id, { note: "Edited" }, draft.revision);
             const staleRevision = draft.revision;
 
             const stale = yield* outcome(
@@ -347,10 +358,12 @@ describe("(i) stale revision and requestKey on Documents.issue from a draft", ()
             );
             const otherAfter = yield* docs.get(other.id);
 
-            const issueAudits = (yield* docs.history(draft.id)).filter(
-              (e) => (e as { readonly action: string }).action === "document.issue",
+            const history = yield* docs.history(draft.id);
+            const issueAudits = EffectArray.filter(
+              history,
+              (entry) => entry.action === "document.issue",
             ).length;
-            const issuedCount = (yield* docs.list({ status: "issued" } as never)).items.length;
+            const issuedCount = (yield* docs.list({ status: "issued" })).items.length;
             return {
               stale,
               afterStale: {
@@ -376,7 +389,7 @@ describe("(i) stale revision and requestKey on Documents.issue from a draft", ()
               otherAfter: { status: otherAfter.status, number: otherAfter.number },
               issueAudits,
               issuedCount,
-              draftId: draft.id as DocumentId,
+              draftId: DocumentId.make(draft.id),
             };
           }),
         );

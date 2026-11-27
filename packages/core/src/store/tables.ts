@@ -14,8 +14,10 @@
  * - failures of the database are `StoreUnavailable`.
  */
 import type { Conflict, EntityKind, NotFound, WorkspaceId } from "@kvitbit/domain/contract";
-import type { Effect, Option, Schema } from "effect";
-import { Context } from "effect";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import type * as Option from "effect/Option";
+import type * as Schema from "effect/Schema";
 import type { StoreUnavailable, UniqueViolation } from "./CoreStore";
 
 /** Every stored aggregate row: tenant-scoped (S7) and revisioned (C2). */
@@ -148,4 +150,4 @@ export interface Collection<A extends Row> {
 export class MemoryTables extends Context.Service<
   MemoryTables,
   { readonly collection: <A extends Row>(def: CollectionDef<A>) => Collection<A> }
->()("kvitbit/core/testing/MemoryTables") {}
+>()("@kvitbit/core/store/tables/MemoryTables") {}

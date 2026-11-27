@@ -1,29 +1,33 @@
 /** Seed data for the Documents e2e scenarios on TestCore (registry records, CNB fixings, setup). */
-import type {
+
+import type { DocumentView, TaxRegime } from "@kvitbit/domain/contract";
+import {
+  BankAccountInput,
   ContactId,
+  Contacts,
   CurrencyCode,
-  DocumentView,
   IsoDate,
-  MemberCaller,
-  TaxRegime,
+  Workspaces,
 } from "@kvitbit/domain/contract";
-import { Contacts, Workspaces } from "@kvitbit/domain/contract";
 import type { CnbFixing, RegistryRecord } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import { asCaller } from "../helpers";
 
 export const dec = (s: string) => BigDecimal.fromStringUnsafe(s);
 /** Normalized decimal string, for assertions. */
-export const str = (d: BigDecimal.BigDecimal) => BigDecimal.format(BigDecimal.normalize(d));
+export const str = (d: BigDecimal.BigDecimal) => d.pipe(BigDecimal.normalize, BigDecimal.format);
 
-export const CZK = "CZK" as CurrencyCode;
-export const EUR = "EUR" as CurrencyCode;
+export const CZK = CurrencyCode.make("CZK");
+export const EUR = CurrencyCode.make("EUR");
 
 /** The Issuing Entity's IČO and the buyer's IČO; both pass the checksum. */
-export const ISSUER_ICO = "27074358";
+const ISSUER_ICO = "27074358";
 export const BUYER_ICO = "25596641";
 
-export const issuerRecord: RegistryRecord = {
+const issuerRecord: RegistryRecord = {
   name: "Dodavatel s.r.o.",
   address: { street: "Dlouhá 1", city: "Praha", postalCode: "11000", country: "CZ" },
   dic: "CZ27074358",
@@ -43,8 +47,16 @@ export const buyerRecord: RegistryRecord = {
 
 export const registry = { [ISSUER_ICO]: issuerRecord, [BUYER_ICO]: buyerRecord };
 
-export const fixing = (fixingDate: string, eur: string, sequence = 1): CnbFixing => ({
-  fixingDate: fixingDate as IsoDate,
+export const fixing = ({
+  date,
+  eur,
+  sequence = 1,
+}: {
+  readonly date: string;
+  readonly eur: string;
+  readonly sequence?: number;
+}): CnbFixing => ({
+  fixingDate: IsoDate.make(date),
   sequence,
   rates: [{ code: EUR, quantity: 1, rate: dec(eur) }],
 });
@@ -56,22 +68,28 @@ export const fixing = (fixingDate: string, eur: string, sequence = 1): CnbFixing
 export const onboard = (regime: TaxRegime) =>
   Effect.gen(function* () {
     const ws = yield* Workspaces;
-    const owner = yield* ws.create({ ico: ISSUER_ICO, taxRegime: regime } as never);
+    const owner = yield* ws.create({ ico: ISSUER_ICO, taxRegime: regime });
     const buyer = yield* asCaller(
       owner,
       Effect.gen(function* () {
-        yield* ws.saveBankAccount({ iban: "CZ1801000000000123456789", currency: CZK } as never);
-        yield* ws.saveBankAccount({ iban: "CZ6701000000000987654321", currency: EUR } as never);
+        yield* ws.saveBankAccount(
+          BankAccountInput.make({ iban: "CZ1801000000000123456789", currency: CZK }),
+        );
+        yield* ws.saveBankAccount(
+          BankAccountInput.make({ iban: "CZ6701000000000987654321", currency: EUR }),
+        );
         const contacts = yield* Contacts;
         const fromAres = yield* contacts.fromIco(BUYER_ICO);
+        const id = yield* Schema.decodeUnknownEffect(ContactId)(fromAres.id);
         return yield* contacts.save({
-          id: fromAres.id as ContactId,
+          id,
           expectedRevision: fromAres.revision,
           billingEmails: ["fakturace@odberatel.cz"],
-        } as never);
+        });
       }),
     );
-    return { owner, buyer: buyer.id as ContactId } as { owner: MemberCaller; buyer: ContactId };
+    const id = yield* Schema.decodeUnknownEffect(ContactId)(buyer.id);
+    return { owner, buyer: id };
   });
 
 export const amounts = (view: Pick<DocumentView, "totals">) => ({
@@ -82,7 +100,7 @@ export const amounts = (view: Pick<DocumentView, "totals">) => ({
 
 /** [treatment, rate %, base, vat, gross, vatCzk] per VAT bucket. */
 export const buckets = (view: Pick<DocumentView, "totals">) =>
-  view.totals.buckets.map((b) => [
+  EffectArray.map(view.totals.buckets, (b) => [
     b.treatment,
     str(b.ratePercent),
     str(b.base),

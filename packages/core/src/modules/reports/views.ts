@@ -14,7 +14,7 @@ import {
   Money,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 export const Period = Schema.Struct({ from: IsoDate, to: IsoDate });
 

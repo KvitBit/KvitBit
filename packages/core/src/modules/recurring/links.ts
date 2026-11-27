@@ -7,8 +7,13 @@
  * the unique index: `UniqueViolation`, which the issue step treats as a defect (its own run row
  * under the schedule lock already prevents it). Board seam: see the ce-recurring post in #384.
  */
-import type { DocumentId, IsoDate, ScheduleId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Schema } from "effect";
+
+import { type DocumentId, IsoDate, ScheduleId, WorkspaceId } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 
@@ -26,7 +31,7 @@ export class RecurringDocumentLink extends Context.Service<
       occurrence: OccurrenceLink,
     ) => Effect.Effect<void, UniqueViolation | StoreUnavailable>;
   }
->()("kvitbit/core/RecurringDocumentLink") {}
+>()("@kvitbit/core/modules/recurring/links/RecurringDocumentLink") {}
 
 interface LinkRow {
   readonly id: string;
@@ -39,7 +44,13 @@ interface LinkRow {
 const LinksTable = defineCollection<LinkRow>({
   name: "fake_document_links",
   entity: "Document",
-  schema: Schema.Unknown as unknown as Schema.Codec<LinkRow, unknown>,
+  schema: Schema.Struct({
+    id: Schema.String,
+    workspaceId: WorkspaceId,
+    revision: Schema.Int,
+    scheduleId: ScheduleId,
+    occurrence: IsoDate,
+  }),
   unique: [
     {
       name: "documents_schedule_occurrence_unique",
@@ -61,7 +72,7 @@ export class FakeDocumentLinks extends Context.Service<
       StoreUnavailable
     >;
   }
->()("kvitbit/core/testing/FakeDocumentLinks") {
+>()("@kvitbit/core/modules/recurring/links/FakeDocumentLinks") {
   static readonly layer: Layer.Layer<
     RecurringDocumentLink | FakeDocumentLinks,
     never,
@@ -73,7 +84,7 @@ export class FakeDocumentLinks extends Context.Service<
         FakeDocumentLinks,
         FakeDocumentLinks.of({
           all: Effect.map(links.listGlobal(), (rows) =>
-            rows.map((row) => ({
+            EffectArray.map(rows, (row) => ({
               document: row.id,
               scheduleId: row.scheduleId,
               occurrence: row.occurrence,
@@ -84,10 +95,12 @@ export class FakeDocumentLinks extends Context.Service<
         Context.add(
           RecurringDocumentLink,
           RecurringDocumentLink.of({
-            link: (workspaceId, document, { scheduleId, occurrence }) =>
-              Effect.asVoid(
-                links.insert({ id: document, workspaceId, revision: 1, scheduleId, occurrence }),
-              ),
+            link: Effect.fn("RecurringDocumentLink.link")(
+              (workspaceId, document, { scheduleId, occurrence }) =>
+                Effect.asVoid(
+                  links.insert({ id: document, workspaceId, revision: 1, scheduleId, occurrence }),
+                ),
+            ),
           }),
         ),
       );

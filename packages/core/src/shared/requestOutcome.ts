@@ -1,6 +1,8 @@
 /** The Ref-backed `RequestOutcome` (core-ports 2.1); the edge provides one per HTTP request. */
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Effect, Layer, Ref } from "effect";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 
 export const makeRequestOutcome: Effect.Effect<RequestOutcome["Service"]> = Effect.map(
   Ref.make(false),

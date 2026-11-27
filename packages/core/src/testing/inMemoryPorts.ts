@@ -1,5 +1,5 @@
 import type { CnbFixing, RegistryRecord } from "@kvitbit/domain/ports";
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { FxFixingsMemory } from "../shared/fx";
 import { IdGeneratorTest } from "../shared/ids";
 import { RequestOutcomeLive } from "../shared/requestOutcome";

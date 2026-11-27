@@ -1,35 +1,45 @@
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
-import { Invalid } from "@kvitbit/domain/contract";
+import { CurrencyCode, Invalid, IsoDate, type IssueCode } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
-import { BigDecimal, Option, Result } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import { Fx } from "../../src/engines";
 
 const d = BigDecimal.fromStringUnsafe;
-const EUR = "EUR" as CurrencyCode;
-const CZK = "CZK" as CurrencyCode;
+const EUR = CurrencyCode.make("EUR");
+const CZK = CurrencyCode.make("CZK");
 
 const fixing = (fixingDate: string, sequence: number, eur = "25.125"): CnbFixing => ({
-  fixingDate: fixingDate as IsoDate,
+  fixingDate: IsoDate.make(fixingDate),
   sequence,
   rates: [
     { code: EUR, quantity: 1, rate: d(eur) },
-    { code: "HUF" as CurrencyCode, quantity: 100, rate: d("6.512") },
+    { code: CurrencyCode.make("HUF"), quantity: 100, rate: d("6.512") },
   ],
 });
 
-const fxInvalid = (code: string, params?: Record<string, string>) =>
-  Result.fail(
-    new Invalid({ issues: [{ path: ["fx"], code: code as never, ...(params ? { params } : {}) }] }),
+const fxInvalid = (code: IssueCode, params?: Record<string, string>) => {
+  const issue = { path: ["fx"], code };
+  return Result.fail(
+    Invalid.make({ issues: [params === undefined ? issue : { ...issue, params }] }),
   );
+};
 
 describe("Fx.toCzk", () => {
   test("amount x rate / quantity, half away from zero at haléře", () => {
-    expect(BigDecimal.format(Fx.toCzk(d("2100"), { rate: d("6.512"), quantity: 100 }))).toBe(
-      "136.75",
+    const hundred = Fx.toCzk(d("2100"), { rate: d("6.512"), quantity: 100 }).pipe(
+      BigDecimal.format,
     );
-    expect(BigDecimal.format(Fx.toCzk(d("0.2"), { rate: d("0.025"), quantity: 1 }))).toBe("0.01"); // 0.005
-    expect(BigDecimal.format(Fx.toCzk(d("-0.2"), { rate: d("0.025"), quantity: 1 }))).toBe("-0.01");
+    const positiveHalf = Fx.toCzk(d("0.2"), { rate: d("0.025"), quantity: 1 }).pipe(
+      BigDecimal.format,
+    );
+    const negativeHalf = Fx.toCzk(d("-0.2"), { rate: d("0.025"), quantity: 1 }).pipe(
+      BigDecimal.format,
+    );
+    expect(hundred).toBe("136.75");
+    expect(positiveHalf).toBe("0.01");
+    expect(negativeHalf).toBe("-0.01");
   });
 });
 
@@ -38,20 +48,20 @@ describe("Fx.selectFixing", () => {
   const cache = [fixing("2026-11-23", 226), fixing("2026-11-20", 225), fixing("2026-11-24", 227)];
 
   test("the latest fixing on or before the date; weekends carry Friday's", () => {
-    expect(Option.map(Fx.selectFixing(cache, "2026-11-22" as IsoDate), (f) => f.sequence)).toEqual(
-      Option.some(225),
-    );
-    expect(Option.map(Fx.selectFixing(cache, "2026-11-23" as IsoDate), (f) => f.sequence)).toEqual(
-      Option.some(226),
-    );
+    expect(
+      Option.map(Fx.selectFixing(cache, IsoDate.make("2026-11-22")), (f) => f.sequence),
+    ).toEqual(Option.some(225));
+    expect(
+      Option.map(Fx.selectFixing(cache, IsoDate.make("2026-11-23")), (f) => f.sequence),
+    ).toEqual(Option.some(226));
   });
   test("none before the first cached fixing", () => {
-    expect(Fx.selectFixing(cache, "2026-11-19" as IsoDate)).toEqual(Option.none());
+    expect(Fx.selectFixing(cache, IsoDate.make("2026-11-19"))).toEqual(Option.none());
   });
   test("the higher sequence wins on the same date", () => {
     const f = Fx.selectFixing(
       [fixing("2026-11-20", 225, "1"), fixing("2026-11-20", 226, "2")],
-      "2026-11-20" as IsoDate,
+      IsoDate.make("2026-11-20"),
     );
     expect(Option.map(f, (x) => BigDecimal.format(x.rates[0]?.rate ?? d("0")))).toEqual(
       Option.some("2"),
@@ -69,18 +79,18 @@ describe("Fx.resolve", () => {
     expect(Fx.needsFixing(CZK, undefined)).toBe(false);
   });
   test("non-CZK takes the fixing's quote with its quantity", () => {
-    expect(Fx.resolve({ currency: "HUF" as CurrencyCode, override: null, fixing: f })).toEqual(
+    expect(Fx.resolve({ currency: CurrencyCode.make("HUF"), override: null, fixing: f })).toEqual(
       Result.succeed({
         rate: d("6.512"),
         quantity: 100,
-        fixingDate: "2026-11-20" as IsoDate,
+        fixingDate: IsoDate.make("2026-11-20"),
         source: "cnb",
       }),
     );
     expect(Fx.needsFixing(EUR, null)).toBe(true);
   });
   test("a currency the fixing does not quote is fx.rate_missing", () => {
-    expect(Fx.resolve({ currency: "XYZ" as CurrencyCode, override: null, fixing: f })).toEqual(
+    expect(Fx.resolve({ currency: CurrencyCode.make("XYZ"), override: null, fixing: f })).toEqual(
       fxInvalid("fx.rate_missing", { currency: "XYZ" }),
     );
     expect(Fx.resolve({ currency: EUR, override: null, fixing: null })).toEqual(

@@ -3,6 +3,7 @@
  * Read-only, no authorize or audit, called inside the caller's transaction. Removed Expenses
  * and other Workspaces' rows are never returned; incomplete Expenses are left out and counted.
  */
+
 import type {
   ContactId,
   CurrencyCode,
@@ -12,8 +13,11 @@ import type {
   VatBucket,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { BigDecimal } from "effect";
-import { Context, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { FxRate } from "../../engines/fx";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { ExpenseRow } from "./model";
@@ -64,10 +68,10 @@ export class ExpenseRecords extends Context.Service<
     ) => Effect.Effect<ReadonlyArray<ExpenseRecord>, StoreUnavailable>;
     readonly incompleteCount: (workspaceId: WorkspaceId) => Effect.Effect<number, StoreUnavailable>;
   }
->()("kvitbit/core/ExpenseRecords") {}
+>()("@kvitbit/core/modules/expenses/records/ExpenseRecords") {}
 
 /** A complete row's record; null for a row without figures (incomplete). */
-export const toRecord = (row: ExpenseRow): ExpenseRecord | null => {
+const toRecord = (row: ExpenseRow): ExpenseRecord | null => {
   const f = row.figures;
   if (f === null || row.issuedOn === null || row.currency === null) return null;
   return {
@@ -95,7 +99,7 @@ export const ExpenseRecordsLive: Layer.Layer<ExpenseRecords, never, ExpensesRepo
   Effect.map(ExpensesRepo, (repo) => ({
     complete: (workspaceId, range) =>
       Effect.map(repo.completeIn(workspaceId, range), (rows) =>
-        rows.flatMap((row) => {
+        EffectArray.flatMap(rows, (row) => {
           const record = toRecord(row);
           return record === null ? [] : [record];
         }),

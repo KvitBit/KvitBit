@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { DocumentId, IsoDate, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Conflict, Invalid, NotFound } from "@kvitbit/domain/contract";
-import { Effect, Exit, Layer, Option } from "effect";
+import type { NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
+import { Conflict, DocumentId, Invalid, IsoDate, NotFound } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import type * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as EffectString from "effect/String";
 import type { NumberingSeriesShape } from "../../../src/modules/numbering";
 import {
   DEFAULT_PER_KIND,
@@ -11,21 +17,20 @@ import {
   NumberingSeriesRepoMemory,
   NumberingTestLayer,
 } from "../../../src/modules/numbering";
+import type { CoreStoreShape } from "../../../src/store/CoreStore";
 import { CoreStore, UniqueViolation } from "../../../src/store/CoreStore";
 import { MemoryTables } from "../../../src/store/tables";
 import { rng, SEEDS } from "../../engines/random";
 import { ensureDocumentRow, member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { withoutStackTrace } from "../../helpers/run";
 
-const TODAY = "2026-11-23" as IsoDate;
+const TODAY = IsoDate.make("2026-11-23");
 const doc = (n: number) =>
-  `01900000-0000-7000-8000-0000000d${String(n).padStart(4, "0")}` as DocumentId;
+  DocumentId.make(`01900000-0000-7000-8000-0000000d${EffectString.padStart(4, "0")(String(n))}`);
 
 /** Runs `body` with the service and a transaction runner on fresh in-memory ports. */
 const scenario = <A, E>(
-  body: (
-    s: NumberingSeriesShape,
-    tx: <B, F>(effect: Effect.Effect<B, F>) => Effect.Effect<B, F | unknown>,
-  ) => Effect.Effect<A, E>,
+  body: (s: NumberingSeriesShape, tx: CoreStoreShape["transaction"]) => Effect.Effect<A, E>,
   layer:
     | Layer.Layer<NumberingSeries, never, never>
     | typeof NumberingTestLayer = NumberingTestLayer,
@@ -50,12 +55,17 @@ const scenario = <A, E>(
     }).pipe(Effect.provide(layer)),
   );
 
+type SeriesRepo = Context.Service.Shape<typeof NumberingSeriesRepo>;
+
 /** The memory repo with hooks, to replay READ COMMITTED interleavings the memory store serializes. */
 const hookedLayer = (hooks: {
   findDefault?: (
-    real: Effect.Effect<Option.Option<unknown>, unknown>,
-  ) => Effect.Effect<Option.Option<unknown>, unknown>;
-  insert?: (row: unknown, real: Effect.Effect<unknown, unknown>) => Effect.Effect<unknown, unknown>;
+    real: ReturnType<SeriesRepo["findDefault"]>,
+  ) => ReturnType<SeriesRepo["findDefault"]>;
+  insert?: (
+    row: Parameters<SeriesRepo["insert"]>[0],
+    real: ReturnType<SeriesRepo["insert"]>,
+  ) => ReturnType<SeriesRepo["insert"]>;
 }) =>
   NumberingSeriesLive.pipe(
     Layer.provide(
@@ -64,14 +74,14 @@ const hookedLayer = (hooks: {
         Effect.map(NumberingSeriesRepo, (repo) =>
           NumberingSeriesRepo.of({
             ...repo,
-            findDefault: (ws, kind) =>
-              (hooks.findDefault
-                ? hooks.findDefault(repo.findDefault(ws, kind))
-                : repo.findDefault(ws, kind)) as ReturnType<typeof repo.findDefault>,
-            insert: (row) =>
-              (hooks.insert ? hooks.insert(row, repo.insert(row)) : repo.insert(row)) as ReturnType<
-                typeof repo.insert
-              >,
+            findDefault: (ws, kind) => {
+              const real = repo.findDefault(ws, kind);
+              return hooks.findDefault?.(real) ?? real;
+            },
+            insert: (row) => {
+              const real = repo.insert(row);
+              return hooks.insert?.(row, real) ?? real;
+            },
           }),
         ),
       ).pipe(Layer.provide(NumberingSeriesRepoMemory)),
@@ -121,9 +131,9 @@ describe("NumberingSeries.configure", () => {
   });
 
   test("an invalid pattern or empty name is Invalid", async () => {
-    expect(await scenario((s, tx) => tx(create(s, "FV-YYYY")))).toEqual(
+    expect((await scenario((s, tx) => tx(create(s, "FV-YYYY")))).pipe(withoutStackTrace)).toEqual(
       Exit.fail(
-        new Invalid({
+        Invalid.make({
           issues: [
             {
               path: ["pattern"],
@@ -154,7 +164,7 @@ describe("NumberingSeries.configure", () => {
       Exit.succeed([
         "2026-0041",
         "2026-0042",
-        new Invalid({
+        Invalid.make({
           issues: [
             {
               path: ["nextNumber"],
@@ -171,9 +181,9 @@ describe("NumberingSeries.configure", () => {
     const exit = await scenario((s, tx) =>
       tx(create(s, "ABCDEFGHIJ-YYYY-NNNN", { nextNumber: 10_000 })),
     );
-    expect(exit).toEqual(
+    expect(exit.pipe(withoutStackTrace)).toEqual(
       Exit.fail(
-        new Invalid({
+        Invalid.make({
           issues: [
             {
               path: ["nextNumber"],
@@ -212,7 +222,7 @@ describe("NumberingSeries.configure", () => {
           ),
         );
         return [
-          views.map((v) => [v.pattern, v.isDefault]),
+          EffectArray.map(views, (v) => [v.pattern, v.isDefault]),
           unset,
           kind,
           back.before?.isDefault,
@@ -227,8 +237,8 @@ describe("NumberingSeries.configure", () => {
           ["YYYY-NNNN", false],
           ["B-YYYY-NNNN", true],
         ],
-        new Conflict({ reason: "illegal_transition" }),
-        new Conflict({ reason: "illegal_transition" }),
+        Conflict.make({ reason: "illegal_transition" }),
+        Conflict.make({ reason: "illegal_transition" }),
         false,
         true,
         true,
@@ -245,7 +255,8 @@ describe("NumberingSeries.configure", () => {
         );
       }),
     );
-    expect(Exit.isFailure(exit) && JSON.stringify(exit)).toContain("NotFound");
+    const error = Exit.findErrorOption(exit).pipe(Option.getOrUndefined);
+    expect(error).toBeInstanceOf(NotFound);
   });
 
   test("ensureDefaults creates one default per listed kind, once", async () => {
@@ -253,12 +264,8 @@ describe("NumberingSeries.configure", () => {
       Effect.gen(function* () {
         yield* tx(s.ensureDefaults(WORKSPACE_A, ["invoice", "proforma", "credit_note"]));
         yield* tx(s.ensureDefaults(WORKSPACE_A, ["invoice", "proforma", "credit_note"]));
-        return (yield* s.list(WORKSPACE_A, TODAY)).map((v) => [
-          v.kind,
-          v.pattern,
-          v.isDefault,
-          v.nextNumber,
-        ]);
+        const series = yield* s.list(WORKSPACE_A, TODAY);
+        return EffectArray.map(series, (v) => [v.kind, v.pattern, v.isDefault, v.nextNumber]);
       }),
     );
     expect(exit).toEqual(
@@ -279,7 +286,7 @@ describe("default-series races (READ COMMITTED replays)", () => {
       findDefault: (real) => {
         if (!stale) return real;
         stale = false;
-        return Effect.succeed(Option.none());
+        return Effect.succeedNone;
       },
     });
     const exit = await scenario(
@@ -289,7 +296,11 @@ describe("default-series races (READ COMMITTED replays)", () => {
           stale = true;
           const c = yield* tx(create(s, "C-YYYY-NNNN", { isDefault: false }));
           const views = yield* s.list(WORKSPACE_A, TODAY);
-          return [b.isDefault, c.isDefault, views.map((v) => [v.pattern, v.isDefault])];
+          return [
+            b.isDefault,
+            c.isDefault,
+            EffectArray.map(views, (v) => [v.pattern, v.isDefault]),
+          ];
         }),
       layer,
     );
@@ -308,7 +319,9 @@ describe("default-series races (READ COMMITTED replays)", () => {
   test("ensureDefaults fails instead of succeeding without the kind's default", async () => {
     const layer = hookedLayer({
       insert: () =>
-        Effect.fail(new UniqueViolation({ collection: "numbering_series", constraint: "primary" })),
+        Effect.fail(
+          UniqueViolation.make({ collection: "numbering_series", constraint: "primary" }),
+        ),
     });
     const exit = await scenario((s, tx) => tx(s.ensureDefaults(WORKSPACE_A, ["invoice"])), layer);
     expect(Exit.isFailure(exit)).toBe(true);
@@ -320,12 +333,15 @@ describe("default-series races (READ COMMITTED replays)", () => {
       findDefault: (real) => {
         if (raced) return real;
         raced = true;
-        return Effect.succeed(Option.none());
+        return Effect.succeedNone;
       },
       insert: (row, real) =>
-        (row as { isDefault: boolean }).isDefault
+        row.isDefault
           ? Effect.fail(
-              new UniqueViolation({ collection: "numbering_series", constraint: DEFAULT_PER_KIND }),
+              UniqueViolation.make({
+                collection: "numbering_series",
+                constraint: DEFAULT_PER_KIND,
+              }),
             )
           : real,
     });
@@ -338,7 +354,7 @@ describe("NumberingSeries.allocate", () => {
   test("a number past 20 characters is never reserved: the series is exhausted", async () => {
     const exit = await scenario((s, tx) =>
       Effect.gen(function* () {
-        const v = yield* tx(create(s, `${"A".repeat(18)}-N`, { nextNumber: 9 }));
+        const v = yield* tx(create(s, `${EffectString.repeat(18)("A")}-N`, { nextNumber: 9 }));
         const ninth = yield* tx(allocate(s, v.id, 1));
         const tenth = yield* Effect.flip(tx(allocate(s, v.id, 2)));
         return [ninth, tenth, (yield* s.list(WORKSPACE_A, TODAY))[0]?.nextCounter];
@@ -346,8 +362,8 @@ describe("NumberingSeries.allocate", () => {
     );
     expect(exit).toEqual(
       Exit.succeed([
-        `${"A".repeat(18)}-9`,
-        new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
+        `${EffectString.repeat(18)("A")}-9`,
+        Conflict.make({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
         10,
       ]),
     );
@@ -374,7 +390,7 @@ describe("NumberingSeries.allocate", () => {
     expect(exit).toEqual(
       Exit.succeed([
         "2147483646",
-        new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
+        Conflict.make({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
         "2147483647",
       ]),
     );
@@ -383,13 +399,13 @@ describe("NumberingSeries.allocate", () => {
   test("skipping a reserved number cannot push the number past 20 characters", async () => {
     const exit = await scenario((s, tx) =>
       Effect.gen(function* () {
-        const v = yield* tx(create(s, `${"A".repeat(18)}-N`, { nextNumber: 9 }));
+        const v = yield* tx(create(s, `${EffectString.repeat(18)("A")}-N`, { nextNumber: 9 }));
         yield* tx(
           s.override({
             workspaceId: WORKSPACE_A,
             kind: "invoice",
             documentId: doc(9),
-            number: `${"A".repeat(18)}-9`,
+            number: `${EffectString.repeat(18)("A")}-9`,
           }),
         );
         return yield* Effect.flip(tx(allocate(s, v.id, 1)));
@@ -397,7 +413,7 @@ describe("NumberingSeries.allocate", () => {
     );
     expect(exit).toEqual(
       Exit.succeed(
-        new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
+        Conflict.make({ reason: "illegal_transition", detail: "numbering.pattern_invalid" }),
       ),
     );
   });
@@ -406,12 +422,14 @@ describe("NumberingSeries.allocate", () => {
     const exit = await scenario((s, tx) =>
       Effect.gen(function* () {
         const v = yield* tx(create(s, "YYYY-NNN", { nextNumber: 100 }));
-        return yield* Effect.flip(tx(create(s, `${"A".repeat(13)}-YYYY-N`, { id: v.id })));
+        return yield* Effect.flip(
+          tx(create(s, `${EffectString.repeat(13)("A")}-YYYY-N`, { id: v.id })),
+        );
       }),
     );
     expect(exit).toEqual(
       Exit.succeed(
-        new Invalid({
+        Invalid.make({
           issues: [
             {
               path: ["pattern"],
@@ -432,10 +450,10 @@ describe("NumberingSeries.allocate", () => {
         return [
           yield* tx(allocate(s, y.id, 1)),
           yield* tx(allocate(s, y.id, 2)),
-          yield* tx(allocate(s, y.id, 3, "2027-01-04" as IsoDate)),
-          yield* tx(allocate(s, m.id, 4, "2026-11-30" as IsoDate)),
-          yield* tx(allocate(s, m.id, 5, "2026-12-01" as IsoDate)),
-          yield* tx(allocate(s, m.id, 6, "2026-12-02" as IsoDate)),
+          yield* tx(allocate(s, y.id, 3, IsoDate.make("2027-01-04"))),
+          yield* tx(allocate(s, m.id, 4, IsoDate.make("2026-11-30"))),
+          yield* tx(allocate(s, m.id, 5, IsoDate.make("2026-12-01"))),
+          yield* tx(allocate(s, m.id, 6, IsoDate.make("2026-12-02"))),
         ];
       }),
     );
@@ -537,14 +555,15 @@ describe("NumberingSeries.override (D4)", () => {
         "2026-0001",
         "2026-0002",
         "2026-0003",
-        new Conflict({ reason: "duplicate" }),
+        Conflict.make({ reason: "duplicate" }),
         "2026-0001",
       ]),
     );
   });
 
-  test("property: allocations strictly increase and never collide with reservations (seeded)", async () => {
-    for (const seed of SEEDS.slice(0, 40)) {
+  test.each(SEEDS.slice(0, 40))(
+    "property: allocations strictly increase and never collide with reservations (seed %i)",
+    async (seed) => {
       const r = rng(seed);
       const exit = await scenario((s, tx) =>
         Effect.gen(function* () {
@@ -556,7 +575,7 @@ describe("NumberingSeries.override (D4)", () => {
             const roll = r.next();
             documents++;
             if (roll < 0.3) {
-              const number = String(r.int(1, 60)).padStart(4, "0");
+              const number = EffectString.padStart(4, "0")(String(r.int(1, 60)));
               const result = yield* Effect.result(
                 tx(
                   s.override({
@@ -596,12 +615,13 @@ describe("NumberingSeries.override (D4)", () => {
           // Every counter value below the next one was issued or reserved (no gaps from rollbacks).
           const next = (yield* s.list(WORKSPACE_A, TODAY))[0]?.nextCounter ?? 0;
           for (let c = 1; c < next; c++) {
-            if (!reserved.has(String(c).padStart(4, "0"))) return `seed ${seed}: gap at ${c}`;
+            if (!reserved.has(EffectString.padStart(4, "0")(String(c))))
+              return `seed ${seed}: gap at ${c}`;
           }
           return "ok";
         }),
       );
       expect(exit).toEqual(Exit.succeed("ok"));
-    }
-  });
+    },
+  );
 });

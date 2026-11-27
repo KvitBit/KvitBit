@@ -2,50 +2,74 @@
  * Documents P3: corrections (D7), the Final Invoice (D8), Payment Tax Documents (P2) and the
  * stage-2 seams (`DocumentPayments`, `DocumentDeliveryReads`), on real layers.
  */
+/**
+ * Documents P3: corrections (D7), the Final Invoice (D8), Payment Tax Documents (P2) and the
+ * stage-2 seams (`DocumentPayments`, `DocumentDeliveryReads`), on real layers.
+ */
+
 import { describe, expect, test } from "bun:test";
-import type {
-  Caller,
-  DocumentId,
-  DocumentView,
+import type { Caller, DocumentView, TaxRegime } from "@kvitbit/domain/contract";
+import {
+  Conflict,
+  CurrentCaller,
+  type DocumentId,
+  Documents,
+  Forbidden,
+  Invalid,
   IsoDate,
   LineId,
+  NotFound,
   RequestKey,
-  TaxRegime,
 } from "@kvitbit/domain/contract";
-import { Conflict, Documents, Forbidden, Invalid, NotFound } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Exit, Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { VatMath } from "../../../src/engines/vat";
 import {
   DocumentDeliveryReads,
   DocumentFixtures,
   DocumentPayments,
+  type DocumentRecord,
   DocumentsRepo,
-  DocumentViewData,
   fakePdfBytes,
-  type LineViewData,
   reportFigures,
 } from "../../../src/modules/documents";
 import { NumberingSeries } from "../../../src/modules/numbering";
 import { ReportCompute } from "../../../src/modules/reports";
 import { CoreStore } from "../../../src/store/CoreStore";
-import { member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { member, WORKSPACE_B, WORKSPACE_A as WS } from "../../helpers";
 import type { Services } from "./fixtures";
-import { as, CZ_BUYER, dec, EUR, fixing, invoiceInput, issuer, scenario, str } from "./fixtures";
+import {
+  as,
+  CZ_BUYER,
+  concreteView,
+  dec,
+  EUR,
+  encodedView,
+  fixing,
+  invoiceInput,
+  issuer,
+  present,
+  scenario,
+  str,
+} from "./fixtures";
 
-const WS = WORKSPACE_A;
-const TODAY = "2026-11-23" as IsoDate;
+const TODAY = IsoDate.make("2026-11-23");
 
 const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
   if (Exit.isFailure(exit)) throw new Error(`expected success, got ${String(exit.cause)}`);
   return exit.value;
 };
 
-const illegal = new Conflict({ reason: "illegal_transition" });
+const illegal = Conflict.make({ reason: "illegal_transition" });
 const malformed = (path: ReadonlyArray<string | number>, reason: string) =>
-  new Invalid({ issues: [{ path, code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path, code: "request.malformed", params: { reason } }] });
 const exceeds = (remaining: string) =>
-  new Invalid({
+  Invalid.make({
     issues: [
       {
         path: ["lines"],
@@ -76,15 +100,12 @@ const run = <A, E>(
     ),
     {
       billingA: { seriesByKind: {} },
-      ...(options.caller === undefined ? {} : { caller: options.caller }),
-      ...(options.regimeA === undefined ? {} : { regimeA: options.regimeA }),
-      ...(options.fixings === undefined ? {} : { fixings: options.fixings }),
+      ...options,
     },
   );
 
-const docs = Documents;
 const issueInvoice = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
-  Effect.flatMap(docs, (d) => d.issue({ input: invoiceInput(extra) }));
+  Effect.flatMap(Documents, (d) => d.issue({ input: invoiceInput(extra) }));
 const issueProforma = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
   issueInvoice({ kind: "proforma", ...extra });
 
@@ -94,7 +115,7 @@ const amounts = (view: DocumentView) => ({
   gross: str(view.totals.gross.amount),
 });
 const buckets = (view: Pick<DocumentView, "totals">) =>
-  view.totals.buckets.map((b) => [
+  EffectArray.map(view.totals.buckets, (b) => [
     b.treatment,
     str(b.ratePercent),
     str(b.base),
@@ -102,26 +123,36 @@ const buckets = (view: Pick<DocumentView, "totals">) =>
     str(b.gross),
     b.vatCzk === null ? null : str(b.vatCzk),
   ]);
-const json = (view: DocumentView) =>
-  Schema.encodeSync(Schema.toCodecJson(DocumentViewData))(view as never);
-const lines = (view: DocumentView) => view.lines as unknown as ReadonlyArray<LineViewData>;
+const lines = (view: DocumentView) => concreteView(view).lines;
 /** Lines without ids, JSON-encoded (decimal caches differ between equal values). */
-const plainLines = (view: DocumentView) =>
-  (json(view) as { readonly lines: ReadonlyArray<{ readonly id: string }> }).lines.map(
-    ({ id: _id, ...l }) => l,
-  );
-const lineOf = (view: DocumentView, i: number) => lines(view)[i]?.id as LineId;
+const plainLines = async (view: DocumentView) =>
+  EffectArray.map((await encodedView(view)).lines, ({ id: _id, ...line }) => line);
+const lineOf = (view: DocumentView, i: number) => present(lines(view)[i]).id;
+
+const taxableBuckets = (row: DocumentRecord, figures: ReturnType<typeof reportFigures>) =>
+  ReportCompute.taxableBucketsCzk({
+    ...row,
+    ...figures,
+    status: row.status === "cancelled" ? "cancelled" : "issued",
+    finalInvoice: row.kind === "invoice",
+    correctsKind: row.kind === "credit_note" ? "invoice" : null,
+    contact: { id: row.contactId, name: row.contact.name },
+    taxPoint: row.taxableSupplyOn,
+    outstanding: dec("0"),
+  });
 
 /** Records a payment the way Payments will: lock, settle, PTD in one transaction. */
 const pay = (id: DocumentId, amount: string, paidOn: IsoDate = TODAY) =>
   Effect.gen(function* () {
     const store = yield* CoreStore;
     const seam = yield* DocumentPayments;
+    const caller = yield* CurrentCaller;
     return yield* store.transaction(
       Effect.gen(function* () {
         const targets = yield* seam.lock(WS, id);
         const on = targets.settleOn;
         const settled = yield* seam.settle(
+          caller,
           WS,
           on.id,
           {
@@ -132,7 +163,10 @@ const pay = (id: DocumentId, amount: string, paidOn: IsoDate = TODAY) =>
         );
         const ptd =
           on.kind === "proforma"
-            ? yield* seam.issuePaymentTaxDocument(WS, on.id, { amount: dec(amount), paidOn })
+            ? yield* seam.issuePaymentTaxDocument(caller, WS, on.id, {
+                amount: dec(amount),
+                paidOn,
+              })
             : null;
         return { targets, settled, ptd };
       }),
@@ -146,23 +180,37 @@ describe("correct (D7)", () => {
     const [original, cn, replay, after, history] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
-          const original = yield* issueInvoice();
-          const key = { requestKey: "corr-1" as RequestKey };
-          const cn = yield* d.correct(original.id, { reason: " sleva ", lines: "full" }, key);
-          const replay = yield* d.correct(original.id, { reason: " sleva ", lines: "full" }, key);
-          return [original, cn, replay, yield* d.get(original.id), yield* d.history(original.id)];
+          const d = yield* Documents;
+          const originalResult = yield* issueInvoice();
+          const key = { requestKey: RequestKey.make("corr-1") };
+          const creditNoteView = yield* d.correct(
+            originalResult.id,
+            { reason: " sleva ", lines: "full" },
+            key,
+          );
+          const replayResult = yield* d.correct(
+            originalResult.id,
+            { reason: " sleva ", lines: "full" },
+            key,
+          );
+          return [
+            originalResult,
+            creditNoteView,
+            replayResult,
+            yield* d.get(originalResult.id),
+            yield* d.history(originalResult.id),
+          ];
         }),
       ),
     );
     expect(cn.kind).toBe("credit_note");
     expect(cn.number).toBe("OD-2026-0001");
     expect(cn.totals).toEqual(VatMath.negate(original.totals));
-    expect(lines(cn).map((l) => str(l.quantity))).toEqual(["-2", "-1"]);
+    expect(EffectArray.map(lines(cn), (l) => str(l.quantity))).toEqual(["-2", "-1"]);
     expect(cn.related).toEqual([
       { relation: "corrects", id: original.id, kind: "invoice", number: "2026-0001" },
     ]);
-    expect(json(replay)).toEqual(json(cn));
+    expect(await encodedView(replay)).toEqual(await encodedView(cn));
     expect(after.settlement).toBe("credited");
     expect(after.revision).toBe(original.revision + 1);
     expect(history.at(-1)).toMatchObject({ action: "document.correct", reason: "sleva" });
@@ -172,44 +220,47 @@ describe("correct (D7)", () => {
     const [original, first, priced, over, rest, after, again] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
-          const original = yield* issueInvoice();
-          const first = yield* d.correct(original.id, {
+          const d = yield* Documents;
+          const originalResult2 = yield* issueInvoice();
+          const firstResult = yield* d.correct(originalResult2.id, {
             reason: "1 hodina méně",
-            lines: [{ line: lineOf(original, 0), quantity: dec("1") }],
+            lines: [{ line: lineOf(originalResult2, 0), quantity: dec("1") }],
           });
-          const priced = yield* d.correct(original.id, {
+          const pricedResult = yield* d.correct(originalResult2.id, {
             reason: "sleva na knihu",
-            lines: [{ line: lineOf(original, 1), unitPrice: dec("100") }],
+            lines: [{ line: lineOf(originalResult2, 1), unitPrice: dec("100") }],
           });
-          const over = yield* Effect.flip(
-            d.correct(original.id, {
+          const overResult = yield* Effect.flip(
+            d.correct(originalResult2.id, {
               reason: "znovu",
-              lines: [{ line: lineOf(original, 0), quantity: dec("1.5") }],
+              lines: [{ line: lineOf(originalResult2, 0), quantity: dec("1.5") }],
             }),
           );
-          const rest = yield* d.correct(original.id, { reason: "zbytek", lines: "full" });
+          const remainingCredit = yield* d.correct(originalResult2.id, {
+            reason: "zbytek",
+            lines: "full",
+          });
           return [
-            original,
-            first,
-            priced,
-            over,
-            rest,
-            yield* d.get(original.id),
-            yield* Effect.flip(d.correct(original.id, { reason: "x", lines: "full" })),
+            originalResult2,
+            firstResult,
+            pricedResult,
+            overResult,
+            remainingCredit,
+            yield* d.get(originalResult2.id),
+            yield* Effect.flip(d.correct(originalResult2.id, { reason: "x", lines: "full" })),
           ] as const;
         }),
       ),
     );
     expect(amounts(first)).toEqual({ net: "-1000", vat: "-210", gross: "-1210" });
     expect(
-      lines(first).map((l) => [str(l.quantity), str(l.unitPrice), str(l.ratePercent)]),
+      EffectArray.map(lines(first), (l) => [str(l.quantity), str(l.unitPrice), str(l.ratePercent)]),
     ).toEqual([["-1", "1000", "21"]]);
     expect(amounts(priced)).toEqual({ net: "-100", vat: "-12", gross: "-112" });
     expect(over).toEqual(exceeds("1658"));
     expect(amounts(rest)).toEqual({ net: "-1400", vat: "-258", gross: "-1658" });
     expect(after.settlement).toBe("credited");
-    expect(after.related.map((r) => r.relation)).toEqual([
+    expect(EffectArray.map(after.related, (r) => r.relation)).toEqual([
       "corrected_by",
       "corrected_by",
       "corrected_by",
@@ -222,19 +273,19 @@ describe("correct (D7)", () => {
     const [preview, issued, countBefore, countAfter] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const repo = yield* DocumentsRepo;
           const original = yield* issueInvoice();
           const input = {
             reason: "reklamace",
             lines: [{ line: lineOf(original, 0), quantity: dec("0.5") }],
-            correctedOn: "2026-11-23" as IsoDate,
+            correctedOn: IsoDate.make("2026-11-23"),
           };
           const before = (yield* repo.search(WS, {}, { limit: 50 })).rows.length;
-          const preview = yield* d.previewCorrection(original.id, input);
+          const previewResult = yield* d.previewCorrection(original.id, input);
           const after = (yield* repo.search(WS, {}, { limit: 50 })).rows.length;
-          const issued = yield* d.correct(original.id, input);
-          return [preview, issued, before, after] as const;
+          const issuedResult = yield* d.correct(original.id, input);
+          return [previewResult, issuedResult, before, after] as const;
         }),
       ),
     );
@@ -242,7 +293,7 @@ describe("correct (D7)", () => {
     expect(preview.number).toBeNull();
     expect(preview.totals).toEqual(issued.totals);
     expect(preview.dates).toEqual(issued.dates);
-    expect(plainLines(preview)).toEqual(plainLines(issued));
+    expect(await plainLines(preview)).toEqual(await plainLines(issued));
     expect(preview.related).toEqual(issued.related);
   });
 
@@ -250,7 +301,7 @@ describe("correct (D7)", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const inv = yield* issueInvoice();
           const proforma = yield* issueProforma();
           const draft = yield* d.createDraft(invoiceInput());
@@ -269,17 +320,19 @@ describe("correct (D7)", () => {
               d.correct(inv.id, {
                 reason: "x",
                 lines: "full",
-                correctedOn: "2026-11-24" as IsoDate,
+                correctedOn: IsoDate.make("2026-11-24"),
               }),
             ),
             yield* Effect.flip(
               d.correct(inv.id, {
                 reason: "x",
                 lines: "full",
-                correctedOn: "2026-11-22" as IsoDate,
+                correctedOn: IsoDate.make("2026-11-22"),
               }),
             ),
-            yield* Effect.flip(d.correct(inv.id, pick("nope" as LineId))),
+            yield* Effect.flip(
+              d.correct(inv.id, pick(LineId.make("nope", { disableChecks: true }))),
+            ),
             yield* Effect.flip(
               d.correct(inv.id, {
                 reason: "x",
@@ -309,7 +362,7 @@ describe("correct (D7)", () => {
       malformed(["lines"], "required"),
       illegal,
       illegal,
-      new Conflict({ reason: "document_locked" }),
+      Conflict.make({ reason: "document_locked" }),
       illegal,
       illegal,
     ]);
@@ -319,20 +372,20 @@ describe("correct (D7)", () => {
     const [paid, overpaid] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const a = yield* issueInvoice();
           yield* d.correct(a.id, {
             reason: "sleva",
             lines: [{ line: lineOf(a, 0), quantity: dec("1") }],
           });
-          const paid = yield* pay(a.id, "1770");
+          const paidResult = yield* pay(a.id, "1770");
           const b = yield* issueInvoice();
           yield* pay(b.id, "2980");
           yield* d.correct(b.id, {
             reason: "vratka",
             lines: [{ line: lineOf(b, 1), quantity: dec("1") }],
           });
-          return [paid.settled.settlement, (yield* d.get(b.id)).settlement] as const;
+          return [paidResult.settled.settlement, (yield* d.get(b.id)).settlement] as const;
         }),
       ),
     );
@@ -348,39 +401,46 @@ describe("payments seam", () => {
     const [result, proforma, ptdHistory, pHistory] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
-          const result = yield* pay(p.id, "1000", "2026-11-20" as IsoDate);
-          const ptdId = result.ptd?.id as DocumentId;
-          return [result, yield* d.get(p.id), yield* d.history(ptdId), yield* d.history(p.id)];
+          const operationResult = yield* pay(p.id, "1000", IsoDate.make("2026-11-20"));
+          const ptdId = present(operationResult.ptd).id;
+          return [
+            operationResult,
+            yield* d.get(p.id),
+            yield* d.history(ptdId),
+            yield* d.history(p.id),
+          ];
         }),
       ),
     );
-    const ptd = result.ptd as DocumentView;
+    const ptd = present(result.ptd);
     expect(ptd.kind).toBe("payment_tax_document");
     expect(ptd.number).toBe("DD-2026-0001");
     expect(ptd.taxDocument).toBe(true);
     expect(ptd.settlement).toBe("paid");
     expect(ptd.dates).toEqual({
       issuedOn: TODAY,
-      taxableSupplyOn: "2026-11-20" as IsoDate,
+      taxableSupplyOn: IsoDate.make("2026-11-20"),
       dueOn: TODAY,
     });
     expect(buckets(ptd)).toEqual([
       ["standard", "21", "671.14", "140.94", "812.08", null],
       ["reduced", "12", "167.79", "20.13", "187.92", null],
     ]);
-    expect(str(ptd.totals.gross.amount)).toBe("1000");
+    ptd.totals.gross.amount.pipe(str, expect).toBe("1000");
     expect(ptd.related).toEqual([
       { relation: "advance_of", id: proforma.id, kind: "proforma", number: "ZF-2026-0001" },
     ]);
     expect(result.settled.settlement).toBe("partially_paid");
     expect(proforma.settlement).toBe("partially_paid");
-    expect(proforma.related.map((r) => [r.relation, r.id])).toEqual([["tax_document_for", ptd.id]]);
+    expect(EffectArray.map(proforma.related, (r) => [r.relation, r.id])).toEqual([
+      ["tax_document_for", ptd.id],
+    ]);
     // Issued from input at revision 2; settle and the PTD link each bump it.
     expect(proforma.revision).toBe(4);
-    expect(ptdHistory.map((e) => e.action)).toEqual(["document.issue"]);
-    expect(pHistory.map((e) => e.action)).toEqual([
+    expect(EffectArray.map(ptdHistory, (e) => e.action)).toEqual(["document.issue"]);
+    expect(EffectArray.map(pHistory, (e) => e.action)).toEqual([
       "document.issue",
       "payment.record",
       "document.taxDocument",
@@ -400,7 +460,7 @@ describe("payments seam", () => {
             currency: EUR,
             lines: [{ description: "Služba", unitPrice: dec("1000") }],
           });
-          return (yield* pay(p.id, "605", "2026-11-21" as IsoDate)).ptd as DocumentView;
+          return present((yield* pay(p.id, "605", IsoDate.make("2026-11-21"))).ptd);
         }),
         { fixings: [fixing("2026-11-23", "25.000"), fixing("2026-11-20", "24.500")] },
       ),
@@ -413,9 +473,10 @@ describe("payments seam", () => {
     const [ptd, steps, history] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
+          const caller = yield* CurrentCaller;
           const p = yield* issueProforma({
             lines: [{ description: "Práce", unitPrice: dec("1000") }],
           });
@@ -428,6 +489,7 @@ describe("payments seam", () => {
             store.transaction(
               Effect.andThen(seam.lock(WS, p.id), () =>
                 seam.settle(
+                  caller,
                   WS,
                   p.id,
                   { amount: dec(amount), payments },
@@ -435,14 +497,14 @@ describe("payments seam", () => {
                 ),
               ),
             );
-          const steps = [
+          const stepsResult = [
             first.settled.settlement,
             (yield* set("1000", 2, "payment.record")).settlement,
             (yield* set("1500", 3, "payment.record")).settlement,
             (yield* set("1000", 2, "payment.remove")).settlement,
             (yield* set("0", 0, "payment.remove")).settlement,
           ];
-          return [first.ptd, steps, yield* d.history(p.id)] as const;
+          return [first.ptd, stepsResult, yield* d.history(p.id)] as const;
         }),
         { regimeA: "non_vat_payer" },
       ),
@@ -456,9 +518,10 @@ describe("payments seam", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
+          const caller = yield* CurrentCaller;
           const draft = yield* d.createDraft(invoiceInput());
           const inv = yield* issueInvoice();
           const cn = yield* d.correct(inv.id, { reason: "x", lines: "full" });
@@ -468,6 +531,7 @@ describe("payments seam", () => {
             Effect.flip(
               store.transaction(
                 seam.settle(
+                  caller,
                   WS,
                   id,
                   { amount: dec(amount), payments },
@@ -492,7 +556,10 @@ describe("payments seam", () => {
       illegal,
       malformed(["payments"], "out_of_range"),
       malformed(["amount"], "out_of_range"),
-      new NotFound({ entity: "Document", id: results[5] instanceof NotFound ? results[5].id : "" }),
+      NotFound.make({
+        entity: "Document",
+        id: Schema.is(NotFound)(results[5]) ? results[5].id : "",
+      }),
     ]);
   });
 
@@ -500,32 +567,32 @@ describe("payments seam", () => {
     const [locks, viaProforma, viaInvoice] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
           const p = yield* issueProforma();
           yield* pay(p.id, "1000");
           const fi = yield* d.issueFinalInvoice(p.id);
-          const locks: Array<DocumentId> = [];
+          const locksResult: Array<DocumentId> = [];
           const spy = DocumentsRepo.of({
             ...repo,
             lock: (ws, id) =>
               Effect.andThen(
-                Effect.sync(() => locks.push(id)),
+                Effect.sync(() => locksResult.push(id)),
                 repo.lock(ws, id),
               ),
           });
           const lockAs = (id: DocumentId) =>
             Effect.provideService(store.transaction(seam.lock(WS, id)), DocumentsRepo, spy);
-          const viaInvoice = yield* lockAs(fi.id);
-          const first = [...locks];
-          locks.length = 0;
-          const viaProforma = yield* lockAs(p.id);
+          const fromInvoice = yield* lockAs(fi.id);
+          const first = [...locksResult];
+          locksResult.length = 0;
+          const fromProforma = yield* lockAs(p.id);
           return [
-            { invoice: first, proforma: [...locks], p: p.id, fi: fi.id },
-            viaProforma,
-            viaInvoice,
+            { invoice: first, proforma: [...locksResult], p: p.id, fi: fi.id },
+            fromProforma,
+            fromInvoice,
           ];
         }),
       ),
@@ -544,18 +611,18 @@ describe("payments seam", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
           const blocked = (target: DocumentId, ptd: DocumentId | null) =>
             store.transaction(seam.removalBlocked(WS, target, ptd));
           const a = yield* issueProforma();
-          const ptdA = (yield* pay(a.id, "500")).ptd as DocumentView;
+          const ptdA = present((yield* pay(a.id, "500")).ptd);
           const before = yield* blocked(a.id, ptdA.id);
           yield* d.correct(ptdA.id, { reason: "chybná záloha", lines: "full" });
           const credited = yield* blocked(a.id, ptdA.id);
           const b = yield* issueProforma();
-          const ptdB = (yield* pay(b.id, "500")).ptd as DocumentView;
+          const ptdB = present((yield* pay(b.id, "500")).ptd);
           const fi = yield* d.issueFinalInvoice(b.id);
           const deducted = yield* blocked(b.id, ptdB.id);
           yield* d.correct(fi.id, { reason: "x", lines: "full" });
@@ -581,7 +648,7 @@ describe("payments seam", () => {
     const [targets, proforma] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
           const p = yield* issueProforma({ due: { on: TODAY } });
@@ -591,8 +658,8 @@ describe("payments seam", () => {
         }),
       ),
     );
-    expect(str(targets.settleOn.owed.amount)).toBe("-20");
-    expect(str(targets.settleOn.refundDue.amount)).toBe("20");
+    targets.settleOn.owed.amount.pipe(str, expect).toBe("-20");
+    targets.settleOn.refundDue.amount.pipe(str, expect).toBe("20");
     expect(targets.settleOn.settlement).toBe("overpaid");
     expect(proforma.overdue).toBe(false);
   });
@@ -605,18 +672,18 @@ describe("issueFinalInvoice (D8)", () => {
     const [ptd, preview, fi, replay, proforma, dup, history] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
-          const { ptd } = yield* pay(p.id, "1000");
-          const preview = yield* d.previewFinalInvoice(p.id);
-          const key = { requestKey: "fi-1" as RequestKey };
-          const fi = yield* d.issueFinalInvoice(p.id, undefined, key);
-          const replay = yield* d.issueFinalInvoice(p.id, undefined, key);
+          const { ptd: taxDocument } = yield* pay(p.id, "1000");
+          const previewResult = yield* d.previewFinalInvoice(p.id);
+          const key = { requestKey: RequestKey.make("fi-1") };
+          const finalInvoiceResult = yield* d.issueFinalInvoice(p.id, undefined, key);
+          const replayResult = yield* d.issueFinalInvoice(p.id, undefined, key);
           return [
-            ptd as DocumentView,
-            preview,
-            fi,
-            replay,
+            present(taxDocument),
+            previewResult,
+            finalInvoiceResult,
+            replayResult,
             yield* d.get(p.id),
             yield* Effect.flip(d.issueFinalInvoice(p.id)),
             yield* d.history(p.id),
@@ -626,7 +693,9 @@ describe("issueFinalInvoice (D8)", () => {
     );
     expect(fi.kind).toBe("invoice");
     expect(fi.number).toBe("2026-0001");
-    expect(lines(fi).map((l) => [str(l.quantity), str(l.unitPrice), l.deducts])).toEqual([
+    expect(
+      EffectArray.map(lines(fi), (l) => [str(l.quantity), str(l.unitPrice), l.deducts]),
+    ).toEqual([
       ["2", "1000", null],
       ["1", "500", null],
       ["-1", "671.14", ptd.id],
@@ -638,28 +707,31 @@ describe("issueFinalInvoice (D8)", () => {
     ]);
     expect(amounts(fi)).toEqual({ net: "1661.07", vat: "318.93", gross: "1980" });
     expect(fi.settlement).toBe("unpaid");
-    expect(fi.related.map((r) => [r.relation, r.id])).toEqual([
+    expect(EffectArray.map(fi.related, (r) => [r.relation, r.id])).toEqual([
       ["advance_of", proforma.id],
       ["deducts", ptd.id],
     ]);
-    expect(proforma.related.map((r) => r.relation)).toEqual([
+    expect(EffectArray.map(proforma.related, (r) => r.relation)).toEqual([
       "tax_document_for",
       "final_invoice_for",
     ]);
-    expect(json(replay)).toEqual(json(fi));
-    expect(dup).toEqual(new Conflict({ reason: "duplicate" }));
+    expect(await encodedView(replay)).toEqual(await encodedView(fi));
+    expect(dup).toEqual(Conflict.make({ reason: "duplicate" }));
     expect(preview.number).toBeNull();
     expect(preview.totals).toEqual(fi.totals);
-    expect(plainLines(preview)).toEqual(plainLines(fi));
+    expect(await plainLines(preview)).toEqual(await plainLines(fi));
     expect(history.at(-1)).toMatchObject({ action: "document.finalInvoice" });
     // Reports: the full supply plus the deducted advance (#384).
     const figures = reportFigures(
       {
-        lines: lines(fi).map((l, i) => ({
-          ...(l as never as object),
+        lines: EffectArray.map(lines(fi), (line, i) => ({
+          ...line,
+          itemPrice: null,
+          vat: null,
+          itemVat: null,
           deductedVat: i < 2 ? null : dec(i === 2 ? "-140.94" : "-20.13"),
           deductedVatCzk: null,
-        })) as never,
+        })),
         totals: fi.totals,
         currency: fi.totals.gross.currency,
         pricesIncludeVat: false,
@@ -667,7 +739,7 @@ describe("issueFinalInvoice (D8)", () => {
       },
       () => true,
     );
-    expect(str(figures.totals.gross.amount)).toBe("2980");
+    figures.totals.gross.amount.pipe(str, expect).toBe("2980");
     expect(figures.advanceDeductions).toEqual(ptd.totals.buckets);
   });
 
@@ -675,31 +747,31 @@ describe("issueFinalInvoice (D8)", () => {
     const [fi, currency] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
           yield* pay(p.id, "1000");
-          const currency = yield* Effect.flip(
+          const currencyResult = yield* Effect.flip(
             d.previewFinalInvoice(p.id, { patch: { currency: EUR } }),
           );
-          const fi = yield* d.issueFinalInvoice(p.id, {
+          const finalInvoice2 = yield* d.issueFinalInvoice(p.id, {
             patch: {
               lines: [{ description: "Dodávka", quantity: dec("3"), unitPrice: dec("1000") }],
-              taxableSupplyOn: "2026-11-22" as IsoDate,
+              taxableSupplyOn: IsoDate.make("2026-11-22"),
             },
           });
-          return [fi, currency] as const;
+          return [finalInvoice2, currencyResult] as const;
         }),
         { fixings: [fixing("2026-11-23", "25.000")] },
       ),
     );
-    expect(fi.dates.taxableSupplyOn).toBe("2026-11-22" as IsoDate);
-    expect(lines(fi).map((l) => l.deducts === null)).toEqual([true, false, false]);
+    expect(fi.dates.taxableSupplyOn).toBe(IsoDate.make("2026-11-22"));
+    expect(EffectArray.map(lines(fi), (l) => l.deducts === null)).toEqual([true, false, false]);
     expect(buckets(fi)).toEqual([
       ["standard", "21", "2328.86", "489.06", "2817.92", null],
       ["reduced", "12", "-167.79", "-20.13", "-187.92", null],
     ]);
     expect(currency).toEqual(
-      new Invalid({
+      Invalid.make({
         issues: [
           {
             path: ["currency"],
@@ -720,30 +792,35 @@ describe("issueFinalInvoice (D8)", () => {
     const [fi, full] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma({
             lines: [{ description: "Práce", unitPrice: dec("1000") }],
           });
           yield* pay(p.id, "300");
-          const fi = yield* d.issueFinalInvoice(p.id);
+          const finalInvoice3 = yield* d.issueFinalInvoice(p.id);
           const q = yield* issueProforma({
             lines: [{ description: "Práce", unitPrice: dec("1000") }],
           });
           yield* pay(q.id, "1000");
-          return [fi, yield* d.issueFinalInvoice(q.id)] as const;
+          return [finalInvoice3, yield* d.issueFinalInvoice(q.id)] as const;
         }),
         { regimeA: "non_vat_payer" },
       ),
     );
     expect(
-      lines(fi).map((l) => [l.treatment, str(l.quantity), str(l.unitPrice), l.deducts]),
+      EffectArray.map(lines(fi), (l) => [
+        l.treatment,
+        str(l.quantity),
+        str(l.unitPrice),
+        l.deducts,
+      ]),
     ).toEqual([
       ["outside_scope", "1", "1000", null],
       ["outside_scope", "-1", "300", fi.related[0]?.id ?? null],
     ]);
     expect(amounts(fi)).toEqual({ net: "700", vat: "0", gross: "700" });
-    expect(fi.related.map((r) => r.relation)).toEqual(["advance_of"]);
-    expect(str(full.totals.gross.amount)).toBe("0");
+    expect(EffectArray.map(fi.related, (r) => r.relation)).toEqual(["advance_of"]);
+    full.totals.gross.amount.pipe(str, expect).toBe("0");
     expect(full.settlement).toBe("paid");
     expect(full.overdue).toBe(false);
   });
@@ -752,19 +829,24 @@ describe("issueFinalInvoice (D8)", () => {
     const [fi, cn] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
           yield* pay(p.id, "1000");
-          const fi = yield* d.issueFinalInvoice(p.id);
-          return [fi, yield* d.correct(fi.id, { reason: "storno", lines: "full" })] as const;
+          const finalInvoice7 = yield* d.issueFinalInvoice(p.id);
+          return [
+            finalInvoice7,
+            yield* d.correct(finalInvoice7.id, { reason: "storno", lines: "full" }),
+          ] as const;
         }),
       ),
     );
     expect(cn.totals).toEqual(VatMath.negate(fi.totals));
-    expect(lines(cn).map((l) => l.deducts)).toEqual(lines(fi).map((l) => l.deducts));
+    expect(EffectArray.map(lines(cn), (l) => l.deducts)).toEqual(
+      EffectArray.map(lines(fi), (l) => l.deducts),
+    );
     const partial = await run(
       Effect.gen(function* () {
-        const d = yield* docs;
+        const d = yield* Documents;
         const p = yield* issueProforma();
         yield* pay(p.id, "1000");
         const invoice = yield* d.issueFinalInvoice(p.id);
@@ -773,7 +855,7 @@ describe("issueFinalInvoice (D8)", () => {
         );
       }),
     );
-    expect(ok(partial)).toEqual(malformed(["lines", 0, "line"], "deduction_line"));
+    partial.pipe(ok, expect).toEqual(malformed(["lines", 0, "line"], "deduction_line"));
   });
 
   test("EUR advances at other fixings: the Final Invoice declares its net VAT at its own fixing, as the VAT report does (§37a)", async () => {
@@ -781,46 +863,53 @@ describe("issueFinalInvoice (D8)", () => {
     const [ptds, fi, cn, reported, full, unknown] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma({
             currency: EUR,
             lines: [{ description: "Služba", unitPrice: dec("24082.29") }],
           });
-          const ptds: Array<DocumentView> = [];
+          const taxDocuments: Array<DocumentView> = [];
           for (const [amount, on] of [
             ["1182.63", "2026-11-18"],
             ["5670.29", "2026-11-21"],
             ["8832.48", "2026-11-23"],
           ] as const) {
-            ptds.push((yield* pay(p.id, amount, on as IsoDate)).ptd as DocumentView);
+            taxDocuments.push(present((yield* pay(p.id, amount, IsoDate.make(on))).ptd));
           }
-          const fi = yield* d.issueFinalInvoice(p.id);
+          const finalInvoice4 = yield* d.issueFinalInvoice(p.id);
           const record = yield* Effect.flatMap(CoreStore, (store) =>
-            store.transaction(Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, fi.id))),
+            store.transaction(
+              Effect.flatMap(DocumentsRepo, (repo) => repo.get(WS, finalInvoice4.id)),
+            ),
           );
           const declare = (r: typeof record) => {
             const f = reportFigures(r, () => true);
             return {
               full: f.totals,
-              vat: ReportCompute.taxableBucketsCzk({
-                currency: r.currency,
-                fx: r.fx,
-                totals: f.totals,
-                advanceDeductions: f.advanceDeductions,
-              } as never),
+              vat: taxableBuckets(r, f),
             };
           };
-          const { full, vat: reported } = declare(record);
+          const { full: fullResult, vat: reportedResult } = declare(record);
           // A stored net bucket without CZK VAT: the report converts the net VAT, never reads 0.
-          const unknown = declare({
+          const missingDocument = declare({
             ...record,
             totals: {
               ...record.totals,
-              buckets: record.totals.buckets.map((b) => ({ ...b, vatCzk: null })),
+              buckets: EffectArray.map(record.totals.buckets, (b) => ({ ...b, vatCzk: null })),
             },
           });
-          const cn = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
-          return [ptds, fi, cn, reported, full, unknown] as const;
+          const creditNoteView = yield* d.correct(finalInvoice4.id, {
+            reason: "storno",
+            lines: "full",
+          });
+          return [
+            taxDocuments,
+            finalInvoice4,
+            creditNoteView,
+            reportedResult,
+            fullResult,
+            missingDocument,
+          ] as const;
         }),
         {
           fixings: [
@@ -831,7 +920,7 @@ describe("issueFinalInvoice (D8)", () => {
         },
       ),
     );
-    expect(ptds.map((t) => buckets(t)[0]?.slice(3))).toEqual([
+    expect(EffectArray.map(ptds, (t) => buckets(t)[0]?.slice(3))).toEqual([
       ["205.25", "1182.63", "5125.91"],
       ["984.1", "5670.29", "24095.69"],
       ["1532.91", "8832.48", "37493.45"],
@@ -840,14 +929,14 @@ describe("issueFinalInvoice (D8)", () => {
     expect(buckets(fi)).toEqual([
       ["standard", "21", "11119.15", "2335.02", "13454.17", "57112.25"],
     ]);
-    expect(str(fi.totals.vatCzk?.amount ?? dec("0"))).toBe("57112.25");
-    expect(reported.map((b) => str(b.vat))).toEqual(["57112.25"]);
+    (fi.totals.vatCzk?.amount ?? dec("0")).pipe(str, expect).toBe("57112.25");
+    expect(EffectArray.map(reported, (b) => str(b.vat))).toEqual(["57112.25"]);
     // Revenue's full supply: 5057.28 EUR at the Final Invoice's fixing, not the advances' fixings.
-    expect(full.buckets.map((b) => (b.vatCzk === null ? null : str(b.vatCzk)))).toEqual([
-      "123696.01",
-    ]);
-    expect(unknown.vat.map((b) => str(b.vat))).toEqual(["57112.25"]);
-    expect(unknown.full.buckets.map((b) => b.vatCzk)).toEqual([null]);
+    expect(
+      EffectArray.map(full.buckets, (b) => (b.vatCzk === null ? null : str(b.vatCzk))),
+    ).toEqual(["123696.01"]);
+    expect(EffectArray.map(unknown.vat, (b) => str(b.vat))).toEqual(["57112.25"]);
+    expect(EffectArray.map(unknown.full.buckets, (b) => b.vatCzk)).toEqual([null]);
     expect(cn.totals).toEqual(VatMath.negate(fi.totals));
   });
 
@@ -855,12 +944,12 @@ describe("issueFinalInvoice (D8)", () => {
     const credit = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma({
             currency: EUR,
             lines: [{ description: "Služba", unitPrice: dec("100") }],
           });
-          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          yield* pay(p.id, "60.50", IsoDate.make("2026-11-20"));
           const fi = yield* d.issueFinalInvoice(p.id);
           return yield* d.correct(fi.id, { reason: "sleva", lines: [{ line: lineOf(fi, 0) }] });
         }),
@@ -875,12 +964,12 @@ describe("issueFinalInvoice (D8)", () => {
     const [fi, partial, rest, revenue] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma({
             currency: EUR,
             lines: [{ description: "Služba", unitPrice: dec("100") }],
           });
-          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          yield* pay(p.id, "60.50", IsoDate.make("2026-11-20"));
           // Revenue's full-supply CZK VAT per document (ReportsSource mapping).
           const fullCzk = (id: DocumentId) =>
             Effect.map(
@@ -889,26 +978,29 @@ describe("issueFinalInvoice (D8)", () => {
               ),
               (record) => str(reportFigures(record, () => true).totals.vatCzk?.amount ?? dec("0")),
             );
-          const fi = yield* d.issueFinalInvoice(p.id);
-          const partial = yield* d.correct(fi.id, {
+          const finalInvoice5 = yield* d.issueFinalInvoice(p.id);
+          const partialResult = yield* d.correct(finalInvoice5.id, {
             reason: "sleva",
-            lines: [{ line: lineOf(fi, 0) }],
+            lines: [{ line: lineOf(finalInvoice5, 0) }],
           });
-          const rest = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
-          const revenue = [
-            yield* fullCzk(fi.id),
-            yield* fullCzk(partial.id),
-            yield* fullCzk(rest.id),
+          const remainingCredit = yield* d.correct(finalInvoice5.id, {
+            reason: "storno",
+            lines: "full",
+          });
+          const revenueResult = [
+            yield* fullCzk(finalInvoice5.id),
+            yield* fullCzk(partialResult.id),
+            yield* fullCzk(remainingCredit.id),
           ];
-          return [fi, partial, rest, revenue] as const;
+          return [finalInvoice5, partialResult, remainingCredit, revenueResult] as const;
         }),
         { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "25.000")] },
       ),
     );
     // No zero-value supply line for the CZK residual; the deduction is reversed as a line.
-    expect(lines(rest).map((l) => [str(l.quantity), str(l.unitPrice), l.deducts])).toEqual([
-      ["1", "50", lines(fi)[1]?.deducts ?? null],
-    ]);
+    expect(
+      EffectArray.map(lines(rest), (l) => [str(l.quantity), str(l.unitPrice), l.deducts]),
+    ).toEqual([["1", "50", lines(fi)[1]?.deducts ?? null]]);
     // CZK VAT closes exactly: 262.5 (FI) - 525 (partial) + 262.5 (remainder) = 0.
     expect(buckets(rest)).toEqual([["standard", "21", "50", "10.5", "60.5", "262.5"]]);
     expect(buckets(partial)[0]?.[5]).toBe("-525");
@@ -920,12 +1012,12 @@ describe("issueFinalInvoice (D8)", () => {
     const [stored, declared, revenue] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma({
             currency: EUR,
             lines: [{ description: "Služba", unitPrice: dec("100") }],
           });
-          yield* pay(p.id, "60.50", "2026-11-20" as IsoDate);
+          yield* pay(p.id, "60.50", IsoDate.make("2026-11-20"));
           const fi = yield* d.issueFinalInvoice(p.id);
           const partial = yield* d.correct(fi.id, {
             reason: "sleva",
@@ -939,23 +1031,20 @@ describe("issueFinalInvoice (D8)", () => {
               ),
               (record) => {
                 const f = reportFigures(record, () => true);
-                const vat = ReportCompute.taxableBucketsCzk({
-                  currency: record.currency,
-                  fx: record.fx,
-                  totals: f.totals,
-                  advanceDeductions: f.advanceDeductions,
-                } as never);
+                const vat = taxableBuckets(record, f);
                 return {
-                  declared: str(vat.reduce((a, b) => BigDecimal.sum(a, b.vat), dec("0"))),
+                  declared: str(
+                    EffectArray.reduce(vat, dec("0"), (a, b) => BigDecimal.sum(a, b.vat)),
+                  ),
                   revenue: str(f.totals.vatCzk?.amount ?? dec("0")),
                 };
               },
             );
           const all = [yield* figures(fi.id), yield* figures(partial.id), yield* figures(rest.id)];
           return [
-            [fi, partial, rest].map((v) => str(v.totals.vatCzk?.amount ?? dec("0"))),
-            all.map((f) => f.declared),
-            all.map((f) => f.revenue),
+            EffectArray.map([fi, partial, rest], (v) => str(v.totals.vatCzk?.amount ?? dec("0"))),
+            EffectArray.map(all, (f) => f.declared),
+            EffectArray.map(all, (f) => f.revenue),
           ] as const;
         }),
         { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "24.450")] },
@@ -973,18 +1062,26 @@ describe("issueFinalInvoice (D8)", () => {
     const [first, second, rest, fi] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma({
             currency: EUR,
             lines: [{ description: "Služba", quantity: dec("2"), unitPrice: dec("50") }],
           });
-          yield* pay(p.id, "24.20", "2026-11-20" as IsoDate);
-          const fi = yield* d.issueFinalInvoice(p.id);
-          const unit = { line: lineOf(fi, 0), quantity: dec("1") };
-          const first = yield* d.correct(fi.id, { reason: "sleva", lines: [unit] });
-          const second = yield* Effect.flip(d.correct(fi.id, { reason: "sleva", lines: [unit] }));
-          const rest = yield* d.correct(fi.id, { reason: "storno", lines: "full" });
-          return [first, second, rest, fi] as const;
+          yield* pay(p.id, "24.20", IsoDate.make("2026-11-20"));
+          const finalInvoice6 = yield* d.issueFinalInvoice(p.id);
+          const unit = { line: lineOf(finalInvoice6, 0), quantity: dec("1") };
+          const firstResult = yield* d.correct(finalInvoice6.id, {
+            reason: "sleva",
+            lines: [unit],
+          });
+          const secondResult = yield* Effect.flip(
+            d.correct(finalInvoice6.id, { reason: "sleva", lines: [unit] }),
+          );
+          const remainingCreditResult = yield* d.correct(finalInvoice6.id, {
+            reason: "storno",
+            lines: "full",
+          });
+          return [firstResult, secondResult, remainingCreditResult, finalInvoice6] as const;
         }),
         { fixings: [fixing("2026-11-20", "24.000"), fixing("2026-11-23", "24.450")] },
       ),
@@ -993,16 +1090,19 @@ describe("issueFinalInvoice (D8)", () => {
     // so a second unit (another -256.73) would credit 513.46: refused, the remainder closes it.
     expect(buckets(first)[0]?.[5]).toBe("-256.73");
     expect(second).toBeInstanceOf(Invalid);
-    expect((second as Invalid).issues[0]?.code).toBe("credit_note.exceeds_original");
+    Schema.asserts(Invalid, second);
+    expect(second.issues[0]?.code).toBe("credit_note.exceeds_original");
     const czk = (v: DocumentView) => BigDecimal.normalize(v.totals.vatCzk?.amount ?? dec("0"));
-    expect(str(BigDecimal.sum(BigDecimal.sum(czk(fi), czk(first)), czk(rest)))).toBe("0");
+    czk(fi)
+      .pipe(BigDecimal.sum(czk(first)), BigDecimal.sum(czk(rest)), str, expect)
+      .toBe("0");
   });
 
   test("checks: unpaid Proforma, not a Proforma, draft, cancelled", async () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const unpaid = yield* issueProforma();
           const inv = yield* issueInvoice();
           const draft = yield* d.createDraft(invoiceInput({ kind: "proforma" }));
@@ -1018,7 +1118,7 @@ describe("issueFinalInvoice (D8)", () => {
         }),
       ),
     );
-    const unpaid = new Invalid({
+    const unpaid = Invalid.make({
       issues: [{ path: ["proforma"], code: "final_invoice.proforma_unpaid" }],
     });
     expect(results).toEqual([unpaid, unpaid, illegal, illegal, illegal]);
@@ -1030,15 +1130,17 @@ describe("council follow-ups", () => {
     const fi = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
+          const caller = yield* CurrentCaller;
           const p = yield* issueProforma();
           yield* pay(p.id, "1000");
           // A payment recorded without a PTD (user-flows 3.8: unticked).
           yield* store.transaction(
             Effect.andThen(seam.lock(WS, p.id), () =>
               seam.settle(
+                caller,
                 WS,
                 p.id,
                 { amount: dec("1400"), payments: 2 },
@@ -1050,7 +1152,9 @@ describe("council follow-ups", () => {
         }),
       ),
     );
-    expect(lines(fi).map((l) => [l.treatment, str(l.unitPrice), l.deducts !== null])).toEqual([
+    expect(
+      EffectArray.map(lines(fi), (l) => [l.treatment, str(l.unitPrice), l.deducts !== null]),
+    ).toEqual([
       ["standard", "1000", false],
       ["reduced", "500", false],
       ["standard", "671.14", true],
@@ -1064,14 +1168,14 @@ describe("council follow-ups", () => {
     const [cn, zero] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const inv = yield* issueInvoice({
             lines: [
               { description: "Práce", quantity: dec("2"), unitPrice: dec("1000") },
               { description: "Sleva", quantity: dec("-1"), unitPrice: dec("200") },
             ],
           });
-          const cn = yield* Effect.flip(
+          const creditNoteView = yield* Effect.flip(
             d.correct(inv.id, { reason: "sleva neplatí", lines: [{ line: lineOf(inv, 1) }] }),
           );
           // With a work line the net effect is a credit: the discount line runs positive.
@@ -1079,18 +1183,18 @@ describe("council follow-ups", () => {
             reason: "storno části",
             lines: [{ line: lineOf(inv, 0), quantity: dec("1") }, { line: lineOf(inv, 1) }],
           });
-          expect(lines(both).map((l) => [str(l.quantity), str(l.unitPrice)])).toEqual([
+          expect(EffectArray.map(lines(both), (l) => [str(l.quantity), str(l.unitPrice)])).toEqual([
             ["-1", "1000"],
             ["1", "200"],
           ]);
           expect(amounts(both)).toEqual({ net: "-800", vat: "-168", gross: "-968" });
-          const zero = yield* Effect.flip(
+          const zeroResult = yield* Effect.flip(
             d.correct(inv.id, {
               reason: "x",
               lines: [{ line: lineOf(inv, 0), unitPrice: dec("0") }],
             }),
           );
-          return [cn, zero] as const;
+          return [creditNoteView, zeroResult] as const;
         }),
       ),
     );
@@ -1103,45 +1207,51 @@ describe("council follow-ups", () => {
     const [fi, partial, rest] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
           yield* pay(p.id, "1000");
-          const fi = yield* d.issueFinalInvoice(p.id);
-          const partial = yield* d.correct(fi.id, {
+          const finalInvoice = yield* d.issueFinalInvoice(p.id);
+          const partialResult = yield* d.correct(finalInvoice.id, {
             reason: "méně hodin",
-            lines: [{ line: lineOf(fi, 0), quantity: dec("1") }],
+            lines: [{ line: lineOf(finalInvoice, 0), quantity: dec("1") }],
           });
-          const rest = yield* d.correct(fi.id, { reason: "zbytek", lines: "full" });
-          return [yield* d.get(fi.id), partial, rest] as const;
+          const remainingCredit = yield* d.correct(finalInvoice.id, {
+            reason: "zbytek",
+            lines: "full",
+          });
+          return [yield* d.get(finalInvoice.id), partialResult, remainingCredit] as const;
         }),
       ),
     );
     expect(fi.settlement).toBe("credited");
-    expect(lines(rest).map((l) => [str(l.quantity), str(l.unitPrice), l.deducts !== null])).toEqual(
-      [
-        ["-1", "1000", false],
-        ["-1", "500", false],
-        ["1", "671.14", true],
-        ["1", "167.79", true],
-      ],
-    );
+    expect(
+      EffectArray.map(lines(rest), (l) => [str(l.quantity), str(l.unitPrice), l.deducts !== null]),
+    ).toEqual([
+      ["-1", "1000", false],
+      ["-1", "500", false],
+      ["1", "671.14", true],
+      ["1", "167.79", true],
+    ]);
     const sum = (k: "net" | "vat" | "gross") =>
       str(
-        [fi, partial, rest].reduce(
-          (acc, v) => BigDecimal.sum(acc, v.totals[k].amount),
-          BigDecimal.fromBigInt(0n),
+        EffectArray.reduce([fi, partial, rest], BigDecimal.fromBigInt(0n), (acc, v) =>
+          BigDecimal.sum(acc, v.totals[k].amount),
         ),
       );
     expect([sum("net"), sum("vat"), sum("gross")]).toEqual(["0", "0", "0"]);
     const deductions = reportFigures(
       {
-        ...(rest as never as object),
-        lines: lines(rest).map((l) => ({
-          ...l,
+        lines: EffectArray.map(lines(rest), (line) => ({
+          ...line,
+          itemPrice: null,
+          vat: null,
+          itemVat: null,
           deductedVat:
-            l.deducts === null ? null : dec(str(l.unitPrice) === "671.14" ? "140.94" : "20.13"),
+            line.deducts === null
+              ? null
+              : dec(str(line.unitPrice) === "671.14" ? "140.94" : "20.13"),
           deductedVatCzk: null,
-        })) as never,
+        })),
         totals: rest.totals,
         currency: rest.totals.gross.currency,
         pricesIncludeVat: false,
@@ -1149,7 +1259,7 @@ describe("council follow-ups", () => {
       },
       () => true,
     ).advanceDeductions;
-    expect(deductions.map((b) => str(b.gross))).toEqual(["-812.08", "-187.92"]);
+    expect(EffectArray.map(deductions, (b) => str(b.gross))).toEqual(["-812.08", "-187.92"]);
   });
 });
 
@@ -1158,23 +1268,23 @@ describe("diff council follow-ups", () => {
     const [partial, afterPartial, afterFull, removal] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
           const p = yield* issueProforma();
           const { ptd } = yield* pay(p.id, "2980");
           const fi = yield* d.issueFinalInvoice(p.id);
-          const partial = yield* d.correct(fi.id, {
+          const partialResult = yield* d.correct(fi.id, {
             reason: "méně práce",
             lines: [{ line: lineOf(fi, 0), quantity: dec("1") }],
           });
-          const afterPartial = yield* d.get(fi.id);
+          const afterPartialResult = yield* d.get(fi.id);
           yield* d.correct(fi.id, { reason: "storno", lines: "full" });
           return [
-            partial,
-            afterPartial,
+            partialResult,
+            afterPartialResult,
             yield* d.get(fi.id),
-            yield* store.transaction(seam.removalBlocked(WS, p.id, (ptd as DocumentView).id)),
+            yield* store.transaction(seam.removalBlocked(WS, p.id, present(ptd).id)),
           ] as const;
         }),
       ),
@@ -1189,11 +1299,12 @@ describe("diff council follow-ups", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
+          const caller = yield* CurrentCaller;
           const p = yield* issueProforma();
-          const ptd = (yield* pay(p.id, "1000")).ptd as DocumentView;
+          const ptd = present((yield* pay(p.id, "1000")).ptd);
           yield* d.issueFinalInvoice(p.id);
           return [
             yield* Effect.flip(d.correct(ptd.id, { reason: "x", lines: "full" })),
@@ -1201,7 +1312,7 @@ describe("diff council follow-ups", () => {
             yield* Effect.flip(d.cancel(ptd.id, { reason: "x" })),
             yield* Effect.flip(
               store.transaction(
-                seam.issuePaymentTaxDocument(WS, p.id, { amount: dec("1"), paidOn: TODAY }),
+                seam.issuePaymentTaxDocument(caller, WS, p.id, { amount: dec("1"), paidOn: TODAY }),
               ),
             ),
           ];
@@ -1215,9 +1326,9 @@ describe("diff council follow-ups", () => {
     const cn = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
-          const ptd = (yield* pay(p.id, "1000")).ptd as DocumentView;
+          const ptd = present((yield* pay(p.id, "1000")).ptd);
           return yield* d.correct(ptd.id, {
             reason: "část zálohy vrácena",
             lines: [{ line: lineOf(ptd, 0), quantity: dec("0.5") }],
@@ -1232,7 +1343,7 @@ describe("diff council follow-ups", () => {
     const [removal, cancelAfterCredit] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
           const p = yield* issueProforma({
@@ -1264,28 +1375,28 @@ describe("diff council follow-ups", () => {
     const [original, cn, after] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const f = yield* DocumentFixtures;
           yield* f.putIssuer({
             ...issuer(WS, "vat_payer", { seriesByKind: {} }),
             paymentRounding: "whole_unit",
           });
-          const original = yield* issueInvoice({
+          const originalResult = yield* issueInvoice({
             lines: [{ description: "Práce", unitPrice: dec("100.40") }],
           });
-          const cn = yield* d.correct(original.id, {
+          const creditNoteView = yield* d.correct(originalResult.id, {
             reason: "vše",
-            lines: [{ line: lineOf(original, 0) }],
+            lines: [{ line: lineOf(originalResult, 0) }],
           });
-          return [original, cn, yield* d.get(original.id)] as const;
+          return [originalResult, creditNoteView, yield* d.get(originalResult.id)] as const;
         }),
       ),
     );
-    expect(str(original.totals.gross.amount)).toBe("121");
-    expect(str(cn.totals.roundingAdjustment.amount)).toBe(
-      str(BigDecimal.negate(original.totals.roundingAdjustment.amount)),
-    );
-    expect(str(cn.totals.gross.amount)).toBe("-121");
+    original.totals.gross.amount.pipe(str, expect).toBe("121");
+    cn.totals.roundingAdjustment.amount
+      .pipe(str, expect)
+      .toBe(original.totals.roundingAdjustment.amount.pipe(BigDecimal.negate, str));
+    cn.totals.gross.amount.pipe(str, expect).toBe("-121");
     expect(after.settlement).toBe("credited");
   });
 
@@ -1293,7 +1404,7 @@ describe("diff council follow-ups", () => {
     const error = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const p = yield* issueProforma();
           yield* pay(p.id, "100");
           return yield* Effect.flip(d.issueFinalInvoice(p.id, { patch: { number: "X-1" } }));
@@ -1314,7 +1425,7 @@ describe("review round 1 follow-ups", () => {
             {
               kind,
               name: "Krátká",
-              pattern: `${"A".repeat(18)}-N`,
+              pattern: `${EffectString.repeat(18)("A")}-N`,
               nextNumber: 9,
               isDefault: true,
             },
@@ -1323,7 +1434,7 @@ describe("review round 1 follow-ups", () => {
         ),
       ),
     );
-  const exhausted = new Conflict({
+  const exhausted = Conflict.make({
     reason: "illegal_transition",
     detail: "numbering.pattern_invalid",
   });
@@ -1332,7 +1443,7 @@ describe("review round 1 follow-ups", () => {
     const [finalPreview, finalIssue, creditPreview, creditIssue] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           yield* exhaust("invoice");
           yield* exhaust("credit_note");
           const first = yield* issueInvoice();
@@ -1364,7 +1475,7 @@ describe("review round 1 follow-ups", () => {
     const [preview, issued] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const inv = yield* issueInvoice();
           const p = yield* issueProforma();
           yield* pay(p.id, "100");
@@ -1384,23 +1495,23 @@ describe("review round 1 follow-ups", () => {
     const [fi, cancelled] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const f = yield* DocumentFixtures;
           const p = yield* issueProforma({
             lines: [{ description: "Práce", unitPrice: dec("100") }],
           });
           yield* pay(p.id, "121");
           yield* f.putIssuer(issuer(WS, "identified_person", { seriesByKind: {} }));
-          const fi = yield* d.issueFinalInvoice(p.id, {
+          const finalInvoice = yield* d.issueFinalInvoice(p.id, {
             patch: {
               lines: [{ description: "Práce", unitPrice: dec("200"), vat: "outside_scope" }],
             },
           });
-          return [fi, yield* d.cancel(fi.id, { reason: "chyba" })] as const;
+          return [finalInvoice, yield* d.cancel(finalInvoice.id, { reason: "chyba" })] as const;
         }),
       ),
     );
-    expect(str(fi.totals.vat.amount)).toBe("-21");
+    fi.totals.vat.amount.pipe(str, expect).toBe("-21");
     expect(fi.taxDocument).toBe(true);
     expect(cancelled.creditNote?.kind).toBe("credit_note");
     expect(cancelled.document.settlement).toBe("credited");
@@ -1410,7 +1521,7 @@ describe("review round 1 follow-ups", () => {
     const [invoice, creditNote] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
           const inv = yield* issueInvoice();
@@ -1423,23 +1534,21 @@ describe("review round 1 follow-ups", () => {
         }),
       ),
     );
-    expect(str(invoice.refundDue.amount)).toBe("560");
-    expect(str(creditNote.refundDue.amount)).toBe("0");
+    const refundDue = str(invoice.refundDue.amount);
+    expect(refundDue).toBe("560");
+    creditNote.refundDue.amount.pipe(str, expect).toBe("0");
   });
 
   test("outside vat_payer a pre-2024 receipt settles with no PTD", async () => {
-    for (const regime of ["non_vat_payer", "identified_person"] as const) {
-      const result = ok(
-        await run(
-          Effect.gen(function* () {
-            const p = yield* issueProforma({
-              lines: [{ description: "Práce", unitPrice: dec("1000"), vat: "outside_scope" }],
-            });
-            return yield* pay(p.id, "100", "2023-12-31" as IsoDate);
-          }),
-          { regimeA: regime },
-        ),
-      );
+    const recordReceipt = Effect.gen(function* () {
+      const p = yield* issueProforma({
+        lines: [{ description: "Práce", unitPrice: dec("1000"), vat: "outside_scope" }],
+      });
+      return yield* pay(p.id, "100", IsoDate.make("2023-12-31"));
+    });
+    const first = await run(recordReceipt, { regimeA: "non_vat_payer" });
+    const second = await run(recordReceipt, { regimeA: "identified_person" });
+    for (const result of [ok(first), ok(second)]) {
       expect(result.ptd).toBeNull();
       expect(result.settled.settlement).toBe("partially_paid");
     }
@@ -1451,12 +1560,13 @@ describe("review round 1 follow-ups", () => {
         Effect.gen(function* () {
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
+          const caller = yield* CurrentCaller;
           const p = yield* issueProforma();
           return yield* Effect.flip(
             store.transaction(
-              seam.issuePaymentTaxDocument(WS, p.id, {
+              seam.issuePaymentTaxDocument(caller, WS, p.id, {
                 amount: dec("100"),
-                paidOn: "2023-12-31" as IsoDate,
+                paidOn: IsoDate.make("2023-12-31"),
               }),
             ),
           );
@@ -1470,23 +1580,25 @@ describe("review round 1 follow-ups", () => {
     const [before, after, historyBefore, historyAfter, next] = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const store = yield* CoreStore;
           const seam = yield* DocumentPayments;
+          const caller = yield* CurrentCaller;
           const p = yield* issueProforma();
-          const before = yield* d.get(p.id);
-          const historyBefore = yield* d.history(p.id);
+          const beforeResult = yield* d.get(p.id);
+          const historyBeforeResult = yield* d.history(p.id);
           const failure = yield* Effect.flip(
             store.transaction(
               Effect.gen(function* () {
                 yield* seam.lock(WS, p.id);
                 yield* seam.settle(
+                  caller,
                   WS,
                   p.id,
                   { amount: dec("100"), payments: 1 },
                   { action: "payment.record" },
                 );
-                const ptd = yield* seam.issuePaymentTaxDocument(WS, p.id, {
+                const ptd = yield* seam.issuePaymentTaxDocument(caller, WS, p.id, {
                   amount: dec("100"),
                   paidOn: TODAY,
                 });
@@ -1497,14 +1609,20 @@ describe("review round 1 follow-ups", () => {
           );
           // The transaction failed where intended: after the PTD was issued.
           expect(failure).toBe("payment insert failed");
-          const after = yield* d.get(p.id);
-          const historyAfter = yield* d.history(p.id);
-          const next = (yield* pay(p.id, "100")).ptd as DocumentView;
-          return [before, after, historyBefore, historyAfter, next] as const;
+          const afterResult = yield* d.get(p.id);
+          const historyAfterResult = yield* d.history(p.id);
+          const nextResult = present((yield* pay(p.id, "100")).ptd);
+          return [
+            beforeResult,
+            afterResult,
+            historyBeforeResult,
+            historyAfterResult,
+            nextResult,
+          ] as const;
         }),
       ),
     );
-    expect(json(after)).toEqual(json(before));
+    expect(await encodedView(after)).toEqual(await encodedView(before));
     expect(historyAfter).toEqual(historyBefore);
     expect(next.number).toBe("DD-2026-0001");
   });
@@ -1517,7 +1635,7 @@ describe("authorization and scoping", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const inv = yield* issueInvoice();
           const p = yield* issueProforma();
           yield* pay(p.id, "100");
@@ -1538,8 +1656,8 @@ describe("authorization and scoping", () => {
         }),
       ),
     );
-    expect(results.slice(0, 4).every((e) => e instanceof Forbidden)).toBe(true);
-    expect(results.slice(4, 8).every((e) => e instanceof NotFound)).toBe(true);
+    expect(EffectArray.every(results.slice(0, 4), Schema.is(Forbidden))).toBe(true);
+    expect(EffectArray.every(results.slice(4, 8), Schema.is(NotFound))).toBe(true);
     expect(results[8]).toBe("credit_note");
   });
 
@@ -1547,13 +1665,13 @@ describe("authorization and scoping", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
-          const d = yield* docs;
+          const d = yield* Documents;
           const inv = yield* issueInvoice();
-          const key = { requestKey: "k-1" as RequestKey };
+          const key = { requestKey: RequestKey.make("k-1") };
           yield* d.correct(inv.id, { reason: "a", lines: [{ line: lineOf(inv, 0) }] }, key);
           const p = yield* issueProforma();
           yield* pay(p.id, "100");
-          const fiKey = { requestKey: "k-2" as RequestKey };
+          const fiKey = { requestKey: RequestKey.make("k-2") };
           yield* d.issueFinalInvoice(p.id, undefined, fiKey);
           return [
             yield* Effect.flip(d.correct(inv.id, { reason: "b", lines: "full" }, key)),
@@ -1563,8 +1681,8 @@ describe("authorization and scoping", () => {
       ),
     );
     expect(results).toEqual([
-      new Conflict({ reason: "idempotency_mismatch" }),
-      new Conflict({ reason: "idempotency_mismatch" }),
+      Conflict.make({ reason: "idempotency_mismatch" }),
+      Conflict.make({ reason: "idempotency_mismatch" }),
     ]);
   });
 });
@@ -1576,15 +1694,22 @@ describe("delivery read seam", () => {
         Effect.gen(function* () {
           const reads = yield* DocumentDeliveryReads;
           const inv = yield* issueInvoice();
-          const loaded = yield* reads.load(WS, inv.id);
-          const bytes = yield* reads.render(loaded.view, { template: "classic", language: "cs" });
-          return [loaded, bytes, yield* Effect.flip(reads.load(WORKSPACE_B, inv.id))] as const;
+          const loadedResult = yield* reads.load(WS, inv.id);
+          const pdfBytes = yield* reads.render(loadedResult.view, {
+            template: "classic",
+            language: "cs",
+          });
+          return [
+            loadedResult,
+            pdfBytes,
+            yield* Effect.flip(reads.load(WORKSPACE_B, inv.id)),
+          ] as const;
         }),
       ),
     );
     expect(loaded.record.id).toBe(loaded.view.id);
     expect(loaded.contactId).toBe(CZ_BUYER);
-    expect(loaded.dueOn).toBe("2026-12-07" as IsoDate);
+    expect(loaded.dueOn).toBe(IsoDate.make("2026-12-07"));
     expect(loaded.reminders).toEqual({ choice: "inherit", on: false });
     expect(loaded.settlement).toBe("unpaid");
     expect(loaded.overdue).toBe(false);

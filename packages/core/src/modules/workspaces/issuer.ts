@@ -5,6 +5,7 @@
  * (Member or System caller, rule R2): any other Workspace, a missing one, or any other caller kind
  * is `NotFound{Workspace}`, so a mis-scoped document operation never reads another issuer.
  */
+
 import type {
   BankAccountId,
   CurrencyCode,
@@ -14,10 +15,15 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { CurrentCaller, NotFound as NotFoundError } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as EffectString from "effect/String";
 import type { WorkspaceBillingDefaults, WorkspaceReminderPolicy } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { PaymentRounding } from "./model";
+import { normalizeIban } from "./rules";
 import { WorkspaceSnapshots } from "./snapshots";
 
 export interface IssuerBankAccount {
@@ -59,14 +65,18 @@ export interface IssuerForDocument {
   readonly revision: number;
 }
 
+const CZECH_IBAN = /^CZ\d{2}(\d{4})(\d{6})(\d{10})$/;
+const LEADING_ZEROS = /^0+(?=\d)/;
+const ONLY_ZEROS = /^0+$/;
+
 /** `CZkk BBBB PPPPPP NNNNNNNNNN` -> `PPPPPP-NNNNNNNNNN/BBBB` without leading zeros; else null. */
 export const czechAccountNumber = (iban: string): string | null => {
-  const compact = iban.replace(/\s+/g, "").toUpperCase();
-  const match = /^CZ\d{2}(\d{4})(\d{6})(\d{10})$/.exec(compact);
+  const match = CZECH_IBAN.exec(normalizeIban(iban));
   if (match === null) return null;
-  const [, bank, prefix, number] = match as unknown as [string, string, string, string];
-  const strip = (digits: string) => digits.replace(/^0+(?=\d)/, "");
-  const head = /^0+$/.test(prefix) ? "" : `${strip(prefix)}-`;
+  const [, bank, prefix, number] = match;
+  if (bank === undefined || prefix === undefined || number === undefined) return null;
+  const strip = EffectString.replace(LEADING_ZEROS, "");
+  const head = ONLY_ZEROS.test(prefix) ? "" : `${strip(prefix)}-`;
   return `${head}${strip(number)}/${bank}`;
 };
 
@@ -78,14 +88,14 @@ export class IssuerSnapshots extends Context.Service<
       on: IsoDate,
     ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
   }
->()("kvitbit/core/IssuerSnapshots") {}
+>()("@kvitbit/core/modules/workspaces/issuer/IssuerSnapshots") {}
 
 /** Fails `NotFound{Workspace}` unless `workspaceId` is the current Member or System caller's. */
 const ownWorkspace = (workspaceId: WorkspaceId): Effect.Effect<void, NotFound, CurrentCaller> =>
   Effect.flatMap(Effect.service(CurrentCaller), (caller) =>
     (caller._tag === "Member" || caller._tag === "System") && caller.workspaceId === workspaceId
       ? Effect.void
-      : Effect.fail(new NotFoundError({ entity: "Workspace", id: workspaceId })),
+      : Effect.fail(NotFoundError.make({ entity: "Workspace", id: workspaceId })),
   );
 
 export const IssuerSnapshotsLive: Layer.Layer<IssuerSnapshots, never, WorkspaceSnapshots> =
@@ -107,7 +117,7 @@ export const IssuerSnapshotsLive: Layer.Layer<IssuerSnapshots, never, WorkspaceS
               web: s.issuingEntity.web,
             },
             regime: s.taxRegime,
-            bankAccounts: s.bankAccounts.map((a) => ({
+            bankAccounts: EffectArray.map(s.bankAccounts, (a) => ({
               id: a.id,
               name: a.name,
               currency: a.currency,

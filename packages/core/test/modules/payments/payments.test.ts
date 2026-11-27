@@ -1,39 +1,45 @@
+import { withoutStackTrace } from "../../helpers/run";
 /**
  * Payments (core-ports 4.5) through the `Payments` service on real layers: documents' payments
  * seam, the memory repos and the port fakes (`PaymentsTestLayer`).
  */
+
 import { describe, expect, test } from "bun:test";
-import type {
-  CurrencyCode,
-  DocumentId,
-  DocumentView,
-  ExpenseId,
-  IsoDate,
-  PaymentId,
-  RequestKey,
-} from "@kvitbit/domain/contract";
+import type { Action, DocumentView, PaymentId, PaymentView } from "@kvitbit/domain/contract";
 import {
   Conflict,
+  CurrencyCode,
+  DocumentId,
   Documents,
+  ExpenseId,
   Forbidden,
   Invalid,
+  IsoDate,
   MoneyMath,
   NotFound,
   Payments,
+  RequestKey,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { Effect, Exit } from "effect";
-import type { PaymentViewData } from "../../../src/modules/payments";
-import { PaymentFixtures, PaymentsRepo, reportPayment } from "../../../src/modules/payments";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import {
+  PaymentFixtures,
+  PaymentsRepo,
+  PaymentViewData,
+  reportPayment,
+} from "../../../src/modules/payments";
 import { CoreStore } from "../../../src/store/CoreStore";
-import { account, member, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { account, member, WORKSPACE_B, WORKSPACE_A as WS } from "../../helpers";
 import { as, CZK, dec, EUR, fixing, invoiceInput, str } from "../documents/fixtures";
 import { run } from "./fixtures";
 
-const WS = WORKSPACE_A;
-const TODAY = "2026-11-23" as IsoDate;
-const EXPENSE = "01900000-0000-7000-8000-0000ee000001" as ExpenseId;
-const EXPENSE_B = "01900000-0000-7000-8000-0000ee0000b1" as ExpenseId;
+const TODAY = IsoDate.make("2026-11-23");
+const EXPENSE = ExpenseId.make("01900000-0000-7000-8000-0000ee000001");
+const EXPENSE_B = ExpenseId.make("01900000-0000-7000-8000-0000ee0000b1");
 
 const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
   if (Exit.isFailure(exit)) throw new Error(`expected success, got ${String(exit.cause)}`);
@@ -41,21 +47,22 @@ const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
 };
 
 const malformed = (path: string, reason: string) =>
-  new Invalid({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
 const mismatch = (expected: string) =>
-  new Invalid({
+  Invalid.make({
     issues: [
       { path: ["amount", "currency"], code: "payment.currency_mismatch", params: { expected } },
     ],
   });
-const hasTaxDocument = new Conflict({
+const hasTaxDocument = Conflict.make({
   reason: "illegal_transition",
   detail: "payment.has_tax_document",
 });
 
 const czk = (amount: string) => MoneyMath.make(dec(amount), CZK);
-const view = (p: unknown) => p as PaymentViewData;
-const docId = (d: DocumentView) => d.id as DocumentId;
+const view = (value: PaymentView) =>
+  Schema.decodeUnknownOption(PaymentViewData)(value).pipe(Option.getOrThrow);
+const docId = (d: DocumentView) => DocumentId.make(d.id);
 
 /** 2 x 1000 standard + 500 reduced: gross 2980 CZK. */
 const issueInvoice = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
@@ -68,14 +75,12 @@ const issuePlainProforma = () =>
     lines: [{ description: "Služby", unitPrice: dec("2980") }],
   });
 
-const pay = (document: DocumentId, amount?: string, extra: { paidOn?: IsoDate } = {}) =>
-  Effect.flatMap(Payments, (p) =>
-    p.record({
-      target: { document },
-      ...(amount === undefined ? {} : { amount: czk(amount) }),
-      ...extra,
-    }),
-  );
+const pay = (document: DocumentId, amount?: string, extra: { paidOn?: IsoDate } = {}) => {
+  const target = { document };
+  const input =
+    amount === undefined ? { target, ...extra } : { target, amount: czk(amount), ...extra };
+  return Effect.flatMap(Payments, (payments) => payments.record(input));
+};
 
 const settlementOf = (id: DocumentId) =>
   Effect.map(
@@ -86,45 +91,49 @@ const settlementOf = (id: DocumentId) =>
 describe("record on documents", () => {
   test("partial, paid and overpaid; the default amount is what is outstanding", async () => {
     const result = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const inv = yield* issueInvoice();
           const first = yield* pay(inv.id, "1000");
           const rest = yield* pay(inv.id);
-          const extra = yield* pay(inv.id, "1", { paidOn: "2026-11-20" as IsoDate });
+          const extra = yield* pay(inv.id, "1", { paidOn: IsoDate.make("2026-11-20") });
           const list = yield* Effect.flatMap(Payments, (p) => p.listFor({ document: inv.id }));
           return { first, rest, extra, list, settlement: yield* settlementOf(inv.id) };
         }),
-      ),
+      }),
     );
     expect(result.first.settlement).toBe("partially_paid");
     expect(result.first.issued).toEqual([]);
     expect(result.rest.settlement).toBe("paid");
-    expect(str(view(result.rest.payment).amount.amount)).toBe("1980");
+    view(result.rest.payment).amount.amount.pipe(str, expect).toBe("1980");
     expect(view(result.rest.payment).paidOn).toBe(TODAY);
     expect(view(result.rest.payment).method).toBe("bank_transfer");
     expect(result.extra.settlement).toBe("overpaid");
     expect(result.settlement).toBe("overpaid");
     // Oldest paidOn first.
-    expect(result.list.map((p) => str(view(p).amount.amount))).toEqual(["1", "1000", "1980"]);
+    expect(EffectArray.map(result.list, (p) => str(view(p).amount.amount))).toEqual([
+      "1",
+      "1000",
+      "1980",
+    ]);
   });
 
   test("P1 currency, positive amounts, and nothing outstanding", async () => {
     const [currency, zero, negative, nothingDue] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const inv = yield* issueInvoice();
-          const currency = yield* Effect.flip(
+          const currencyResult = yield* Effect.flip(
             p.record({ target: { document: inv.id }, amount: MoneyMath.make(dec("10"), EUR) }),
           );
-          const zero = yield* Effect.flip(pay(inv.id, "0"));
-          const negative = yield* Effect.flip(pay(inv.id, "-5"));
+          const zeroResult = yield* Effect.flip(pay(inv.id, "0"));
+          const negativeResult = yield* Effect.flip(pay(inv.id, "-5"));
           yield* pay(inv.id);
-          const nothingDue = yield* Effect.flip(pay(inv.id));
-          return [currency, zero, negative, nothingDue] as const;
+          const nothingDueResult = yield* Effect.flip(pay(inv.id));
+          return [currencyResult, zeroResult, negativeResult, nothingDueResult] as const;
         }),
-      ),
+      }),
     );
     expect(currency).toEqual(mismatch("CZK"));
     expect(zero).toEqual(malformed("amount", "out_of_range"));
@@ -134,27 +143,27 @@ describe("record on documents", () => {
 
   test("drafts, credit notes and cancelled documents take no payments", async () => {
     const [draft, creditNote] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
-          const draft = yield* d.createDraft(invoiceInput());
+          const draftResult = yield* d.createDraft(invoiceInput());
           const inv = yield* issueInvoice();
           const cn = yield* d.correct(inv.id, { reason: "storno", lines: "full" });
           return [
-            yield* Effect.flip(pay(draft.id, "10")),
+            yield* Effect.flip(pay(draftResult.id, "10")),
             yield* Effect.flip(pay(cn.id, "10")),
           ] as const;
         }),
-      ),
+      }),
     );
     expect(draft).toBeInstanceOf(Conflict);
-    expect(creditNote).toEqual(new Conflict({ reason: "illegal_transition" }));
+    expect(creditNote).toEqual(Conflict.make({ reason: "illegal_transition" }));
   });
 
   test("state before amounts: credited and cancelled targets conflict; a locked one takes payments (P4)", async () => {
     const [credited, cancelled, locked] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const a = yield* issueInvoice();
           yield* d.correct(a.id, { reason: "storno", lines: "full" });
@@ -168,55 +177,57 @@ describe("record on documents", () => {
             yield* pay(c.id),
           ] as const;
         }),
-      ),
+      }),
     );
-    expect(credited).toEqual(new Conflict({ reason: "illegal_transition" }));
-    expect(cancelled).toEqual(new Conflict({ reason: "illegal_transition" }));
+    expect(credited).toEqual(Conflict.make({ reason: "illegal_transition" }));
+    expect(cancelled).toEqual(Conflict.make({ reason: "illegal_transition" }));
     expect(locked.settlement).toBe("paid");
   });
 
   test("amount bounds: minor unit scale and the numeric(18,2) range, checked under the key", async () => {
-    const key = { requestKey: "bank-tx-2" as RequestKey };
+    const key = { requestKey: RequestKey.make("bank-tx-2") };
     const [fraction, huge, replayInvalid] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const inv = yield* issueInvoice();
-          const fraction = yield* Effect.flip(pay(inv.id, "0.001"));
-          const huge = yield* Effect.flip(pay(inv.id, "10000000000000000"));
+          const fractionResult = yield* Effect.flip(pay(inv.id, "0.001"));
+          const hugeResult = yield* Effect.flip(pay(inv.id, "10000000000000000"));
           yield* p.record({ target: { document: inv.id }, amount: czk("10") }, key);
-          const replayInvalid = yield* Effect.flip(
+          const replayInvalidResult = yield* Effect.flip(
             p.record({ target: { document: inv.id }, amount: czk("0.001") }, key),
           );
-          return [fraction, huge, replayInvalid] as const;
+          return [fractionResult, hugeResult, replayInvalidResult] as const;
         }),
-      ),
+      }),
     );
     expect(fraction).toEqual(malformed("amount", "out_of_range"));
     expect(huge).toEqual(malformed("amount", "out_of_range"));
-    expect(replayInvalid).toEqual(new Conflict({ reason: "idempotency_mismatch" }));
+    expect(replayInvalid).toEqual(Conflict.make({ reason: "idempotency_mismatch" }));
   });
 
   test("the method defaults to the document's printed payment method (C4)", async () => {
     const result = ok(
-      await run(Effect.flatMap(issueInvoice({ paymentMethod: "cash" }), (inv) => pay(inv.id))),
+      await run({
+        body: Effect.flatMap(issueInvoice({ paymentMethod: "cash" }), (inv) => pay(inv.id)),
+      }),
     );
     expect(view(result.payment).method).toBe("cash");
   });
 
   test("audit: one entry on the Document with the payment's particulars; revision bumps (C2)", async () => {
     const [history, stale, payment] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const inv = yield* issueInvoice();
           const result = yield* pay(inv.id, "100");
-          const stale = yield* Effect.flip(d.edit(inv.id, { note: "x" }, inv.revision));
-          return [yield* d.history(inv.id), stale, view(result.payment)] as const;
+          const staleResult = yield* Effect.flip(d.edit(inv.id, { note: "x" }, inv.revision));
+          return [yield* d.history(inv.id), staleResult, view(result.payment)] as const;
         }),
-      ),
+      }),
     );
-    const entries = history.filter((e) => e.action === "payment.record");
+    const entries = EffectArray.filter(history, (e) => e.action === "payment.record");
     expect(entries).toHaveLength(1);
     expect(entries[0]?.changes).toContainEqual({
       path: "payment",
@@ -231,27 +242,34 @@ describe("record on documents", () => {
       },
     });
     expect(stale).toBeInstanceOf(Conflict);
-    expect((stale as Conflict).reason).toBe("revision_changed");
+    expect(Schema.is(Conflict)(stale) && stale.reason).toBe("revision_changed");
   });
 
   test("idempotency (C3): a replay returns the stored result; another payload is a mismatch", async () => {
-    const key = { requestKey: "bank-tx-1" as RequestKey };
+    const key = { requestKey: RequestKey.make("bank-tx-1") };
     const [first, replay, mismatched, rows] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const inv = yield* issueInvoice();
           const input = { target: { document: inv.id }, amount: czk("500") };
-          const first = yield* p.record(input, key);
-          const replay = yield* p.record(input, key);
-          const mismatched = yield* Effect.flip(p.record({ ...input, amount: czk("501") }, key));
-          return [first, replay, mismatched, yield* p.listFor({ document: inv.id })] as const;
+          const firstResult = yield* p.record(input, key);
+          const replayResult = yield* p.record(input, key);
+          const mismatchedResult = yield* Effect.flip(
+            p.record({ ...input, amount: czk("501") }, key),
+          );
+          return [
+            firstResult,
+            replayResult,
+            mismatchedResult,
+            yield* p.listFor({ document: inv.id }),
+          ] as const;
         }),
-      ),
+      }),
     );
     expect(view(replay.payment).id).toBe(view(first.payment).id);
     expect(replay.settlement).toBe(first.settlement);
-    expect(mismatched).toEqual(new Conflict({ reason: "idempotency_mismatch" }));
+    expect(mismatched).toEqual(Conflict.make({ reason: "idempotency_mismatch" }));
     expect(rows).toHaveLength(1);
   });
 });
@@ -259,18 +277,21 @@ describe("record on documents", () => {
 describe("authorization and tenancy", () => {
   test("payment.write for record/remove, payment.read for listFor, per role and scope", async () => {
     const results = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const inv = yield* issueInvoice();
           const paid = yield* pay(inv.id, "10");
           const id = view(paid.payment).id;
           const attempt = (caller: Parameters<typeof as>[0]) =>
-            Effect.all({
-              record: Effect.exit(as(caller, pay(inv.id, "1"))),
-              remove: Effect.exit(as(caller, p.remove(id, "x"))),
-              list: Effect.exit(as(caller, p.listFor({ document: inv.id }))),
-            });
+            Effect.all(
+              {
+                record: Effect.exit(as(caller, pay(inv.id, "1"))),
+                remove: Effect.exit(as(caller, p.remove(id, "x"))),
+                list: Effect.exit(as(caller, p.listFor({ document: inv.id }))),
+              },
+              { concurrency: 1 },
+            );
           return {
             accountant: yield* attempt(member("accountant")),
             readToken: yield* attempt(member("member", { scopes: ["payments:read"] })),
@@ -278,28 +299,30 @@ describe("authorization and tenancy", () => {
             account: yield* attempt(account()),
           };
         }),
-      ),
+      }),
     );
-    const forbidden = (action: string) => Exit.fail(new Forbidden({ action: action as never }));
-    expect(results.accountant.record).toEqual(forbidden("payment.write"));
-    expect(results.accountant.remove).toEqual(forbidden("payment.write"));
+    const forbidden = (action: Action) => Exit.fail(Forbidden.make({ action }));
+    expect(results.accountant.record.pipe(withoutStackTrace)).toEqual(forbidden("payment.write"));
+    expect(results.accountant.remove.pipe(withoutStackTrace)).toEqual(forbidden("payment.write"));
     expect(Exit.isSuccess(results.accountant.list)).toBe(true);
-    expect(results.readToken.record).toEqual(forbidden("payment.write"));
+    expect(results.readToken.record.pipe(withoutStackTrace)).toEqual(forbidden("payment.write"));
     expect(Exit.isSuccess(results.readToken.list)).toBe(true);
-    expect(results.documentsToken.record).toEqual(forbidden("payment.write"));
-    expect(results.documentsToken.list).toEqual(forbidden("payment.read"));
-    expect(results.account.record).toEqual(forbidden("payment.write"));
-    expect(results.account.list).toEqual(forbidden("payment.read"));
+    expect(results.documentsToken.record.pipe(withoutStackTrace)).toEqual(
+      forbidden("payment.write"),
+    );
+    expect(results.documentsToken.list.pipe(withoutStackTrace)).toEqual(forbidden("payment.read"));
+    expect(results.account.record.pipe(withoutStackTrace)).toEqual(forbidden("payment.write"));
+    expect(results.account.list.pipe(withoutStackTrace)).toEqual(forbidden("payment.read"));
   });
 
   test("a payments-scoped token may record", async () => {
     const result = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const inv = yield* issueInvoice();
           return yield* as(member("member", { scopes: ["payments:write"] }), pay(inv.id, "10"));
         }),
-      ),
+      }),
     );
     expect(result.settlement).toBe("partially_paid");
   });
@@ -307,8 +330,8 @@ describe("authorization and tenancy", () => {
   test("another Workspace's document, expense and payment are NotFound", async () => {
     const other = member("owner", { workspaceId: WORKSPACE_B });
     const results = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const f = yield* PaymentFixtures;
           yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: CZK, gross: dec("100") });
@@ -317,49 +340,60 @@ describe("authorization and tenancy", () => {
           const id = view(paid.payment).id;
           return yield* as(
             other,
-            Effect.all([
-              Effect.flip(pay(inv.id, "1")),
-              Effect.flip(p.listFor({ document: inv.id })),
-              Effect.flip(p.remove(id, "x")),
-              Effect.flip(p.record({ target: { expense: EXPENSE }, amount: czk("1") })),
-              Effect.flip(p.listFor({ expense: EXPENSE })),
-            ]),
+            Effect.all(
+              [
+                Effect.flip(pay(inv.id, "1")),
+                Effect.flip(p.listFor({ document: inv.id })),
+                Effect.flip(p.remove(id, "x")),
+                Effect.flip(p.record({ target: { expense: EXPENSE }, amount: czk("1") })),
+                Effect.flip(p.listFor({ expense: EXPENSE })),
+              ],
+              { concurrency: 1 },
+            ),
           );
         }),
-      ),
+      }),
     );
     expect(results[0]).toBeInstanceOf(NotFound);
-    expect((results[0] as NotFound).entity).toBe("Document");
+    expect(Schema.is(NotFound)(results[0]) && results[0].entity).toBe("Document");
     expect(results[1]).toBeInstanceOf(NotFound);
-    expect(results[2]).toEqual(
-      new NotFound({ entity: "Payment", id: (results[2] as NotFound).id }),
-    );
-    expect((results[3] as NotFound).entity).toBe("Expense");
-    expect((results[4] as NotFound).entity).toBe("Expense");
+    const removal = results[2];
+    if (!Schema.is(NotFound)(removal)) throw new Error("Expected removal to fail with NotFound");
+    expect(removal).toEqual(NotFound.make({ entity: "Payment", id: removal.id }));
+    expect(Schema.is(NotFound)(results[3]) && results[3].entity).toBe("Expense");
+    expect(Schema.is(NotFound)(results[4]) && results[4].entity).toBe("Expense");
   });
 });
 
 describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () => {
   test("a vat_payer Proforma payment issues a PTD in the same transaction, linked to the payment", async () => {
     const [result, rows, sent, history] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const pf = yield* issueProforma();
-          const result = yield* pay(pf.id, "1000");
+          const resultResult = yield* pay(pf.id, "1000");
           const repo = yield* PaymentsRepo;
           const store = yield* CoreStore;
-          const rows = yield* store.transaction(repo.liveFor(WS, { document: pf.id }));
-          const id = view(result.payment).id;
-          yield* d.correct(docId(result.issued[0] as DocumentView), { reason: "x", lines: "full" });
+          const rowsResult = yield* store.transaction(repo.liveFor(WS, { document: pf.id }));
+          const id = view(resultResult.payment).id;
+          yield* d.correct(docId(EffectArray.getUnsafe(resultResult.issued, 0)), {
+            reason: "x",
+            lines: "full",
+          });
           yield* (yield* Payments).remove(id, "chyba");
-          const history = yield* d.history(pf.id);
-          return [result, rows, yield* (yield* PaymentFixtures).sent(WS), history] as const;
+          const historyResult = yield* d.history(pf.id);
+          return [
+            resultResult,
+            rowsResult,
+            yield* (yield* PaymentFixtures).sent(WS),
+            historyResult,
+          ] as const;
         }),
-      ),
+      }),
     );
     expect(result.issued).toHaveLength(1);
-    const ptd = result.issued[0] as DocumentView;
+    const ptd = EffectArray.getUnsafe(result.issued, 0);
     expect(ptd.kind).toBe("payment_tax_document");
     expect(view(result.payment).taxDocument).toBe(docId(ptd));
     expect(rows[0]?.taxDocumentId).toBe(docId(ptd));
@@ -368,94 +402,102 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     expect(sent).toEqual([]);
     // record's particulars precede the PTD; remove's name it.
     const particularsOf = (action: string) =>
-      history.find((e) => e.action === action)?.changes.find((c) => c.path === "payment");
+      EffectArray.findFirst(history, (e) => e.action === action).pipe(
+        Option.flatMap((entry) =>
+          EffectArray.findFirst(entry.changes, (change) => change.path === "payment"),
+        ),
+        Option.getOrUndefined,
+      );
     expect(particularsOf("payment.record")?.after).not.toHaveProperty("taxDocument");
     expect(particularsOf("payment.remove")?.before).toMatchObject({ taxDocument: docId(ptd) });
   });
 
   test("auto-send: on, the PTD is sent in the transaction; a caller who may not send still records", async () => {
     const [own, token, sent] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const f = yield* PaymentFixtures;
           yield* f.setAutoSend(WS, true);
           const pf = yield* issueProforma();
-          const own = yield* pay(pf.id, "100");
-          const token = yield* as(
+          const ownResult = yield* pay(pf.id, "100");
+          const tokenResult = yield* as(
             member("member", { scopes: ["payments:write"] }),
             pay(pf.id, "100"),
           );
-          return [own, token, yield* f.sent(WS)] as const;
+          return [ownResult, tokenResult, yield* f.sent(WS)] as const;
         }),
-      ),
+      }),
     );
-    expect(sent).toEqual([docId(own.issued[0] as DocumentView)]);
+    expect(sent).toEqual([docId(EffectArray.getUnsafe(own.issued, 0))]);
     expect(token.issued).toHaveLength(1);
   });
 
   test("one transaction: a PTD that cannot be issued rolls the payment back", async () => {
     const [failed, list, settlement] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const pf = yield* issueInvoice({ kind: "proforma", currency: EUR });
           // No CNB fixing on or before paidOn: the PTD's fx is unavailable.
-          const failed = yield* Effect.flip(
+          const failedResult = yield* Effect.flip(
             p.record({
               target: { document: pf.id },
               amount: MoneyMath.make(dec("10"), EUR),
-              paidOn: "2026-11-01" as IsoDate,
+              paidOn: IsoDate.make("2026-11-01"),
             }),
           );
           return [
-            failed,
+            failedResult,
             yield* p.listFor({ document: pf.id }),
             yield* settlementOf(pf.id),
           ] as const;
         }),
-        { fixings: [fixing("2026-11-23", "25.000")] },
-      ),
+        fixings: [fixing("2026-11-23", "25.000")],
+      }),
     );
-    expect(failed).toEqual(new Unavailable({ dependency: "exchange_rates" }));
+    expect(failed).toEqual(Unavailable.make({ dependency: "exchange_rates" }));
     expect(list).toEqual([]);
     expect(settlement).toBe("unpaid");
   });
 
   test("auto-send skips are audited on the PTD; a refused send keeps the payment and its PTD", async () => {
     const [token, refused, illegal, sent, tokenHistory, refusedHistory, illegalHistory, list] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const f = yield* PaymentFixtures;
           yield* f.setAutoSend(WS, true);
           const pf = yield* issueProforma();
-          const token = yield* as(
+          const tokenResult = yield* as(
             member("member", { scopes: ["payments:write"] }),
             pay(pf.id, "100"),
           );
           yield* f.failSends(
-            new Invalid({
+            Invalid.make({
               issues: [{ path: ["to"], code: "request.malformed", params: { reason: "required" } }],
             }),
           );
-          const refused = yield* pay(pf.id, "100");
-          yield* f.failSends(new Conflict({ reason: "illegal_transition" }));
-          const illegal = yield* pay(pf.id, "100");
-          const ptdOf = (r: typeof token) => docId(r.issued[0] as DocumentView);
+          const refusedResult = yield* pay(pf.id, "100");
+          yield* f.failSends(Conflict.make({ reason: "illegal_transition" }));
+          const illegalResult = yield* pay(pf.id, "100");
+          const ptdOf = (r: typeof tokenResult) => docId(EffectArray.getUnsafe(r.issued, 0));
           return [
-            token,
-            refused,
-            illegal,
+            tokenResult,
+            refusedResult,
+            illegalResult,
             yield* f.sent(WS),
-            yield* d.history(ptdOf(token)),
-            yield* d.history(ptdOf(refused)),
-            yield* d.history(ptdOf(illegal)),
+            yield* d.history(ptdOf(tokenResult)),
+            yield* d.history(ptdOf(refusedResult)),
+            yield* d.history(ptdOf(illegalResult)),
             yield* (yield* Payments).listFor({ document: pf.id }),
           ] as const;
         }),
-      ),
+      }),
     );
-    const skip = (h: typeof tokenHistory) => h.find((e) => e.action === "payment.autoSendSkipped");
+    const skip = (h: typeof tokenHistory) =>
+      Option.getOrUndefined(
+        EffectArray.findFirst(h, (e) => e.action === "payment.autoSendSkipped"),
+      );
     expect(skip(tokenHistory)?.reason).toBe("caller_cannot_send");
     expect(skip(refusedHistory)?.reason).toBe("Invalid:to:request.malformed");
     expect(skip(illegalHistory)?.reason).toBe("Conflict:illegal_transition");
@@ -468,73 +510,73 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
 
   test("auto-send: an invariant failure of the sender rolls the whole payment back", async () => {
     const [missing, stale, invalid, linesInvalid, list, sent, ptds] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const f = yield* PaymentFixtures;
           yield* f.setAutoSend(WS, true);
           const pf = yield* issueProforma();
-          yield* f.failSends(new NotFound({ entity: "Document", id: pf.id }));
-          const missing = yield* Effect.flip(pay(pf.id, "100"));
-          yield* f.failSends(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
-          const stale = yield* Effect.flip(pay(pf.id, "100"));
+          yield* f.failSends(NotFound.make({ entity: "Document", id: pf.id }));
+          const missingResult = yield* Effect.flip(pay(pf.id, "100"));
+          yield* f.failSends(Conflict.make({ reason: "revision_changed", currentRevision: 9 }));
+          const staleResult = yield* Effect.flip(pay(pf.id, "100"));
           // An Invalid that is not (only) about recipients is a document failure, not a skip.
-          const linesInvalid = new Invalid({
+          const linesInvalidResult = Invalid.make({
             issues: [
               { path: ["to"], code: "request.malformed" },
               { path: ["lines"], code: "document.lines_required" },
             ],
           });
-          yield* f.failSends(linesInvalid);
-          const invalid = yield* Effect.flip(pay(pf.id, "100"));
+          yield* f.failSends(linesInvalidResult);
+          const invalidResult = yield* Effect.flip(pay(pf.id, "100"));
           return [
-            missing,
-            stale,
-            invalid,
-            linesInvalid,
+            missingResult,
+            staleResult,
+            invalidResult,
+            linesInvalidResult,
             yield* (yield* Payments).listFor({ document: pf.id }),
             yield* f.sent(WS),
             yield* (yield* Documents).list({ kind: "payment_tax_document", limit: 10 }),
           ] as const;
         }),
-      ),
+      }),
     );
     // No orphaned Payment Tax Document either.
     expect(ptds.items).toEqual([]);
     expect(missing).toBeInstanceOf(NotFound);
-    expect(stale).toEqual(new Conflict({ reason: "revision_changed", currentRevision: 9 }));
+    expect(stale).toEqual(Conflict.make({ reason: "revision_changed", currentRevision: 9 }));
     expect(invalid).toEqual(linesInvalid);
     expect(list).toEqual([]);
     expect(sent).toEqual([]);
   });
 
   test("a keyed replay on a vat_payer Proforma returns the same PTD and sends once", async () => {
-    const key = { requestKey: "bank-tx-3" as RequestKey };
+    const key = { requestKey: RequestKey.make("bank-tx-3") };
     const [first, replay, sent] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const f = yield* PaymentFixtures;
           const p = yield* Payments;
           yield* f.setAutoSend(WS, true);
           const pf = yield* issueProforma();
           const input = { target: { document: pf.id }, amount: czk("100") };
-          const first = yield* p.record(input, key);
-          const replay = yield* p.record(input, key);
-          return [first, replay, yield* f.sent(WS)] as const;
+          const firstResult = yield* p.record(input, key);
+          const replayResult = yield* p.record(input, key);
+          return [firstResult, replayResult, yield* f.sent(WS)] as const;
         }),
-      ),
+      }),
     );
-    const ptd = docId(first.issued[0] as DocumentView);
-    expect(docId(replay.issued[0] as DocumentView)).toBe(ptd);
+    const ptd = docId(EffectArray.getUnsafe(first.issued, 0));
+    expect(docId(EffectArray.getUnsafe(replay.issued, 0))).toBe(ptd);
     expect(view(replay.payment).taxDocument).toBe(ptd);
     expect(sent).toEqual([ptd]);
   });
 
   test("non_vat_payer: no Payment Tax Document", async () => {
     const result = ok(
-      await run(
-        Effect.flatMap(issuePlainProforma(), (pf) => pay(pf.id, "1000")),
-        { regimeA: "non_vat_payer" },
-      ),
+      await run({
+        body: Effect.flatMap(issuePlainProforma(), (pf) => pay(pf.id, "1000")),
+        regimeA: "non_vat_payer",
+      }),
     );
     expect(result.issued).toEqual([]);
     expect(view(result.payment).taxDocument).toBeNull();
@@ -542,28 +584,28 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
 
   test("D8: a payment on a Proforma with a Final Invoice settles the Final Invoice", async () => {
     const [result, fi, finalSettlement, proformaList, fiList] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const p = yield* Payments;
           const pf = yield* issuePlainProforma();
           yield* pay(pf.id, "1000");
-          const fi = yield* d.issueFinalInvoice(pf.id);
-          const result = yield* pay(pf.id);
+          const fiResult = yield* d.issueFinalInvoice(pf.id);
+          const resultResult = yield* pay(pf.id);
           return [
-            result,
-            fi,
-            yield* settlementOf(fi.id),
+            resultResult,
+            fiResult,
+            yield* settlementOf(fiResult.id),
             yield* p.listFor({ document: pf.id }),
-            yield* p.listFor({ document: fi.id }),
+            yield* p.listFor({ document: fiResult.id }),
           ] as const;
         }),
-        { regimeA: "non_vat_payer" },
-      ),
+        regimeA: "non_vat_payer",
+      }),
     );
     expect(view(result.payment).target).toEqual({ document: fi.id });
     // The Final Invoice owes 2980 - 1000 deducted; the default amount pays it.
-    expect(str(view(result.payment).amount.amount)).toBe("1980");
+    view(result.payment).amount.amount.pipe(str, expect).toBe("1980");
     expect(result.settlement).toBe("paid");
     expect(result.issued).toEqual([]);
     expect(finalSettlement).toBe("paid");
@@ -575,35 +617,35 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
 describe("remove", () => {
   test("soft delete: settlement follows, repeat succeeds, reason required and audited", async () => {
     const [before, after, again, blank, history, list] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const d = yield* Documents;
           const inv = yield* issueInvoice();
           const paid = yield* pay(inv.id);
           const id = view(paid.payment).id;
-          const before = yield* settlementOf(inv.id);
+          const beforeResult = yield* settlementOf(inv.id);
           yield* p.remove(id, " duplicate import ");
-          const after = yield* settlementOf(inv.id);
-          const again = yield* Effect.exit(p.remove(id, "again"));
-          const blank = yield* Effect.flip(p.remove(id, "  "));
+          const afterResult = yield* settlementOf(inv.id);
+          const againResult = yield* Effect.exit(p.remove(id, "again"));
+          const blankResult = yield* Effect.flip(p.remove(id, "  "));
           return [
-            before,
-            after,
-            again,
-            blank,
+            beforeResult,
+            afterResult,
+            againResult,
+            blankResult,
             yield* d.history(inv.id),
             yield* p.listFor({ document: inv.id }),
           ] as const;
         }),
-      ),
+      }),
     );
     expect(before).toBe("paid");
     expect(after).toBe("unpaid");
     expect(Exit.isSuccess(again)).toBe(true);
     // A blank reason fails with Invalid.
-    expect(blank as unknown).toEqual(malformed("reason", "required"));
-    const removals = history.filter((e) => e.action === "payment.remove");
+    expect(blank).toEqual(malformed("reason", "required"));
+    const removals = EffectArray.filter(history, (e) => e.action === "payment.remove");
     expect(removals).toHaveLength(1);
     expect(removals[0]?.reason).toBe("duplicate import");
     expect(list).toEqual([]);
@@ -611,15 +653,15 @@ describe("remove", () => {
 
   test("P3 order: reverse the Final Invoice first, then credit the PTD", async () => {
     const steps = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const p = yield* Payments;
-          const attempt = (id: PaymentId) => Effect.exit(p.remove(id, "chyba"));
+          const attempt = (idInput: PaymentId) => Effect.exit(p.remove(idInput, "chyba"));
           const pf = yield* issueProforma();
           const paid = yield* pay(pf.id, "500");
           const id = view(paid.payment).id;
-          const ptd = docId(paid.issued[0] as DocumentView);
+          const ptd = docId(EffectArray.getUnsafe(paid.issued, 0));
           const open = yield* attempt(id);
           const fi = yield* d.issueFinalInvoice(pf.id);
           yield* d.correct(ptd, { reason: "x", lines: "full" }).pipe(Effect.exit);
@@ -630,32 +672,32 @@ describe("remove", () => {
           const done = yield* attempt(id);
           return [open, deducted, ptdOpen, done, yield* settlementOf(pf.id)] as const;
         }),
-      ),
+      }),
     );
-    expect(steps[0]).toEqual(Exit.fail(hasTaxDocument));
-    expect(steps[1]).toEqual(Exit.fail(hasTaxDocument));
-    expect(steps[2]).toEqual(Exit.fail(hasTaxDocument));
+    expect(steps[0].pipe(withoutStackTrace)).toEqual(Exit.fail(hasTaxDocument));
+    expect(steps[1].pipe(withoutStackTrace)).toEqual(Exit.fail(hasTaxDocument));
+    expect(steps[2].pipe(withoutStackTrace)).toEqual(Exit.fail(hasTaxDocument));
     expect(Exit.isSuccess(steps[3])).toBe(true);
     expect(steps[4]).toBe("unpaid");
   });
 
   test("a cancelled Final Invoice releases a non-payer's advance", async () => {
     const [blocked, released] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const d = yield* Documents;
           const p = yield* Payments;
           const pf = yield* issuePlainProforma();
           const id = view((yield* pay(pf.id, "500")).payment).id;
           const fi = yield* d.issueFinalInvoice(pf.id);
-          const blocked = yield* Effect.exit(p.remove(id, "x"));
+          const blockedResult = yield* Effect.exit(p.remove(id, "x"));
           yield* d.cancel(fi.id, { reason: "storno" });
-          return [blocked, yield* Effect.exit(p.remove(id, "x"))] as const;
+          return [blockedResult, yield* Effect.exit(p.remove(id, "x"))] as const;
         }),
-        { regimeA: "non_vat_payer" },
-      ),
+        regimeA: "non_vat_payer",
+      }),
     );
-    expect(blocked).toEqual(Exit.fail(hasTaxDocument));
+    expect(blocked.pipe(withoutStackTrace)).toEqual(Exit.fail(hasTaxDocument));
     expect(Exit.isSuccess(released)).toBe(true);
   });
 });
@@ -663,8 +705,8 @@ describe("remove", () => {
 describe("expense targets", () => {
   test("record, settle, list, remove; audit on the Expense", async () => {
     const result = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const f = yield* PaymentFixtures;
           const store = yield* CoreStore;
@@ -677,17 +719,17 @@ describe("expense targets", () => {
           const history = yield* store.audit.history(WS, { entity: "Expense", id: EXPENSE });
           return { partial, rest, list, afterRemove, history };
         }),
-      ),
+      }),
     );
     expect(result.partial.settlement).toBe("partially_paid");
     expect(result.rest.settlement).toBe("paid");
-    expect(str(view(result.rest.payment).amount.amount)).toBe("600");
+    view(result.rest.payment).amount.amount.pipe(str, expect).toBe("600");
     expect(view(result.rest.payment).target).toEqual({ expense: EXPENSE });
     expect(view(result.rest.payment).method).toBe("card");
     expect(result.list).toHaveLength(2);
     expect(result.afterRemove.payments).toBe(1);
     expect(result.afterRemove.settlement).toBe("partially_paid");
-    expect(result.history.map((e) => e.action)).toEqual([
+    expect(EffectArray.map(result.history, (e) => e.action)).toEqual([
       "payment.record",
       "payment.record",
       "payment.remove",
@@ -696,10 +738,10 @@ describe("expense targets", () => {
   });
 
   test("amounts never exceed the column's two decimals, even for a three-decimal currency", async () => {
-    const KWD = "KWD" as CurrencyCode;
+    const KWD = CurrencyCode.make("KWD");
     const [tooFine, ok2] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const f = yield* PaymentFixtures;
           yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: KWD, gross: dec("10") });
@@ -707,7 +749,7 @@ describe("expense targets", () => {
             p.record({ target: { expense: EXPENSE }, amount: MoneyMath.make(dec(amount), KWD) });
           return [yield* Effect.flip(record("1.001")), yield* record("1.01")] as const;
         }),
-      ),
+      }),
     );
     expect(tooFine).toEqual(malformed("amount", "out_of_range"));
     expect(ok2.settlement).toBe("partially_paid");
@@ -715,8 +757,8 @@ describe("expense targets", () => {
 
   test("incomplete -> expense.incomplete; currency mismatch -> payment.currency_mismatch", async () => {
     const [incomplete, currency] = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const p = yield* Payments;
           const f = yield* PaymentFixtures;
           yield* f.putExpense({
@@ -729,7 +771,7 @@ describe("expense targets", () => {
           yield* f.putExpense({
             workspaceId: WS,
             id: EXPENSE_B,
-            currency: "EUR" as CurrencyCode,
+            currency: CurrencyCode.make("EUR"),
             gross: dec("10"),
           });
           return [
@@ -737,10 +779,10 @@ describe("expense targets", () => {
             yield* Effect.flip(p.record({ target: { expense: EXPENSE_B }, amount: czk("1") })),
           ] as const;
         }),
-      ),
+      }),
     );
     expect(incomplete).toEqual(
-      new Invalid({ issues: [{ path: ["target"], code: "expense.incomplete" }] }),
+      Invalid.make({ issues: [{ path: ["target"], code: "expense.incomplete" }] }),
     );
     expect(currency).toEqual(mismatch("EUR"));
   });
@@ -749,27 +791,27 @@ describe("expense targets", () => {
 describe("reports read", () => {
   test("paidBetween: live payments in range, both directions, mapped with the target's fx", async () => {
     const rows = ok(
-      await run(
-        Effect.gen(function* () {
+      await run({
+        body: Effect.gen(function* () {
           const f = yield* PaymentFixtures;
           const p = yield* Payments;
           yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: CZK, gross: dec("1000") });
           const inv = yield* issueInvoice();
-          yield* pay(inv.id, "10", { paidOn: "2026-11-01" as IsoDate });
-          const removed = yield* pay(inv.id, "20", { paidOn: "2026-11-02" as IsoDate });
+          yield* pay(inv.id, "10", { paidOn: IsoDate.make("2026-11-01") });
+          const removed = yield* pay(inv.id, "20", { paidOn: IsoDate.make("2026-11-02") });
           yield* p.remove(view(removed.payment).id, "x");
-          yield* pay(inv.id, "30", { paidOn: "2026-10-31" as IsoDate });
+          yield* pay(inv.id, "30", { paidOn: IsoDate.make("2026-10-31") });
           yield* p.record({ target: { expense: EXPENSE }, amount: czk("5"), paidOn: TODAY });
           const store = yield* CoreStore;
           const repo = yield* PaymentsRepo;
           const live = yield* store.transaction(
-            repo.paidBetween(WS, { from: "2026-11-01" as IsoDate, to: TODAY }),
+            repo.paidBetween(WS, { from: IsoDate.make("2026-11-01"), to: TODAY }),
           );
-          return live.map((row) => reportPayment(row, null));
+          return EffectArray.map(live, (row) => reportPayment(row, null));
         }),
-      ),
+      }),
     );
-    expect(rows.map((r) => [r.direction, r.paidOn, str(r.amount.amount)])).toEqual([
+    expect(EffectArray.map(rows, (r) => [r.direction, r.paidOn, str(r.amount.amount)])).toEqual([
       ["in", "2026-11-01", "10"],
       ["out", TODAY, "5"],
     ]);

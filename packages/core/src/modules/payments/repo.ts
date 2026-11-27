@@ -12,7 +12,9 @@ import type {
   PaymentId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { MemoryTables } from "../../store/tables";
 import type { PaymentRecord } from "./record";
@@ -50,7 +52,7 @@ export class PaymentsRepo extends Context.Service<
       range: { readonly from: IsoDate; readonly to: IsoDate },
     ) => Effect.Effect<ReadonlyArray<PaymentRecord>, StoreUnavailable>;
   }
->()("kvitbit/core/PaymentsRepo") {}
+>()("@kvitbit/core/modules/payments/repo/PaymentsRepo") {}
 
 const byPaidOn = (a: PaymentRecord, b: PaymentRecord) =>
   a.paidOn < b.paidOn ? -1 : a.paidOn > b.paidOn ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -60,11 +62,11 @@ export const PaymentsRepoMemory: Layer.Layer<PaymentsRepo, never, MemoryTables> 
   Effect.map(MemoryTables, (tables) => {
     const table = tables.collection(PaymentsTable);
     return PaymentsRepo.of({
-      get: (workspaceId, id) => table.get(workspaceId, id),
-      lock: (workspaceId, id) => table.lock(workspaceId, id),
+      get: Effect.fn("PaymentsRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+      lock: Effect.fn("PaymentsRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
       insert: table.insert,
       update: table.update,
-      liveFor: (workspaceId, target) =>
+      liveFor: Effect.fn("PaymentsRepo.liveFor")((workspaceId, target) =>
         Effect.map(
           table.list(workspaceId, {
             where:
@@ -74,7 +76,8 @@ export const PaymentsRepoMemory: Layer.Layer<PaymentsRepo, never, MemoryTables> 
           }),
           (rows) => [...rows].sort(byPaidOn),
         ),
-      paidBetween: (workspaceId, range) =>
+      ),
+      paidBetween: Effect.fn("PaymentsRepo.paidBetween")((workspaceId, range) =>
         Effect.map(
           table.list(workspaceId, {
             where: { removedAt: null },
@@ -82,6 +85,7 @@ export const PaymentsRepoMemory: Layer.Layer<PaymentsRepo, never, MemoryTables> 
           }),
           (rows) => [...rows].sort(byPaidOn),
         ),
+      ),
     });
   }),
 );

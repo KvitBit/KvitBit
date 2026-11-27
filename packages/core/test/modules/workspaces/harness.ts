@@ -1,28 +1,35 @@
 /** Test harness for the Workspaces module: real layers over the in-memory ports. */
+
 import type {
   AuditEntry,
+  BankAccountView,
   Caller,
   MemberCaller,
   Role,
-  UserId,
   WorkspaceId,
+  WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
+import { CurrentCaller, InvitationToken, UserId, Workspaces } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
-import type { Exit } from "effect";
-import { Effect, Layer, Ref } from "effect";
-import { TestClock } from "effect/testing";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import {
   CaptureInvitationDelivery,
   type DirectoryUser,
   InvitationTokens,
   WorkspacesTestLayer,
 } from "../../../src/modules/workspaces";
+import { BankAccountViewFields, WorkspaceViewFields } from "../../../src/modules/workspaces/model";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { InMemoryPortsLive } from "../../../src/testing";
 import { account, TEST_NOW } from "../../helpers";
 
-const user = (n: number) => `01900000-0000-7000-8000-00000000c00${n}` as UserId;
+const user = (n: number) => UserId.make(`01900000-0000-7000-8000-00000000c00${n}`);
 export const OWNER = user(1);
 export const ADMIN = user(2);
 export const MEMBER = user(3);
@@ -39,7 +46,8 @@ export const USERS: ReadonlyArray<DirectoryUser> = [
   { userId: SECOND_ADMIN, name: "Bara Admin", email: "admin2@example.cz" },
 ];
 
-export const emailOf = (userId: UserId) => USERS.find((u) => u.userId === userId)?.email ?? "";
+const emailOf = (userId: UserId) =>
+  Option.getOrUndefined(EffectArray.findFirst(USERS, (u) => u.userId === userId))?.email ?? "";
 export const accountOf = (userId: UserId) => account({ userId, email: emailOf(userId) });
 
 /** Valid IČO with a registry record; and one whose checksum fails. */
@@ -59,11 +67,14 @@ const env = Layer.merge(InMemoryPortsLive({ registry: { [ICO]: RECORD } }), Test
 const layer = WorkspacesTestLayer(USERS).pipe(Layer.provideMerge(env));
 type Env = Layer.Success<typeof layer>;
 
-/** Runs a scenario on fresh layers with the TestClock at TEST_NOW. */
-export const run = <A, E>(effect: Effect.Effect<A, E, Env>): Promise<Exit.Exit<A, E>> =>
-  Effect.runPromiseExit(
-    Effect.andThen(TestClock.setTime(TEST_NOW), effect).pipe(Effect.provide(layer)),
-  );
+// Keep every field from the service response so exact assertions can see unexpected fields.
+const isBankAccountView = Schema.is(BankAccountViewFields);
+const isWorkspaceView = Schema.is(WorkspaceViewFields);
+
+export const bankAccountView = (view: BankAccountView) =>
+  isBankAccountView(view) ? Effect.succeed(view) : Effect.die("unexpected bank account view");
+export const workspaceView = (view: WorkspaceView) =>
+  isWorkspaceView(view) ? Effect.succeed(view) : Effect.die("unexpected workspace view");
 
 /** Runs `effect` as `caller`. */
 export const as =
@@ -77,13 +88,14 @@ export const W = Effect.service(Workspaces);
 export const lastToken = Effect.gen(function* () {
   const capture = yield* CaptureInvitationDelivery;
   const sent = yield* Ref.get(capture.sent);
-  const last = sent[sent.length - 1];
+  const last = sent.at(-1);
   if (last === undefined) return yield* Effect.die("no invitation sent");
   const tokens = yield* InvitationTokens;
-  return yield* tokens.token(last.invitationId, last.epoch);
+  const token = yield* tokens.token(last.invitationId, last.epoch);
+  return InvitationToken.make(token);
 });
 
-export interface Seeded {
+interface Seeded {
   readonly workspaceId: WorkspaceId;
   readonly owner: MemberCaller;
   readonly admin: MemberCaller;
@@ -92,38 +104,41 @@ export interface Seeded {
 }
 
 /** Joins `userId` as `role` through invite (by `inviter`) and accept. */
-export const join = (inviter: MemberCaller, userId: UserId, role: Exclude<Role, "owner">) =>
+export const join = (inviter: MemberCaller) => (userId: UserId, role: Exclude<Role, "owner">) =>
   Effect.gen(function* () {
     const ws = yield* W;
     yield* as(inviter)(ws.invite(emailOf(userId), role));
     const token = yield* lastToken;
-    return yield* as(accountOf(userId))(ws.acceptInvitation(token as never));
+    return yield* as(accountOf(userId))(ws.acceptInvitation(token));
   });
 
 /** Acme with an owner, an admin, a member and an accountant. */
 export const seed = (name = "Acme s.r.o.") =>
   Effect.gen(function* () {
     const ws = yield* W;
-    const owner = yield* as(accountOf(OWNER))(ws.create({ name } as never));
-    const admin = yield* join(owner, ADMIN, "admin");
-    const member = yield* join(owner, MEMBER, "member");
-    const accountant = yield* join(owner, ACCOUNTANT, "accountant");
+    const owner = yield* as(accountOf(OWNER))(ws.create({ name }));
+    const admin = yield* join(owner)(ADMIN, "admin");
+    const member = yield* join(owner)(MEMBER, "member");
+    const accountant = yield* join(owner)(ACCOUNTANT, "accountant");
     const seeded: Seeded = { workspaceId: owner.workspaceId, owner, admin, member, accountant };
     return seeded;
   });
 
 /** A token caller of `base` narrowed to `scopes`. */
-export const scoped = (base: MemberCaller, scopes: MemberCaller["scopes"]): MemberCaller => ({
-  ...base,
-  scopes,
-  channel: "api",
-  client: { kind: "api_key", id: "key-1", name: "CI key" },
-});
+export const scoped =
+  (scopes: MemberCaller["scopes"]) =>
+  (base: MemberCaller): MemberCaller => ({
+    ...base,
+    scopes,
+    channel: "api",
+    client: { kind: "api_key", id: "key-1", name: "CI key" },
+  });
 
-export const history = (workspaceId: WorkspaceId, subject?: AuditEntry["subject"]) =>
-  Effect.flatMap(Effect.service(CoreStore), (store) =>
-    store.audit.history(workspaceId, subject ?? { entity: "Workspace", id: workspaceId }),
-  );
+export const historyOf = (subject: AuditEntry["subject"]) => (workspaceId: WorkspaceId) =>
+  Effect.flatMap(Effect.service(CoreStore), (store) => store.audit.history(workspaceId, subject));
+
+export const history = (workspaceId: WorkspaceId) =>
+  historyOf({ entity: "Workspace", id: workspaceId })(workspaceId);
 
 /** Runs a scenario whose `expect`s run inside; rejects on any failure or defect. */
 export const scenario = <A, E>(effect: Effect.Effect<A, E, Env>): Promise<A> =>

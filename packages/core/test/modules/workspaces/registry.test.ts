@@ -2,8 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { Invalid, Unavailable } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
 import { CompanyRegistry } from "@kvitbit/domain/ports";
-import { Deferred, Duration, Effect, Exit, Fiber, Layer, Ref } from "effect";
-import { TestClock } from "effect/testing";
+import * as Deferred from "effect/Deferred";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as TestClock from "effect/testing/TestClock";
 import { isValidIco, RegistryLookup } from "../../../src/modules/workspaces/registry";
 import { FakeCompanyRegistry } from "../../../src/testing";
 
@@ -47,7 +53,7 @@ describe("RegistryLookup", () => {
     );
     const [error, lookups] = Exit.isSuccess(exit) ? exit.value : [undefined, undefined];
     expect(error).toBeInstanceOf(Invalid);
-    expect((error as Invalid).issues[0]?.code).toBe("ico.checksum");
+    expect(error?._tag === "Invalid" ? error.issues[0]?.code : undefined).toBe("ico.checksum");
     expect(lookups).toEqual([]);
   });
 
@@ -86,7 +92,7 @@ describe("RegistryLookup", () => {
     );
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
-    expect(exit.value.error).toEqual(new Unavailable({ dependency: "company_registry" }));
+    expect(exit.value.error).toEqual(Unavailable.make({ dependency: "company_registry" }));
     expect(exit.value.after?.name).toBe("Acme s.r.o.");
   });
 

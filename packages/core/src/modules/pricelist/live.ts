@@ -1,8 +1,3 @@
-/**
- * `PriceList` (core-ports 4.3). A Price List Item only supplies defaults: lines copy its values
- * when a document is drafted, so later edits never change existing documents. Not audited (no
- * tax effect).
- */
 import type {
   CurrentCaller,
   Forbidden,
@@ -14,8 +9,23 @@ import type {
   Unavailable,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Conflict, PriceList } from "@kvitbit/domain/contract";
-import { BigDecimal, Clock, Context, Effect, Layer } from "effect";
+import {
+  Conflict,
+  PriceList,
+  PriceListItemId as PriceListItemIdSchema,
+} from "@kvitbit/domain/contract";
+/**
+ * `PriceList` (core-ports 4.3). A Price List Item only supplies defaults: lines copy its values
+ * when a document is drafted, so later edits never change existing documents. Not audited (no
+ * tax effect).
+ */
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { canonicalJson } from "../../shared/canonicalJson";
 import { orUnavailable } from "../../shared/errors";
@@ -54,7 +64,7 @@ export interface PriceListImpl {
   }) => Effect.Effect<ReadonlyArray<PriceListItemViewData>, Forbidden | Unavailable, CurrentCaller>;
 }
 
-const nowIso = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
+const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const applyFields = (
   row: PriceListItemRow,
@@ -87,65 +97,71 @@ export const makePriceList: Effect.Effect<
   const store = yield* CoreStore;
   const repo = yield* PriceListRepo;
   // Only these services: the caller stays the one of each call.
+  const ids = yield* IdGenerator;
   const context = Context.make(CoreStore, store).pipe(
-    Context.add(IdGenerator, yield* IdGenerator),
+    Context.add(IdGenerator, ids),
     Context.add(PriceListRepo, repo),
   );
 
-  const create = (workspaceId: WorkspaceId, fields: PriceListItemSaveFields) =>
-    Effect.gen(function* () {
-      const missing = (["name", "unitPrice", "currency"] as const).find(
+  const create = Effect.fn("create")(function* (
+    workspaceId: WorkspaceId,
+    fields: PriceListItemSaveFields,
+  ) {
+    const missing = Option.getOrUndefined(
+      EffectArray.findFirst(
+        ["name", "unitPrice", "currency"] as const,
         (key) => fields[key] === undefined,
-      );
-      if (missing !== undefined) return yield* invalidAt([missing], "request.malformed");
-      const { name, unitPrice, currency } = fields;
-      if (name === undefined || unitPrice === undefined || currency === undefined) {
-        return yield* Effect.die("unreachable: required fields checked above");
-      }
-      const now = yield* nowIso;
-      const row: PriceListItemRow = {
-        id: yield* newId<PriceListItemId>(),
-        workspaceId,
-        revision: 1,
-        name,
-        description: fields.description ?? null,
-        unit: fields.unit ?? null,
-        unitPrice,
-        currency,
-        vat: fields.vat ?? null,
-        archivedAt: null,
-        createdAt: now,
-        updatedAt: now,
-      };
-      return yield* repo.insert(row).pipe(Effect.catchTag("UniqueViolation", Effect.die));
-    });
+      ),
+    );
+    if (missing !== undefined) return yield* invalidAt([missing], "request.malformed");
+    const { name, unitPrice, currency } = fields;
+    if (name === undefined || unitPrice === undefined || currency === undefined) {
+      return yield* Effect.die("unreachable: required fields checked above");
+    }
+    const now = yield* nowIso;
+    const row: PriceListItemRow = {
+      id: yield* newId(PriceListItemIdSchema.make),
+      workspaceId,
+      revision: 1,
+      name,
+      description: fields.description ?? null,
+      unit: fields.unit ?? null,
+      unitPrice,
+      currency,
+      vat: fields.vat ?? null,
+      archivedAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    return yield* repo.insert(row).pipe(Effect.catchTag("UniqueViolation", Effect.die));
+  });
 
-  const edit = (
+  const edit = Effect.fn("edit")(function* (
     workspaceId: WorkspaceId,
     id: PriceListItemId,
     expectedRevision: number | undefined,
     fields: PriceListItemSaveFields,
-  ) =>
-    Effect.gen(function* () {
-      // An edit without expectedRevision is stale by definition (rule C2): report the current one.
-      const current =
-        expectedRevision === undefined
-          ? yield* Effect.flatMap(repo.lock(workspaceId, id), (row) =>
-              Effect.fail(
-                new Conflict({ reason: "revision_changed", currentRevision: row.revision }),
-              ),
-            )
-          : yield* repo.getForUpdate(workspaceId, id, expectedRevision);
-      const next = applyFields(current, fields, yield* nowIso);
-      if (sameContent(current, next)) return current;
-      return yield* repo
-        .update(next, current.revision)
-        .pipe(Effect.catchTag("UniqueViolation", Effect.die));
-    });
+  ) {
+    // An edit without expectedRevision is stale by definition (rule C2): report the current one.
+    const current =
+      expectedRevision === undefined
+        ? yield* Effect.flatMap(repo.lock(workspaceId, id), (row) =>
+            Effect.fail(
+              Conflict.make({ reason: "revision_changed", currentRevision: row.revision }),
+            ),
+          )
+        : yield* repo.getForUpdate(workspaceId, id, expectedRevision);
+    const nowIso_1 = yield* nowIso;
+    const next = applyFields(current, fields, nowIso_1);
+    if (sameContent(current, next)) return current;
+    return yield* repo
+      .update(next, current.revision)
+      .pipe(Effect.catchTag("UniqueViolation", Effect.die));
+  });
 
   const impl: PriceListImpl = {
-    save: (input, opts) =>
-      Effect.gen(function* () {
+    save: Effect.fn("save")(
+      function* (input, opts) {
         const { workspaceId } = yield* authorizeInWorkspace("priceList.write");
         // The whole input, strictly: unknown fields, a malformed id or revision are Invalid.
         const { id, expectedRevision, ...fields } = yield* decodeInput(
@@ -159,11 +175,7 @@ export const makePriceList: Effect.Effect<
             method: "PriceList.save",
             payload: {
               schema: PriceListItemSavePayload,
-              value: {
-                fields,
-                ...(id !== undefined ? { id } : {}),
-                ...(expectedRevision !== undefined ? { expectedRevision } : {}),
-              },
+              value: { fields, id, expectedRevision },
             },
             result: PriceListItemViewSchema,
           },
@@ -175,10 +187,13 @@ export const makePriceList: Effect.Effect<
             return toPriceListItemView(saved);
           }),
         );
-      }).pipe(Effect.provide(context), orUnavailable),
+      },
+      Effect.provide(context),
+      (_) => orUnavailable(_),
+    ),
 
-    archive: (id) =>
-      Effect.gen(function* () {
+    archive: Effect.fn("archive")(
+      function* (id) {
         const { workspaceId } = yield* authorizeInWorkspace("priceList.write");
         yield* store.transaction(
           Effect.gen(function* () {
@@ -191,17 +206,23 @@ export const makePriceList: Effect.Effect<
               .pipe(Effect.catchTags({ UniqueViolation: Effect.die, Conflict: Effect.die }));
           }),
         );
-      }).pipe(Effect.provide(context), orUnavailable),
+      },
+      Effect.provide(context),
+      (_) => orUnavailable(_),
+    ),
 
-    list: (q) =>
-      Effect.gen(function* () {
+    list: Effect.fn("list")(
+      function* (q) {
         const { workspaceId } = yield* authorizeInWorkspace("priceList.read");
         const rows = yield* repo.list(workspaceId, {
-          ...(q?.text !== undefined ? { text: q.text } : {}),
+          text: q?.text,
           includeArchived: q?.includeArchived ?? false,
         });
-        return rows.map(toPriceListItemView);
-      }).pipe(Effect.provide(context), orUnavailable),
+        return EffectArray.map(rows, toPriceListItemView);
+      },
+      Effect.provide(context),
+      (_) => orUnavailable(_),
+    ),
   };
   return impl;
 });

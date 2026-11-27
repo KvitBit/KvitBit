@@ -1,9 +1,12 @@
 /** Shared helpers for the Contacts and PriceList module tests. */
-import { expect } from "bun:test";
-import type { AuditEntry, Caller, ContactInput, WorkspaceId } from "@kvitbit/domain/contract";
+import type { AuditEntry, Caller, WorkspaceId } from "@kvitbit/domain/contract";
 import { CurrentCaller } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
-import { Cause, Effect, Exit, Option } from "effect";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as EffectFunction from "effect/Function";
+import * as Option from "effect/Option";
 import { CoreStore } from "../../../src/store/CoreStore";
 
 export const ACME_ICO = "27074358";
@@ -22,7 +25,7 @@ export const acmeRecord: RegistryRecord = {
 };
 
 /** Padded name and no DIČ, as registry data can come. */
-export const cezRecord: RegistryRecord = {
+const cezRecord: RegistryRecord = {
   name: "  ČEZ, a. s. ",
   address: { street: "Duhová 2/1444", city: "Praha", postalCode: "14000", country: "CZ" },
   dic: null,
@@ -55,20 +58,15 @@ export const failureOf = <A, E>(exit: Exit.Exit<A, E>): E => {
   throw new Error("expected a failure, got success");
 };
 
-/** Asserts a tagged failure with the given fields. */
-export const expectFailure = (
-  exit: Exit.Exit<unknown, unknown>,
-  expected: Record<string, unknown>,
-) => expect(failureOf(exit)).toMatchObject(expected);
+type AuditHistory = Effect.Effect<ReadonlyArray<AuditEntry>, never, CoreStore>;
 
-export const history = (
-  workspaceId: WorkspaceId,
-  subject: AuditEntry["subject"],
-): Effect.Effect<ReadonlyArray<AuditEntry>, never, CoreStore> =>
-  Effect.flatMap(CoreStore, (store) => store.audit.history(workspaceId, subject)).pipe(
-    Effect.orDie,
-  );
-
-/** `ContactInput` with open particulars. */
-export const contactInput = (fields: Record<string, unknown>): ContactInput =>
-  fields as ContactInput;
+export const history: {
+  (subject: AuditEntry["subject"]): (workspaceId: WorkspaceId) => AuditHistory;
+  (workspaceId: WorkspaceId, subject: AuditEntry["subject"]): AuditHistory;
+} = EffectFunction.dual(
+  2,
+  (workspaceId: WorkspaceId, subject: AuditEntry["subject"]): AuditHistory =>
+    Effect.flatMap(CoreStore, (store) => store.audit.history(workspaceId, subject)).pipe(
+      Effect.orDie,
+    ),
+);

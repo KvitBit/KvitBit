@@ -5,17 +5,22 @@
  * src/index.ts). Writes must run inside the caller's `CoreStore.transaction`; `allocate` runs
  * after the document row lock (lock order S4: documents, then counters).
  */
+
 import type {
   Conflict as ConflictType,
   DocumentId,
   DocumentKind,
   IsoDate,
-  NumberingSeriesId,
   NumberingSeriesView,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Conflict, Invalid, NotFound } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, Result } from "effect";
+import { Conflict, Invalid, NotFound, NumberingSeriesId } from "@kvitbit/domain/contract";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as EffectString from "effect/String";
 import { Numbering, type NumberPattern } from "../../engines/numbering";
 import { IdGenerator } from "../../shared/ids";
 import { CoreStore, type StoreUnavailable, type UniqueViolation } from "../../store/CoreStore";
@@ -121,27 +126,28 @@ export interface NumberingSeriesShape {
 }
 
 export class NumberingSeries extends Context.Service<NumberingSeries, NumberingSeriesShape>()(
-  "kvitbit/core/NumberingSeries",
+  "@kvitbit/core/modules/numbering/service/NumberingSeries",
 ) {}
 
 /** A stored pattern is valid by construction; a broken one is a defect. */
 const storedPattern = (row: SeriesRow): NumberPattern =>
-  Result.getOrThrowWith(Numbering.parsePattern(row.pattern), () => {
-    return new Error(`numbering_series ${row.id}: stored pattern "${row.pattern}" is invalid`);
-  });
+  Result.getOrThrowWith(
+    Numbering.parsePattern(row.pattern),
+    () => new Error(`numbering_series ${row.id}: stored pattern "${row.pattern}" is invalid`),
+  );
 
-const illegal = () => new Conflict({ reason: "illegal_transition" });
+const illegal = () => Conflict.make({ reason: "illegal_transition" });
 
 /** The series cannot number another document (20 characters or the counter range reached). */
 const exhausted = () =>
-  new Conflict({ reason: "illegal_transition", detail: "numbering.pattern_invalid" });
+  Conflict.make({ reason: "illegal_transition", detail: "numbering.pattern_invalid" });
 
 const nameInvalid = () =>
-  new Invalid({
+  Invalid.make({
     issues: [{ path: ["name"], code: "request.malformed", params: { reason: "empty" } }],
   });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const store = yield* CoreStore;
   const ids = yield* IdGenerator;
   const repo = yield* NumberingSeriesRepo;
@@ -152,42 +158,44 @@ export const make = Effect.gen(function* () {
     period: Numbering.periodKey(pattern, date),
   });
 
-  const view: NumberingSeriesShape["view"] = (row, today) =>
-    Effect.gen(function* () {
-      const pattern = storedPattern(row);
-      const key = counterKey(row, pattern, today);
-      const nextCounter = yield* store.counters.peek(key);
-      return {
-        id: row.id,
-        kind: row.kind,
-        name: row.name,
-        pattern: row.pattern,
-        isDefault: row.isDefault,
-        periodKey: key.period,
-        nextCounter,
-        nextNumber: Numbering.format(pattern, today, nextCounter),
-      };
-    });
+  const view: NumberingSeriesShape["view"] = Effect.fn("view")(function* (row, today) {
+    const pattern = storedPattern(row);
+    const key = counterKey(row, pattern, today);
+    const nextCounter = yield* store.counters.peek(key);
+    return {
+      id: row.id,
+      kind: row.kind,
+      name: row.name,
+      pattern: row.pattern,
+      isDefault: row.isDefault,
+      periodKey: key.period,
+      nextCounter,
+      nextNumber: Numbering.format(pattern, today, nextCounter),
+    };
+  });
 
   /** Demotes the kind's current default unless it is `keep`. */
-  const demoteDefault = (workspaceId: WorkspaceId, kind: DocumentKind, keep?: NumberingSeriesId) =>
-    Effect.gen(function* () {
-      const current = yield* repo.findDefault(workspaceId, kind);
-      if (Option.isNone(current) || current.value.id === keep) return;
-      // Found in this transaction and locked before the update: a miss or a conflict is a defect.
-      const locked = yield* Effect.catchTag(
-        repo.lock(workspaceId, current.value.id),
-        "NotFound",
-        Effect.die,
-      );
-      yield* repo.update({ ...locked, isDefault: false }, locked.revision).pipe(
-        Effect.catchTags({
-          NotFound: Effect.die,
-          Conflict: Effect.die,
-          UniqueViolation: Effect.die,
-        }),
-      );
-    });
+  const demoteDefault = Effect.fn("demoteDefault")(function* (
+    workspaceId: WorkspaceId,
+    kind: DocumentKind,
+    keep?: NumberingSeriesId,
+  ) {
+    const current = yield* repo.findDefault(workspaceId, kind);
+    if (Option.isNone(current) || current.value.id === keep) return;
+    // Found in this transaction and locked before the update: a miss or a conflict is a defect.
+    const locked = yield* Effect.catchTag(
+      repo.lock(workspaceId, current.value.id),
+      "NotFound",
+      Effect.die,
+    );
+    yield* repo.update({ ...locked, isDefault: false }, locked.revision).pipe(
+      Effect.catchTags({
+        NotFound: Effect.die,
+        Conflict: Effect.die,
+        UniqueViolation: Effect.die,
+      }),
+    );
+  });
 
   /**
    * Runs a write that may promote a default in a savepoint. Under READ COMMITTED two
@@ -211,17 +219,17 @@ export const make = Effect.gen(function* () {
     return attempt(3);
   };
 
-  const configure: NumberingSeriesShape["configure"] = (workspaceId, input, today) =>
-    Effect.gen(function* () {
+  const configure: NumberingSeriesShape["configure"] = Effect.fn("configure")(
+    function* (workspaceId, input, today) {
       const pattern = yield* Effect.fromResult(Numbering.parsePattern(input.pattern));
-      const name = input.name.trim();
-      if (name.length === 0) return yield* Effect.fail(nameInvalid());
+      const name = EffectString.trim(input.name);
+      if (name.length === 0) return yield* nameInvalid();
       let before: NumberingSeriesView | null = null;
       let row: SeriesRow;
       if (input.id !== undefined) {
         const locked = yield* repo.lock(workspaceId, input.id);
-        if (locked.kind !== input.kind) return yield* Effect.fail(illegal());
-        if (input.isDefault === false && locked.isDefault) return yield* Effect.fail(illegal());
+        if (locked.kind !== input.kind) return yield* illegal();
+        if (input.isDefault === false && locked.isDefault) return yield* illegal();
         before = yield* view(locked, today);
         const isDefault = locked.isDefault || input.isDefault === true;
         row = yield* defaultSafe(
@@ -236,15 +244,18 @@ export const make = Effect.gen(function* () {
           }),
         );
       } else {
-        const id = (yield* ids.next) as NumberingSeriesId;
+        const next_1 = yield* ids.next;
+        const id = NumberingSeriesId.make(next_1);
         row = yield* defaultSafe(
           Effect.gen(function* () {
             // Only an explicit promotion demotes. An implicit default (first of its kind) is
             // inserted as is: if a concurrent default committed after our read, the index
             // rejects it and the retry re-reads and inserts a non-default.
             const explicit = input.isDefault === true;
-            const isDefault =
-              explicit || Option.isNone(yield* repo.findDefault(workspaceId, input.kind));
+            const previous = explicit
+              ? Option.none()
+              : yield* repo.findDefault(workspaceId, input.kind);
+            const isDefault = Option.isNone(previous);
             if (explicit) yield* demoteDefault(workspaceId, input.kind);
             return yield* repo.insert({
               id,
@@ -265,79 +276,77 @@ export const make = Effect.gen(function* () {
           Numbering.checkNextCounter(currentNext, input.nextNumber),
         );
         if (!Numbering.fitsLength(pattern, today, requested)) {
-          return yield* Effect.fail(
-            new Invalid({
-              issues: [
-                {
-                  path: ["nextNumber"],
-                  code: "numbering.pattern_invalid",
-                  params: { reason: "too_long" },
-                },
-              ],
-            }),
-          );
+          return yield* Invalid.make({
+            issues: [
+              {
+                path: ["nextNumber"],
+                code: "numbering.pattern_invalid",
+                params: { reason: "too_long" },
+              },
+            ],
+          });
         }
         if (requested > currentNext) yield* store.counters.set(key, requested);
       } else {
         // A pattern edit keeps the period's counter: the next number must still fit.
         const next = yield* store.counters.peek(counterKey(row, pattern, today));
         if (!Numbering.fitsLength(pattern, today, next)) {
-          return yield* Effect.fail(
-            new Invalid({
-              issues: [
-                {
-                  path: ["pattern"],
-                  code: "numbering.pattern_invalid",
-                  params: { reason: "too_long" },
-                },
-              ],
-            }),
-          );
+          return yield* Invalid.make({
+            issues: [
+              {
+                path: ["pattern"],
+                code: "numbering.pattern_invalid",
+                params: { reason: "too_long" },
+              },
+            ],
+          });
         }
       }
       return { view: yield* view(row, today), before };
-    });
+    },
+  );
 
   const list: NumberingSeriesShape["list"] = (workspaceId, today) =>
     Effect.flatMap(repo.list(workspaceId), (rows) =>
-      Effect.forEach(rows, (row) => view(row, today)),
+      Effect.forEach(rows, (row) => view(row, today), { concurrency: 1 }),
     );
 
   const ensureDefaults: NumberingSeriesShape["ensureDefaults"] = (workspaceId, kinds) =>
     Effect.forEach(
       kinds,
-      (kind) =>
-        Effect.gen(function* () {
-          if (Option.isSome(yield* repo.findDefault(workspaceId, kind))) return;
-          const id = (yield* ids.next) as NumberingSeriesId;
-          // A concurrent creator that committed the default first wins; ours is not needed.
-          yield* store
-            .transaction(
-              repo.insert({
-                id,
-                workspaceId,
-                revision: 1,
-                kind,
-                name: DEFAULT_SERIES_NAMES[kind],
-                pattern: DEFAULT_SERIES_PATTERNS[kind],
-                isDefault: true,
-              }),
-            )
-            .pipe(
-              Effect.catchTag("UniqueViolation", (e) =>
-                e.constraint === DEFAULT_PER_KIND ? Effect.void : Effect.die(e),
-              ),
-            );
-        }),
-      { discard: true },
+      Effect.fnUntraced(function* (kind) {
+        const value_1 = yield* repo.findDefault(workspaceId, kind);
+        if (Option.isSome(value_1)) return;
+        const next_1 = yield* ids.next;
+        const id = NumberingSeriesId.make(next_1);
+        // A concurrent creator that committed the default first wins; ours is not needed.
+        yield* store
+          .transaction(
+            repo.insert({
+              id,
+              workspaceId,
+              revision: 1,
+              kind,
+              name: DEFAULT_SERIES_NAMES[kind],
+              pattern: DEFAULT_SERIES_PATTERNS[kind],
+              isDefault: true,
+            }),
+          )
+          .pipe(
+            Effect.catchTag("UniqueViolation", (e) =>
+              e.constraint === DEFAULT_PER_KIND ? Effect.void : Effect.die(e),
+            ),
+          );
+      }),
+      { discard: true, concurrency: 1 },
     );
 
-  const resolve: NumberingSeriesShape["resolve"] = (workspaceId, kind, seriesId) =>
-    Effect.gen(function* () {
+  const resolve: NumberingSeriesShape["resolve"] = Effect.fn("resolve")(
+    function* (workspaceId, kind, seriesId) {
       if (seriesId !== undefined) {
         const row = yield* repo.get(workspaceId, seriesId);
         if (row.kind !== kind) {
-          return yield* Effect.fail(new NotFound({ entity: "NumberingSeries", id: seriesId }));
+          return yield* NotFound.make({ entity: "NumberingSeries", id: seriesId });
         }
         return row;
       }
@@ -349,50 +358,49 @@ export const make = Effect.gen(function* () {
         );
       }
       return found.value;
-    });
+    },
+  );
 
-  const allocate: NumberingSeriesShape["allocate"] = (input) =>
-    Effect.gen(function* () {
-      const row = yield* resolve(input.workspaceId, input.kind, input.seriesId);
-      const pattern = storedPattern(row);
-      const key = counterKey(row, pattern, input.issuedOn);
-      // The foundation's allocateNumber loop plus the 20-character and counter-range limits,
-      // checked on every candidate (including after skipping a reserved number).
-      for (let sequence = yield* store.counters.lock(key); ; sequence++) {
-        const number =
-          sequence <= Numbering.MAX_COUNTER
-            ? Numbering.format(pattern, input.issuedOn, sequence)
-            : null;
-        if (number === null || number.length > Numbering.MAX_NUMBER_LENGTH) {
-          return yield* Effect.fail(exhausted());
-        }
-        const reserved = yield* store.reservations.tryReserve({
-          workspaceId: input.workspaceId,
-          kind: input.kind,
-          number,
-          seriesId: row.id,
-          documentId: input.documentId,
-        });
-        if (reserved) {
-          yield* store.counters.set(key, sequence + 1);
-          return { number, sequence, seriesId: row.id };
-        }
+  const allocate: NumberingSeriesShape["allocate"] = Effect.fn("allocate")(function* (input) {
+    const row = yield* resolve(input.workspaceId, input.kind, input.seriesId);
+    const pattern = storedPattern(row);
+    const key = counterKey(row, pattern, input.issuedOn);
+    // The foundation's allocateNumber loop plus the 20-character and counter-range limits,
+    // checked on every candidate (including after skipping a reserved number).
+    for (let sequence = yield* store.counters.lock(key); ; sequence++) {
+      const number =
+        sequence <= Numbering.MAX_COUNTER
+          ? Numbering.format(pattern, input.issuedOn, sequence)
+          : null;
+      if (number === null || number.length > Numbering.MAX_NUMBER_LENGTH) {
+        return yield* exhausted();
       }
-    });
-
-  const override: NumberingSeriesShape["override"] = (input) =>
-    Effect.gen(function* () {
-      const number = yield* Effect.fromResult(Numbering.checkManualNumber(input.number));
-      const reserved = yield* reserveNumber({
+      const reserved = yield* store.reservations.tryReserve({
         workspaceId: input.workspaceId,
         kind: input.kind,
         number,
-        seriesId: null,
+        seriesId: row.id,
         documentId: input.documentId,
-      }).pipe(Effect.provideService(CoreStore, store));
-      if (!reserved) return yield* Effect.fail(new Conflict({ reason: "duplicate" }));
-      return number;
-    });
+      });
+      if (reserved) {
+        yield* store.counters.set(key, sequence + 1);
+        return { number, sequence, seriesId: row.id };
+      }
+    }
+  });
+
+  const override: NumberingSeriesShape["override"] = Effect.fn("override")(function* (input) {
+    const number = yield* Effect.fromResult(Numbering.checkManualNumber(input.number));
+    const reserved = yield* reserveNumber({
+      workspaceId: input.workspaceId,
+      kind: input.kind,
+      number,
+      seriesId: null,
+      documentId: input.documentId,
+    }).pipe(Effect.provideService(CoreStore, store));
+    if (!reserved) return yield* Conflict.make({ reason: "duplicate" });
+    return number;
+  });
 
   return NumberingSeries.of({ configure, list, ensureDefaults, resolve, allocate, override, view });
 });

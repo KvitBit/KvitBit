@@ -4,9 +4,9 @@
  * attachment and the reminder resolution; `send` then stores the reminder choice (purpose
  * "document"), queues the delivery with its snapshot, audits, and starts the job after commit.
  */
+
 import type {
   AuditEntry,
-  DeliveryId,
   DeliveryPurpose,
   DocumentId,
   DocumentKind,
@@ -24,7 +24,12 @@ import {
   Invalid,
   Locale as LocaleSchema,
 } from "@kvitbit/domain/contract";
-import { Effect, Option, Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { authorizeInWorkspace } from "../../../policy/Policy";
 import { appendAudit } from "../../../shared/audit";
 import { orUnavailable } from "../../../shared/errors";
@@ -64,19 +69,32 @@ const REMINDER_PREFIX: Readonly<Record<Locale, string>> = {
 };
 
 /** Subject line: "[Reminder: ]<Kind> <number> – <issuer>". */
-export const subjectOf = (
-  purpose: DeliveryPurpose,
-  language: Locale,
-  record: Pick<DocumentRecord, "kind" | "number" | "issuer">,
-): string => {
-  const title = `${KIND_TITLE[language][record.kind]} ${record.number ?? ""}`.trim();
-  const base = `${title} – ${record.issuer.name}`;
-  return purpose === "reminder" ? `${REMINDER_PREFIX[language]}: ${base}` : base;
-};
+export const subjectOf: {
+  (
+    language: Locale,
+    record: Pick<DocumentRecord, "kind" | "number" | "issuer">,
+  ): (purpose: DeliveryPurpose) => string;
+  (
+    purpose: DeliveryPurpose,
+    language: Locale,
+    record: Pick<DocumentRecord, "kind" | "number" | "issuer">,
+  ): string;
+} = Fn.dual(
+  3,
+  (
+    purpose: DeliveryPurpose,
+    language: Locale,
+    record: Pick<DocumentRecord, "kind" | "number" | "issuer">,
+  ): string => {
+    const title = EffectString.trim(`${KIND_TITLE[language][record.kind]} ${record.number ?? ""}`);
+    const base = `${title} – ${record.issuer.name}`;
+    return purpose === "reminder" ? `${REMINDER_PREFIX[language]}: ${base}` : base;
+  },
+);
 
 /** The PDF attachment's name and type; rendered at dispatch from the snapshot. */
 export const attachmentOf = (record: Pick<DocumentRecord, "number" | "id">) => ({
-  filename: `${(record.number ?? record.id).replace(/[^\p{L}\p{N}._-]+/gu, "_")}.pdf`,
+  filename: `${EffectString.replace(/[^\p{L}\p{N}._-]+/gu, "_")(record.number ?? record.id)}.pdf`,
   contentType: "application/pdf",
   template: "classic" as const,
 });
@@ -84,20 +102,26 @@ export const attachmentOf = (record: Pick<DocumentRecord, "number" | "id">) => (
 const EMAIL = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
 
 const malformed = (path: ReadonlyArray<string | number>, reason: string) =>
-  new Invalid({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
 
 /** Explicit recipients, else the Contact's billing emails; trimmed, deduped, validated. */
-const recipientsOf = (workspaceId: WorkspaceId, record: DocumentRecord, to: SendOptions["to"]) =>
-  Effect.gen(function* () {
-    const given =
-      to ??
-      (yield* (yield* DocumentContacts).forDocument(workspaceId, record.contactId)).billingEmails;
-    const recipients = [...new Set(given.map((email) => email.trim()))];
-    if (recipients.length === 0) return yield* malformed(["to"], "recipients_required");
-    const bad = recipients.findIndex((email) => !EMAIL.test(email));
-    if (bad >= 0) return yield* malformed(["to", bad], "email_invalid");
-    return recipients;
-  });
+const recipientsOf = Effect.fn("recipientsOf")(function* (
+  workspaceId: WorkspaceId,
+  record: DocumentRecord,
+  to: SendOptions["to"],
+) {
+  const given =
+    to ??
+    (yield* (yield* DocumentContacts).forDocument(workspaceId, record.contactId)).billingEmails;
+  const recipients = [...new Set(EffectArray.map(given, (email) => EffectString.trim(email)))];
+  if (recipients.length === 0) return yield* malformed(["to"], "recipients_required");
+  const bad = Option.getOrElse(
+    EffectArray.findFirstIndex(recipients, (email) => !EMAIL.test(email)),
+    () => -1,
+  );
+  if (bad >= 0) return yield* malformed(["to", bad], "email_invalid");
+  return recipients;
+});
 
 /** What a send would do now; shared by send and previewSend (D15). */
 export interface SendPlan {
@@ -113,41 +137,44 @@ export interface SendPlan {
   readonly armsReminders: boolean;
 }
 
-export const plan = (workspaceId: WorkspaceId, record: DocumentRecord, input: SendOptions = {}) =>
-  Effect.gen(function* () {
-    // D13: drafts and cancelled documents are not sent.
-    yield* guard(record, "send");
-    const purpose = input.purpose ?? "document";
-    // D14: a manual reminder needs an owed Invoice or Proforma.
-    if (purpose === "reminder" && !stillOwed(record)) {
-      return yield* new Conflict({
-        reason: "illegal_transition",
-        detail: "reminder.document_settled",
-      });
-    }
-    const to = yield* recipientsOf(workspaceId, record, input.to);
-    const language = input.language ?? record.language;
-    const { today } = yield* now;
-    const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
-    const choice = purpose === "document" ? choiceOf(input.reminders) : null;
-    const armsReminders =
-      choice === null
-        ? false
-        : record.kind === "invoice" || record.kind === "proforma"
-          ? (yield* effectiveReminders(workspaceId, record, today, choice)).arms
-          : false;
-    return {
-      record,
-      purpose,
-      to,
-      language,
-      subject: subjectOf(purpose, language, record),
-      replyTo: issuer.party.email,
-      attachment: attachmentOf(record),
-      choice,
-      armsReminders,
-    } satisfies SendPlan;
-  });
+export const plan = Effect.fn("plan")(function* (
+  workspaceId: WorkspaceId,
+  record: DocumentRecord,
+  input: SendOptions = {},
+) {
+  // D13: drafts and cancelled documents are not sent.
+  yield* guard(record, "send");
+  const purpose = input.purpose ?? "document";
+  // D14: a manual reminder needs an owed Invoice or Proforma.
+  if (purpose === "reminder" && !stillOwed(record)) {
+    return yield* Conflict.make({
+      reason: "illegal_transition",
+      detail: "reminder.document_settled",
+    });
+  }
+  const to = yield* recipientsOf(workspaceId, record, input.to);
+  const language = input.language ?? record.language;
+  const { today } = yield* now;
+  const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
+  const choice = purpose === "document" ? choiceOf(input.reminders) : null;
+  const armsReminders =
+    choice === null
+      ? false
+      : record.kind === "invoice" || record.kind === "proforma"
+        ? (yield* effectiveReminders(workspaceId, record, today, choice)).arms
+        : false;
+  return {
+    record,
+    purpose,
+    to,
+    language,
+    subject: subjectOf(purpose, language, record),
+    replyTo: issuer.party.email,
+    attachment: attachmentOf(record),
+    choice,
+    armsReminders,
+  } satisfies SendPlan;
+});
 
 export const previewOf = (p: SendPlan): SendPreview => ({
   purpose: p.purpose,
@@ -163,91 +190,87 @@ export const previewOf = (p: SendPlan): SendPreview => ({
  * `document.send` on the Document, and starts the job after the outermost commit (J1).
  * Shared by `send` and the automatic reminder enqueue.
  */
-export const queueDelivery = (
+export const queueDelivery = Effect.fn("queueDelivery")(function* (
   workspaceId: WorkspaceId,
   p: Omit<SendPlan, "choice" | "armsReminders">,
   reminder: ReminderStepRecord | null,
   extraChanges: AuditEntry["changes"] = [],
   arms = false,
-) =>
-  Effect.gen(function* () {
-    const { at } = yield* now;
-    const id = yield* newId<DeliveryId>();
-    const row: DeliveryRecord = {
-      id,
-      workspaceId,
-      revision: 1,
-      documentId: p.record.id,
-      // Per-document order, assigned under the document row lock the caller holds.
-      sequence: (yield* (yield* DeliveriesRepo).byDocument(workspaceId, p.record.id)).length + 1,
-      documentRevision: p.record.revision,
-      contactId: p.record.contactId,
-      arms,
-      dueOn: p.record.dueOn,
-      purpose: p.purpose,
-      status: "queued",
-      to: p.to,
-      replyTo: p.replyTo,
-      language: p.language,
-      subject: p.subject,
-      // The view in the delivery's language (statutory notes, labels), as the PDF prints it.
-      view: yield* viewOf(p.record, { language: p.language }),
-      attachment: p.attachment,
-      reminder,
-      attempts: 0,
-      lastOutcome: null,
-      failure: null,
-      provider: null,
-      providerMessageId: null,
-      createdAt: at,
-      updatedAt: at,
-    };
-    const repo = yield* DeliveriesRepo;
-    const store = yield* CoreStore;
-    // The insert runs as a savepoint, so a reminder step queued concurrently (unique
-    // `deliveries_reminder_step`) returns that delivery without aborting the caller's
-    // transaction or auditing twice. Other ids are fresh.
-    const taken = yield* store.transaction(repo.insert(row)).pipe(
-      Effect.map(() => null),
-      Effect.catchTag("UniqueViolation", (e) =>
-        reminder === null || e.constraint !== REMINDER_STEP
-          ? Effect.die(e)
-          : Effect.flatMap(
-              repo.reminderStep(workspaceId, { documentId: p.record.id, ...reminder }),
-              (existing) =>
-                Option.isSome(existing) ? Effect.succeed(existing.value) : Effect.die(e),
-            ),
-      ),
-    );
-    if (taken !== null) return taken;
-    const inserted = row;
-    yield* appendAudit({
-      workspaceId,
-      subject: { entity: "Document", id: p.record.id },
-      action: "document.send",
-      revision: p.record.revision,
-      changes: [
-        { path: "delivery", before: null, after: inserted.id },
-        { path: "purpose", before: null, after: p.purpose },
-        { path: "to", before: null, after: p.to.join(", ") },
-        ...extraChanges,
-        ...(reminder === null
-          ? []
-          : [
-              { path: "reminder", before: null, after: `${reminder.dueOn}+${reminder.offsetDays}` },
-            ]),
-      ],
-    });
-    const jobs = yield* DeliveryJobs;
-    yield* (yield* CoreStore).afterCommit(jobs.start(workspaceId, inserted.id));
-    return inserted;
+) {
+  const { at } = yield* now;
+  const id = yield* newId(DeliveryIdSchema.make);
+  const row: DeliveryRecord = {
+    id,
+    workspaceId,
+    revision: 1,
+    documentId: p.record.id,
+    // Per-document order, assigned under the document row lock the caller holds.
+    sequence: (yield* (yield* DeliveriesRepo).byDocument(workspaceId, p.record.id)).length + 1,
+    documentRevision: p.record.revision,
+    contactId: p.record.contactId,
+    arms,
+    dueOn: p.record.dueOn,
+    purpose: p.purpose,
+    status: "queued",
+    to: p.to,
+    replyTo: p.replyTo,
+    language: p.language,
+    subject: p.subject,
+    // The view in the delivery's language (statutory notes, labels), as the PDF prints it.
+    view: yield* viewOf(p.record, { language: p.language }),
+    attachment: p.attachment,
+    reminder,
+    attempts: 0,
+    lastOutcome: null,
+    failure: null,
+    provider: null,
+    providerMessageId: null,
+    createdAt: at,
+    updatedAt: at,
+  };
+  const repo = yield* DeliveriesRepo;
+  const store = yield* CoreStore;
+  // The insert runs as a savepoint, so a reminder step queued concurrently (unique
+  // `deliveries_reminder_step`) returns that delivery without aborting the caller's
+  // transaction or auditing twice. Other ids are fresh.
+  const taken = yield* store.transaction(repo.insert(row)).pipe(
+    Effect.as(null),
+    Effect.catchTag("UniqueViolation", (e) =>
+      reminder === null || e.constraint !== REMINDER_STEP
+        ? Effect.die(e)
+        : Effect.flatMap(
+            repo.reminderStep(workspaceId, { documentId: p.record.id, ...reminder }),
+            (existing) =>
+              Option.isSome(existing) ? Effect.succeed(existing.value) : Effect.die(e),
+          ),
+    ),
+  );
+  if (taken !== null) return taken;
+  yield* appendAudit({
+    workspaceId,
+    subject: { entity: "Document", id: p.record.id },
+    action: "document.send",
+    revision: p.record.revision,
+    changes: [
+      { path: "delivery", before: null, after: row.id },
+      { path: "purpose", before: null, after: p.purpose },
+      { path: "to", before: null, after: EffectArray.join(p.to, ", ") },
+      ...extraChanges,
+      ...(reminder === null
+        ? []
+        : [{ path: "reminder", before: null, after: `${reminder.dueOn}+${reminder.offsetDays}` }]),
+    ],
   });
+  const jobs = yield* DeliveryJobs;
+  yield* (yield* CoreStore).afterCommit(jobs.start(workspaceId, row.id));
+  return row;
+});
 
 const SendPayload = Schema.Struct({
   id: DocumentIdSchema,
   input: Schema.optional(
     Schema.Struct({
-      to: Schema.optional(Schema.Array(Schema.String)),
+      to: Schema.String.pipe(Schema.Array, Schema.optional),
       language: Schema.optional(LocaleSchema),
       reminders: Schema.optional(Schema.Boolean),
       purpose: Schema.optional(DeliveryPurposeSchema),
@@ -258,18 +281,15 @@ const SendPayload = Schema.Struct({
 export const SendResultCodec = Schema.Struct({
   deliveryId: DeliveryIdSchema,
   status: Schema.Literal("queued"),
-}) as unknown as Schema.Codec<
-  { readonly deliveryId: DeliveryId; readonly status: "queued" },
-  unknown
->;
+});
 
 /**
  * Queue email delivery (never fails on provider outage: dispatch is the job's). Runs nested
  * in a caller's transaction as a savepoint (issue with send, recurring issuance as System,
  * board #399); a `requestKey` makes it replay-safe (C3) when it is the outermost call.
  */
-export const send = (id: DocumentId, input?: SendOptions, opts?: RequestOptions) =>
-  Effect.gen(function* () {
+export const send = Effect.fn("send")(
+  function* (id: DocumentId, input?: SendOptions, opts?: RequestOptions) {
     const { workspaceId } = yield* authorizeInWorkspace("document.send");
     return yield* withIdempotency(
       {
@@ -277,7 +297,7 @@ export const send = (id: DocumentId, input?: SendOptions, opts?: RequestOptions)
         key: opts?.requestKey,
         method: "Documents.send",
         payload: {
-          schema: SendPayload as unknown as Schema.Codec<typeof SendPayload.Type, unknown>,
+          schema: SendPayload,
           value: input === undefined ? { id } : { id, input },
         },
         result: SendResultCodec,
@@ -308,25 +328,29 @@ export const send = (id: DocumentId, input?: SendOptions, opts?: RequestOptions)
               .pipe(Effect.catchTag(["Conflict", "UniqueViolation"], (e) => Effect.die(e)));
           }
         }
-        const delivery = yield* queueDelivery(
-          workspaceId,
-          { ...p, record },
-          null,
-          changes,
-          // A new arm (D16): reminders were effectively off (stored flag and due-date re-arm,
-          // eligibility.ts) and this send turns them on; a re-send keeps the current arm.
-          p.armsReminders &&
-            !isArmed(locked, yield* (yield* DeliveriesRepo).byDocument(workspaceId, locked.id)),
-        );
+        // A new arm (D16) starts only when reminders were effectively off.
+        let newArm = false;
+        if (p.armsReminders) {
+          const deliveryRepo = yield* DeliveriesRepo;
+          const previous = yield* deliveryRepo.byDocument(workspaceId, locked.id);
+          newArm = !isArmed(locked, previous);
+        }
+        const delivery = yield* queueDelivery(workspaceId, { ...p, record }, null, changes, newArm);
         return { deliveryId: delivery.id, status: "queued" as const };
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /** Dry run of `send` (D15): same policy check and plan, nothing stored. */
-export const previewSend = (id: DocumentId, input?: SendOptions) =>
-  Effect.gen(function* () {
+export const previewSend = Effect.fn("previewSend")(
+  function* (id: DocumentId, input?: SendOptions) {
     const { workspaceId } = yield* authorizeInWorkspace("document.send");
     const record = yield* (yield* DocumentsRepo).get(workspaceId, id);
-    return previewOf(yield* plan(workspaceId, record, input));
-  }).pipe(fxDryRun, orUnavailable);
+    const value_1 = yield* plan(workspaceId, record, input);
+    return previewOf(value_1);
+  },
+  (_) => fxDryRun(_),
+  (_) => orUnavailable(_),
+);

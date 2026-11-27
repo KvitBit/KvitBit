@@ -1,11 +1,15 @@
+import type { DocumentId, PageRequest, ShareViewEvent } from "@kvitbit/domain/contract";
+import { Conflict, Invalid } from "@kvitbit/domain/contract";
 /**
  * Member side of Public Share Links (core-ports 4.6): `create`, `revoke`, `views`. Both writes
  * are idempotent by state (C6): they row-lock the document, so one active link per document
  * holds, and audit on the Document subject (D audit list: share create and revoke).
  */
-import type { DocumentId, PageRequest, ShareViewEvent } from "@kvitbit/domain/contract";
-import { Conflict, Invalid } from "@kvitbit/domain/contract";
-import { Clock, Effect, Option } from "effect";
+import * as EffectArray from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
@@ -14,27 +18,26 @@ import { newId } from "../../shared/ids";
 import { CoreStore } from "../../store/CoreStore";
 import { DocumentsRepo } from "../documents";
 import { ShareLinkKeys } from "./ports";
-import type { ShareLink, ShareLinkId } from "./record";
+import { type ShareLink, ShareLinkId } from "./record";
 import { ShareLinksRepo } from "./repo";
 import { deriveToken } from "./token";
 
-export const nowIso = Effect.map(Clock.currentTimeMillis, (ms) => new Date(ms).toISOString());
+export const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 /** The token and its stored hash for `linkId` under the current key. */
-export const currentToken = (linkId: string) =>
-  Effect.gen(function* () {
-    const keys = yield* ShareLinkKeys;
-    const token = yield* deriveToken(linkId, keys.version, keys.secret);
-    return { token, tokenHash: yield* sha256Hex(token), version: keys.version };
-  });
+const currentToken = Effect.fn("currentToken")(function* (linkId: string) {
+  const keys = yield* ShareLinkKeys;
+  const token = yield* deriveToken(linkId, keys.version, keys.secret);
+  return { token, tokenHash: yield* sha256Hex(token), version: keys.version };
+});
 
 /**
  * Idempotent: returns the active link's URL if one exists. Issued documents only. An active
  * link minted under a rotated-out key version is expired (core-ports section 1): it is revoked
  * and a new link (new id, new token) replaces it in the same transaction.
  */
-export const create = (id: DocumentId) =>
-  Effect.gen(function* () {
+export const create = Effect.fn("create")(
+  function* (id: DocumentId) {
     const { caller, workspaceId } = yield* authorizeInWorkspace("share.write");
     const store = yield* CoreStore;
     return yield* store.transaction(
@@ -43,7 +46,7 @@ export const create = (id: DocumentId) =>
         const document = yield* (yield* DocumentsRepo).lock(workspaceId, id);
         // Drafts (D13) and cancelled documents cannot be shared.
         if (document.status !== "issued") {
-          return yield* new Conflict({ reason: "illegal_transition" });
+          return yield* Conflict.make({ reason: "illegal_transition" });
         }
         const repo = yield* ShareLinksRepo;
         const keys = yield* ShareLinkKeys;
@@ -55,7 +58,7 @@ export const create = (id: DocumentId) =>
         const at = yield* nowIso;
         const expired = Option.getOrNull(active);
         if (expired !== null) yield* repo.revoke(workspaceId, expired.id, at);
-        const linkId = yield* newId<ShareLinkId>();
+        const linkId = yield* newId(ShareLinkId.make);
         const { token, tokenHash, version } = yield* currentToken(linkId);
         const link: ShareLink = {
           id: linkId,
@@ -79,11 +82,13 @@ export const create = (id: DocumentId) =>
         return { url: keys.pageUrl(token) };
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /** Idempotent: revokes the active link if there is one; its token then returns NotFound. */
-export const revoke = (id: DocumentId) =>
-  Effect.gen(function* () {
+export const revoke = Effect.fn("revoke")(
+  function* (id: DocumentId) {
     const { workspaceId } = yield* authorizeInWorkspace("share.write");
     const store = yield* CoreStore;
     return yield* store.transaction(
@@ -92,7 +97,8 @@ export const revoke = (id: DocumentId) =>
         const repo = yield* ShareLinksRepo;
         const active = yield* repo.activeFor(workspaceId, id);
         if (Option.isNone(active)) return;
-        yield* repo.revoke(workspaceId, active.value.id, yield* nowIso);
+        const nowIso_1 = yield* nowIso;
+        yield* repo.revoke(workspaceId, active.value.id, nowIso_1);
         yield* appendAudit({
           workspaceId,
           subject: { entity: "Document", id },
@@ -102,51 +108,56 @@ export const revoke = (id: DocumentId) =>
         });
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 const DEFAULT_LIMIT = 50;
 
 const pageIssue = (path: string, code: "request.malformed" | "page.cursor_mismatch") =>
-  new Invalid({ issues: [{ path: [path], code }] });
+  Invalid.make({ issues: [{ path: [path], code }] });
 
 /** Cursor = base64 of JSON [document id, at, event id]: bound to the document it came from. */
-const decodeCursor = (cursor: string, documentId: DocumentId) => {
-  try {
-    const parsed: unknown = JSON.parse(atob(cursor));
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === 3 &&
-      parsed.every((p) => typeof p === "string") &&
-      parsed[0] === documentId
-    ) {
-      return [parsed[1] as string, parsed[2] as string] as const;
-    }
-  } catch {
-    // fall through
-  }
-  return null;
-};
+const ViewCursor = Schema.StringFromBase64.pipe(
+  Schema.decodeTo(
+    Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String, Schema.String])),
+  ),
+);
+const decodeCursor = Schema.decodeUnknownOption(ViewCursor);
+const encodeCursor = Schema.encodeEffect(ViewCursor);
 
 /** View and download events of the document's links (all of them), newest first. */
-export const views = (id: DocumentId, page: PageRequest = {}) =>
-  Effect.gen(function* () {
+export const views = Effect.fn("views")(
+  function* (id: DocumentId, page: PageRequest = {}) {
     const { workspaceId } = yield* authorizeInWorkspace("share.read");
     const limit = page.limit ?? DEFAULT_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       return yield* pageIssue("limit", "request.malformed");
     }
-    const after = page.cursor === undefined ? undefined : decodeCursor(page.cursor, id);
-    if (after === null) return yield* pageIssue("cursor", "page.cursor_mismatch");
+    let after: readonly [string, string] | undefined;
+    if (page.cursor !== undefined) {
+      const cursor = decodeCursor(page.cursor);
+      if (Option.isNone(cursor) || cursor.value[0] !== id)
+        return yield* pageIssue("cursor", "page.cursor_mismatch");
+      after = [cursor.value[1], cursor.value[2]];
+    }
     yield* (yield* DocumentsRepo).get(workspaceId, id);
     const { rows, more } = yield* (yield* ShareLinksRepo).events(workspaceId, id, {
       after,
       limit,
     });
     const last = rows.at(-1);
+    const nextCursor =
+      more && last !== undefined
+        ? yield* encodeCursor([id, last.at, last.id]).pipe(Effect.orDie)
+        : null;
     return {
-      items: rows.map(
+      items: EffectArray.map(
+        rows,
         (e): ShareViewEvent => ({ id: e.id, kind: e.kind, at: e.at, device: e.device }),
       ),
-      nextCursor: more && last ? btoa(JSON.stringify([id, last.at, last.id])) : null,
+      nextCursor,
     };
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);

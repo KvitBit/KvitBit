@@ -3,6 +3,7 @@
  * src/store/tables.ts. Rows are returned raw, removed Expenses included; the service treats a
  * removed Expense as NotFound.
  */
+
 import type {
   AttachmentId,
   Conflict,
@@ -12,8 +13,11 @@ import type {
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { Option } from "effect";
-import { Context, Effect, Layer, type Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import type * as Option from "effect/Option";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 import { AttachmentRow, ExpenseRow } from "./model";
@@ -24,13 +28,13 @@ export const ATTACHMENT_SHA_UNIQUE = "attachments_expense_sha256_unique";
 export const ExpensesTable = defineCollection<ExpenseRow>({
   name: "expenses",
   entity: "Expense",
-  schema: ExpenseRow as unknown as Schema.Codec<ExpenseRow, unknown>,
+  schema: ExpenseRow,
 });
 
 export const AttachmentsTable = defineCollection<AttachmentRow>({
   name: "attachments",
   entity: "Attachment",
-  schema: AttachmentRow as unknown as Schema.Codec<AttachmentRow, unknown>,
+  schema: AttachmentRow,
   unique: [
     { name: ATTACHMENT_SHA_UNIQUE, scope: "workspace", key: (a) => [a.expenseId, a.sha256] },
   ],
@@ -38,9 +42,9 @@ export const AttachmentsTable = defineCollection<AttachmentRow>({
 
 export interface ExpensePageRequest {
   /** Only this status; absent: every status. */
-  readonly status?: ExpenseStatus;
+  readonly status?: ExpenseStatus | undefined;
   /** Keyset: ids strictly below this one (newest first). */
-  readonly beforeId?: ExpenseId;
+  readonly beforeId?: ExpenseId | undefined;
   readonly limit: number;
 }
 
@@ -117,7 +121,7 @@ export class ExpensesRepo extends Context.Service<
       expenseIds: ReadonlyArray<ExpenseId>,
     ) => Effect.Effect<ReadonlyArray<AttachmentRow>, StoreUnavailable>;
   }
->()("kvitbit/core/ExpensesRepo") {}
+>()("@kvitbit/core/modules/expenses/repo/ExpensesRepo") {}
 
 /** In-memory `ExpensesRepo` on `MemoryTables` (tests). */
 export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> = Layer.effect(
@@ -125,7 +129,8 @@ export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> 
   Effect.map(MemoryTables, (tables) => {
     const expenses = tables.collection(ExpensesTable);
     const attachments = tables.collection(AttachmentsTable);
-    const live = (rows: ReadonlyArray<ExpenseRow>) => rows.filter((r) => r.removedAt === null);
+    const live = (rows: ReadonlyArray<ExpenseRow>) =>
+      EffectArray.filter(rows, (r) => r.removedAt === null);
     const attachmentsOf = (ws: WorkspaceId, expenseIds: ReadonlyArray<ExpenseId>) =>
       expenseIds.length === 0
         ? Effect.succeed<ReadonlyArray<AttachmentRow>>([])
@@ -135,42 +140,52 @@ export const ExpensesRepoMemory: Layer.Layer<ExpensesRepo, never, MemoryTables> 
       lock: (ws, id) => expenses.lock(ws, id),
       insert: expenses.insert,
       update: expenses.update,
-      page: (ws, request) =>
-        expenses
-          .list(ws, {
-            where: {
-              removedAt: null,
-              ...(request.status === undefined ? {} : { status: request.status }),
-            },
-            ...(request.beforeId === undefined ? {} : { range: { id: { lt: request.beforeId } } }),
-            orderBy: ["id"],
-            direction: "desc",
-            limit: request.limit,
-          })
+      page: Effect.fn("ExpensesRepo.page")((ws, request) => {
+        const where =
+          request.status === undefined
+            ? { removedAt: null }
+            : { removedAt: null, status: request.status };
+        const query = {
+          where,
+          orderBy: ["id"],
+          direction: "desc",
+          limit: request.limit,
+        } as const;
+        return expenses
+          .list(
+            ws,
+            request.beforeId === undefined
+              ? query
+              : { ...query, range: { id: { lt: request.beforeId } } },
+          )
           .pipe(
             Effect.map(live),
             Effect.flatMap((rows) =>
               Effect.map(
                 attachmentsOf(
                   ws,
-                  rows.map((r) => r.id),
+                  EffectArray.map(rows, (r) => r.id),
                 ),
                 (atts) => {
                   const counts = new Map<string, number>();
                   for (const a of atts) counts.set(a.expenseId, (counts.get(a.expenseId) ?? 0) + 1);
-                  return rows.map((row) => ({ row, attachments: counts.get(row.id) ?? 0 }));
+                  return EffectArray.map(rows, (row) => ({
+                    row,
+                    attachments: counts.get(row.id) ?? 0,
+                  }));
                 },
               ),
             ),
-          ),
+          );
+      }),
       detail: (ws, id) =>
         Effect.flatMap(expenses.get(ws, id), (row) =>
-          Effect.map(attachmentsOf(ws, [row.id]), (attachments) => ({ row, attachments })),
+          Effect.map(attachmentsOf(ws, [row.id]), (details) => ({ row, attachments: details })),
         ),
       completeIn: (ws, range) =>
         expenses.list(ws, { where: { status: "complete", removedAt: null } }).pipe(
           Effect.map((rows) =>
-            rows.filter((r) => {
+            EffectArray.filter(rows, (r) => {
               const date = range.field === "issuedOn" ? r.issuedOn : (r.figures?.taxPoint ?? null);
               return date !== null && date >= range.from && date <= range.to;
             }),

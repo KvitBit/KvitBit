@@ -1,8 +1,12 @@
 /** BankAccountReferencesLive over the real documents layers and the memory repos. */
+
 import { describe, expect, test } from "bun:test";
-import type { BankAccountId, DocumentId, TemplateId } from "@kvitbit/domain/contract";
-import { Documents } from "@kvitbit/domain/contract";
-import { Effect, Exit, Layer } from "effect";
+import type { DocumentId } from "@kvitbit/domain/contract";
+import { BankAccountId, CurrencyCode, Documents, TemplateId } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import { BankAccountReferencesLive } from "../../src/compose/bankAccounts";
 import { DocumentsRepo } from "../../src/modules/documents";
 import { NumberingSeries } from "../../src/modules/numbering";
@@ -28,7 +32,7 @@ import {
 } from "../modules/documents/fixtures";
 import { templateInput } from "../modules/recurring/fixtures";
 
-const NEW_ACCOUNT = "01900000-0000-7000-8000-0000ba000009" as BankAccountId;
+const NEW_ACCOUNT = BankAccountId.make("01900000-0000-7000-8000-0000ba000009");
 const AT = "2026-11-23T09:00:00.000Z";
 /** Default series per kind; an EUR fixing for the EUR draft. */
 const OPTIONS = { billingA: { seriesByKind: {} }, fixings: [fixing("2026-11-23", "25.320")] };
@@ -43,7 +47,7 @@ const template = (
 ): TemplateRow => {
   const { bankAccount, ...rest } = overrides;
   return {
-    id: `01900000-0000-7000-8000-0000ee00000${id}` as TemplateId,
+    id: TemplateId.make(`01900000-0000-7000-8000-0000ee00000${id}`),
     workspaceId: WORKSPACE_A,
     revision: 1,
     name: `T${id}`,
@@ -70,7 +74,7 @@ const fixture = Effect.gen(function* () {
   const docs = yield* Documents;
   const chosen = yield* docs.createDraft(invoiceInput({ bankAccount: CZK_ACCOUNT }));
   const defaulted = yield* docs.createDraft(invoiceInput());
-  const eur = yield* docs.createDraft(invoiceInput({ currency: "EUR" as never }));
+  const eur = yield* docs.createDraft(invoiceInput({ currency: CurrencyCode.make("EUR") }));
   const issued = yield* docs.issue({ input: invoiceInput() });
   const otherDraft = yield* as(
     member("owner", { workspaceId: WORKSPACE_B }),
@@ -109,7 +113,8 @@ const fixture = Effect.gen(function* () {
 });
 
 const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
-  if (Exit.isFailure(exit)) throw new Error(`expected success, got ${JSON.stringify(exit.cause)}`);
+  if (Exit.isFailure(exit))
+    throw new Error("Expected bank account fixture to succeed", { cause: exit.cause });
   return exit.value;
 };
 
@@ -318,7 +323,7 @@ describe("BankAccountReferencesLive", () => {
             ).pipe(Effect.provide(stale)),
           );
           return {
-            staleIds: staleDrafts.map((d) => d.id),
+            staleIds: EffectArray.map(staleDrafts, (d) => d.id),
             discarded: yield* Effect.exit(record(f.chosen.id)),
             defaultedBefore: defaulted,
             defaulted: yield* record(f.defaulted.id),

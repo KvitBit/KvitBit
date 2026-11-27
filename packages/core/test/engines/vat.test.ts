@@ -1,15 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, IsoDate, VatTreatment } from "@kvitbit/domain/contract";
-import { BigDecimal } from "effect";
+import type { VatTreatment } from "@kvitbit/domain/contract";
+import { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
 import type { VatBreakdown, VatInput, VatInputLine } from "../../src/engines";
 import { TREATMENTS, VatMath } from "../../src/engines";
 import { rng, SEEDS } from "./random";
 
 const d = BigDecimal.fromStringUnsafe;
 const s = (v: BigDecimal.BigDecimal | null) => (v === null ? null : BigDecimal.format(v));
-const CZK = "CZK" as CurrencyCode;
-const EUR = "EUR" as CurrencyCode;
-const TAX_POINT = "2026-11-23" as IsoDate;
+const CZK = CurrencyCode.make("CZK");
+const EUR = CurrencyCode.make("EUR");
+const TAX_POINT = IsoDate.make("2026-11-23");
 
 const line = (quantity: string, unitPrice: string, treatment: VatTreatment = "standard") => ({
   quantity: d(quantity),
@@ -30,7 +32,7 @@ const calc = (lines: ReadonlyArray<VatInputLine>, over: Partial<VatInput> = {}) 
 
 /** A breakdown as plain strings, for readable equality. */
 const view = (b: VatBreakdown) => ({
-  buckets: b.buckets.map((k) => ({
+  buckets: EffectArray.map(b.buckets, (k) => ({
     treatment: k.treatment,
     rate: s(k.ratePercent),
     base: s(k.base),
@@ -47,14 +49,16 @@ const view = (b: VatBreakdown) => ({
 
 describe("VatMath.rateFor", () => {
   test("21 and 12 from 2024-01-01; non-rated treatments are 0", () => {
-    expect(s(VatMath.rateFor("standard", "2024-01-01" as IsoDate))).toBe("21");
-    expect(s(VatMath.rateFor("reduced", TAX_POINT))).toBe("12");
+    const standard = VatMath.rateFor("standard", IsoDate.make("2024-01-01")).pipe(s);
+    const reduced = VatMath.rateFor("reduced", TAX_POINT).pipe(s);
+    expect(standard).toBe("21");
+    expect(reduced).toBe("12");
     for (const t of ["exempt_intra_eu_goods", "reverse_charge", "outside_scope"] as const) {
-      expect(s(VatMath.rateFor(t, TAX_POINT))).toBe("0");
+      VatMath.rateFor(t, TAX_POINT).pipe(s, expect).toBe("0");
     }
   });
   test("a tax point before the rate table is a defect", () => {
-    expect(() => VatMath.rateFor("standard", "2023-12-31" as IsoDate)).toThrow();
+    expect(() => VatMath.rateFor("standard", IsoDate.make("2023-12-31"))).toThrow();
   });
 });
 
@@ -84,13 +88,17 @@ describe("VatMath.calculate", () => {
   test("VAT is rounded per rate bucket, not per line", () => {
     // Per line: 7 x round(0.0147) = 0.07. Per bucket: round(0.49 x 0.21) = 0.10.
     const b = calc(Array.from({ length: 7 }, () => line("1", "0.07")));
-    expect(s(b.vat.amount)).toBe("0.1");
+    const vat = b.vat.amount.pipe(s);
+    expect(vat).toBe("0.1");
   });
 
   test("rounding is half away from zero, not half-even", () => {
-    expect(s(calc([line("1", "0.5")]).vat.amount)).toBe("0.11"); // 0.105
-    expect(s(calc([line("-1", "0.5")]).vat.amount)).toBe("-0.11");
-    expect(s(calc([line("1", "0.125", "outside_scope")]).net.amount)).toBe("0.13");
+    const positive = calc([line("1", "0.5")]).vat.amount.pipe(s);
+    const negative = calc([line("-1", "0.5")]).vat.amount.pipe(s);
+    const outsideScope = calc([line("1", "0.125", "outside_scope")]).net.amount.pipe(s);
+    expect(positive).toBe("0.11"); // 0.105
+    expect(negative).toBe("-0.11");
+    expect(outsideScope).toBe("0.13");
   });
 
   test("top-down (prices include VAT): VAT = gross x rate / (100 + rate)", () => {
@@ -110,7 +118,7 @@ describe("VatMath.calculate", () => {
       // 100 x 12 / 112 = 10.714
       { treatment: "reduced", rate: "12", base: "89.29", vat: "10.71", gross: "100", vatCzk: null },
     ]);
-    expect(s(b.gross.amount)).toBe("321");
+    b.gross.amount.pipe(s, expect).toBe("321");
   });
 
   test("non-rated treatments get their own zero-VAT buckets in treatment order", () => {
@@ -119,12 +127,12 @@ describe("VatMath.calculate", () => {
       line("2", "100", "reverse_charge"),
       line("1", "10", "exempt_intra_eu_goods"),
     ]);
-    expect(b.buckets.map((k) => [k.treatment, s(k.ratePercent), s(k.vat)])).toEqual([
+    expect(EffectArray.map(b.buckets, (k) => [k.treatment, s(k.ratePercent), s(k.vat)])).toEqual([
       ["exempt_intra_eu_goods", "0", "0"],
       ["reverse_charge", "0", "0"],
       ["outside_scope", "0", "0"],
     ]);
-    expect(s(b.gross.amount)).toBe("260");
+    b.gross.amount.pipe(s, expect).toBe("260");
   });
 
   test("whole-unit payment rounding is reported outside the tax base", () => {
@@ -138,11 +146,9 @@ describe("VatMath.calculate", () => {
     const down = calc([line("1", "10.30")], { paymentRounding: "whole_unit" }); // 12.46 -> 12
     expect(view(down)).toMatchObject({ roundingAdjustment: "-0.46", gross: "12 CZK" });
     expect(s(b.buckets[0]?.base ?? null)).toBe("10.4");
-    expect(
-      s(
-        calc([line("1", "10.50", "outside_scope")], { paymentRounding: "whole_unit" }).gross.amount,
-      ),
-    ).toBe("11");
+    calc([line("1", "10.50", "outside_scope")], { paymentRounding: "whole_unit" })
+      .gross.amount.pipe(s, expect)
+      .toBe("11");
   });
 
   test("foreign currency: CZK VAT per bucket = round2(VAT x rate / quantity), summed", () => {
@@ -150,10 +156,10 @@ describe("VatMath.calculate", () => {
       currency: EUR,
       fx: { rate: d("25.125"), quantity: 1 },
     });
-    expect(b.buckets.map((k) => s(k.vatCzk))).toEqual(["5276.25", "301.5"]);
+    expect(EffectArray.map(b.buckets, (k) => s(k.vatCzk))).toEqual(["5276.25", "301.5"]);
     expect(view(b).vatCzk).toBe("5577.75 CZK");
     const huf = calc([line("1", "10000")], {
-      currency: "HUF" as CurrencyCode,
+      currency: CurrencyCode.make("HUF"),
       fx: { rate: d("6.512"), quantity: 100 },
     });
     expect(s(huf.buckets[0]?.vatCzk ?? null)).toBe("136.75"); // 2100 x 6.512 / 100 = 136.752
@@ -161,7 +167,7 @@ describe("VatMath.calculate", () => {
 
   test("a foreign document without a rate yet (live preview) has unknown CZK VAT", () => {
     const b = calc([line("1", "1000")], { currency: EUR, fx: null });
-    expect(b.buckets.map((k) => k.vatCzk)).toEqual([null]);
+    expect(EffectArray.map(b.buckets, (k) => k.vatCzk)).toEqual([null]);
     expect(b.vatCzk).toBeNull();
   });
 
@@ -170,11 +176,13 @@ describe("VatMath.calculate", () => {
   });
 
   test("rounds to 2 decimals whatever the currency (JPY too, rule 3)", () => {
-    const b = calc([line("1", "1001")], { currency: "JPY" as CurrencyCode });
-    expect(s(b.vat.amount)).toBe("210.21");
-    expect(s(calc([line("1", "0.125")], { currency: "BHD" as CurrencyCode }).net.amount)).toBe(
-      "0.13",
-    );
+    const b = calc([line("1", "1001")], { currency: CurrencyCode.make("JPY") });
+    const jpyVat = b.vat.amount.pipe(s);
+    const bhdNet = calc([line("1", "0.125")], {
+      currency: CurrencyCode.make("BHD"),
+    }).net.amount.pipe(s);
+    expect(jpyVat).toBe("210.21");
+    expect(bhdNet).toBe("0.13");
   });
 
   test("no lines: empty buckets and zero totals", () => {
@@ -196,12 +204,12 @@ describe("VatMath.negate", () => {
       paymentRounding: "whole_unit",
     });
     const n = VatMath.negate(b);
-    expect(s(n.gross.amount)).toBe(`-${s(b.gross.amount)}`);
-    expect(s(n.roundingAdjustment.amount)).toBe(
-      `${s(BigDecimal.negate(b.roundingAdjustment.amount))}`,
-    );
-    expect(n.buckets.map((k) => s(k.vatCzk))).toEqual(
-      b.buckets.map((k) => s(BigDecimal.negate(k.vatCzk ?? d("0")))),
+    n.gross.amount.pipe(s, expect).toBe(`-${s(b.gross.amount)}`);
+    n.roundingAdjustment.amount
+      .pipe(s, expect)
+      .toBe(`${b.roundingAdjustment.amount.pipe(BigDecimal.negate, s)}`);
+    expect(EffectArray.map(n.buckets, (k) => s(k.vatCzk))).toEqual(
+      EffectArray.map(b.buckets, (k) => (k.vatCzk ?? d("0")).pipe(BigDecimal.negate, s)),
     );
     expect(view(VatMath.negate(n))).toEqual(view(b));
   });
@@ -212,7 +220,7 @@ describe("VatMath.splitAdvance", () => {
 
   test("splits by gross share and recomputes VAT top-down", () => {
     const split = VatMath.splitAdvance(proforma, d("661"));
-    expect(split.map((k) => [k.treatment, s(k.gross), s(k.vat), s(k.base)])).toEqual([
+    expect(EffectArray.map(split, (k) => [k.treatment, s(k.gross), s(k.vat), s(k.base)])).toEqual([
       ["standard", "605", "105", "500"],
       ["reduced", "56", "6", "50"],
     ]);
@@ -220,7 +228,7 @@ describe("VatMath.splitAdvance", () => {
 
   test("the largest bucket absorbs the rounding remainder", () => {
     const split = VatMath.splitAdvance(proforma, d("100"));
-    expect(split.map((k) => s(k.gross))).toEqual(["91.53", "8.47"]);
+    expect(EffectArray.map(split, (k) => s(k.gross))).toEqual(["91.53", "8.47"]);
   });
 
   test("fromBuckets sums a split back into a breakdown with CZK VAT", () => {
@@ -238,7 +246,7 @@ describe("VatMath.splitAdvance", () => {
   test("largest remainder: no share flips sign (4 equal buckets, 0.02 paid)", () => {
     const four = {
       ...proforma,
-      buckets: TREATMENTS.slice(0, 4).map((treatment) => ({
+      buckets: EffectArray.map(TREATMENTS.slice(0, 4), (treatment) => ({
         treatment,
         ratePercent: d("0"),
         base: d("25"),
@@ -247,7 +255,7 @@ describe("VatMath.splitAdvance", () => {
         vatCzk: null,
       })),
     };
-    expect(VatMath.splitAdvance(four, d("0.02")).map((k) => s(k.gross))).toEqual([
+    expect(EffectArray.map(VatMath.splitAdvance(four, d("0.02")), (k) => s(k.gross))).toEqual([
       "0.01",
       "0.01",
       "0",
@@ -256,37 +264,51 @@ describe("VatMath.splitAdvance", () => {
   });
 
   test("taxPoint re-reads the rate in force on the receipt date", () => {
-    const split = VatMath.splitAdvance(proforma, d("121"), { taxPoint: "2026-12-01" as IsoDate });
-    expect(split.map((k) => s(k.ratePercent))).toEqual(["21", "12"]);
+    const split = VatMath.splitAdvance(proforma, d("121"), {
+      taxPoint: IsoDate.make("2026-12-01"),
+    });
+    expect(EffectArray.map(split, (k) => s(k.ratePercent))).toEqual(["21", "12"]);
     expect(() =>
-      VatMath.splitAdvance(proforma, d("1"), { taxPoint: "2023-01-01" as IsoDate }),
+      VatMath.splitAdvance(proforma, d("1"), { taxPoint: IsoDate.make("2023-01-01") }),
     ).toThrow();
   });
 
   test("shares keep the payment's minor units (BHD: 3 decimals); VAT stays round2", () => {
-    const bhd = calc([line("1", "100", "outside_scope")], { currency: "BHD" as CurrencyCode });
-    expect(VatMath.splitAdvance(bhd, d("1.234")).map((k) => s(k.gross))).toEqual(["1.234"]);
-    expect(VatMath.splitAdvance(bhd, d("0.001")).map((k) => s(k.gross))).toEqual(["0.001"]);
-    const std = calc([line("1", "100")], { currency: "BHD" as CurrencyCode });
+    const bhd = calc([line("1", "100", "outside_scope")], { currency: CurrencyCode.make("BHD") });
+    expect(EffectArray.map(VatMath.splitAdvance(bhd, d("1.234")), (k) => s(k.gross))).toEqual([
+      "1.234",
+    ]);
+    expect(EffectArray.map(VatMath.splitAdvance(bhd, d("0.001")), (k) => s(k.gross))).toEqual([
+      "0.001",
+    ]);
+    const std = calc([line("1", "100")], { currency: CurrencyCode.make("BHD") });
     // 1.234 x 21 / 121 = 0.21416... -> 0.21
     expect(
-      VatMath.splitAdvance(std, d("1.234")).map((k) => [s(k.gross), s(k.vat), s(k.base)]),
+      EffectArray.map(VatMath.splitAdvance(std, d("1.234")), (k) => [
+        s(k.gross),
+        s(k.vat),
+        s(k.base),
+      ]),
     ).toEqual([["1.234", "0.21", "1.024"]]);
   });
 
   test("a payment more precise than the minor unit is kept whole (JPY gross 1.21)", () => {
-    const jpy = calc([line("1", "1")], { currency: "JPY" as CurrencyCode });
-    expect(s(jpy.gross.amount)).toBe("1.21");
+    const jpy = calc([line("1", "1")], { currency: CurrencyCode.make("JPY") });
+    jpy.gross.amount.pipe(s, expect).toBe("1.21");
     expect(
-      VatMath.splitAdvance(jpy, jpy.gross.amount).map((k) => [s(k.gross), s(k.vat), s(k.base)]),
+      EffectArray.map(VatMath.splitAdvance(jpy, jpy.gross.amount), (k) => [
+        s(k.gross),
+        s(k.vat),
+        s(k.base),
+      ]),
     ).toEqual([["1.21", "0.21", "1"]]);
   });
 
   test("shares carry the payment's own precision (1.005 JPY over two equal buckets)", () => {
     const two = calc([line("1", "100", "reverse_charge"), line("1", "100", "outside_scope")], {
-      currency: "JPY" as CurrencyCode,
+      currency: CurrencyCode.make("JPY"),
     });
-    expect(VatMath.splitAdvance(two, d("1.005")).map((k) => s(k.gross))).toEqual([
+    expect(EffectArray.map(VatMath.splitAdvance(two, d("1.005")), (k) => s(k.gross))).toEqual([
       "0.503",
       "0.502",
     ]);
@@ -300,9 +322,11 @@ describe("VatMath.splitAdvance", () => {
 // Property tests -----------------------------------------------------------------------------
 
 const exact = (lines: ReadonlyArray<VatInputLine>, t: VatTreatment) =>
-  lines
-    .filter((l) => l.treatment === t)
-    .reduce((acc, l) => BigDecimal.sum(acc, BigDecimal.multiply(l.quantity, l.unitPrice)), d("0"));
+  EffectArray.reduce(
+    EffectArray.filter(lines, (l) => l.treatment === t),
+    d("0"),
+    (acc, l) => BigDecimal.sum(acc, BigDecimal.multiply(l.quantity, l.unitPrice)),
+  );
 
 const within = (a: BigDecimal.BigDecimal, b: BigDecimal.BigDecimal, bound: string) =>
   BigDecimal.isLessThanOrEqualTo(BigDecimal.abs(BigDecimal.subtract(a, b)), d(bound));
@@ -330,7 +354,7 @@ describe("VatMath properties (seeded)", () => {
     for (const seed of SEEDS) {
       const b = VatMath.calculate(randomInput(seed));
       const sum = (f: (k: (typeof b.buckets)[number]) => BigDecimal.BigDecimal) =>
-        b.buckets.reduce((acc, k) => BigDecimal.sum(acc, f(k)), d("0"));
+        EffectArray.reduce(b.buckets, d("0"), (acc, k) => BigDecimal.sum(acc, f(k)));
       expect([
         seed,
         BigDecimal.equals(
@@ -356,15 +380,13 @@ describe("VatMath properties (seeded)", () => {
         seed,
         BigDecimal.equals(BigDecimal.sum(total, b.roundingAdjustment.amount), b.gross.amount),
       ]).toEqual([seed, true]);
-      if (b.vatCzk) {
-        expect([
-          seed,
-          BigDecimal.equals(
-            sum((k) => k.vatCzk ?? d("0")),
-            b.vatCzk.amount,
-          ),
-        ]).toEqual([seed, true]);
-      }
+      const czkVatMatches =
+        b.vatCzk === null ||
+        BigDecimal.equals(
+          sum((k) => k.vatCzk ?? d("0")),
+          b.vatCzk.amount,
+        );
+      expect([seed, czkVatMatches]).toEqual([seed, true]);
     }
   });
 
@@ -373,7 +395,10 @@ describe("VatMath properties (seeded)", () => {
       const input = randomInput(seed);
       const negated = VatMath.calculate({
         ...input,
-        lines: input.lines.map((l) => ({ ...l, quantity: BigDecimal.negate(l.quantity) })),
+        lines: EffectArray.map(input.lines, (l) => ({
+          ...l,
+          quantity: BigDecimal.negate(l.quantity),
+        })),
       });
       expect([seed, view(negated)]).toEqual([seed, view(VatMath.negate(VatMath.calculate(input)))]);
     }
@@ -386,25 +411,23 @@ describe("VatMath properties (seeded)", () => {
       for (const k of b.buckets) {
         const sum = exact(input.lines, k.treatment);
         const rate = k.ratePercent;
-        if (input.pricesIncludeVat) {
-          expect([seed, within(k.gross, sum, "0.005")]).toEqual([seed, true]);
-          const vat = BigDecimal.divideUnsafe(
-            BigDecimal.multiply(k.gross, rate),
-            BigDecimal.sum(d("100"), rate),
+        const basis = input.pricesIncludeVat ? k.gross : k.base;
+        const divisor = input.pricesIncludeVat ? BigDecimal.sum(d("100"), rate) : d("100");
+        const vat = BigDecimal.divideUnsafe(BigDecimal.multiply(basis, rate), divisor);
+        expect([seed, within(basis, sum, "0.005")]).toEqual([seed, true]);
+        expect([seed, within(k.vat, vat, "0.005")]).toEqual([seed, true]);
+        const czkVatWithinBounds =
+          input.fx === null ||
+          k.vatCzk === null ||
+          within(
+            k.vatCzk,
+            BigDecimal.divideUnsafe(
+              BigDecimal.multiply(k.vat, input.fx.rate),
+              BigDecimal.fromBigInt(BigInt(input.fx.quantity)),
+            ),
+            "0.005",
           );
-          expect([seed, within(k.vat, vat, "0.005")]).toEqual([seed, true]);
-        } else {
-          expect([seed, within(k.base, sum, "0.005")]).toEqual([seed, true]);
-          const vat = BigDecimal.divideUnsafe(BigDecimal.multiply(k.base, rate), d("100"));
-          expect([seed, within(k.vat, vat, "0.005")]).toEqual([seed, true]);
-        }
-        if (input.fx && k.vatCzk) {
-          const czk = BigDecimal.divideUnsafe(
-            BigDecimal.multiply(k.vat, input.fx.rate),
-            BigDecimal.fromBigInt(BigInt(input.fx.quantity)),
-          );
-          expect([seed, within(k.vatCzk, czk, "0.005")]).toEqual([seed, true]);
-        }
+        expect([seed, czkVatWithinBounds]).toEqual([seed, true]);
       }
       expect([seed, within(b.roundingAdjustment.amount, d("0"), "0.5")]).toEqual([seed, true]);
     }
@@ -414,11 +437,11 @@ describe("VatMath properties (seeded)", () => {
     for (const seed of SEEDS) {
       const r = rng(seed);
       const b = VatMath.calculate(randomInput(seed));
-      const total = b.buckets.reduce((acc, k) => BigDecimal.sum(acc, k.gross), d("0"));
+      const total = EffectArray.reduce(b.buckets, d("0"), (acc, k) => BigDecimal.sum(acc, k.gross));
       if (BigDecimal.isZero(total)) continue;
       const paid = d(r.decimal(5000, 2, false));
       const split = VatMath.splitAdvance(b, paid);
-      const sum = split.reduce((acc, k) => BigDecimal.sum(acc, k.gross), d("0"));
+      const sum = EffectArray.reduce(split, d("0"), (acc, k) => BigDecimal.sum(acc, k.gross));
       expect([seed, BigDecimal.equals(sum, paid)]).toEqual([seed, true]);
     }
   });

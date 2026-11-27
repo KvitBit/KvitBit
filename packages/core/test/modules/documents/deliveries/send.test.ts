@@ -1,9 +1,27 @@
 /** Documents.send / previewSend and the DocumentDelivery job steps on real layers. */
+
 import { describe, expect, test } from "bun:test";
-import type { DeliveryId, DocumentId, RequestKey } from "@kvitbit/domain/contract";
-import { Conflict, Documents, Forbidden, Invalid, NotFound } from "@kvitbit/domain/contract";
+import type { DeliveryId } from "@kvitbit/domain/contract";
+import {
+  Conflict,
+  DocumentId,
+  Documents,
+  Forbidden,
+  Invalid,
+  IsoDate,
+  NotFound,
+  RequestKey,
+  ScheduleId,
+} from "@kvitbit/domain/contract";
 import { EmailNotAccepted, EmailSender } from "@kvitbit/domain/ports";
-import { Deferred, Effect, Exit, Fiber, Ref } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { systemCaller } from "../../../../src/internal/system";
 import {
   claim,
@@ -19,9 +37,7 @@ import { CoreStore } from "../../../../src/store/CoreStore";
 import { CaptureEmailSender } from "../../../../src/testing";
 import { member, system, WORKSPACE_A, WORKSPACE_B } from "../../../helpers";
 import { as, B_BUYER, DE_BUYER, dec, invoiceInput } from "../fixtures";
-import { deliveryScenario, issueInvoice, patchDocument } from "./helpers";
-
-const run = deliveryScenario;
+import { issueInvoice, patchDocument, deliveryScenario as run } from "./helpers";
 
 const worker = system();
 
@@ -53,7 +69,8 @@ describe("Documents.send", () => {
         const after = yield* (yield* DocumentsRepo).get(WORKSPACE_A, id);
         expect(after).toMatchObject({ remindersChoice: "inherit", remindersOn: true });
         expect(after.revision).toBe(before.revision + 1);
-        const started = yield* Ref.get(yield* StartedDeliveries);
+        const StartedDeliveries_1 = yield* StartedDeliveries;
+        const started = yield* Ref.get(StartedDeliveries_1);
         expect(started).toEqual([{ workspaceId: WORKSPACE_A, deliveryId: result.deliveryId }]);
         const history = yield* d.history(id);
         const audit = history.at(-1);
@@ -80,15 +97,17 @@ describe("Documents.send", () => {
         const r = yield* d.send(id, { to: [" a@b.cz ", "a@b.cz"], language: "en" });
         const row = yield* delivery(r.deliveryId);
         expect(row.to).toEqual(["a@b.cz"]);
-        expect(row.subject.startsWith("Invoice ")).toBe(true);
+        expect(EffectString.startsWith("Invoice ")(row.subject)).toBe(true);
         const bad = yield* Effect.flip(d.send(id, { to: ["nope"] }));
         expect(bad).toBeInstanceOf(Invalid);
-        expect((bad as Invalid).issues[0]).toMatchObject({
+        Schema.asserts(Invalid, bad);
+        expect(bad.issues[0]).toMatchObject({
           path: ["to", 0],
           params: { reason: "email_invalid" },
         });
         const none = yield* Effect.flip(d.send(id, { to: [] }));
-        expect((none as Invalid).issues[0]?.params).toEqual({ reason: "recipients_required" });
+        Schema.asserts(Invalid, none);
+        expect(none.issues[0]?.params).toEqual({ reason: "recipients_required" });
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -102,8 +121,10 @@ describe("Documents.send", () => {
         const accountant = yield* Effect.flip(as(member("accountant"), d.send(id)));
         expect(accountant).toBeInstanceOf(Forbidden);
         const reader = member("owner", { scopes: ["documents:read"] });
-        expect(yield* Effect.flip(as(reader, d.send(id)))).toBeInstanceOf(Forbidden);
-        expect(yield* Effect.flip(as(reader, d.previewSend(id)))).toBeInstanceOf(Forbidden);
+        const sendFailure = yield* Effect.flip(as(reader, d.send(id)));
+        expect(sendFailure).toBeInstanceOf(Forbidden);
+        const previewSendFailure = yield* Effect.flip(as(reader, d.previewSend(id)));
+        expect(previewSendFailure).toBeInstanceOf(Forbidden);
         // The member role writes documents.
         yield* as(member("member"), d.send(id));
       }),
@@ -125,8 +146,10 @@ describe("Documents.send", () => {
             }),
           }),
         );
-        expect(yield* Effect.flip(d.send(inB.id))).toBeInstanceOf(NotFound);
-        expect(yield* Effect.flip(d.previewSend(inB.id))).toBeInstanceOf(NotFound);
+        const sendFailure = yield* Effect.flip(d.send(inB.id));
+        expect(sendFailure).toBeInstanceOf(NotFound);
+        const previewSendFailure = yield* Effect.flip(d.previewSend(inB.id));
+        expect(previewSendFailure).toBeInstanceOf(NotFound);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -138,16 +161,14 @@ describe("Documents.send", () => {
         const d = yield* Documents;
         const draft = yield* d.createDraft(invoiceInput());
         const e1 = yield* Effect.flip(d.send(draft.id));
-        expect(e1).toEqual(new Conflict({ reason: "illegal_transition" }));
-        expect(yield* Effect.flip(d.previewSend(draft.id))).toEqual(
-          new Conflict({ reason: "illegal_transition" }),
-        );
+        expect(e1).toEqual(Conflict.make({ reason: "illegal_transition" }));
+        const flipResult = yield* Effect.flip(d.previewSend(draft.id));
+        expect(flipResult).toEqual(Conflict.make({ reason: "illegal_transition" }));
         // A non-tax (non_vat_payer-like) cancel: Proformas are always non-tax.
         const proforma = yield* d.issue({ input: invoiceInput({ kind: "proforma" }) });
         yield* d.cancel(proforma.id, { reason: "chyba" });
-        expect(yield* Effect.flip(d.send(proforma.id))).toEqual(
-          new Conflict({ reason: "illegal_transition" }),
-        );
+        const flipResult2 = yield* Effect.flip(d.send(proforma.id));
+        expect(flipResult2).toEqual(Conflict.make({ reason: "illegal_transition" }));
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -172,11 +193,12 @@ describe("Documents.send", () => {
       Effect.gen(function* () {
         const d = yield* Documents;
         const id = yield* issueInvoice();
-        const key = { requestKey: "send-1" as RequestKey };
+        const key = { requestKey: RequestKey.make("send-1") };
         const first = yield* d.send(id, { reminders: true }, key);
         const replay = yield* d.send(id, { reminders: true }, key);
         expect(replay).toEqual(first);
-        expect(yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id)).toHaveLength(1);
+        const byDocumentResult = yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id);
+        expect(byDocumentResult).toHaveLength(1);
         const mismatch = yield* Effect.flip(d.send(id, { reminders: false }, key));
         expect(mismatch).toMatchObject({ _tag: "Conflict", reason: "idempotency_mismatch" });
       }),
@@ -190,10 +212,13 @@ describe("Documents.send", () => {
         const d = yield* Documents;
         const view = yield* d.issue(
           { input: invoiceInput() },
-          { requestKey: "issue-send" as RequestKey, send: { reminders: false } },
+          { requestKey: RequestKey.make("issue-send"), send: { reminders: false } },
         );
-        const rows = yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, view.id as DocumentId);
-        expect(rows.map((r) => r.status)).toEqual(["queued"]);
+        const rows = yield* (yield* DeliveriesRepo).byDocument(
+          WORKSPACE_A,
+          DocumentId.make(view.id),
+        );
+        expect(EffectArray.map(rows, (r) => r.status)).toEqual(["queued"]);
         expect((yield* (yield* DocumentsRepo).get(WORKSPACE_A, view.id)).remindersChoice).toBe(
           "off",
         );
@@ -208,8 +233,8 @@ describe("Documents.send", () => {
         const d = yield* Documents;
         const recurring = systemCaller(WORKSPACE_A, {
           _tag: "RecurringIssuance",
-          scheduleId: "01900000-0000-7000-8000-0000000000aa" as never,
-          occurrence: "2026-11-23" as never,
+          scheduleId: ScheduleId.make("01900000-0000-7000-8000-0000000000aa"),
+          occurrence: IsoDate.make("2026-11-23"),
         });
         const store = yield* CoreStore;
         const result = yield* as(
@@ -225,10 +250,10 @@ describe("Documents.send", () => {
         expect(row.status).toBe("queued");
         const history = yield* d.history(row.documentId);
         expect(history.at(-1)?.actor).toMatchObject({ _tag: "System" });
+        const startedDeliveries = yield* StartedDeliveries;
         // Started only after the outer commit.
-        expect((yield* Ref.get(yield* StartedDeliveries)).map((s) => s.deliveryId)).toEqual([
-          result.deliveryId,
-        ]);
+        const started = yield* Ref.get(startedDeliveries);
+        expect(EffectArray.map(started, (entry) => entry.deliveryId)).toEqual([result.deliveryId]);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -244,8 +269,11 @@ describe("Documents.send", () => {
           store.transaction(Effect.andThen(d.send(id), Effect.fail("boom" as const))),
         );
         expect(Exit.isFailure(failed)).toBe(true);
-        expect(yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id)).toHaveLength(0);
-        expect(yield* Ref.get(yield* StartedDeliveries)).toHaveLength(0);
+        const byDocumentResult = yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id);
+        expect(byDocumentResult).toHaveLength(0);
+        const startedDeliveries = yield* StartedDeliveries;
+        const getResult = yield* Ref.get(startedDeliveries);
+        expect(getResult).toHaveLength(0);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -271,7 +299,8 @@ describe("Documents.previewSend", () => {
         expect((yield* d.previewSend(id, { reminders: false })).armsReminders).toBe(false);
         expect((yield* d.previewSend(id, { purpose: "reminder" })).armsReminders).toBe(false);
         expect((yield* d.get(id)).revision).toBe(before.revision);
-        expect(yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id)).toHaveLength(0);
+        const byDocumentResult = yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id);
+        expect(byDocumentResult).toHaveLength(0);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -289,7 +318,7 @@ describe("manual reminder (D14)", () => {
         const r = yield* d.send(id, { purpose: "reminder", reminders: true });
         const row = yield* delivery(r.deliveryId);
         expect(row).toMatchObject({ purpose: "reminder", reminder: null });
-        expect(row.subject.startsWith("Upomínka: Faktura")).toBe(true);
+        expect(EffectString.startsWith("Upomínka: Faktura")(row.subject)).toBe(true);
         const after = yield* (yield* DocumentsRepo).get(WORKSPACE_A, id);
         expect(after).toMatchObject({ remindersChoice: "off", remindersOn: false });
         expect(after.revision).toBe(before.revision);
@@ -297,7 +326,7 @@ describe("manual reminder (D14)", () => {
         yield* patchDocument(id, { settlement: "paid" });
         const settled = yield* Effect.flip(d.send(id, { purpose: "reminder" }));
         expect(settled).toEqual(
-          new Conflict({ reason: "illegal_transition", detail: "reminder.document_settled" }),
+          Conflict.make({ reason: "illegal_transition", detail: "reminder.document_settled" }),
         );
       }),
     );
@@ -316,21 +345,25 @@ describe("DocumentDelivery job steps", () => {
     const exit = await run(
       Effect.gen(function* () {
         const { deliveryId } = yield* queued;
-        expect(yield* as(worker, deliver(WORKSPACE_A, deliveryId))).toBe("sent");
+        const result = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        expect(result).toBe("sent");
         const emails = yield* sent;
         expect(emails).toHaveLength(1);
         expect(emails[0]?.idempotencyKey).toBe(deliveryId);
         expect(emails[0]?.message.to).toEqual(["fakturace@odberatel.cz"]);
         expect(emails[0]?.message.attachments[0]?.contentType).toBe("application/pdf");
         expect(emails[0]?.message.attachments[0]?.bytes.length).toBeGreaterThan(0);
-        expect(yield* delivery(deliveryId)).toMatchObject({
+        const result2 = yield* delivery(deliveryId);
+        expect(result2).toMatchObject({
           status: "sent",
           attempts: 1,
           provider: "capture",
         });
+        const result3 = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
         // Replays are no-ops (idempotent by status).
-        expect(yield* as(worker, deliver(WORKSPACE_A, deliveryId))).toBe("sent");
-        expect(yield* attempts).toBe(1);
+        expect(result3).toBe("sent");
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(1);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -356,14 +389,19 @@ describe("DocumentDelivery job steps", () => {
       Effect.gen(function* () {
         const { deliveryId } = yield* queued;
         yield* CaptureEmailSender.failNext("rejected");
-        expect(yield* as(worker, deliver(WORKSPACE_A, deliveryId))).toBe("failed");
-        expect(yield* delivery(deliveryId)).toMatchObject({
+        const result = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        expect(result).toBe("failed");
+        const result2 = yield* delivery(deliveryId);
+        expect(result2).toMatchObject({
           status: "failed",
           failure: "rejected",
         });
-        expect(yield* as(worker, dispatch(WORKSPACE_A, deliveryId))).toBe("failed");
-        expect(yield* attempts).toBe(1);
-        expect(yield* sent).toHaveLength(0);
+        const result3 = yield* as(worker, dispatch(WORKSPACE_A, deliveryId));
+        expect(result3).toBe("failed");
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(1);
+        const sent_1 = yield* sent;
+        expect(sent_1).toHaveLength(0);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -375,18 +413,22 @@ describe("DocumentDelivery job steps", () => {
         const { deliveryId } = yield* queued;
         yield* CaptureEmailSender.failNext("not_accepted");
         const retry = yield* Effect.flip(as(worker, deliver(WORKSPACE_A, deliveryId)));
-        expect(retry).toEqual(new DeliveryRetry({ deliveryId, cause: "not_accepted" }));
-        expect(yield* delivery(deliveryId)).toMatchObject({
+        expect(retry).toEqual(DeliveryRetry.make({ deliveryId, cause: "not_accepted" }));
+        const result = yield* delivery(deliveryId);
+        expect(result).toMatchObject({
           status: "sending",
           attempts: 1,
           lastOutcome: "not_accepted",
         });
+        const result2 = yield* as(worker, claim(WORKSPACE_A, deliveryId));
         // A reconcile re-start claims nothing new and re-dispatches.
-        expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
-        expect(yield* as(worker, dispatch(WORKSPACE_A, deliveryId))).toBe("sent");
+        expect(result2).toBe("sending");
+        const result3 = yield* as(worker, dispatch(WORKSPACE_A, deliveryId));
+        expect(result3).toBe("sent");
         const emails = yield* sent;
-        expect(emails.map((e) => e.idempotencyKey)).toEqual([deliveryId]);
-        expect(yield* attempts).toBe(2);
+        expect(EffectArray.map(emails, (e) => e.idempotencyKey)).toEqual([deliveryId]);
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(2);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -398,21 +440,26 @@ describe("DocumentDelivery job steps", () => {
         const { deliveryId } = yield* queued;
         yield* CaptureEmailSender.failNext("outcome_unknown", "outcome_unknown");
         const first = yield* Effect.flip(as(worker, deliver(WORKSPACE_A, deliveryId)));
-        expect(first).toEqual(new DeliveryRetry({ deliveryId, cause: "outcome_unknown" }));
+        expect(first).toEqual(DeliveryRetry.make({ deliveryId, cause: "outcome_unknown" }));
         const second = yield* Effect.flip(as(worker, dispatch(WORKSPACE_A, deliveryId)));
-        expect(second).toEqual(new DeliveryRetry({ deliveryId, cause: "outcome_unknown" }));
-        expect(yield* delivery(deliveryId)).toMatchObject({
+        expect(second).toEqual(DeliveryRetry.make({ deliveryId, cause: "outcome_unknown" }));
+        const result = yield* delivery(deliveryId);
+        expect(result).toMatchObject({
           status: "sending",
           lastOutcome: "outcome_unknown",
         });
-        expect(yield* as(worker, giveUp(WORKSPACE_A, deliveryId))).toBe("failed");
-        expect(yield* delivery(deliveryId)).toMatchObject({
+        const result2 = yield* as(worker, giveUp(WORKSPACE_A, deliveryId));
+        expect(result2).toBe("failed");
+        const result3 = yield* delivery(deliveryId);
+        expect(result3).toMatchObject({
           status: "failed",
           attempts: 2,
           failure: "retries_exhausted",
         });
-        expect(yield* as(worker, dispatch(WORKSPACE_A, deliveryId))).toBe("failed");
-        expect(yield* attempts).toBe(2);
+        const result4 = yield* as(worker, dispatch(WORKSPACE_A, deliveryId));
+        expect(result4).toBe("failed");
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(2);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -425,9 +472,12 @@ describe("DocumentDelivery job steps", () => {
         const proforma = yield* d.issue({ input: invoiceInput({ kind: "proforma" }) });
         const { deliveryId } = yield* d.send(proforma.id);
         yield* d.cancel(proforma.id, { reason: "chyba" });
-        expect(yield* as(worker, deliver(WORKSPACE_A, deliveryId))).toBe("skipped");
-        expect(yield* delivery(deliveryId)).toMatchObject({ failure: "document_cancelled" });
-        expect(yield* attempts).toBe(0);
+        const result = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        expect(result).toBe("skipped");
+        const result2 = yield* delivery(deliveryId);
+        expect(result2).toMatchObject({ failure: "document_cancelled" });
+        const attempts_1 = yield* attempts;
+        expect(attempts_1).toBe(0);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -438,9 +488,8 @@ describe("DocumentDelivery job steps", () => {
       Effect.gen(function* () {
         const { deliveryId } = yield* queued;
         const other = system(undefined, WORKSPACE_B);
-        expect(yield* Effect.flip(as(other, claim(WORKSPACE_B, deliveryId)))).toBeInstanceOf(
-          NotFound,
-        );
+        const failureResult = yield* Effect.flip(as(other, claim(WORKSPACE_B, deliveryId)));
+        expect(failureResult).toBeInstanceOf(NotFound);
         const statuses = yield* (yield* DeliveriesRepo).statuses(WORKSPACE_B, [deliveryId]);
         expect(statuses.size).toBe(0);
       }),
@@ -469,14 +518,11 @@ describe("council round: ordering, language, overlapping attempts", () => {
         const cs = yield* d.send(view.id, { language: "cs" });
         const en = yield* d.send(view.id, { language: "en" });
         const notes = (id: DeliveryId) =>
-          Effect.map(
-            delivery(id),
-            (row) =>
-              (row.view as unknown as { statutoryNotes: ReadonlyArray<unknown> }).statutoryNotes,
-          );
+          Effect.map(delivery(id), (row) => row.view.statutoryNotes);
         const csNotes = yield* notes(cs.deliveryId);
         expect(csNotes.length).toBeGreaterThan(0);
-        expect(yield* notes(en.deliveryId)).not.toEqual(csNotes);
+        const result = yield* notes(en.deliveryId);
+        expect(result).not.toEqual(csNotes);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -492,7 +538,7 @@ describe("council round: ordering, language, overlapping attempts", () => {
           Effect.andThen(d.send(id, { to: ["a@x.cz"] }), d.send(id, { to: ["b@x.cz"] })),
         );
         const rows = yield* (yield* DeliveriesRepo).byDocument(WORKSPACE_A, id);
-        expect(rows.map((r) => [r.sequence, r.to])).toEqual([
+        expect(EffectArray.map(rows, (r) => [r.sequence, r.to])).toEqual([
           [1, ["a@x.cz"]],
           [2, ["b@x.cz"]],
         ]);
@@ -505,7 +551,8 @@ describe("council round: ordering, language, overlapping attempts", () => {
     const exit = await run(
       Effect.gen(function* () {
         const { deliveryId } = yield* queued;
-        expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
+        const result = yield* as(worker, claim(WORKSPACE_A, deliveryId));
+        expect(result).toBe("sending");
         const reached = yield* Deferred.make<void>();
         const gate = yield* Deferred.make<void>();
         const slow = EmailSender.of({
@@ -521,10 +568,13 @@ describe("council round: ordering, language, overlapping attempts", () => {
           ),
         );
         yield* Deferred.await(reached);
-        expect(yield* as(worker, dispatch(WORKSPACE_A, deliveryId))).toBe("sent");
+        const result2 = yield* as(worker, dispatch(WORKSPACE_A, deliveryId));
+        expect(result2).toBe("sent");
         yield* Deferred.succeed(gate, undefined);
-        expect(yield* Fiber.join(first)).toBe("sent");
-        expect(yield* delivery(deliveryId)).toMatchObject({ status: "sent", attempts: 2 });
+        const joinResult = yield* Fiber.join(first);
+        expect(joinResult).toBe("sent");
+        const result3 = yield* delivery(deliveryId);
+        expect(result3).toMatchObject({ status: "sent", attempts: 2 });
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -534,7 +584,8 @@ describe("council round: ordering, language, overlapping attempts", () => {
     const exit = await run(
       Effect.gen(function* () {
         const { deliveryId } = yield* queued;
-        expect(yield* as(worker, claim(WORKSPACE_A, deliveryId))).toBe("sending");
+        const result = yield* as(worker, claim(WORKSPACE_A, deliveryId));
+        expect(result).toBe("sending");
         const reached = yield* Deferred.make<void>();
         const gate = yield* Deferred.make<void>();
         const slow = EmailSender.of({
@@ -550,10 +601,13 @@ describe("council round: ordering, language, overlapping attempts", () => {
           ),
         );
         yield* Deferred.await(reached);
-        expect(yield* as(worker, giveUp(WORKSPACE_A, deliveryId))).toBe("failed");
+        const result2 = yield* as(worker, giveUp(WORKSPACE_A, deliveryId));
+        expect(result2).toBe("failed");
         yield* Deferred.succeed(gate, undefined);
-        expect(yield* Fiber.join(inFlight)).toBe("sent");
-        expect(yield* delivery(deliveryId)).toMatchObject({
+        const joinResult = yield* Fiber.join(inFlight);
+        expect(joinResult).toBe("sent");
+        const result3 = yield* delivery(deliveryId);
+        expect(result3).toMatchObject({
           status: "sent",
           failure: null,
           provider: "slow",

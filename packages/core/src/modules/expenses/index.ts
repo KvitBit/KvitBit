@@ -4,7 +4,7 @@
  * Reports uses (board #404); `ExpenseSuppliers` is the narrow Contacts port the integration
  * implements on the domain `Contacts` tag.
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { ExpensePayablesLive } from "./payables";
 import { ExpenseRecordsLive } from "./records";
 import { ExpensesRepoMemory } from "./repo";
