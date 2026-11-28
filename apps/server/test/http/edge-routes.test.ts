@@ -140,9 +140,9 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
       readonly method: string | undefined;
       readonly headers: Headers;
       readonly body: string;
-      readonly redirect: RequestRedirect | undefined;
+      readonly redirect: string | undefined;
     }> = [];
-    const proxyFetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const proxyFetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
       const body =
         init?.body instanceof Uint8Array
