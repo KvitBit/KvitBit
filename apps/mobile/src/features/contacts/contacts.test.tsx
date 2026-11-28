@@ -251,7 +251,7 @@ describe("contacts model", () => {
     const stale = Paged.receive(
       next.paged,
       first.paged.seq,
-      ok({ items: [sampleContact], nextCursor: "staleCursor" }),
+      ok({ value: { items: [sampleContact], nextCursor: "staleCursor" } }),
     );
     expect(stale.paged).toBe(next.paged);
     expect(stale.paged.nextCursor).toBeNull();

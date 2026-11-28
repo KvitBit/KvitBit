@@ -421,7 +421,9 @@ const runProcess = Effect.fn("MobileRelease.runProcess")(function* (
   if (command === undefined)
     return yield* ReleaseError.make({ message: "Missing subprocess command" });
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const handle = yield* spawner.spawn(ChildProcess.make(command, args, options));
+  const handle = yield* spawner.spawn(
+    ChildProcess.make(command, args, { ...options, stdin: "ignore" }),
+  );
   return yield* Effect.all(
     {
       stdout: handle.stdout.pipe(Stream.decodeText, Stream.mkString),

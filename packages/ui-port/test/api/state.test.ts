@@ -33,12 +33,19 @@ const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 
 test("matchResult handles both outcomes from the API entry", () => {
   const cases = { onOk: (value: string) => value.length, onErr: () => 0 };
-  const success = ok("saved");
+  const success = ok({ value: "saved" });
   const failure = err(UiError.offline);
   const matchedSuccess = matchResult(success, cases);
   const matchedFailure = matchResult(failure, cases);
   expect(matchedSuccess).toBe(5);
   expect(matchedFailure).toBe(0);
+});
+
+test("success retains response metadata independently of a response-shaped value", () => {
+  const value = { etag: 3, replayed: true };
+  const meta = { etag: 4, replayed: false };
+  expect(ok({ value })).toEqual({ _tag: "Ok", value, meta: { etag: null, replayed: false } });
+  expect(ok({ value, meta })).toEqual({ _tag: "Ok", value, meta });
 });
 
 describe("query builders", () => {
@@ -65,7 +72,7 @@ describe("Remote", () => {
       err(UiError.timeout),
     );
     expect(Remote.value(failed)).toEqual(Option.some(1));
-    expect(Remote.fromResult(Remote.idle, ok(2))).toEqual(Remote.ready(2));
+    expect(Remote.fromResult(Remote.idle, ok({ value: 2 }))).toEqual(Remote.ready(2));
   });
 });
 
@@ -73,7 +80,7 @@ interface Q {
   readonly text?: string;
 }
 const page = (items: Array<number>, nextCursor: string | null): ApiResult<Page<number>> =>
-  ok({ items, nextCursor });
+  ok({ value: { items, nextCursor } });
 
 describe("Paged", () => {
   test("first page, load more appends, older seq ignored", () => {

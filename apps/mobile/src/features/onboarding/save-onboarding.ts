@@ -237,11 +237,11 @@ const save = Effect.fn("Onboarding.save")(function* (
       ),
     );
     if (result._tag === "Err") return { step: "bank" as const, result };
-    return { step: "workspace" as const, result: ok(progress.workspace) };
+    return { step: "workspace" as const, result: ok({ value: progress.workspace }) };
   }
 
   yield* Effect.ignore(clearState());
-  return { step: "workspace" as const, result: ok(progress.workspace) };
+  return { step: "workspace" as const, result: ok({ value: progress.workspace }) };
 });
 
 export const saveOnboarding = (

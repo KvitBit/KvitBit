@@ -342,6 +342,11 @@
       "includes": ["apps/web/src/app/prefs.ts"],
       "linter": { "rules": { "suspicious": { "noDocumentCookie": "off" } } }
     },
+    // Feedback captures rendered text, including CSS transforms and layout-dependent whitespace.
+    {
+      "includes": ["apps/web/src/runtime/feedback/capture.ts"],
+      "linter": { "rules": { "performance": { "useDomNodeTextContent": "off" } } }
+    },
     {
       "includes": [
         // Vite resolves ?inline and embeds the CSS in the feedback shadow root.

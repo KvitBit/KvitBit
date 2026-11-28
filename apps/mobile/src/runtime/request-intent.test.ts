@@ -140,13 +140,15 @@ test("a failed success checkpoint preserves the key for recovery", async () => {
   const payload = { template: "test" };
   const call = (key: RequestKey) => {
     keys.push(key);
-    return Promise.resolve(ok("saved"));
+    return Promise.resolve(ok({ value: "saved" }));
   };
   const first = await runRequestIntent("checkpoint-user", operation, payload, call, () =>
     Promise.reject(new Error("Interrupted while storing the acknowledgement")),
   );
   expect(first._tag).toBe("Err");
-  expect(await runRequestIntent("checkpoint-user", operation, payload, call)).toEqual(ok("saved"));
+  expect(await runRequestIntent("checkpoint-user", operation, payload, call)).toEqual(
+    ok({ value: "saved" }),
+  );
   expect(keys[0]).toBe(keys[1]);
 });
 

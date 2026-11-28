@@ -127,7 +127,7 @@ export const uploadBrandingImage = Effect.fn("Settings.uploadBrandingImage")(
       return err(errorFromResponse({ status: response.status, body: text, requestId }));
     const parsed = decodeImageRef(text);
     return Option.isSome(parsed)
-      ? ok(parsed.value)
+      ? ok({ value: parsed.value })
       : err(UiError.unexpected(response.status, requestId));
   },
   Effect.orElseSucceed((): ApiResult<ImageRef> => err(UiError.offline)),

@@ -153,7 +153,7 @@ const resolveSeed = Effect.fn("TemplateImport.resolveSeed")(function* (
   if (source.bankAccount !== undefined) seed.bankAccount = source.bankAccount;
   if (source.variableSymbol !== undefined) seed.variableSymbol = source.variableSymbol;
   if (source.orderNumber !== undefined) seed.orderNumber = source.orderNumber;
-  return ok(seed);
+  return ok({ value: seed });
 });
 
 const payloadFor = (patch: TemplateSeed) => ({ as: "draft" as const, patch });
@@ -170,7 +170,7 @@ export const importTemplate = Effect.fn("TemplateImport.import")(
       slot,
       Effect.gen(function* () {
         let pending = yield* readPending(slot);
-        if (pending !== null && pending.document !== null) return ok(pending.document);
+        if (pending !== null && pending.document !== null) return ok({ value: pending.document });
         if (pending === null) {
           const resolved = yield* resolveSeed(run, workspace, templateId);
           if (resolved._tag === "Err") return resolved;
@@ -205,7 +205,7 @@ export const importTemplate = Effect.fn("TemplateImport.import")(
         const completed = yield* encodePending({ ...pending, document: { id, revision } });
         yield* fromMobilePromise(() => AsyncStorage.setItem(slot, completed));
         yield* Effect.ignore(fromMobilePromise(() => completeRequestKey(owner, operation, key)));
-        return ok({ id, revision });
+        return ok({ value: { id, revision } });
       }),
     );
   },

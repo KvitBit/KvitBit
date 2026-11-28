@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 const feedbackAssetPattern = /\/assets\/feedback-overlay-[^/]+\.js$/;
 const privateFeedbackPattern = /fixture-secret|private-fragment/;
 const privateSharePattern = /demo-unpaid-czk|fixture-secret|private-fragment/;
+const hiddenTextPattern = /fixture-hidden-text/i;
 const signInPathPattern = /\/sign-in$/;
 
 const submissionJson = Schema.fromJsonString(FeedbackSubmission);
@@ -211,7 +212,7 @@ if (!("Bun" in globalThis)) {
     expect(body).not.toContain("fixture-private-form-value");
   });
 
-  test("captures visible text and omits hidden descendants", async ({ page }) => {
+  test("captures rendered text and omits hidden descendants", async ({ page }) => {
     await session(page, true);
     await page.goto(dashboard);
     const heading = page.locator("#main h1");
@@ -219,21 +220,18 @@ if (!("Bun" in globalThis)) {
       const hidden = document.createElement("span");
       hidden.style.display = "none";
       hidden.textContent = "fixture-hidden-text";
-      const ariaHidden = document.createElement("span");
-      ariaHidden.setAttribute("aria-hidden", "true");
-      ariaHidden.textContent = "fixture-aria-hidden";
-      element.replaceChildren("Visible title", hidden, ariaHidden);
+      element.style.textTransform = "uppercase";
+      element.replaceChildren("Visible title", hidden);
     });
     await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
     await heading.dispatchEvent("click");
     const { submission, body } = await captureSubmission(page, "Adjust the title.");
     expect(submission.pins[0]).toMatchObject({
       tag: "h1",
-      accessibleName: "Visible title",
-      text: "Visible title",
+      accessibleName: "VISIBLE TITLE",
+      text: "VISIBLE TITLE",
     });
-    expect(body).not.toContain("fixture-hidden-text");
-    expect(body).not.toContain("fixture-aria-hidden");
+    expect(body).not.toMatch(hiddenTextPattern);
   });
 
   test("disposes the picker when the app signs out", async ({ page }) => {

@@ -14,6 +14,7 @@ import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Schema from "effect/Schema";
 
 import {
+  annotateFailedResponse,
   describeError,
   fromCause,
   isAutoRetryable,
@@ -25,6 +26,14 @@ import {
 } from "../../src/api";
 
 describe("toUiError", () => {
+  test("ignores response metadata for primitive failures", () => {
+    const response = { status: 422, requestId: "request-id" };
+    const failure = Symbol.for("primitive API failure");
+    annotateFailedResponse(failure, response);
+    annotateFailedResponse(response)(failure);
+    expect(toUiError(failure)).toEqual(UiError.unexpected());
+  });
+
   test("keeps decoded wire errors and local UiErrors as they are", () => {
     const notFound = NotFound.make({ entity: "Contact", id: "x" });
     notFound.pipe(toUiError, expect).toBe(notFound);

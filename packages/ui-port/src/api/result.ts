@@ -27,18 +27,17 @@ export type ApiResult<A> =
   | { readonly _tag: "Ok"; readonly value: A; readonly meta: ResponseMeta }
   | { readonly _tag: "Err"; readonly error: UiError };
 
-const success = <A>({
+export const ok = <A>({
   value,
-  meta,
+  meta = noMeta,
 }: {
   readonly value: A;
-  readonly meta: ResponseMeta;
+  readonly meta?: ResponseMeta;
 }): ApiResult<A> => ({
   _tag: "Ok",
   value,
   meta,
 });
-export const ok = <A>(value: A): ApiResult<A> => success({ value, meta: noMeta });
 export const err = <A = never>(error: UiError): ApiResult<A> => ({ _tag: "Err", error });
 
 export const DEFAULT_TIMEOUT: Duration.Input = "20 seconds";
@@ -71,7 +70,7 @@ export const attempt: {
         Effect.provideService(ResponseObserver, observed),
         Effect.matchCause({
           onSuccess: (value) =>
-            success({
+            ok({
               value,
               meta:
                 observed.current === null

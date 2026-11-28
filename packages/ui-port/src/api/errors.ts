@@ -160,7 +160,7 @@ export interface FailedResponse {
   readonly requestId: string | null;
 }
 
-const failedResponses = new WeakMap<WeakKey, FailedResponse>();
+const failedResponses = new WeakMap<object, FailedResponse>();
 
 /**
  * Associates a failure value (a response body's `SchemaError`) with the response that produced it,
@@ -169,10 +169,10 @@ const failedResponses = new WeakMap<WeakKey, FailedResponse>();
  * association. Keyed by the error object, so each failure keeps its own exchange.
  */
 export const annotateFailedResponse: {
-  (response: FailedResponse): (error: WeakKey) => void;
-  (error: WeakKey, response: FailedResponse): void;
-} = Fn.dual(2, (error: WeakKey, response: FailedResponse): void => {
-  if (!failedResponses.has(error)) {
+  (response: FailedResponse): <E>(error: E) => void;
+  <E>(error: E, response: FailedResponse): void;
+} = Fn.dual(2, <E>(error: E, response: FailedResponse): void => {
+  if (Predicate.isObjectOrArray(error) && !failedResponses.has(error)) {
     failedResponses.set(error, { status: response.status, requestId: response.requestId });
   }
 });

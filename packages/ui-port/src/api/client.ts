@@ -131,10 +131,7 @@ const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effe
     return decoded.pipe(
       Effect.tapError((error) =>
         Effect.sync(() => {
-          if (
-            Predicate.isObjectOrArray(error) &&
-            !(isUiError(error) || HttpClientError.isHttpClientError(error))
-          ) {
+          if (!(isUiError(error) || HttpClientError.isHttpClientError(error))) {
             annotateFailedResponse(error, response);
           }
         }),
