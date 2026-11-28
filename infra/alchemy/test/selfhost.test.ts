@@ -477,7 +477,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
     };
     return {
       start,
-      stop: () => runDocker(["rm", "-f", container]),
+      stop: () => runDocker(["rm", "--force", "--volumes", container]),
       logs: () => runDocker(["logs", container]),
       init,
       reconcile,
