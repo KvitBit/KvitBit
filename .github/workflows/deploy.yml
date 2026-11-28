@@ -95,13 +95,6 @@ jobs:
         with:
           bun-version: 1.4.2
 
-      - name: Validate GCP deployment variables
-        env:
-          KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}
-        run: |
-          set -euo pipefail
-          bun infra/alchemy/src/preflight-cli.ts
-
       - uses: actions/cache@v4
         with:
           path: ~/.bun/install/cache
@@ -111,6 +104,13 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      - name: Validate GCP deployment variables
+        env:
+          KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          set -euo pipefail
+          bun infra/alchemy/src/preflight-cli.ts
 
       # Step 1: Federated credentials file for gcloud and Artifact Registry Docker push.
       - name: Authenticate to Google Cloud (OIDC)

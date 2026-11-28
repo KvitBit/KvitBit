@@ -899,6 +899,25 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(flake).toContain("services.nginx = lib.mkIf cfg.nginx.enable");
   });
 
+  test("deploy.yml validates GCP deployment variables after installing dependencies and before authenticating", async () => {
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
+    const { steps } = parseDeployWorkflow(workflow).jobs.deploy;
+    const stepIndex = (name: string) =>
+      Option.getOrElse(
+        Arr.findFirstIndex(steps, (step) => step.name === name),
+        () => -1,
+      );
+
+    const install = stepIndex("Install dependencies");
+    const preflight = stepIndex("Validate GCP deployment variables");
+    const authenticate = stepIndex("Authenticate to Google Cloud (OIDC)");
+    expect(install).toBeGreaterThanOrEqual(0);
+    expect(preflight).toBeGreaterThan(install);
+    expect(authenticate).toBeGreaterThan(preflight);
+  });
+
   test(".github/workflows/deploy.yml enforces prod-only stage, bootstrap preflight, --yes deploy, optional secret flags, immutable attempt tags, runner digest check, and edge probing", async () => {
     const workflow = await Effect.runPromise(
       fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
