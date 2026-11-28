@@ -127,7 +127,12 @@
       "outputs": []
     },
     "//#check:bun-nix": {
-      "inputs": ["bun.lock", "bun.nix", "scripts/generate-bun-nix.ts"],
+      "inputs": [
+        "bun.lock",
+        "bun.nix",
+        "scripts/bun-lock-boundary.ts",
+        "scripts/generate-bun-nix.ts"
+      ],
       "outputs": []
     },
     "//#formal:selftest": {

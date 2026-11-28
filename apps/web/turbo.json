@@ -36,8 +36,13 @@
       "inputs": [
         "package.json",
         "tsconfig.json",
-        "src/page/public/_altcha-solver.ts",
+        "src/app/api.ts",
+        "src/app/browser.ts",
+        "src/app/commands.ts",
+        "src/page/public/_altcha*.ts",
+        "src/runtime/altcha.worker.ts",
         "test/public/altcha.test.ts",
+        "test/public/wire.ts",
         "$TURBO_ROOT$/packages/adapters/src/altcha/**",
         "$TURBO_ROOT$/packages/adapters/src/testing/**",
         "$TURBO_ROOT$/packages/db/drizzle/**"
