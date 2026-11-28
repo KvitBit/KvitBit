@@ -15,7 +15,6 @@ type Pin = FeedbackSubmission["pins"][number];
 type Diagnostic = FeedbackSubmission["diagnostics"][number];
 
 const editable =
-  // biome-ignore lint/security/noSecrets: This is the selector used to redact editing controls.
   "input, textarea, select, [contenteditable]:not([contenteditable=false]), [role=textbox]";
 const nonContent = "script, style, [hidden], [aria-hidden=true]";
 const privateContent = ".kb-secret-box, [data-feedback-private]";
@@ -29,17 +28,59 @@ const excerpt = (value: string, limit: number) =>
     limit,
   )(Str.trim(Str.replace(/\s+/gu, " ")(redactFeedbackUrls(redactFeedbackApiKeys(value)))));
 
+const inlineDisplays = new Set([
+  "inline",
+  "inline-block",
+  "inline-flex",
+  "inline-grid",
+  "contents",
+]);
+
+const closedDetails = (element: HTMLElement): element is HTMLDetailsElement =>
+  element instanceof HTMLDetailsElement && !element.open;
+
+const summaryOf = (element: HTMLDetailsElement) => element.querySelector(":scope > summary");
+
+const appendRenderedText = (element: HTMLElement, parts: string[]): void => {
+  if (element.matches(nonContent)) return;
+  const { display, visibility, contentVisibility } = getComputedStyle(element);
+  if (display === "none" || contentVisibility === "hidden") return;
+  if (element.localName === "br") {
+    if (visibility === "visible") parts.push(" ");
+    return;
+  }
+  const separatesText = !inlineDisplays.has(display);
+  if (separatesText) parts.push(" ");
+  const visibleNodes = closedDetails(element) ? [summaryOf(element)] : element.childNodes;
+  for (const node of visibleNodes) {
+    if (node instanceof HTMLElement) {
+      appendRenderedText(node, parts);
+    } else if (node instanceof Text && visibility === "visible") {
+      parts.push(node.textContent ?? "");
+    }
+  }
+  if (separatesText) parts.push(" ");
+};
+
 const visibleText = (element: Element, limit: number): string => {
   if (
-    !(element instanceof HTMLElement || element instanceof SVGElement) ||
+    !(element instanceof HTMLElement) ||
     element.closest(`${editable}, ${nonContent}`) !== null ||
     element.querySelector(editable) !== null ||
     containsPrivateContent(element)
   ) {
     return "";
   }
-  // biome-ignore lint/performance/useDomNodeTextContent: Capture rendered text while excluding hidden nodes.
-  return excerpt(element instanceof HTMLElement ? element.innerText : "", limit);
+  let child = element;
+  for (let parent = child.parentElement; parent !== null; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    if (style.display === "none" || style.contentVisibility === "hidden") return "";
+    if (closedDetails(parent) && summaryOf(parent) !== child) return "";
+    child = parent;
+  }
+  const parts: string[] = [];
+  appendRenderedText(element, parts);
+  return excerpt(Arr.join(parts, ""), limit);
 };
 
 const implicitRole = (element: Element) => {

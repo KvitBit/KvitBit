@@ -135,11 +135,7 @@ export type BlobKey = typeof BlobKey.Type;
 export class BlobTooLarge extends Schema.TaggedError<
   BlobTooLarge,
   { readonly brand: unique symbol }
->()(
-  // biome-ignore lint/security/noSecrets: This literal is the error's discriminant.
-  "BlobTooLarge",
-  { maxBytes: Schema.Finite },
-) {}
+>()("BlobTooLarge", { maxBytes: Schema.Finite }) {}
 export class BlobMissing extends Schema.TaggedError<
   BlobMissing,
   { readonly brand: unique symbol }

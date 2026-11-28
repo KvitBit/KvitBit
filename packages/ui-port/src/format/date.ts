@@ -69,37 +69,41 @@ const optionsFor = (locale: Locale, style: DateStyle): Intl.DateTimeFormatOption
 };
 
 /** Formats a calendar date (no time-zone shift: the date is the date). */
-// A calendar input is a string and can overlap the locale at the call boundary.
-// @effect-diagnostics-next-line missingPipeableSignature:off The positional API accepts invalid date strings and reports them synchronously.
-export const formatDate = (
-  locale: Locale,
-  date: string | CalendarDate,
-  style: DateStyle = "default",
-): string =>
+export const formatDate = ({
+  locale,
+  date,
+  style = "default",
+}: {
+  readonly locale: Locale;
+  readonly date: string | CalendarDate;
+  readonly style?: DateStyle;
+}): string =>
   dateFormat(locale, optionsFor(locale, style)).format(DateTime.toEpochMillis(toUtc(asDate(date))));
 
 /** Formats an instant (ISO timestamp or Date) in Europe/Prague: cs `23. 11. 2026 14:05`. */
-// An instant can be a string and overlap the locale at the call boundary.
-// @effect-diagnostics-next-line missingPipeableSignature:off The positional API accepts string instants and an optional string time zone.
-export const formatDateTime = (
-  locale: Locale,
-  instant: string | Date,
-  timeZone: string = BUSINESS_TIME_ZONE,
-): string => {
-  // Offsetless timestamp strings use the device's local timezone.
-  // @effect-diagnostics-next-line globalDate:off Native Date interprets offsetless timestamp strings in the device time zone.
-  const parsed = Predicate.isString(instant) ? new Date(instant) : instant;
+export const formatDateTime = ({
+  locale,
+  instant,
+  timeZone = BUSINESS_TIME_ZONE,
+}: {
+  readonly locale: Locale;
+  readonly instant: string | Date;
+  readonly timeZone?: string;
+}): string => {
+  // Date.parse interprets offsetless timestamps in the device's time zone.
+  const parsed = Predicate.isString(instant) ? Date.parse(instant) : instant.getTime();
   const dateValue = Option.getOrThrowWith(
-    Option.liftPredicate((value: Date) => !Number.isNaN(value.getTime()))(parsed),
+    DateTime.make(parsed),
     () => new RangeError(`Not a timestamp: ${String(instant)}`),
   );
-  const date = dateFormat(locale, { ...optionsFor(locale, "default"), timeZone }).format(dateValue);
+  const millis = DateTime.toEpochMillis(dateValue);
+  const date = dateFormat(locale, { ...optionsFor(locale, "default"), timeZone }).format(millis);
   const time = dateFormat(locale, {
     hour: "2-digit",
     minute: "2-digit",
     hourCycle: "h23",
     timeZone,
-  }).format(dateValue);
+  }).format(millis);
   return locale === "cs" ? `${date} ${time}` : `${date}, ${time}`;
 };
 
@@ -141,13 +145,14 @@ export const formatDateRange: {
 } = Fn.dual(3, (locale: Locale, from: string | CalendarDate, to: string | CalendarDate): string => {
   const a = asDate(from);
   const b = asDate(to);
-  if (a.year === b.year && a.month === b.month && a.day === b.day) return formatDate(locale, a);
+  if (a.year === b.year && a.month === b.month && a.day === b.day)
+    return formatDate({ locale, date: a });
   const sameYear = a.year === b.year;
   const sameMonth = sameYear && a.month === b.month;
   if (locale === "cs") {
     if (sameMonth) return `${a.day}.–${b.day}. ${b.month}. ${b.year}`;
     if (sameYear) return `${a.day}. ${a.month}. – ${b.day}. ${b.month}. ${b.year}`;
-    return `${formatDate(locale, a)} – ${formatDate(locale, b)}`;
+    return `${formatDate({ locale, date: a })} – ${formatDate({ locale, date: b })}`;
   }
   const ma = EN_MONTHS[a.month - 1] ?? "";
   const mb = EN_MONTHS[b.month - 1] ?? "";

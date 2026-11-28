@@ -1,10 +1,11 @@
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { MOBILE_NAV, type NavSection, navLabelKey } from "@kvitbit/ui-port/view-models";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { Redirect, router, Tabs, useLocalSearchParams, useUnstableGlobalHref } from "expo-router";
 import { FileText, House, Menu, Receipt, Users } from "lucide-react-native";
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { ExpenseCaptureRuntime } from "../../../src/features/expenses/expense-capture-runtime";
 import { useCaptureQueueSummary } from "../../../src/features/expenses/use-expense-capture";
 import { forkFeatureEffect } from "../../../src/features/ui-effect";
@@ -101,7 +102,12 @@ export default function WorkspaceLayout() {
   const slug = param(useLocalSearchParams<{ ws: string }>().ws) ?? "";
   const returnTo = safeReturnTo(useUnstableGlobalHref());
   const signedIn = session.state.status === "signed-in";
-  const workspaces = useRemote(signedIn ? (api) => api.myWorkspaces.listMine() : null, [signedIn]);
+  const workspaces = useRemote(
+    useMemo(
+      () => (signedIn ? (api: KvitbitApiClient) => api.myWorkspaces.listMine() : null),
+      [signedIn],
+    ),
+  );
   const isMember =
     signedIn &&
     workspaces.state._tag === "Ready" &&

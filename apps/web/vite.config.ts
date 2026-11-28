@@ -1,8 +1,8 @@
 // Vite provides native synchronous filesystem hooks to build-config plugins.
-// @effect-diagnostics-next-line nodeBuiltinImport:off The Vite middleware reads assets synchronously on its Node host.
+
 import { cpSync, existsSync, readFileSync, statSync } from "node:fs";
 // Use native paths for the Vite host, including Windows.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Resolve host-native paths in Vite, including Windows paths.
+
 import { extname, join, resolve } from "node:path";
 import * as Str from "effect/String";
 import { defineConfig, type Plugin } from "vite";

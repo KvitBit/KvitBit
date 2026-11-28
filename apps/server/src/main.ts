@@ -9,7 +9,7 @@
  * - `KVITBIT_RUNNER_MODE=cluster`: runs `ClusterClientRuntimeLive` (client-only sharding over
  *   `SqlMessageStorage`) and serves HTTP only; workflows and crons execute on `worker.ts`.
  */
-// @effect-diagnostics-next-line nodeBuiltinImport:off NodeHttpServer.layer requires a Node HTTP server factory.
+
 import { createServer } from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";

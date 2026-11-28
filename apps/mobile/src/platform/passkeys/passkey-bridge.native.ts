@@ -3,6 +3,7 @@
  * Adapted from DeskoHub's native-passkey-module.service.ts and passkey-credential.ts.
  */
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
 import { PlatformOperationFailed, tryPlatform } from "../platform-effect";
@@ -14,10 +15,13 @@ import type {
 } from "./passkey-bridge";
 import {
   classifyNativePasskeyError,
+  NativeFields,
   normalizeAuthenticationResponse,
   normalizeRegistrationResponse,
 } from "./passkey-codec";
 import { decodeCreationOptions, decodeRequestOptions } from "./passkey-options";
+
+const decodeNativeResponse = Schema.decodeUnknownOption(NativeFields);
 
 export interface NativePasskeyModule {
   readonly isSupported: () => boolean;
@@ -88,7 +92,8 @@ export const makeNativePasskeyBridge = (
         if (raw === null || raw === undefined) return { _tag: "Cancelled" };
         const normalize =
           method === "create" ? normalizeRegistrationResponse : normalizeAuthenticationResponse;
-        const normalized = normalize(raw);
+        const decoded = decodeNativeResponse(raw);
+        const normalized = Option.isSome(decoded) ? normalize(decoded.value) : null;
         if (normalized !== null) return { _tag: "Ok", value: normalized };
         return {
           _tag: "Failed",

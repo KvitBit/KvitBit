@@ -27,13 +27,18 @@ export type ApiResult<A> =
   | { readonly _tag: "Ok"; readonly value: A; readonly meta: ResponseMeta }
   | { readonly _tag: "Err"; readonly error: UiError };
 
-// A successful value can itself have the ResponseMeta shape.
-// @effect-diagnostics-next-line missingPipeableSignature:off A successful value can have the same shape as the optional response metadata.
-export const ok = <A>(value: A, meta: ResponseMeta = noMeta): ApiResult<A> => ({
+const success = <A>({
+  value,
+  meta,
+}: {
+  readonly value: A;
+  readonly meta: ResponseMeta;
+}): ApiResult<A> => ({
   _tag: "Ok",
   value,
   meta,
 });
+export const ok = <A>(value: A): ApiResult<A> => success({ value, meta: noMeta });
 export const err = <A = never>(error: UiError): ApiResult<A> => ({ _tag: "Err", error });
 
 export const DEFAULT_TIMEOUT: Duration.Input = "20 seconds";
@@ -66,12 +71,13 @@ export const attempt: {
         Effect.provideService(ResponseObserver, observed),
         Effect.matchCause({
           onSuccess: (value) =>
-            ok(
+            success({
               value,
-              observed.current === null
-                ? noMeta
-                : { etag: observed.current.etag, replayed: observed.current.replayed },
-            ),
+              meta:
+                observed.current === null
+                  ? noMeta
+                  : { etag: observed.current.etag, replayed: observed.current.replayed },
+            }),
           onFailure: (cause) => cause.pipe(fromCause, err),
         }),
       );

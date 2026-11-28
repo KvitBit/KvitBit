@@ -1,3 +1,4 @@
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import * as Effect from "effect/Effect";
 import { fromMobilePromise } from "../../runtime/request-intent";
 import { runFeatureEffect } from "../ui-effect";
@@ -38,7 +39,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, ScrollView, StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
-import { useApi, useRemote } from "../../runtime/api-runtime";
+import { useApi, useReloadSignal, useRemote } from "../../runtime/api-runtime";
 import { isRequestIntentExpired, requestIntentFailure } from "../../runtime/request-intent";
 import { useTheme } from "../../theme/theme-provider";
 import {
@@ -118,13 +119,13 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
   const requestOwner = useRequestOwner(workspace.id);
   const writable = canWriteWorkspace(workspace);
   const [failure, setFailure] = useState<UiError | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const [importSignal, reloadImport] = useReloadSignal();
   const [restarting, setRestarting] = useState(false);
   const expired = failure !== null && isRequestIntentExpired(failure);
 
   const retry = () => {
     setFailure(null);
-    setAttempt((n) => n + 1);
+    reloadImport();
   };
 
   const startNewImport = Effect.fn("startNewImport")(function* () {
@@ -158,12 +159,11 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
     );
   }, runFeatureEffect);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new attempt
   useEffect(() => {
-    if (!writable || requestOwner === null) return;
+    if (!writable || requestOwner === null || importSignal.aborted) return;
     let active = true;
     runFeatureEffect(importTemplate(requestOwner, workspace, templateId, run)).then((result) => {
-      if (!active) return;
+      if (!active || importSignal.aborted) return;
       if (result._tag === "Err") {
         setFailure(result.error);
       } else {
@@ -176,7 +176,7 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
     return () => {
       active = false;
     };
-  }, [attempt, requestOwner, run, templateId, workspace, writable]);
+  }, [importSignal, requestOwner, run, templateId, workspace, writable]);
 
   return (
     <Screen title={t("documents.editor.titleDraft")} back>
@@ -305,24 +305,38 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const overlay = useOverlay();
 
   const wsRemote = useRemote(
-    (api) => api.workspace.current({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) => api.workspace.current({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
   const contactsRemote = useRemote(
-    (api) => api.contacts.search({ params: { workspaceId: workspace.id }, query: { limit: 100 } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.contacts.search({ params: { workspaceId: workspace.id }, query: { limit: 100 } }),
+      [workspace.id],
+    ),
   );
   const priceListRemote = useRemote(
-    (api) => api.priceList.list({ params: { workspaceId: workspace.id }, query: {} }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.priceList.list({ params: { workspaceId: workspace.id }, query: {} }),
+      [workspace.id],
+    ),
   );
   const bankAccountsRemote = useRemote(
-    (api) => api.workspace.listBankAccounts({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.workspace.listBankAccounts({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
   const seriesRemote = useRemote(
-    (api) => api.workspace.listSeries({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.workspace.listSeries({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
 
   const sourceDocId =
@@ -333,13 +347,16 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         : null;
 
   const sourceDocRemote = useRemote(
-    sourceDocId === null
-      ? null
-      : (api) =>
-          api.documents.get({
-            params: { workspaceId: workspace.id, documentId: sourceDocId },
-          }),
-    [workspace.id, sourceDocId],
+    useMemo(
+      () =>
+        sourceDocId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.documents.get({
+                params: { workspaceId: workspace.id, documentId: sourceDocId },
+              }),
+      [workspace.id, sourceDocId],
+    ),
   );
 
   const originalDoc: DocumentView | null =
@@ -357,11 +374,16 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       ? parseContactSnapshot(originalDoc.contact).contactId
       : null;
   const templateContactRemote = useRemote(
-    templateContactId === null
-      ? null
-      : (api) =>
-          api.contacts.get({ params: { workspaceId: workspace.id, contactId: templateContactId } }),
-    [workspace.id, templateContactId],
+    useMemo(
+      () =>
+        templateContactId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.contacts.get({
+                params: { workspaceId: workspace.id, contactId: templateContactId },
+              }),
+      [workspace.id, templateContactId],
+    ),
   );
   const templateContactArchived =
     templateContactId !== null &&
@@ -413,26 +435,31 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const [templateLoadFailure, setTemplateLoadFailure] = useState<"storage" | "revision" | null>(
     null,
   );
-  const [templateLoadAttempt, setTemplateLoadAttempt] = useState(0);
+  const [templateLoadSignal, reloadTemplate] = useReloadSignal();
   const importDocId = originalDoc?.id ?? null;
   const importRevision = originalDoc?.revision ?? null;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new lookup
   useEffect(() => {
-    if (draft !== null || requestOwner === null || importDocId === null || importRevision === null)
+    if (
+      draft !== null ||
+      requestOwner === null ||
+      importDocId === null ||
+      importRevision === null ||
+      templateLoadSignal.aborted
+    )
       return;
     let live = true;
     runFeatureEffect(
       openImportedDraft(requestOwner, importDocId, importRevision).pipe(
         Effect.match({
           onSuccess: (seed) => {
-            if (live) {
+            if (live && !templateLoadSignal.aborted) {
               setTemplateLoadFailure(null);
               setCachedTemplate({ revision: importRevision, seed });
             }
           },
           onFailure: (error) => {
-            if (live)
+            if (live && !templateLoadSignal.aborted)
               setTemplateLoadFailure(error._tag === "StaleImportedDraft" ? "revision" : "storage");
           },
         }),
@@ -441,7 +468,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     return () => {
       live = false;
     };
-  }, [draft, importDocId, importRevision, requestOwner, templateLoadAttempt]);
+  }, [draft, importDocId, importRevision, requestOwner, templateLoadSignal]);
 
   const readyToInit =
     wsRemote.state._tag === "Ready" &&
@@ -935,7 +962,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             onPress: () => {
               setTemplateLoadFailure(null);
               sourceDocRemote.reload();
-              setTemplateLoadAttempt((n) => n + 1);
+              reloadTemplate();
             },
           }}
         />
@@ -1098,7 +1125,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                       value={line.treatment}
                       choices={Arr.map(VAT_TREATMENTS, (tr) => ({
                         value: tr,
-                        label: t(enumKey("vatTreatment", tr)),
+                        label: t(enumKey({ name: "vatTreatment", value: tr })),
                       }))}
                       onChange={(value) => {
                         if (!isLocked) updateLine(line.key, { treatment: value });
@@ -1189,7 +1216,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     label={t("documents.editor.fx.title")}
                     value={draft.fxMode}
                     choices={[
-                      { value: "cnb", label: t(enumKey("fxSource", "cnb")) },
+                      { value: "cnb", label: t(enumKey({ name: "fxSource", value: "cnb" })) },
                       { value: "manual", label: t("documents.editor.fx.manual") },
                     ]}
                     onChange={(mode) => {
@@ -1207,7 +1234,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                           rate: BigDecimal.format(cnbFx.rate),
                           quantity: cnbFx.quantity,
                           currency: draft.currency,
-                          date: formatDate(locale, cnbFx.fixingDate),
+                          date: formatDate({ locale, date: cnbFx.fixingDate }),
                         })}
                       </Text>
                     ) : fxUnavailable === true ? (
@@ -1249,7 +1276,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 value={draft.paymentMethod}
                 choices={Arr.map(PAYMENT_METHODS, (m) => ({
                   value: m,
-                  label: t(enumKey("paymentMethod", m)),
+                  label: t(enumKey({ name: "paymentMethod", value: m })),
                 }))}
                 onChange={(paymentMethod) => {
                   if (!isLocked) setDraft({ ...draft, paymentMethod });
@@ -1312,8 +1339,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 value={draft.language ?? (hasSavedTerms ? null : "keep")}
                 choices={[
                   ...(!hasSavedTerms ? [keepSaved] : []),
-                  { value: "cs", label: t(enumKey("locale", "cs")) },
-                  { value: "en", label: t(enumKey("locale", "en")) },
+                  { value: "cs", label: t(enumKey({ name: "locale", value: "cs" })) },
+                  { value: "en", label: t(enumKey({ name: "locale", value: "en" })) },
                 ]}
                 onChange={(language: Locale | "keep") => {
                   if (!isLocked)
@@ -1386,7 +1413,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     style={styles.totalRow}
                   >
                     <Text variant="bodyMedium" style={styles.flex}>
-                      {`${t(enumKey("vatTreatment", bucket.treatment))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
+                      {`${t(enumKey({ name: "vatTreatment", value: bucket.treatment }))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
                     </Text>
                     <View style={styles.amountCol}>
                       <Text variant="bodyMedium" numeric>
@@ -1573,12 +1600,14 @@ export function CreditNoteCreatorScreen() {
   const overlay = useOverlay();
 
   const issuedRemote = useRemote(
-    (api) =>
-      api.documents.list({
-        params: { workspaceId: workspace.id },
-        query: { status: "issued", limit: 100 },
-      }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.documents.list({
+          params: { workspaceId: workspace.id },
+          query: { status: "issued", limit: 100 },
+        }),
+      [workspace.id],
+    ),
   );
 
   const [selectedDocId, setSelectedDocId] = useState<DocumentId | null>(null);
@@ -1588,13 +1617,16 @@ export function CreditNoteCreatorScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedDocRemote = useRemote(
-    selectedDocId === null
-      ? null
-      : (api) =>
-          api.documents.get({
-            params: { workspaceId: workspace.id, documentId: selectedDocId },
-          }),
-    [workspace.id, selectedDocId],
+    useMemo(
+      () =>
+        selectedDocId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.documents.get({
+                params: { workspaceId: workspace.id, documentId: selectedDocId },
+              }),
+      [workspace.id, selectedDocId],
+    ),
   );
 
   const submit = Effect.fn("submit")(function* () {
@@ -1689,7 +1721,7 @@ export function CreditNoteCreatorScreen() {
                     key={doc.id}
                     testID={`credit-source-${doc.id}`}
                     title={doc.number ?? doc.id}
-                    subtitle={`${doc.contact.name} · ${formatDate(locale, doc.issuedOn)}`}
+                    subtitle={`${doc.contact.name} · ${formatDate({ locale, date: doc.issuedOn })}`}
                     trailing={formatMoney(locale, doc.total)}
                     badge={
                       selectedDocId === doc.id ? (

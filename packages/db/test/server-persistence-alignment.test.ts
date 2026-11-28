@@ -1,11 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-// Bun uses Node's synchronous filesystem APIs to stage the migration tree.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Stage the historical migration directories synchronously before constructing PGlite.
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-// @effect-diagnostics-next-line nodeBuiltinImport:off Build native paths for the PGlite migrator.
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import { PGlite } from "@electric-sql/pglite";
 import { VatBreakdown } from "@kvitbit/domain/contract";
 import { drizzle } from "drizzle-orm/pglite";
@@ -13,7 +7,9 @@ import { migrate } from "drizzle-orm/pglite/migrator";
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 const vatBreakdownJson = Schema.toCodecJson(VatBreakdown);
@@ -25,7 +21,11 @@ const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Json));
 // The server persistence alignment migration (20261124135932) must upgrade a populated database
 // from the prior schema without failing on existing delivery history (S5) or zeroing out
 // accounting projections (core P1/P3/D6/D8).
-const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
+const { fs, path } = await Effect.all(
+  { fs: FileSystem.FileSystem, path: Path.Path },
+  { concurrency: 1 },
+).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
+const migrationsFolder = path.resolve(import.meta.dir, "../drizzle");
 const PRE_MIGRATIONS = ["20261123175822_init", "20261124120853_core_record_alignment"] as const;
 
 const wsVat = "0190a000-0000-7000-8000-0000000003a0";
@@ -143,10 +143,13 @@ const breakdown = (
 };
 
 beforeAll(async () => {
-  preDir = mkdtempSync(join(tmpdir(), "kvitbit-db-pre-3a-"));
-  for (const name of PRE_MIGRATIONS) {
-    cpSync(join(migrationsFolder, name), join(preDir, name), { recursive: true });
-  }
+  const staging = await Effect.runPromise(fs.makeTempDirectory({ prefix: "kvitbit-db-pre-3a-" }));
+  preDir = staging;
+  await Effect.forEach(
+    PRE_MIGRATIONS,
+    (name) => fs.copy(path.join(migrationsFolder, name), path.join(staging, name)),
+    { concurrency: 1, discard: true },
+  ).pipe(Effect.runPromise);
   client = new PGlite();
   await migrate(drizzle({ client }), { migrationsFolder: preDir });
 
@@ -566,7 +569,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client?.close();
-  if (preDir !== undefined) rmSync(preDir, { recursive: true, force: true });
+  if (preDir !== undefined)
+    await Effect.runPromise(fs.remove(preDir, { recursive: true, force: true }));
 });
 
 describe("server persistence alignment migration (populated upgrade)", () => {

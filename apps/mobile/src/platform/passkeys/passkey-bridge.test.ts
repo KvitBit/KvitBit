@@ -26,7 +26,6 @@ describe("makeNativePasskeyBridge", () => {
         type: "public-key",
         authenticatorAttachment: "platform",
         response: {
-          // biome-ignore lint/security/noSecrets: Base64 fixture for normalization.
           clientDataJSON: "Y2xpZW50+A==",
           attestationObject: "YXR0ZXN0/w==",
           transports: ["internal", "unknown-transport"],

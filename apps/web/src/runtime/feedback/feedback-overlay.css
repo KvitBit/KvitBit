@@ -228,10 +228,14 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 8px;
-  /* biome-ignore lint/suspicious/useBaseline: browsers without resize use the native textarea. */
-  resize: vertical;
+
   inline-size: 100%;
   min-block-size: 4rem;
+}
+@supports (resize: vertical) {
+  .composer textarea {
+    resize: vertical;
+  }
 }
 
 .error {

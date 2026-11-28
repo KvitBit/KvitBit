@@ -1,3 +1,4 @@
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import * as Effect from "effect/Effect";
 import { fromMobilePromise } from "../../runtime/request-intent";
 import { runFeatureEffect } from "../ui-effect";
@@ -144,44 +145,56 @@ export function DocumentDetailScreen() {
   const [pdfLanguage, setPdfLanguage] = useState<Locale>(locale);
 
   const docRemote = useRemote(
-    documentId === null
-      ? null
-      : (api) =>
-          api.documents.get({
-            params: { workspaceId: workspace.id, documentId },
-          }),
-    [workspace.id, documentId],
+    useMemo(
+      () =>
+        documentId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.documents.get({
+                params: { workspaceId: workspace.id, documentId },
+              }),
+      [workspace.id, documentId],
+    ),
   );
 
   const paymentsRemote = useRemote(
-    documentId === null
-      ? null
-      : (api) =>
-          api.payments.listForDocument({
-            params: { workspaceId: workspace.id, documentId },
-          }),
-    [workspace.id, documentId],
+    useMemo(
+      () =>
+        documentId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.payments.listForDocument({
+                params: { workspaceId: workspace.id, documentId },
+              }),
+      [workspace.id, documentId],
+    ),
   );
 
   const historyRemote = useRemote(
-    documentId === null || tab !== "history"
-      ? null
-      : (api) =>
-          api.documents.history({
-            params: { workspaceId: workspace.id, documentId },
-          }),
-    [workspace.id, documentId, tab],
+    useMemo(
+      () =>
+        documentId === null || tab !== "history"
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.documents.history({
+                params: { workspaceId: workspace.id, documentId },
+              }),
+      [workspace.id, documentId, tab],
+    ),
   );
 
   const shareViewsRemote = useRemote(
-    documentId === null || tab !== "share"
-      ? null
-      : (api) =>
-          api.shareLinks.views({
-            params: { workspaceId: workspace.id, documentId },
-            query: { limit: 50 },
-          }),
-    [workspace.id, documentId, tab],
+    useMemo(
+      () =>
+        documentId === null || tab !== "share"
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.shareLinks.views({
+                params: { workspaceId: workspace.id, documentId },
+                query: { limit: 50 },
+              }),
+      [workspace.id, documentId, tab],
+    ),
   );
 
   const reloadAll = useCallback(() => {
@@ -212,7 +225,9 @@ export function DocumentDetailScreen() {
   const handleIssue = Effect.fn("handleIssue")(function* (doc: DocumentView) {
     const confirmed = yield* fromMobilePromise(() =>
       overlay.confirm({
-        title: t("documents.issue.title", { kind: t(enumKey("documentKind", doc.kind)) }),
+        title: t("documents.issue.title", {
+          kind: t(enumKey({ name: "documentKind", value: doc.kind })),
+        }),
         body: t("documents.issue.irreversible"),
         confirmLabel: t("documents.issue.confirm"),
         cancelLabel: t("common.action.cancel"),
@@ -726,24 +741,24 @@ export function DocumentDetailScreen() {
 
                 <View style={styles.metaGrid}>
                   <Text variant="meta" color="onSurfaceVariant" numeric>
-                    {`${t("documents.editor.issueDate")}: ${formatDate(locale, doc.dates.issuedOn)}`}
+                    {`${t("documents.editor.issueDate")}: ${formatDate({ locale, date: doc.dates.issuedOn })}`}
                   </Text>
                   {doc.dates.taxableSupplyOn !== null ? (
                     <Text variant="meta" color="onSurfaceVariant" numeric>
-                      {`${t("documents.editor.taxableSupplyDate")}: ${formatDate(locale, doc.dates.taxableSupplyOn)}`}
+                      {`${t("documents.editor.taxableSupplyDate")}: ${formatDate({ locale, date: doc.dates.taxableSupplyOn })}`}
                     </Text>
                   ) : null}
                   <Text variant="meta" color="onSurfaceVariant" numeric>
-                    {`${t("documents.editor.dueDate")}: ${formatDate(locale, doc.dates.dueOn)}`}
+                    {`${t("documents.editor.dueDate")}: ${formatDate({ locale, date: doc.dates.dueOn })}`}
                   </Text>
                   <Text variant="meta" color="onSurfaceVariant">
-                    {`${t("documents.editor.paymentMethod")}: ${t(enumKey("paymentMethod", doc.paymentMethod))}`}
+                    {`${t("documents.editor.paymentMethod")}: ${t(enumKey({ name: "paymentMethod", value: doc.paymentMethod }))}`}
                   </Text>
                   {doc.fx !== null ? (
                     <Text variant="meta" color="onSurfaceVariant" numeric>
-                      {`${t(enumKey("fxSource", doc.fx.source))}: ${doc.fx.quantity} ${currency} = ${BigDecimal.format(doc.fx.rate)} CZK${
+                      {`${t(enumKey({ name: "fxSource", value: doc.fx.source }))}: ${doc.fx.quantity} ${currency} = ${BigDecimal.format(doc.fx.rate)} CZK${
                         doc.fx.fixingDate !== null
-                          ? ` (${formatDate(locale, doc.fx.fixingDate)})`
+                          ? ` (${formatDate({ locale, date: doc.fx.fixingDate })})`
                           : ""
                       }`}
                     </Text>
@@ -886,10 +901,13 @@ export function DocumentDetailScreen() {
                         label={t("shared.pdfPreview.template")}
                         value={pdfTemplate}
                         choices={[
-                          { value: "classic", label: t(enumKey("pdfTemplate", "classic")) },
+                          {
+                            value: "classic",
+                            label: t(enumKey({ name: "pdfTemplate", value: "classic" })),
+                          },
                           {
                             value: "modern_minimal",
-                            label: t(enumKey("pdfTemplate", "modern_minimal")),
+                            label: t(enumKey({ name: "pdfTemplate", value: "modern_minimal" })),
                           },
                         ]}
                         onChange={setPdfTemplate}
@@ -898,8 +916,8 @@ export function DocumentDetailScreen() {
                         label={t("shared.pdfPreview.language")}
                         value={pdfLanguage}
                         choices={[
-                          { value: "cs", label: t(enumKey("locale", "cs")) },
-                          { value: "en", label: t(enumKey("locale", "en")) },
+                          { value: "cs", label: t(enumKey({ name: "locale", value: "cs" })) },
+                          { value: "en", label: t(enumKey({ name: "locale", value: "en" })) },
                         ]}
                         onChange={setPdfLanguage}
                       />
@@ -996,7 +1014,7 @@ export function DocumentDetailScreen() {
                         <ListRow
                           key={line.id}
                           title={line.description}
-                          subtitle={`${formatQuantity(locale, line.quantity)}${(line.unit ?? "") !== "" ? ` ${line.unit}` : ""} × ${formatMoney(
+                          subtitle={`${formatQuantity({ locale, value: line.quantity })}${(line.unit ?? "") !== "" ? ` ${line.unit}` : ""} × ${formatMoney(
                             locale,
                             MoneyMath.make(line.unitPrice, currency),
                           )} · ${t("common.field.vat")} ${formatVatRate(locale, Number(BigDecimal.format(line.ratePercent)))}`}
@@ -1016,7 +1034,7 @@ export function DocumentDetailScreen() {
                         >
                           <View style={styles.flex}>
                             <Text variant="bodyMedium">
-                              {`${t(enumKey("vatTreatment", bucket.treatment))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
+                              {`${t(enumKey({ name: "vatTreatment", value: bucket.treatment }))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
                             </Text>
                             <Text variant="meta" color="onSurfaceVariant" numeric>
                               {`${t("documents.editor.totals.base")}: ${formatMoney(
@@ -1102,7 +1120,7 @@ export function DocumentDetailScreen() {
                             key={`${rel.relation}-${rel.id}`}
                             testID={`related-doc-${rel.id}`}
                             title={rel.number}
-                            subtitle={`${t(enumKey("documentRelation", rel.relation))} · ${t(enumKey("documentKind", rel.kind))}`}
+                            subtitle={`${t(enumKey({ name: "documentRelation", value: rel.relation }))} · ${t(enumKey({ name: "documentKind", value: rel.kind }))}`}
                             onPress={() =>
                               navigate({
                                 _tag: "Document",
@@ -1127,10 +1145,10 @@ export function DocumentDetailScreen() {
                             title={t("documents.detail.deliveryTo", {
                               email: Arr.join(del.to, ", "),
                             })}
-                            subtitle={`${t(enumKey("deliveryPurpose", del.purpose))} · ${formatDateTime(locale, del.at)}`}
+                            subtitle={`${t(enumKey({ name: "deliveryPurpose", value: del.purpose }))} · ${formatDateTime({ locale, instant: del.at })}`}
                             badge={
                               <Badge
-                                label={t(enumKey("deliveryStatus", del.status))}
+                                label={t(enumKey({ name: "deliveryStatus", value: del.status }))}
                                 tone={deliveryStatusTone(del.status)}
                               />
                             }
@@ -1187,14 +1205,19 @@ export function DocumentDetailScreen() {
                             <View key={payment.id} style={styles.paymentItem}>
                               <ListRow
                                 title={formatMoney(locale, payment.amount)}
-                                subtitle={`${formatDate(locale, payment.paidOn)} · ${t(enumKey("paymentMethod", payment.method))}${
+                                subtitle={`${formatDate({ locale, date: payment.paidOn })} · ${t(enumKey({ name: "paymentMethod", value: payment.method }))}${
                                   (payment.note ?? "") !== "" ? ` · ${payment.note}` : ""
                                 }`}
                                 {...(payment.taxDocument !== null
                                   ? {
                                       badge: (
                                         <Badge
-                                          label={t(enumKey("documentKind", "payment_tax_document"))}
+                                          label={t(
+                                            enumKey({
+                                              name: "documentKind",
+                                              value: "payment_tax_document",
+                                            }),
+                                          )}
                                           tone="info"
                                         />
                                       ),
@@ -1254,7 +1277,7 @@ export function DocumentDetailScreen() {
                               : t("documents.share.noViews")}
                             {doc.share.lastViewedAt !== null
                               ? ` · ${t("documents.detail.lastViewed", {
-                                  date: formatDateTime(locale, doc.share.lastViewedAt),
+                                  date: formatDateTime({ locale, instant: doc.share.lastViewedAt }),
                                 })}`
                               : ""}
                           </Text>
@@ -1325,8 +1348,8 @@ export function DocumentDetailScreen() {
                               {Arr.map(viewsPage.items, (ev) => (
                                 <ListRow
                                   key={ev.id}
-                                  title={t(enumKey("shareEvent", ev.kind))}
-                                  subtitle={`${t(enumKey("device", ev.device))} · ${formatDateTime(locale, ev.at)}`}
+                                  title={t(enumKey({ name: "shareEvent", value: ev.kind }))}
+                                  subtitle={`${t(enumKey({ name: "device", value: ev.device }))} · ${formatDateTime({ locale, instant: ev.at })}`}
                                 />
                               ))}
                             </Card>
@@ -1369,7 +1392,7 @@ export function DocumentDetailScreen() {
                             );
                             const parts = Arr.filter(
                               [
-                                formatDateTime(locale, entry.at),
+                                formatDateTime({ locale, instant: entry.at }),
                                 actorText,
                                 entry.reason !== null
                                   ? t("documents.history.unlockReason", { reason: entry.reason })

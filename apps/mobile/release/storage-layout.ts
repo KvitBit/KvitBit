@@ -263,10 +263,9 @@ export const latestRelease = (records: readonly ReleaseInfo[]): ReleaseInfo | un
   return latest;
 };
 
-// Preserve the SyntaxError and message exposed by the release CLI.
-const parseJson = (json: string): unknown =>
-  // @effect-diagnostics-next-line globalJson:off The release CLI exposes the native SyntaxError message for malformed stored JSON.
-  JSON.parse(json);
+const decodeJson = Schema.decodeResult(Schema.fromJsonString(Schema.Unknown));
+const parseJson = (json: string) =>
+  Result.getOrThrowWith(decodeJson(json), () => new SyntaxError("Invalid stored JSON"));
 
 const requireString = (obj: StoredFields, field: string): string => {
   const value = obj[field];
@@ -423,7 +422,6 @@ export const parseReleaseInfo = (json: string): ReleaseInfo => {
   const apkUrl = requireString(parsed, "apkUrl");
   const apkSha256 = assertSha256Hex(requireString(parsed, "apkSha256"));
   const sizeBytes = requireNonNegativeInt(parsed, "sizeBytes");
-  // biome-ignore lint/security/noSecrets: This names a public signing certificate fingerprint field.
   const signingCertSha256 = requireString(parsed, "signingCertSha256");
   const minAndroidSdk = requireNonNegativeInt(parsed, "minAndroidSdk");
   const obtainiumUrl = requireString(parsed, "obtainiumUrl");

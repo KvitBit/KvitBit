@@ -1,18 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import {
-  chmodSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-  // @effect-diagnostics-next-line nodeBuiltinImport:off The deployment fixtures stage and inspect shell files synchronously.
-} from "node:fs"; // The shell fixtures require POSIX modes and direct filesystem assertions.
-import { tmpdir } from "node:os";
 import { Credentials as GcpCredentials } from "@alchemy.run/gcp/Credentials";
 import { Providers as GcpProviders } from "@alchemy.run/gcp/Providers";
 import { Secret } from "@alchemy.run/gcp/SecretManager";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as Apply from "alchemy/Apply";
 import * as Output from "alchemy/Output";
 import * as Plan from "alchemy/Plan";
@@ -23,6 +13,7 @@ import * as State from "alchemy/State";
 import * as Arr from "effect/Array";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Order from "effect/Order";
@@ -85,6 +76,7 @@ import { declareServerService, serverServiceProps } from "../src/resources/serve
 import { parseDeployWorkflow } from "./deploy-workflow";
 import { runCommand, runSerial, systemPath } from "./process-fixture";
 
+const fs = await FileSystem.FileSystem.pipe(Effect.provide(BunFileSystem.layer), Effect.runPromise);
 const { join, resolve } = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
 const sha256Digest = /^sha256:[a-f0-9]{64}$/;
 const logFilterPattern = /httpRequest\.requestUrl=~"([^"]+)"/;
@@ -817,7 +809,7 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     );
   });
 
-  const makeRunnerSandbox = (sandbox: string) => {
+  const makeRunnerSandbox = async (sandbox: string) => {
     const config1 = sampleProdConfig({
       emailFrom: "Kvitbit <no-reply@kvitbit.cz>",
       secrets: defaultSecretBindings({
@@ -850,7 +842,8 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
     const runDir = join(sandbox, "run");
     const stateDir = join(sandbox, "state");
     const systemdDir = join(sandbox, "systemd");
-    for (const dir of [binDir, runDir, stateDir, systemdDir]) mkdirSync(dir);
+    for (const dir of [binDir, runDir, stateDir, systemdDir])
+      await Effect.runPromise(fs.makeDirectory(dir));
 
     // Rewrite /run/kvitbit and /etc/systemd/system to sandboxed dirs for hermetic execution
     const reconcileScript = Str.replaceAll(
@@ -858,32 +851,33 @@ describe("Pure-Alchemy Compute Engine runner pool (#908)", () => {
       systemdDir,
     )(Str.replaceAll("/run/kvitbit", runDir)(source));
     const scriptPath = join(sandbox, "reconcile-worker.sh");
-    writeFileSync(scriptPath, reconcileScript);
+    await Effect.runPromise(fs.writeFileString(scriptPath, reconcileScript));
     // Do NOT set +x: proves /bin/bash execution works even on noexec filesystems
-    chmodSync(scriptPath, 0o600);
+    await Effect.runPromise(fs.chmod(scriptPath, 0o600));
 
     const digest2 = `sha256:${Str.repeat(64)("b")}`;
     const ref1 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${SAMPLE_DIGEST}`;
     const ref2 = `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${digest2}`;
     const imageId1 = `sha256:${Str.repeat(64)("c")}`;
     const imageId2 = `sha256:${Str.repeat(64)("d")}`;
-    writeFileSync(join(stateDir, "target-ref"), ref1);
-    writeFileSync(join(stateDir, "target-digest"), SAMPLE_DIGEST);
-    writeFileSync(join(stateDir, "target-config"), configJson1);
-    writeFileSync(join(stateDir, "target-config-sha"), configSha1);
-    writeFileSync(join(stateDir, "attributes-etag"), "initial");
-    writeFileSync(join(stateDir, "fail-once"), "1");
-    writeFileSync(join(stateDir, "registry-ref"), ref1);
-    writeFileSync(join(stateDir, "registry-image-id"), imageId1);
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "target-ref"), ref1));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "target-digest"), SAMPLE_DIGEST));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config"), configJson1));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config-sha"), configSha1));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "attributes-etag"), "initial"));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "fail-once"), "1"));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "registry-ref"), ref1));
+    await Effect.runPromise(fs.writeFileString(join(stateDir, "registry-image-id"), imageId1));
 
     // Stub sleep (no-op for fast retry test)
-    writeFileSync(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n");
-    chmodSync(join(binDir, "sleep"), 0o755);
+    await Effect.runPromise(fs.writeFileString(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n"));
+    await Effect.runPromise(fs.chmod(join(binDir, "sleep"), 0o755));
 
     // Stub iptables (tracks whether rule is installed)
-    writeFileSync(
-      join(binDir, "iptables"),
-      `#!/bin/sh
+    await Effect.runPromise(
+      fs.writeFileString(
+        join(binDir, "iptables"),
+        `#!/bin/sh
 set -eu
 RULE_FILE="${stateDir}/iptables-rule"
 if [ "$1" = "-C" ]; then
@@ -896,13 +890,15 @@ elif [ "$1" = "-I" ]; then
 fi
 exit 1
 `,
+      ),
     );
-    chmodSync(join(binDir, "iptables"), 0o755);
+    await Effect.runPromise(fs.chmod(join(binDir, "iptables"), 0o755));
 
     // Stub curl (simulates metadata, transient failure on first metadata call, Secret Manager, and guest attributes PUT)
-    writeFileSync(
-      join(binDir, "curl"),
-      `#!/bin/sh
+    await Effect.runPromise(
+      fs.writeFileString(
+        join(binDir, "curl"),
+        `#!/bin/sh
 set -eu
 URL=""
 DATA=""
@@ -983,13 +979,15 @@ case "$URL" in
     ;;
 esac
 `,
+      ),
     );
-    chmodSync(join(binDir, "curl"), 0o755);
+    await Effect.runPromise(fs.chmod(join(binDir, "curl"), 0o755));
 
     // Stub docker
-    writeFileSync(
-      join(binDir, "docker"),
-      `#!/bin/sh
+    await Effect.runPromise(
+      fs.writeFileString(
+        join(binDir, "docker"),
+        `#!/bin/sh
 set -eu
 case "$1" in
   inspect)
@@ -1020,13 +1018,15 @@ case "$1" in
   *) exit 1 ;;
 esac
 `,
+      ),
     );
-    chmodSync(join(binDir, "docker"), 0o755);
+    await Effect.runPromise(fs.chmod(join(binDir, "docker"), 0o755));
 
     // Stub systemctl (activates target digest + config sha as running)
-    writeFileSync(
-      join(binDir, "systemctl"),
-      `#!/bin/sh
+    await Effect.runPromise(
+      fs.writeFileString(
+        join(binDir, "systemctl"),
+        `#!/bin/sh
 set -eu
 echo "systemctl:$*" >> "${stateDir}/log"
 if [ "$1" = "stop" ]; then
@@ -1041,8 +1041,9 @@ if [ "$1" = "start" ]; then
   printf '%s' "$KVITBIT_WORKER_CONFIG_SHA" > "${stateDir}/running-config-sha"
 fi
 `,
+      ),
     );
-    chmodSync(join(binDir, "systemctl"), 0o755);
+    await Effect.runPromise(fs.chmod(join(binDir, "systemctl"), 0o755));
 
     const env = { PATH: `${binDir}:${systemPath}` };
     const reconcile = () => runCommand({ command: ["/bin/bash", scriptPath], env });
@@ -1065,13 +1066,13 @@ fi
   };
 
   const withRunnerSandbox = async (
-    run: (fixture: ReturnType<typeof makeRunnerSandbox>) => Promise<void>,
+    run: (fixture: Awaited<ReturnType<typeof makeRunnerSandbox>>) => Promise<void>,
   ) => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-reconcile-"));
+    const sandbox = await Effect.runPromise(fs.makeTempDirectory({ prefix: "kvitbit-reconcile-" }));
     try {
-      await run(makeRunnerSandbox(sandbox));
+      await run(await makeRunnerSandbox(sandbox));
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   };
 
@@ -1092,72 +1093,108 @@ fi
         configJson2,
       }) => {
         // A legacy worker can have the expected labels and image with stale environment values.
-        writeFileSync(join(stateDir, "legacy-image-ref"), ref1);
-        writeFileSync(join(stateDir, "pulled-ref"), ref1);
-        writeFileSync(join(stateDir, "pulled-repo-digest"), ref1);
-        writeFileSync(join(stateDir, "pulled-image-id"), imageId1);
-        writeFileSync(join(stateDir, "running-image-id"), imageId1);
-        writeFileSync(join(stateDir, "running-digest"), digest1);
-        writeFileSync(join(stateDir, "running-config-sha"), configSha1);
-        writeFileSync(join(runDir, "worker.env"), "EMAIL_FROM=stale@example.invalid\n");
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "legacy-image-ref"), ref1));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "pulled-ref"), ref1));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "pulled-repo-digest"), ref1));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "pulled-image-id"), imageId1));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "running-image-id"), imageId1));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "running-digest"), digest1));
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "running-config-sha"), configSha1),
+        );
+        await Effect.runPromise(
+          fs.writeFileString(join(runDir, "worker.env"), "EMAIL_FROM=stale@example.invalid\n"),
+        );
 
         // The initial reconcile survives a transient request failure and replaces the legacy worker.
         expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId1);
-        expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest1);
-        expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha1);
-        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
-          `${digest1}|${configSha1}`,
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "running-image-id")))).toBe(
+          imageId1,
         );
-        const env1 = readFileSync(join(runDir, "worker.env"), "utf8");
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-digest"))),
+        ).toBe(digest1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-config-sha"))),
+        ).toBe(configSha1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-target"))),
+        ).toBe(`${digest1}|${configSha1}`);
+        const env1 = await Effect.runPromise(fs.readFileString(join(runDir, "worker.env")));
         expect(env1).toContain("DATABASE_URL_UNPOOLED=secret-val");
         expect(env1).toContain("EMAIL_FROM=Kvitbit <no-reply@kvitbit.cz>");
         expect(env1).not.toContain("KVITBIT_SMTP_URL=");
-        expect(readFileSync(join(stateDir, "iptables-rule"), "utf8")).toContain("10.42.0.0/20");
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "iptables-rule"))),
+        ).toContain("10.42.0.0/20");
 
-        const logAfterFirst = readFileSync(join(stateDir, "log"), "utf8");
+        const logAfterFirst = await Effect.runPromise(fs.readFileString(join(stateDir, "log")));
         expect(logAfterFirst).toContain("systemctl:start kvitbit-worker.service");
 
         // 2. Second reconcile with same digest AND same config is a no-op
         expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterFirst);
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "log")))).toBe(
+          logAfterFirst,
+        );
 
-        writeFileSync(join(stateDir, "target-config-sha"), configSha2);
-        writeFileSync(join(stateDir, "target-config"), configJson2);
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "target-config-sha"), configSha2),
+        );
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config"), configJson2));
         expect((await reconcile()).exitCode).toBe(0);
-        const env2 = readFileSync(join(runDir, "worker.env"), "utf8");
+        const env2 = await Effect.runPromise(fs.readFileString(join(runDir, "worker.env")));
         expect(env2).toContain("EMAIL_FROM=Billing <billing@kvitbit.cz>");
         expect(env2).toContain("KVITBIT_SMTP_URL=smtps://mailer.example:465");
-        const logAfterConfigUpdate = readFileSync(join(stateDir, "log"), "utf8");
+        const logAfterConfigUpdate = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "log")),
+        );
 
         // Image metadata updates must agree before the runner pulls anything.
-        const guestWritesAfterConfigUpdate = readFileSync(join(stateDir, "guest-writes"), "utf8");
-        const targetEnv2 = readFileSync(join(runDir, "worker-target.env"), "utf8");
-        writeFileSync(join(stateDir, "target-ref"), ref2);
+        const guestWritesAfterConfigUpdate = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "guest-writes")),
+        );
+        const targetEnv2 = await Effect.runPromise(
+          fs.readFileString(join(runDir, "worker-target.env")),
+        );
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-ref"), ref2));
         expect((await reconcile()).exitCode).toBe(1);
-        expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterConfigUpdate);
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "log")))).toBe(
+          logAfterConfigUpdate,
+        );
 
         // A successful pull still needs to report the requested registry digest.
-        writeFileSync(join(stateDir, "target-digest"), digest2);
-        writeFileSync(join(stateDir, "registry-image-id"), imageId2);
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-digest"), digest2));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "registry-image-id"), imageId2));
         expect((await reconcile()).exitCode).toBe(1);
-        expect(readFileSync(join(stateDir, "running-digest"), "utf8")).toBe(digest1);
-        expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId1);
-        expect(readFileSync(join(stateDir, "guest-writes"), "utf8")).toBe(
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "running-digest")))).toBe(
+          digest1,
+        );
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "running-image-id")))).toBe(
+          imageId1,
+        );
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "guest-writes")))).toBe(
           guestWritesAfterConfigUpdate,
         );
-        expect(readFileSync(join(runDir, "worker.env"), "utf8")).toBe(env2);
-        expect(readFileSync(join(runDir, "worker-target.env"), "utf8")).toBe(targetEnv2);
-
-        writeFileSync(join(stateDir, "registry-ref"), ref2);
-        expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "running-image-id"), "utf8")).toBe(imageId2);
-        expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest2);
-        expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha2);
-        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
-          `${digest2}|${configSha2}`,
+        expect(await Effect.runPromise(fs.readFileString(join(runDir, "worker.env")))).toBe(env2);
+        expect(await Effect.runPromise(fs.readFileString(join(runDir, "worker-target.env")))).toBe(
+          targetEnv2,
         );
-        const logAfterFourth = readFileSync(join(stateDir, "log"), "utf8");
+
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "registry-ref"), ref2));
+        expect((await reconcile()).exitCode).toBe(0);
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "running-image-id")))).toBe(
+          imageId2,
+        );
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-digest"))),
+        ).toBe(digest2);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-config-sha"))),
+        ).toBe(configSha2);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-target"))),
+        ).toBe(`${digest2}|${configSha2}`);
+        const logAfterFourth = await Effect.runPromise(fs.readFileString(join(stateDir, "log")));
         expect(logAfterFourth).toContain(`docker:pull:${ref2}`);
         expect(
           Arr.filter(
@@ -1173,55 +1210,87 @@ fi
     await withRunnerSandbox(
       async ({ reconcile, runDir, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
         expect((await reconcile()).exitCode).toBe(0);
-        const env1 = readFileSync(join(runDir, "worker.env"), "utf8");
-        const logAfterFirst = readFileSync(join(stateDir, "log"), "utf8");
+        const env1 = await Effect.runPromise(fs.readFileString(join(runDir, "worker.env")));
+        const logAfterFirst = await Effect.runPromise(fs.readFileString(join(stateDir, "log")));
 
         // A new config SHA can become visible while fetching its JSON still fails.
-        const guestWrites = readFileSync(join(stateDir, "guest-writes"), "utf8");
-        const configReads = readFileSync(join(stateDir, "config-reads"), "utf8");
-        const targetEnv1 = readFileSync(join(runDir, "worker-target.env"), "utf8");
-        writeFileSync(join(stateDir, "target-config-sha"), configSha2);
-        rmSync(join(stateDir, "target-config"));
+        const guestWrites = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "guest-writes")),
+        );
+        const configReads = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "config-reads")),
+        );
+        const targetEnv1 = await Effect.runPromise(
+          fs.readFileString(join(runDir, "worker-target.env")),
+        );
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "target-config-sha"), configSha2),
+        );
+        await Effect.runPromise(fs.remove(join(stateDir, "target-config")));
         expect((await reconcile()).exitCode).toBe(1);
-        expect(readFileSync(join(stateDir, "config-reads"), "utf8")).toBe(
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "config-reads")))).toBe(
           configReads + Str.repeat(6)("config fetch\n"),
         );
 
         // The expected SHA covers every response byte, including any trailing newline.
-        writeFileSync(join(stateDir, "target-config"), `${configJson2}\n`);
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "target-config"), `${configJson2}\n`),
+        );
         expect((await reconcile()).exitCode).toBe(1);
-        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
-        expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha1);
-        expect(readFileSync(join(stateDir, "guest-writes"), "utf8")).toBe(guestWrites);
-        expect(readFileSync(join(runDir, "worker.env"), "utf8")).toBe(env1);
-        expect(readFileSync(join(runDir, "worker-target.env"), "utf8")).toBe(targetEnv1);
-        expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterFirst);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "running-config-sha"))),
+        ).toBe(configSha1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-config-sha"))),
+        ).toBe(configSha1);
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "guest-writes")))).toBe(
+          guestWrites,
+        );
+        expect(await Effect.runPromise(fs.readFileString(join(runDir, "worker.env")))).toBe(env1);
+        expect(await Effect.runPromise(fs.readFileString(join(runDir, "worker-target.env")))).toBe(
+          targetEnv1,
+        );
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "log")))).toBe(
+          logAfterFirst,
+        );
 
         // The next tick applies the config-only rollout once its JSON is available.
-        writeFileSync(join(stateDir, "target-config"), configJson2);
-        writeFileSync(join(stateDir, "next-attributes-etag"), "changed-during-fetch");
-        const readsBeforeRecovery = readFileSync(join(stateDir, "config-reads"), "utf8");
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config"), configJson2));
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "next-attributes-etag"), "changed-during-fetch"),
+        );
+        const readsBeforeRecovery = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "config-reads")),
+        );
         expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "config-reads"), "utf8")).toBe(
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "config-reads")))).toBe(
           readsBeforeRecovery + Str.repeat(2)("config fetch\n"),
         );
-        expect(readFileSync(join(stateDir, "guest-active-digest"), "utf8")).toBe(digest1);
-        expect(readFileSync(join(stateDir, "guest-active-config-sha"), "utf8")).toBe(configSha2);
-        const env2 = readFileSync(join(runDir, "worker.env"), "utf8");
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-digest"))),
+        ).toBe(digest1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-config-sha"))),
+        ).toBe(configSha2);
+        const env2 = await Effect.runPromise(fs.readFileString(join(runDir, "worker.env")));
         expect(env2).toContain("EMAIL_FROM=Billing <billing@kvitbit.cz>");
         expect(env2).toContain("KVITBIT_SMTP_URL=smtps://mailer.example:465");
         expect(
           Arr.filter(
-            Str.split("\n")(readFileSync(join(stateDir, "log"), "utf8")),
+            Str.split("\n")(await Effect.runPromise(fs.readFileString(join(stateDir, "log")))),
             (l) => l === "systemctl:start kvitbit-worker.service",
           ).length,
         ).toBe(2);
-        const logAfterConfigUpdate = readFileSync(join(stateDir, "log"), "utf8");
-        expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(logAfterConfigUpdate);
-        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
-          `${digest1}|${configSha2}`,
+        const logAfterConfigUpdate = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "log")),
         );
+        expect((await reconcile()).exitCode).toBe(0);
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "log")))).toBe(
+          logAfterConfigUpdate,
+        );
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-target"))),
+        ).toBe(`${digest1}|${configSha2}`);
       },
     );
   }, 30_000);
@@ -1230,7 +1299,9 @@ fi
     await withRunnerSandbox(
       async ({ binDir, reconcile, stateDir, digest1, configSha1, configSha2, configJson2 }) => {
         const workflow = parseDeployWorkflow(
-          readFileSync(resolve(import.meta.dir, "../../../.github/workflows/deploy.yml"), "utf8"),
+          await Effect.runPromise(
+            fs.readFileString(resolve(import.meta.dir, "../../../.github/workflows/deploy.yml")),
+          ),
         );
         const verify = Option.getOrUndefined(
           Arr.findFirst(
@@ -1240,9 +1311,10 @@ fi
         )?.run;
         if (verify === undefined) throw new Error("Expected the runner verification step");
         const gcloud = join(binDir, "gcloud");
-        writeFileSync(
-          gcloud,
-          `#!/bin/sh
+        await Effect.runPromise(
+          fs.writeFileString(
+            gcloud,
+            `#!/bin/sh
 set -eu
 case "$3" in
   list) printf 'runner\\n' ;;
@@ -1254,8 +1326,9 @@ case "$3" in
   *) exit 1 ;;
 esac
 `,
+          ),
         );
-        chmodSync(gcloud, 0o755);
+        await Effect.runPromise(fs.chmod(gcloud, 0o755));
         const verifyRollout = () =>
           runCommand({
             command: ["bash", "-c", verify],
@@ -1269,39 +1342,55 @@ esac
           });
 
         expect((await reconcile()).exitCode).toBe(0);
-        const configJson1 = readFileSync(join(stateDir, "target-config"), "utf8");
-        writeFileSync(join(stateDir, "target-config"), configJson2);
-        writeFileSync(join(stateDir, "target-config-sha"), configSha2);
-        writeFileSync(join(stateDir, "fail-active-target-once"), "");
+        const configJson1 = await Effect.runPromise(
+          fs.readFileString(join(stateDir, "target-config")),
+        );
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config"), configJson2));
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "target-config-sha"), configSha2),
+        );
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "fail-active-target-once"), ""));
         const changed = await reconcile();
-        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha2);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "running-config-sha"))),
+        ).toBe(configSha2);
 
-        writeFileSync(join(stateDir, "target-config"), configJson1);
-        writeFileSync(join(stateDir, "target-config-sha"), configSha1);
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config"), configJson1));
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "target-config-sha"), configSha1),
+        );
         expect((await verifyRollout()).exitCode).toBe(1);
         expect(changed.exitCode).toBe(1);
-        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe("pending");
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-target"))),
+        ).toBe("pending");
         expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "running-config-sha"))),
+        ).toBe(configSha1);
         expect((await verifyRollout()).exitCode).toBe(0);
 
         // If invalidation fails, the current worker must remain running and acknowledged.
-        writeFileSync(join(stateDir, "target-config"), configJson2);
-        writeFileSync(join(stateDir, "target-config-sha"), configSha2);
-        writeFileSync(join(stateDir, "fail-invalidation"), "");
-        expect((await reconcile()).exitCode).toBe(1);
-        expect(readFileSync(join(stateDir, "running-config-sha"), "utf8")).toBe(configSha1);
-        expect(readFileSync(join(stateDir, "guest-active-target"), "utf8")).toBe(
-          `${digest1}|${configSha1}`,
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "target-config"), configJson2));
+        await Effect.runPromise(
+          fs.writeFileString(join(stateDir, "target-config-sha"), configSha2),
         );
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "fail-invalidation"), ""));
+        expect((await reconcile()).exitCode).toBe(1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "running-config-sha"))),
+        ).toBe(configSha1);
+        expect(
+          await Effect.runPromise(fs.readFileString(join(stateDir, "guest-active-target"))),
+        ).toBe(`${digest1}|${configSha1}`);
 
         // A later tick can confirm a running target after an acknowledgement write failure.
-        rmSync(join(stateDir, "fail-invalidation"));
-        writeFileSync(join(stateDir, "fail-active-target-once"), "");
+        await Effect.runPromise(fs.remove(join(stateDir, "fail-invalidation")));
+        await Effect.runPromise(fs.writeFileString(join(stateDir, "fail-active-target-once"), ""));
         expect((await reconcile()).exitCode).toBe(1);
-        const log = readFileSync(join(stateDir, "log"), "utf8");
+        const log = await Effect.runPromise(fs.readFileString(join(stateDir, "log")));
         expect((await reconcile()).exitCode).toBe(0);
-        expect(readFileSync(join(stateDir, "log"), "utf8")).toBe(log);
+        expect(await Effect.runPromise(fs.readFileString(join(stateDir, "log")))).toBe(log);
         expect((await verifyRollout()).exitCode).toBe(0);
       },
     );
@@ -1632,28 +1721,26 @@ describe("Pure-Alchemy Cloud DNS", () => {
 describe("Zero-Terraform enforcement", () => {
   const repoRoot = resolve(import.meta.dir, "../../..");
 
-  const collectFiles = (dir: string): Array<string> => {
+  const collectFiles = async (dir: string): Promise<Array<string>> => {
     const out: Array<string> = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name === "node_modules" || entry.name === ".git") {
-        continue;
-      }
-      const full = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        out.push(...collectFiles(full));
-      } else {
-        out.push(full);
-      }
+    for (const name of await Effect.runPromise(fs.readDirectory(dir))) {
+      if (name === "node_modules" || name === ".git") continue;
+      const full = join(dir, name);
+      const info = await Effect.runPromise(fs.lstat(full));
+      if (info.type === "Directory") out.push(...(await collectFiles(full)));
+      else out.push(full);
     }
     return out;
   };
 
-  test("contains zero .tf/.tfvars files and zero terraform CLI usage in infra/deploy artifacts", () => {
-    const infraFiles = collectFiles(join(repoRoot, "infra"));
+  test("contains zero .tf/.tfvars files and zero terraform CLI usage in infra/deploy artifacts", async () => {
+    const infraFiles = await collectFiles(join(repoRoot, "infra"));
     const tfFiles = Arr.filter(infraFiles, (file) => terraformFile.test(file));
     expect(tfFiles).toEqual([]);
 
-    const deployWorkflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
+    const deployWorkflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
     expect(Str.toLowerCase(deployWorkflow)).not.toContain("terraform");
     expect(Str.toLowerCase(deployWorkflow)).not.toContain("opentofu");
   });

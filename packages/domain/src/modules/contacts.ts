@@ -56,7 +56,6 @@ export class Contacts extends Context.Service<
   }
 >()("@kvitbit/domain/modules/contacts") {}
 
-// biome-ignore lint/security/noSecrets: This literal names the Price List Item Input brand.
 export const PriceListItemInput = Schema.Unknown.pipe(Schema.brand("PriceListItemInput"));
 export type PriceListItemInput = typeof PriceListItemInput.Type;
 /** Partly specified: only the revision used by save (existing) is fixed (open). */

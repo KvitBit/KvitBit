@@ -492,7 +492,7 @@ test("Biome enforces every GritQL rule and keeps its configured path boundaries"
       ),
     );
 
-    for (const config of ["biome.json", "packages/db/biome.json"]) {
+    for (const config of ["biome.jsonc", "packages/db/biome.json"]) {
       const target = path.join(scratch, config);
       yield* fs.makeDirectory(path.dirname(target), { recursive: true });
       yield* fs.copyFile(path.join(root, config), target);

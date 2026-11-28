@@ -6,7 +6,6 @@ import { solveAltchaChallenge } from "../page/public/_altcha-solver";
 const solveMessage = Schema.decodeUnknownEffect(AltchaChallenge);
 
 globalThis.onmessage = (event: MessageEvent) => {
-  // biome-ignore lint/plugin/no-direct-effect-runs: This module is the worker's entry point.
   Effect.runFork(
     solveMessage(event.data).pipe(
       Effect.flatMap(solveAltchaChallenge),

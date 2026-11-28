@@ -1,18 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-  // @effect-diagnostics-next-line nodeBuiltinImport:off The shell fixtures use synchronous POSIX file modes and cleanup.
-} from "node:fs"; // The shell fixtures require POSIX modes and direct filesystem assertions.
-import { tmpdir } from "node:os";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as Arr from "effect/Array";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Record from "effect/Record";
@@ -21,6 +12,7 @@ import * as Str from "effect/String";
 import { parseDeployWorkflow } from "./deploy-workflow";
 import { runCommand, runSerial, systemPath } from "./process-fixture";
 
+const fs = await FileSystem.FileSystem.pipe(Effect.provide(BunFileSystem.layer), Effect.runPromise);
 const { join, resolve } = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
 const repoRoot = resolve(import.meta.dir, "../../..");
 const entrypointPath = join(repoRoot, "docker/entrypoint.sh");
@@ -57,7 +49,9 @@ const decodeCompose = Schema.decodeUnknownEffect(Compose);
 
 describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
   test("exits 69 with clear stderr message when apps/server is absent", async () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-missing-"));
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-ep-missing-" }),
+    );
     try {
       const serverRes = await runEntrypoint(["server"], { KVITBIT_APP_ROOT: sandbox });
       expect(serverRes.exitCode).toBe(69);
@@ -67,22 +61,22 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       expect(workerRes.exitCode).toBe(69);
       expect(workerRes.stderr).toContain("apps/server/src/worker.ts");
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
   test("dispatches server, worker, and migrate to bun with expected entrypoints", async () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-ok-"));
+    const sandbox = await Effect.runPromise(fs.makeTempDirectory({ prefix: "kvitbit-ep-ok-" }));
     try {
       const serverDir = join(sandbox, "apps/server/src");
-      mkdirSync(serverDir, { recursive: true });
-      writeFileSync(join(serverDir, "main.ts"), "// main\n");
-      writeFileSync(join(serverDir, "worker.ts"), "// worker\n");
-      writeFileSync(join(serverDir, "migrate.ts"), "// migrate\n");
+      await Effect.runPromise(fs.makeDirectory(serverDir, { recursive: true }));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "main.ts"), "// main\n"));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "worker.ts"), "// worker\n"));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "migrate.ts"), "// migrate\n"));
 
       const fakeBun = join(sandbox, "fake-bun.sh");
-      writeFileSync(fakeBun, '#!/bin/sh\necho "FAKE_BUN:$*"\n');
-      chmodSync(fakeBun, 0o755);
+      await Effect.runPromise(fs.writeFileString(fakeBun, '#!/bin/sh\necho "FAKE_BUN:$*"\n'));
+      await Effect.runPromise(fs.chmod(fakeBun, 0o755));
 
       const serverRes = await runEntrypoint(["server"], {
         KVITBIT_APP_ROOT: sandbox,
@@ -140,7 +134,7 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       expect(migrateBundled.exitCode).toBe(0);
       expect(Str.trim(migrateBundled.stdout)).toBe(`FAKE_BUN:${join(serverDir, "migrate.ts")}`);
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
@@ -180,14 +174,18 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
   });
 
   test("migrate and reconcile require the bundled host, port, and database before using owner credentials", async () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-migrate-"));
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-ep-migrate-" }),
+    );
     try {
       const serverDir = join(sandbox, "apps/server/src");
-      mkdirSync(serverDir, { recursive: true });
-      writeFileSync(join(serverDir, "migrate.ts"), "// migrate\n");
+      await Effect.runPromise(fs.makeDirectory(serverDir, { recursive: true }));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "migrate.ts"), "// migrate\n"));
       const fakeBun = join(sandbox, "fake-bun.sh");
-      writeFileSync(fakeBun, '#!/bin/sh\nprintf "%s\\n" "$DATABASE_URL_UNPOOLED"\n');
-      chmodSync(fakeBun, 0o755);
+      await Effect.runPromise(
+        fs.writeFileString(fakeBun, '#!/bin/sh\nprintf "%s\\n" "$DATABASE_URL_UNPOOLED"\n'),
+      );
+      await Effect.runPromise(fs.chmod(fakeBun, 0o755));
 
       const bundledUrl = ownerDsn("postgres:5432/kvitbit");
       const ownerUrl = ownerDsn("postgres:5432/other");
@@ -245,8 +243,10 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
 
       const runtimeUrl = appDsn("postgres:5432/second_db");
       const fakePsql = join(sandbox, "psql");
-      writeFileSync(fakePsql, '#!/bin/sh\nprintf "%s\\n" "unexpected owner access"\n');
-      chmodSync(fakePsql, 0o755);
+      await Effect.runPromise(
+        fs.writeFileString(fakePsql, '#!/bin/sh\nprintf "%s\\n" "unexpected owner access"\n'),
+      );
+      await Effect.runPromise(fs.chmod(fakePsql, 0o755));
       await runSerial([{ DATABASE_URL: runtimeUrl }, { KVITBIT_RUNTIME_DATABASE_URL: runtimeUrl }])(
         async (runtime) => {
           const wrongDatabase = await runEntrypoint(["migrate"], {
@@ -275,15 +275,17 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
         },
       );
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 });
 
 describe("Self-hosting and CI deploy artifacts", () => {
-  test("Dockerfile includes static assets, Bun 1.4.2 multi-stage build, Chromium, non-root uid 10001, and tini entrypoint", () => {
-    const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
-    const dockerignore = readFileSync(join(repoRoot, ".dockerignore"), "utf8");
+  test("Dockerfile includes static assets, Bun 1.4.2 multi-stage build, Chromium, non-root uid 10001, and tini entrypoint", async () => {
+    const dockerfile = await Effect.runPromise(fs.readFileString(join(repoRoot, "Dockerfile")));
+    const dockerignore = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".dockerignore")),
+    );
 
     // Static assets (assets/brand) must be in Docker build context and copied before web/mobile builds
     const ignoredLines = Arr.filter(
@@ -314,12 +316,14 @@ describe("Self-hosting and CI deploy artifacts", () => {
   });
 
   test("docker-compose.yml separates migration owner credentials from DML-only app role, reconciles roles post-migration, and preserves DATABASE_URL_UNPOOLED (S5)", async () => {
-    const compose = readFileSync(join(repoRoot, "docker-compose.yml"), "utf8");
+    const compose = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, "docker-compose.yml")),
+    );
     const initScriptPath = join(repoRoot, "docker/postgres-init/01-create-app-role.sh");
     const reconcileScriptPath = join(repoRoot, "docker/reconcile-app-role.sh");
     const targetScriptPath = join(repoRoot, "docker/database-target.sh");
-    expect(existsSync(initScriptPath)).toBe(true);
-    expect(existsSync(reconcileScriptPath)).toBe(true);
+    expect(await Effect.runPromise(fs.exists(initScriptPath))).toBe(true);
+    expect(await Effect.runPromise(fs.exists(reconcileScriptPath))).toBe(true);
 
     await runSerial([initScriptPath, reconcileScriptPath, targetScriptPath])(async (scriptPath) => {
       const syntax = await runCommand({ command: ["sh", "-n", scriptPath] });
@@ -799,11 +803,11 @@ describe("Self-hosting and CI deploy artifacts", () => {
     );
   }, 45_000);
 
-  test("flake.nix has valid bun.nix, writable OCI storage dirs for uid 10001, and separate NixOS migration credentials", () => {
-    const flake = readFileSync(join(repoRoot, "flake.nix"), "utf8");
+  test("flake.nix has valid bun.nix, writable OCI storage dirs for uid 10001, and separate NixOS migration credentials", async () => {
+    const flake = await Effect.runPromise(fs.readFileString(join(repoRoot, "flake.nix")));
     const bunNixPath = join(repoRoot, "bun.nix");
-    expect(existsSync(bunNixPath)).toBe(true);
-    const bunNix = readFileSync(bunNixPath, "utf8");
+    expect(await Effect.runPromise(fs.exists(bunNixPath))).toBe(true);
+    const bunNix = await Effect.runPromise(fs.readFileString(bunNixPath));
     expect(bunNix).toContain("{ fetchurl }:");
     expect(bunNix).toContain("sha512-");
 
@@ -821,8 +825,10 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(flake).toContain("services.nginx = lib.mkIf cfg.nginx.enable");
   });
 
-  test(".github/workflows/deploy.yml enforces prod-only stage, bootstrap preflight, --yes deploy, optional secret flags, immutable attempt tags, runner digest check, and edge probing", () => {
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
+  test(".github/workflows/deploy.yml enforces prod-only stage, bootstrap preflight, --yes deploy, optional secret flags, immutable attempt tags, runner digest check, and edge probing", async () => {
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
     const parsed = parseDeployWorkflow(workflow);
     expect(parsed).toBeDefined();
 
@@ -909,7 +915,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
 
   test("feedback secret bootstrap can precede the first enabled token version", async () => {
     const workflow = parseDeployWorkflow(
-      readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8"),
+      await Effect.runPromise(fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml"))),
     );
     const steps = workflow.jobs.deploy.steps;
     const getStep = (name: string) =>
@@ -935,11 +941,14 @@ describe("Self-hosting and CI deploy artifacts", () => {
       expect(getStep(name)?.if).toContain("env.BOOTSTRAP_FEEDBACK_SECRET != 'true'");
     }
 
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-feedback-bootstrap-"));
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-feedback-bootstrap-" }),
+    );
     try {
-      writeFileSync(
-        join(sandbox, "gcloud"),
-        `#!/bin/sh
+      await Effect.runPromise(
+        fs.writeFileString(
+          join(sandbox, "gcloud"),
+          `#!/bin/sh
 set -eu
 case "$1 $2 $3" in
   'artifacts repositories describe') exit 0 ;;
@@ -953,15 +962,18 @@ case "$1 $2 $3" in
   *) exit 1 ;;
 esac
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
-      writeFileSync(
-        join(sandbox, "bunx"),
-        `#!/bin/sh
+      await Effect.runPromise(
+        fs.writeFileString(
+          join(sandbox, "bunx"),
+          `#!/bin/sh
 set -eu
 printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DIGEST" "$*"
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
       const run = (step: string, env: Record<string, string> = {}) => {
         const script = getStep(step)?.run;
@@ -1029,12 +1041,14 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       expect(conflicting.exitCode).toBe(1);
       expect(conflicting.stdout).toContain("Select only one");
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
   test("deploy.yml verifies readiness and both static mounts through the public Cloud Run URL", async () => {
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
     const parsed = parseDeployWorkflow(workflow);
     const script = Option.getOrUndefined(
       Arr.findFirst(
@@ -1126,7 +1140,9 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
   });
 
   test("deploy.yml normalizes secret flags and resets legacy runners that cannot confirm a verified target", async () => {
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
     const parsed = parseDeployWorkflow(workflow);
 
     const validateStep = Option.getOrUndefined(
@@ -1144,11 +1160,13 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
     expect(validateStep?.run).toBeDefined();
     expect(verifyStep?.run).toBeDefined();
 
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-deploy-yml-"));
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-deploy-yml-" }),
+    );
     try {
       // 1. Test boolean normalization step with YES / 1 / OFF and invalid value
       const ghEnv = join(sandbox, "github_env");
-      writeFileSync(ghEnv, "");
+      await Effect.runPromise(fs.writeFileString(ghEnv, ""));
       const baseVars = {
         KVITBIT_STAGE: "prod",
         BOOTSTRAP_FOUNDATION: "false",
@@ -1175,7 +1193,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         },
       });
       expect(normOk.exitCode).toBe(0);
-      const exported = readFileSync(ghEnv, "utf8");
+      const exported = await Effect.runPromise(fs.readFileString(ghEnv));
       expect(exported).toContain("KVITBIT_ENABLE_RESEND_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_SMTP_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET=false");
@@ -1194,18 +1212,19 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       // 2. Verify the rollout step requires the combined acknowledgement from the current script.
       const binDir = join(sandbox, "bin");
       const stateDir = join(sandbox, "state");
-      mkdirSync(binDir, { recursive: true });
-      mkdirSync(stateDir, { recursive: true });
+      await Effect.runPromise(fs.makeDirectory(binDir, { recursive: true }));
+      await Effect.runPromise(fs.makeDirectory(stateDir, { recursive: true }));
 
       const targetDigest = `sha256:${Str.repeat(64)("a")}`;
       const targetConfigSha = `sha256:${Str.repeat(64)("c")}`;
 
-      writeFileSync(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n");
-      chmodSync(join(binDir, "sleep"), 0o755);
+      await Effect.runPromise(fs.writeFileString(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n"));
+      await Effect.runPromise(fs.chmod(join(binDir, "sleep"), 0o755));
 
-      writeFileSync(
-        join(binDir, "gcloud"),
-        `#!/bin/sh
+      await Effect.runPromise(
+        fs.writeFileString(
+          join(binDir, "gcloud"),
+          `#!/bin/sh
 set -eu
 if [ "$1" = "compute" ] && [ "$2" = "instances" ] && [ "$3" = "list" ]; then
   printf 'kvitbit-prod-runner-0\\nkvitbit-prod-runner-1\\n'
@@ -1249,8 +1268,9 @@ if [ "$1" = "compute" ] && [ "$2" = "instances" ] && [ "$3" = "get-guest-attribu
 fi
 exit 1
 `,
+        ),
       );
-      chmodSync(join(binDir, "gcloud"), 0o755);
+      await Effect.runPromise(fs.chmod(join(binDir, "gcloud"), 0o755));
 
       const verifyRes = await runCommand({
         command: ["bash", "-c", verifyStep?.run ?? ""],
@@ -1269,11 +1289,11 @@ exit 1
       expect(verifyRes.stdout).toContain(
         `Verified runner kvitbit-prod-runner-1 is running digest=${targetDigest} config=${targetConfigSha}`,
       );
-      expect(Str.trim(readFileSync(join(stateDir, "resets"), "utf8"))).toBe(
+      expect(Str.trim(await Effect.runPromise(fs.readFileString(join(stateDir, "resets"))))).toBe(
         "reset:kvitbit-prod-runner-1",
       );
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 });

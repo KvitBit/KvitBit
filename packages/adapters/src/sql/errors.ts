@@ -45,13 +45,9 @@ export class NumberTaken extends Schema.TaggedError<
 export class NumberingExhausted extends Schema.TaggedError<
   NumberingExhausted,
   { readonly brand: unique symbol }
->()(
-  // biome-ignore lint/security/noSecrets: Public SQL error tag.
-  "NumberingExhausted",
-  {
-    seriesId: Schema.String,
-    period: Schema.String,
-    firstCounter: Schema.Finite,
-    attempts: Schema.Finite,
-  },
-) {}
+>()("NumberingExhausted", {
+  seriesId: Schema.String,
+  period: Schema.String,
+  firstCounter: Schema.Finite,
+  attempts: Schema.Finite,
+}) {}

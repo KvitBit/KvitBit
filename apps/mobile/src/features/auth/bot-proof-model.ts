@@ -10,17 +10,13 @@ import * as Effect from "effect/Effect";
 import type {
   BotProofState,
   FetchedChallenge,
-  SolveOptions,
-  SolveOutcome,
+  solveChallenge,
 } from "../../platform/altcha/bot-proof";
 import { runFeatureEffect } from "../ui-effect";
 
 export interface BotProofDeps {
   readonly fetchChallenge: (origin: string, scope: BotScope) => Promise<FetchedChallenge>;
-  readonly solveChallenge: (
-    challenge: Extract<FetchedChallenge, { readonly _tag: "Challenge" }>["challenge"],
-    options?: SolveOptions,
-  ) => Promise<SolveOutcome>;
+  readonly solveChallenge: typeof solveChallenge;
   readonly origin: string;
   readonly scope: BotScope;
   readonly onState: (state: BotProofState) => void;
@@ -95,7 +91,8 @@ export const makeBotProof = (deps: BotProofDeps): BotProofController => {
 
         setState({ _tag: "Solving", progress: 0 });
         const solved = yield* Effect.promise(() =>
-          deps.solveChallenge(fetched.challenge, {
+          deps.solveChallenge({
+            challenge: fetched.challenge,
             signal: controller.signal,
             onProgress: (progress) => {
               if (mySeq === runSeq && !controller.signal.aborted) {

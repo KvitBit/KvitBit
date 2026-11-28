@@ -97,7 +97,6 @@ const local = copy({
 });
 
 const OBTAINIUM_MARK_SVG =
-  // biome-ignore lint/security/noSecrets: This is the inline Android icon.
   '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" focusable="false" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/><path d="M9 14l3 3 3-3"/></svg>';
 
 const decodeRelease = HttpClientResponse.schemaBodyJson(ReleaseInfo);
@@ -232,7 +231,10 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     ],
                     [
                       local(ctx.locale, "releasedOn"),
-                      Format.formatDate(ctx.locale, Str.slice(0, 10)(release.releasedAt)),
+                      Format.formatDate({
+                        locale: ctx.locale,
+                        date: Str.slice(0, 10)(release.releasedAt),
+                      }),
                     ],
                     [local(ctx.locale, "minSdk"), `API ${release.minAndroidSdk}+`],
                   ]),

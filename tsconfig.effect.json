@@ -208,6 +208,80 @@
               }
             }
           },
+          {
+            "include": [
+              // Expo loads its configuration synchronously using Node's host filesystem and paths.
+              "apps/mobile/app.config.ts",
+              // Expo's manifest protocol uses Node RSA signing and certificate verification.
+              "apps/mobile/release/manifest-response.ts",
+              // Generate RSA keys independently to exercise the Expo wire signature.
+              "apps/mobile/release/manifest-response.test.ts",
+              // Node's Argon2 and PBKDF2 implementations are independent KDF oracles.
+              "apps/mobile/src/platform/altcha/bot-proof.test.ts",
+              // The Node HTTP adapter requires a Node server factory.
+              "apps/server/src/main.ts",
+              // Node-hosted Playwright starts a Bun process to render server markup.
+              "apps/web/e2e/smoke.spec.ts",
+              // Vite reads middleware assets on its Node host and resolves native paths.
+              "apps/web/vite.config.ts",
+              // Alchemy derives DNS resource names from a synchronous SHA-256 digest.
+              "infra/alchemy/src/resources/dns.ts",
+              // Alchemy derives rollout identifiers from a synchronous SHA-256 digest.
+              "infra/alchemy/src/resources/network.ts",
+              // The public key verifier uses constant-time comparison and secure bytes synchronously.
+              "packages/adapters/src/auth/api-key.ts",
+              // GCS signing uses a Node RSA private key.
+              "packages/adapters/src/blob/gcs-signed-url.ts",
+              // Node rmdir fails atomically on nonempty directories.
+              "packages/adapters/src/blob/local-disk.ts",
+              // Node SHA-256 independently checks stored content hashes.
+              "packages/adapters/test/blob/contract.ts",
+              // Node RSA verification independently checks GCS signatures.
+              "packages/adapters/test/blob/gcs-signed-url.test.ts",
+              // The CLI checks X.509 certificates and creates ephemeral verification keys.
+              "scripts/release/mobile-release.ts"
+            ],
+            "options": { "diagnosticSeverity": { "nodeBuiltinImport": "off" } }
+          },
+          {
+            // Effect UI defines App's callable signature and attaches runtime properties.
+            "include": ["apps/web/src/main.ts"],
+            "options": { "diagnosticSeverity": { "missingPipeableSignature": "off" } }
+          },
+          {
+            // Playwright emits real browser console events to probe feedback redaction.
+            "include": ["apps/web/e2e/feedback.spec.ts"],
+            "options": { "diagnosticSeverity": { "globalConsole": "off" } }
+          },
+          {
+            // Validate arrays from the Bun lockfile parser before Effect is installed.
+            "include": ["scripts/bun-lock-boundary.ts"],
+            "options": { "diagnosticSeverity": { "preferEffectArray": "off" } }
+          },
+          {
+            // Encode Nix and read its Bun lockfile inputs before Effect is installed.
+            "include": ["scripts/generate-bun-nix.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "globalJson": "off",
+                "preferEffectArray": "off",
+                "preferEffectRecord": "off",
+                "preferEffectString": "off"
+              }
+            }
+          },
+          {
+            // Populate Nix's tarball cache before Effect is installed.
+            "include": ["scripts/prepare-bun-tarball-cache.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "nodeBuiltinImport": "off",
+                "preferEffectArray": "off",
+                "preferEffectRecord": "off",
+                "preferEffectString": "off"
+              }
+            }
+          },
           // Metro inlines EXPO_PUBLIC values from direct process.env references.
           {
             "include": ["apps/mobile/src/config/env.ts"],

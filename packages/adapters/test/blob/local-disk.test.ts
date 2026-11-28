@@ -1,16 +1,4 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-  // @effect-diagnostics-next-line nodeBuiltinImport:off The fixture checks Node filesystem metadata and symlink behavior.
-} from "node:fs"; // Direct fixture operations and independent filesystem assertions.
-import { tmpdir } from "node:os";
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import { BlobStorage } from "@kvitbit/domain/ports";
 import * as Arr from "effect/Array";
@@ -26,9 +14,14 @@ import { LocalDiskBlobStorage } from "../../src/blob/index";
 import { makeLocalDiskBlobStorage } from "../../src/blob/local-disk";
 import { chunked, describeBlobStorageContract, endless, key, meta } from "./contract";
 
+const fixtureFs = await FileSystem.FileSystem.pipe(
+  Effect.provide(BunFileSystem.layer),
+  Effect.runPromise,
+);
 const { join } = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
-const base = mkdtempSync(join(tmpdir(), "kvitbit-blob-"));
-afterAll(() => rmSync(base, { recursive: true, force: true }));
+const hasProcFd = await Effect.runPromise(fixtureFs.exists("/proc/self/fd"));
+const base = await Effect.runPromise(fixtureFs.makeTempDirectory({ prefix: "kvitbit-blob-" }));
+afterAll(() => Effect.runPromise(fixtureFs.remove(base, { recursive: true, force: true })));
 let roots = 0;
 const freshRoot = () => join(base, `root-${roots++}`);
 
@@ -54,8 +47,10 @@ describe("LocalDiskBlobStorage on disk", () => {
     await withStore(root, (store) =>
       store.put(key("pdf/ws/doc/1/cs.pdf"), chunked("%PDF"), meta()),
     );
-    expect(readFileSync(join(root, "pdf/ws/doc/1/cs.pdf"), "utf8")).toBe("%PDF");
-    expect(readdirSync(join(root, ".partial"))).toEqual([]);
+    expect(
+      await Effect.runPromise(fixtureFs.readFileString(join(root, "pdf/ws/doc/1/cs.pdf"))),
+    ).toBe("%PDF");
+    expect(await Effect.runPromise(fixtureFs.readDirectory(join(root, ".partial")))).toEqual([]);
   });
 
   test("an oversized or failed put leaves no temp file and no target", async () => {
@@ -66,9 +61,9 @@ describe("LocalDiskBlobStorage on disk", () => {
         store.put(key("ws/broken"), Stream.concat(chunked("abc"), Stream.die("boom")), meta()),
       ),
     );
-    expect(existsSync(join(root, "ws/big"))).toBe(false);
-    expect(existsSync(join(root, "ws/broken"))).toBe(false);
-    expect(readdirSync(join(root, ".partial"))).toEqual([]);
+    expect(await Effect.runPromise(fixtureFs.exists(join(root, "ws/big")))).toBe(false);
+    expect(await Effect.runPromise(fixtureFs.exists(join(root, "ws/broken")))).toBe(false);
+    expect(await Effect.runPromise(fixtureFs.readDirectory(join(root, ".partial")))).toEqual([]);
   });
 
   test("interrupting an overwrite preserves the existing object and clears staging", async () => {
@@ -88,8 +83,8 @@ describe("LocalDiskBlobStorage on disk", () => {
         yield* Fiber.interrupt(upload);
       }),
     );
-    expect(readFileSync(join(root, target), "utf8")).toBe("old");
-    expect(readdirSync(join(root, ".partial"))).toEqual([]);
+    expect(await Effect.runPromise(fixtureFs.readFileString(join(root, target)))).toBe("old");
+    expect(await Effect.runPromise(fixtureFs.readDirectory(join(root, ".partial")))).toEqual([]);
   });
 
   test("get of a directory or of a path under a file is BlobMissing", async () => {
@@ -114,7 +109,7 @@ describe("LocalDiskBlobStorage on disk", () => {
         yield* store.delete(key("ws/dir"));
       }),
     );
-    expect(readFileSync(join(root, "ws/dir/file"), "utf8")).toBe("x");
+    expect(await Effect.runPromise(fixtureFs.readFileString(join(root, "ws/dir/file")))).toBe("x");
   });
 
   test("delete of a path under a file is a no-op", async () => {
@@ -125,7 +120,7 @@ describe("LocalDiskBlobStorage on disk", () => {
         yield* store.delete(key("ws/file/child"));
       }),
     );
-    expect(readFileSync(join(root, "ws/file"), "utf8")).toBe("x");
+    expect(await Effect.runPromise(fixtureFs.readFileString(join(root, "ws/file")))).toBe("x");
   });
 
   test("a put whose parent is a file fails with BlobUnavailable", async () => {
@@ -137,14 +132,14 @@ describe("LocalDiskBlobStorage on disk", () => {
       }),
     );
     expect(error._tag).toBe("BlobUnavailable");
-    expect(readdirSync(join(root, ".partial"))).toEqual([]);
+    expect(await Effect.runPromise(fixtureFs.readDirectory(join(root, ".partial")))).toEqual([]);
   });
 
   test("reads files placed by another writer, e.g. a restored backup", async () => {
     const root = freshRoot();
     await withStore(root, () => Effect.void);
     const restored = Str.repeat(30_000)("from backup");
-    writeFileSync(join(root, "restored"), restored);
+    await Effect.runPromise(fixtureFs.writeFileString(join(root, "restored"), restored));
     const text = await withStore(root, (store) =>
       Effect.flatMap(store.get(key("restored")), (stream) =>
         Stream.runCollect(stream).pipe(Effect.map((chunks) => Buffer.concat(chunks).toString())),
@@ -155,7 +150,7 @@ describe("LocalDiskBlobStorage on disk", () => {
 
   test("a root that cannot be created fails the layer with BlobUnavailable", async () => {
     const file = join(base, "not-a-dir");
-    writeFileSync(file, "");
+    await Effect.runPromise(fixtureFs.writeFileString(file, ""));
     const error = await BlobStorage.pipe(
       Effect.asVoid,
       Effect.provide(LocalDiskBlobStorage.layer({ root: file })),
@@ -166,19 +161,19 @@ describe("LocalDiskBlobStorage on disk", () => {
   });
 
   describe("symlinks below root are never followed", () => {
-    const setup = () => {
+    const setup = async () => {
       const root = freshRoot();
       const outside = join(base, `outside-${roots}`);
-      mkdirSync(outside, { recursive: true });
-      mkdirSync(root, { recursive: true });
-      writeFileSync(join(outside, "secret"), "outside");
-      symlinkSync(outside, join(root, "ws"));
-      symlinkSync(join(outside, "secret"), join(root, "link"));
+      await Effect.runPromise(fixtureFs.makeDirectory(outside, { recursive: true }));
+      await Effect.runPromise(fixtureFs.makeDirectory(root, { recursive: true }));
+      await Effect.runPromise(fixtureFs.writeFileString(join(outside, "secret"), "outside"));
+      await Effect.runPromise(fixtureFs.symlink(outside, join(root, "ws")));
+      await Effect.runPromise(fixtureFs.symlink(join(outside, "secret"), join(root, "link")));
       return { root, outside };
     };
 
     test("put, get and delete through a symlinked directory fail and touch nothing outside", async () => {
-      const { root, outside } = setup();
+      const { root, outside } = await setup();
       const errors = await withStore(root, (store) =>
         Effect.gen(function* () {
           return [
@@ -195,45 +190,55 @@ describe("LocalDiskBlobStorage on disk", () => {
         "BlobUnavailable",
         "BlobUnavailable",
       ]);
-      expect(readdirSync(outside).sort()).toEqual(["secret"]);
-      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
-      expect(readdirSync(join(root, ".partial"))).toEqual([]);
+      expect((await Effect.runPromise(fixtureFs.readDirectory(outside))).sort()).toEqual([
+        "secret",
+      ]);
+      expect(await Effect.runPromise(fixtureFs.readFileString(join(outside, "secret")))).toBe(
+        "outside",
+      );
+      expect(await Effect.runPromise(fixtureFs.readDirectory(join(root, ".partial")))).toEqual([]);
     });
 
     test("a symlinked object is refused on get; delete removes only the link", async () => {
-      const { root, outside } = setup();
+      const { root, outside } = await setup();
       const error = await withStore(root, (store) => Effect.flip(store.get(key("link"))));
       expect(error._tag).toBe("BlobUnavailable");
       await withStore(root, (store) => store.delete(key("link")));
-      expect(existsSync(join(root, "link"))).toBe(false);
-      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+      expect(await Effect.runPromise(fixtureFs.exists(join(root, "link")))).toBe(false);
+      expect(await Effect.runPromise(fixtureFs.readFileString(join(outside, "secret")))).toBe(
+        "outside",
+      );
     });
 
     test("delete removes a dangling or directory symlink by name", async () => {
-      const { root, outside } = setup();
+      const { root, outside } = await setup();
       await withStore(root, (store) => store.delete(key("ws")));
-      expect(existsSync(join(root, "ws"))).toBe(false);
-      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+      expect(await Effect.runPromise(fixtureFs.exists(join(root, "ws")))).toBe(false);
+      expect(await Effect.runPromise(fixtureFs.readFileString(join(outside, "secret")))).toBe(
+        "outside",
+      );
 
       const dangling = join(root, "dangling");
-      symlinkSync(join(outside, "absent"), dangling);
+      await Effect.runPromise(fixtureFs.symlink(join(outside, "absent"), dangling));
       await withStore(root, (store) => store.delete(key("dangling")));
-      expect(readdirSync(root)).not.toContain("dangling");
+      expect(await Effect.runPromise(fixtureFs.readDirectory(root))).not.toContain("dangling");
     });
 
     test("a put over a symlinked object replaces the link, not its target", async () => {
-      const { root, outside } = setup();
+      const { root, outside } = await setup();
       await withStore(root, (store) => store.put(key("link"), chunked("mine"), meta()));
-      expect(readFileSync(join(root, "link"), "utf8")).toBe("mine");
-      expect(readFileSync(join(outside, "secret"), "utf8")).toBe("outside");
+      expect(await Effect.runPromise(fixtureFs.readFileString(join(root, "link")))).toBe("mine");
+      expect(await Effect.runPromise(fixtureFs.readFileString(join(outside, "secret")))).toBe(
+        "outside",
+      );
     });
 
     test("a symlinked staging directory fails the layer", async () => {
       const root = freshRoot();
       const outside = join(base, `staging-${roots}`);
-      mkdirSync(outside, { recursive: true });
-      mkdirSync(root, { recursive: true });
-      symlinkSync(outside, join(root, ".partial"));
+      await Effect.runPromise(fixtureFs.makeDirectory(outside, { recursive: true }));
+      await Effect.runPromise(fixtureFs.makeDirectory(root, { recursive: true }));
+      await Effect.runPromise(fixtureFs.symlink(outside, join(root, ".partial")));
       const exit = await BlobStorage.pipe(
         Effect.asVoid,
         Effect.provide(LocalDiskBlobStorage.layer({ root })),
@@ -244,11 +249,13 @@ describe("LocalDiskBlobStorage on disk", () => {
 
     test("a root that is itself a symlink works", async () => {
       const real = freshRoot();
-      mkdirSync(real, { recursive: true });
+      await Effect.runPromise(fixtureFs.makeDirectory(real, { recursive: true }));
       const alias = join(base, `alias-${roots}`);
-      symlinkSync(real, alias);
+      await Effect.runPromise(fixtureFs.symlink(real, alias));
       await withStore(alias, (store) => store.put(key("ws/a"), chunked("via alias"), meta()));
-      expect(readFileSync(join(real, "ws/a"), "utf8")).toBe("via alias");
+      expect(await Effect.runPromise(fixtureFs.readFileString(join(real, "ws/a")))).toBe(
+        "via alias",
+      );
     });
   });
 
@@ -261,14 +268,14 @@ describe("LocalDiskBlobStorage on disk", () => {
       }),
     );
     expect(error._tag).toBe("BlobUnavailable");
-    expect(readFileSync(join(root, "ws/a/b"), "utf8")).toBe("child");
-    expect(readdirSync(join(root, ".partial"))).toEqual([]);
+    expect(await Effect.runPromise(fixtureFs.readFileString(join(root, "ws/a/b")))).toBe("child");
+    expect(await Effect.runPromise(fixtureFs.readDirectory(join(root, ".partial")))).toEqual([]);
   });
 
   test("download interruption waits for a pending read before releasing the file", async () => {
     const root = freshRoot();
-    mkdirSync(root);
-    writeFileSync(join(root, "object"), "body");
+    await Effect.runPromise(fixtureFs.makeDirectory(root));
+    await Effect.runPromise(fixtureFs.writeFileString(join(root, "object"), "body"));
 
     const result = await Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -317,14 +324,15 @@ describe("LocalDiskBlobStorage on disk", () => {
   });
 
   // Counts descriptors through procfs; hosts without it (macOS) skip this check.
-  describe.skipIf(!existsSync("/proc/self/fd"))("open descriptors", () => {
+  describe.skipIf(hasProcFd !== true)("open descriptors", () => {
     test("a download cancelled before or while reading leaves no descriptor open", async () => {
       const root = freshRoot();
-      const openFds = () => readdirSync("/proc/self/fd").length;
+      const openFds = async () =>
+        (await Effect.runPromise(fixtureFs.readDirectory("/proc/self/fd"))).length;
       await withStore(root, (store) =>
         store.put(key("ws/f"), chunked(Str.repeat(100_000)("a")), meta(10 ** 6)),
       );
-      const before = openFds();
+      const before = await openFds();
       await withStore(root, (store) =>
         Effect.gen(function* () {
           for (let i = 0; i < 20; i++) {
@@ -335,7 +343,7 @@ describe("LocalDiskBlobStorage on disk", () => {
           }
         }),
       );
-      expect(openFds()).toBeLessThanOrEqual(before);
+      expect(await openFds()).toBeLessThanOrEqual(before);
     });
   });
 });

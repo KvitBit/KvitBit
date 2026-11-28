@@ -1,5 +1,5 @@
 // Alchemy resource names and instance props need a synchronous SHA-256. Effect Digest is asynchronous.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Alchemy derives rollout identifiers synchronously on its Node host.
+
 import { createHash } from "node:crypto";
 import type {
   FirewallProps,

@@ -44,7 +44,6 @@ export const app = {
   "shell.workspaceSwitcher.current": "Aktuální pracovní prostor",
   "shell.workspaceSwitcher.create": "Vytvořit pracovní prostor",
   "shell.workspaceSwitcher.empty": "Žádný pracovní prostor neodpovídá.",
-  // biome-ignore lint/security/noSecrets: The literal is localized UI text.
   "shell.workspaceSwitcher.switching": "Přepínáme na {workspace}…",
   "shell.workspaceSwitcher.role": "Vaše role: {role}",
 

@@ -238,13 +238,13 @@ test("Knip checks changes to graph inputs referenced by its plugins", () => {
 
 test("rule and tool configuration changes run the lint fixtures, including deleted rules", () => {
   const input = { present: [], workspaces: [], tests: [], covered: new Set<string>() };
-  for (const file of ["biome.json", "packages/db/biome.json", "lint/removed.grit", "bun.lock"]) {
+  for (const file of ["biome.jsonc", "packages/db/biome.json", "lint/removed.grit", "bun.lock"]) {
     const plan = planChecks({ ...input, files: [file] });
     expect(plan).toContainEqual({ name: "Lint rule fixtures", args: ["run", "test:lint-rules"] });
   }
   const plan = planChecks({
     ...input,
-    files: ["biome.json", "lint/lint-rules.test.ts"],
+    files: ["biome.jsonc", "lint/lint-rules.test.ts"],
     tests: ["lint/lint-rules.test.ts"],
   });
   expect(plan).toContainEqual({

@@ -302,7 +302,6 @@ const CreateWorkspaceArgs = Schema.Struct({
 
 const LookupAresCmd = defineApiCommand({
   message: Message,
-  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
   name: "OnboardingLookupAres",
   args: { ico: Schema.String, seq: Remote.Seq },
   execute: ({ ico, seq }) =>
@@ -315,7 +314,6 @@ const LookupAresCmd = defineApiCommand({
 
 const CreateWorkspaceCmd = defineApiCommand({
   message: Message,
-  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
   name: "OnboardingCreateWorkspace",
   args: CreateWorkspaceArgs.fields,
   execute: Effect.fn("create workspace")(function* ({
@@ -430,7 +428,6 @@ const ApplySetupArgs = Schema.Struct({
 
 const ApplyOnboardingSetupCmd = defineApiCommand({
   message: Message,
-  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
   name: "OnboardingApplySetup",
   args: ApplySetupArgs.fields,
   execute: (args) => {
@@ -899,7 +896,6 @@ const updateWizard = (
         model: { ...model, submitSeq: seq, submitting: true, submitFailure: null, stepError: null },
         commands: [
           browserCommand(
-            // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
             "OnboardingRequestKeys",
             Effect.gen(function* () {
               const createKey =
@@ -1144,7 +1140,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ? [
                   banner(h, {
                     text: local(ctx.locale, "dissolvedWarning", {
-                      date: Format.formatDate(ctx.locale, aresData.terminatedOn),
+                      date: Format.formatDate({ locale: ctx.locale, date: aresData.terminatedOn }),
                     }),
                     tone: "error",
                   }),
@@ -1240,7 +1236,9 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   .attr("aria-pressed", String(model.taxRegime === regime ? "true" : "false"))
                   .on("click", Message.SelectedTaxRegime({ regime }))
                   .children([
-                    h.strong.children([t.translate(I18n.enumText("taxRegime", regime))]),
+                    h.strong.children([
+                      t.translate(I18n.enumText({ name: "taxRegime", value: regime })),
+                    ]),
                     h.span.class("kb-small").children([t.t(`enum.taxRegimeHint.${regime}`)]),
                   ]),
               ),
@@ -1437,7 +1435,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     mono(h, sampleNumber),
                     badge(
                       h,
-                      t.translate(I18n.enumText("taxRegime", model.taxRegime)),
+                      t.translate(I18n.enumText({ name: "taxRegime", value: model.taxRegime })),
                       isVat ? "proforma" : "outline",
                     ),
                   ]),

@@ -929,7 +929,6 @@ const runDraftWrite = (
     return {
       model: next,
       commands: [
-        // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
         mintRequestKeyCommand("MintDraftWriteKey", (requestKey) =>
           Message.GotRequestKey({ key: requestKey }),
         ),
@@ -1169,7 +1168,6 @@ const updateImpl = (
         commands: [
           apiCommand(
             Message,
-            // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
             "AresQuickAdd",
             (c) =>
               c.contacts.fromIco({
@@ -1812,31 +1810,43 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const vatOptions: ReadonlyArray<{ readonly value: VatTreatment; readonly label: string }> =
     regime === "vat_payer"
       ? [
-          { value: "standard", label: textOf(t, I18n.enumText("vatTreatment", "standard")) },
-          { value: "reduced", label: textOf(t, I18n.enumText("vatTreatment", "reduced")) },
+          {
+            value: "standard",
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "standard" })),
+          },
+          {
+            value: "reduced",
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "reduced" })),
+          },
           {
             value: "reverse_charge",
-            label: textOf(t, I18n.enumText("vatTreatment", "reverse_charge")),
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "reverse_charge" })),
           },
           {
             value: "exempt_intra_eu_goods",
-            label: textOf(t, I18n.enumText("vatTreatment", "exempt_intra_eu_goods")),
+            label: textOf(
+              t,
+              I18n.enumText({ name: "vatTreatment", value: "exempt_intra_eu_goods" }),
+            ),
           },
           {
             value: "outside_scope",
-            label: textOf(t, I18n.enumText("vatTreatment", "outside_scope")),
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "outside_scope" })),
           },
         ]
       : [
           {
             value: "outside_scope",
-            label: textOf(t, I18n.enumText("vatTreatment", "outside_scope")),
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "outside_scope" })),
           },
           ...(regime === "identified_person"
             ? [
                 {
                   value: "reverse_charge" as const,
-                  label: textOf(t, I18n.enumText("vatTreatment", "reverse_charge")),
+                  label: textOf(
+                    t,
+                    I18n.enumText({ name: "vatTreatment", value: "reverse_charge" }),
+                  ),
                 },
               ]
             : []),
@@ -2014,8 +2024,14 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   value: effective.language.value,
                   onChange: (value) => Message.ChangedLanguage({ value }),
                   options: [
-                    { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
-                    { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
+                    {
+                      value: "cs",
+                      label: textOf(t, I18n.enumText({ name: "locale", value: "cs" })),
+                    },
+                    {
+                      value: "en",
+                      label: textOf(t, I18n.enumText({ name: "locale", value: "en" })),
+                    },
                   ],
                 }),
               ]),
@@ -2036,19 +2052,22 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   options: [
                     {
                       value: "bank_transfer",
-                      label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+                      label: textOf(
+                        t,
+                        I18n.enumText({ name: "paymentMethod", value: "bank_transfer" }),
+                      ),
                     },
                     {
                       value: "cash",
-                      label: textOf(t, I18n.enumText("paymentMethod", "cash")),
+                      label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "cash" })),
                     },
                     {
                       value: "card",
-                      label: textOf(t, I18n.enumText("paymentMethod", "card")),
+                      label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "card" })),
                     },
                     {
                       value: "other",
-                      label: textOf(t, I18n.enumText("paymentMethod", "other")),
+                      label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "other" })),
                     },
                   ],
                 }),
@@ -2114,8 +2133,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ...(retainedSymbol !== undefined
                   ? { error: txt(locale, "variableSymbolRetained", { symbol: retainedSymbol }) }
                   : model.savedDoc !== null
-                    ? // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
-                      { hint: txt(locale, "variableSymbolUnchanged") }
+                    ? { hint: txt(locale, "variableSymbolUnchanged") }
                     : {}),
                 mono: true,
               }),
@@ -2206,12 +2224,10 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ? [
                     select(h, {
                       id: "editor-add-pricelist",
-                      // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
                       label: txt(locale, "addFromPriceList"),
                       value: "",
                       onChange: (itemId) => Message.AddedPriceListItem({ itemId }),
                       options: [
-                        // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
                         { value: "", label: txt(locale, "addFromPriceList") },
                         ...Arr.map(data.priceList, (p) => ({
                           value: p.id,
@@ -2319,7 +2335,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       cardTitle(h, txt(locale, "previewTitle"), [
         badge(
           h,
-          textOf(t, I18n.enumText("documentKind", model.kind)),
+          textOf(t, I18n.enumText({ name: "documentKind", value: model.kind })),
           model.kind === "proforma" ? "proforma" : "outline",
         ),
       ]),

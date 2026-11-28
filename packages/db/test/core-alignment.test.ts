@@ -1,19 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-// Bun uses Node's synchronous filesystem APIs to stage the migration tree.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Stage the migration directory synchronously before constructing the PGlite fixture.
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-// @effect-diagnostics-next-line nodeBuiltinImport:off Build native paths for the PGlite migrator.
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 // The core record alignment migration (#451, #479, #557) is applied on top of a database that
 // already holds rows from the init migration, as it would be in a deployed install.
-const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
+const { fs, path } = await Effect.all(
+  { fs: FileSystem.FileSystem, path: Path.Path },
+  { concurrency: 1 },
+).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
+const migrationsFolder = path.resolve(import.meta.dir, "../drizzle");
 const INIT = "20261123175822_init";
 
 const ws = "0190a000-0000-7000-8000-0000000002a0";
@@ -37,8 +38,8 @@ const rows = async <T>(sql: string, params: ReadonlyArray<unknown> = []): Promis
   (await client.query<T>(sql, [...params])).rows;
 
 beforeAll(async () => {
-  initOnly = mkdtempSync(join(tmpdir(), "kvitbit-db-init-"));
-  cpSync(join(migrationsFolder, INIT), join(initOnly, INIT), { recursive: true });
+  initOnly = await Effect.runPromise(fs.makeTempDirectory({ prefix: "kvitbit-db-init-" }));
+  await Effect.runPromise(fs.copy(path.join(migrationsFolder, INIT), path.join(initOnly, INIT)));
   client = new PGlite();
   await migrate(drizzle({ client }), { migrationsFolder: initOnly });
   await client.exec(`
@@ -76,7 +77,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client?.close();
-  if (initOnly !== undefined) rmSync(initOnly, { recursive: true, force: true });
+  if (initOnly !== undefined)
+    await Effect.runPromise(fs.remove(initOnly, { recursive: true, force: true }));
 });
 
 describe("core record alignment migration", () => {

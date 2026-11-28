@@ -115,7 +115,6 @@ const preConnectCodes = new Set([
   "ENETUNREACH",
   "UND_ERR_CONNECT_TIMEOUT",
   "ConnectionRefused",
-  // biome-ignore lint/security/noSecrets: Bun fetch error code for a socket it could not open.
   "FailedToOpenSocket",
   "DNSError",
   "CERT_HAS_EXPIRED",

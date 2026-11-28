@@ -1,5 +1,6 @@
 import type { ExportFormat, ReportGroupBy } from "@kvitbit/api-contract";
 import type { ReportKind } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { describeError } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
 import type { Period } from "@kvitbit/ui-port/view-models";
@@ -77,16 +78,18 @@ export function ReportsScreen(props: {
     : undefined;
 
   const remote = useRemote(
-    (client) =>
-      client.reports.run({
-        params: { workspaceId: workspace.id, report: props.report },
-        query: {
-          from: range.from,
-          to: range.to,
-          groupBy: effectiveGroupBy,
-        },
-      }),
-    [workspace.id, props.report, range.from, range.to, effectiveGroupBy],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.reports.run({
+          params: { workspaceId: workspace.id, report: props.report },
+          query: {
+            from: range.from,
+            to: range.to,
+            groupBy: effectiveGroupBy,
+          },
+        }),
+      [workspace.id, props.report, range.from, range.to, effectiveGroupBy],
+    ),
   );
 
   const selectReport = useCallback(
@@ -326,7 +329,7 @@ export function ReportsScreen(props: {
                       <ListRow
                         key={doc.id}
                         title={doc.number ?? doc.id}
-                        subtitle={`${doc.contact.name}${doc.dueOn !== null ? ` · ${formatDate(locale, doc.dueOn)}` : ""}`}
+                        subtitle={`${doc.contact.name}${doc.dueOn !== null ? ` · ${formatDate({ locale, date: doc.dueOn })}` : ""}`}
                         trailing={formatMoney(locale, doc.outstandingCzk)}
                         {...(doc.currency !== "CZK"
                           ? { trailingSub: formatMoney(locale, doc.outstanding) }
@@ -477,7 +480,7 @@ export function ReportsScreen(props: {
               {period}
             </Text>
             <Text variant="meta" color="onSurfaceVariant" numeric>
-              {formatDate(locale, range.from)} – {formatDate(locale, range.to)}
+              {formatDate({ locale, date: range.from })} – {formatDate({ locale, date: range.to })}
             </Text>
           </View>
           <IconButton

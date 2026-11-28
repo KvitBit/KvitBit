@@ -1,6 +1,7 @@
 import type { RecordPaymentInput } from "@kvitbit/api-contract";
 import type { ExpenseId, PaymentId, PaymentMethod, VatTreatment } from "@kvitbit/domain/contract";
 import { CurrencyCode, IsoDate, MoneyMath } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { describeError, idempotencyHeaders, ifMatchHeaders, UiError } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney, parseIsoDate } from "@kvitbit/ui-port/format";
 import * as Arr from "effect/Array";
@@ -119,18 +120,25 @@ export function ExpenseDetailScreen(props: {
   const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
 
   const detailRemote = useRemote(
-    expenseId === null
-      ? null
-      : (client) => client.expenses.get({ params: { workspaceId: workspace.id, expenseId } }),
-    [workspace.id, expenseId],
+    useMemo(
+      () =>
+        expenseId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              client.expenses.get({ params: { workspaceId: workspace.id, expenseId } }),
+      [workspace.id, expenseId],
+    ),
   );
 
   const paymentsRemote = useRemote(
-    expenseId === null
-      ? null
-      : (client) =>
-          client.payments.listForExpense({ params: { workspaceId: workspace.id, expenseId } }),
-    [workspace.id, expenseId],
+    useMemo(
+      () =>
+        expenseId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              client.payments.listForExpense({ params: { workspaceId: workspace.id, expenseId } }),
+      [workspace.id, expenseId],
+    ),
   );
 
   const loadedDetail = useMemo(
@@ -914,12 +922,13 @@ export function ExpenseDetailScreen(props: {
                 )}
                 {detail.issuedOn === null ? null : (
                   <Text variant="bodyMedium" color="onSurfaceVariant">
-                    {t("expenses.editor.issueDate")}: {formatDate(locale, detail.issuedOn)}
+                    {t("expenses.editor.issueDate")}:{" "}
+                    {formatDate({ locale, date: detail.issuedOn })}
                   </Text>
                 )}
                 {detail.dueOn === null ? null : (
                   <Text variant="bodyMedium" color="onSurfaceVariant">
-                    {t("expenses.editor.dueDate")}: {formatDate(locale, detail.dueOn)}
+                    {t("expenses.editor.dueDate")}: {formatDate({ locale, date: detail.dueOn })}
                   </Text>
                 )}
                 {detail.category === null ? null : (
@@ -1033,7 +1042,7 @@ export function ExpenseDetailScreen(props: {
                                   {formatMoney(locale, p.amount)}
                                 </Text>
                                 <Text variant="meta" color="onSurfaceVariant">
-                                  {formatDate(locale, p.paidOn)} ·{" "}
+                                  {formatDate({ locale, date: p.paidOn })} ·{" "}
                                   {t(`enum.paymentMethod.${p.method}`)}
                                 </Text>
                                 {p.note === null ? null : <Text variant="bodySmall">{p.note}</Text>}

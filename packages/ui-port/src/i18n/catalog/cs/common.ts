@@ -66,19 +66,15 @@ export const common = {
   "common.action.skip": "Přeskočit",
   "common.action.more": "Více",
 
-  // biome-ignore lint/security/noSecrets: The literal is localized UI text.
   "common.state.loading": "Načítání…",
   "common.state.saving": "Ukládání…",
   "common.state.saved": "Uloženo",
   "common.state.savedAt": "Uloženo v {time}",
   "common.state.unsaved": "Neuložené změny",
   "common.state.saveFailed": "Uložení se nezdařilo",
-  // biome-ignore lint/security/noSecrets: The literal is localized UI text.
   "common.state.sending": "Odesílání…",
-  // biome-ignore lint/security/noSecrets: The literal is localized UI text.
   "common.state.uploading": "Nahrávání…",
   "common.state.uploadingPercent": "Nahrávání {percent} %",
-  // biome-ignore lint/security/noSecrets: The literal is localized UI text.
   "common.state.processing": "Zpracování…",
   "common.state.offline": "Offline",
   "common.state.offlineBanner": "Jste offline. Změny se synchronizují po obnovení připojení.",

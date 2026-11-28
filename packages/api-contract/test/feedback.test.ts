@@ -4,7 +4,6 @@ import { redactFeedbackUrls } from "../src/index";
 test("redacts absolute and root-relative document share URLs inside feedback", () => {
   expect(
     redactFeedbackUrls(
-      // biome-ignore lint/security/noSecrets: Simulated share links for the redaction test.
       'Open <https://kvitbit.test/i/v1.comment-secret?download=private#preview> or "/s/v1.relative-secret/pdf"',
     ),
   ).toBe('Open <[redacted]> or "[redacted]"');

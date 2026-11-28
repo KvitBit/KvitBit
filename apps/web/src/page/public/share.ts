@@ -125,7 +125,6 @@ const FetchShare = defineApiCommand({
 
 const CopyShare = defineApiCommand({
   message: Message,
-  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
   name: "PublicShareCopy",
   args: { value: Schema.String },
   execute: ({ value }) => copyToClipboard(value, (ok) => Message.CopiedValue({ ok })),
@@ -193,7 +192,7 @@ const titleImpl = (model: Model, ctx: PageContext): string => {
   const doc = Remote.dataOf(model.doc);
   const t = translator(ctx.locale);
   if (doc === undefined) return t.t("share.view.gone.title");
-  const kind = t.translate(I18n.enumText("documentKind", doc.kind));
+  const kind = t.translate(I18n.enumText({ name: "documentKind", value: doc.kind }));
   return t.t("share.view.title", { kind, number: doc.number });
 };
 
@@ -286,9 +285,9 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const contactIco = contact?.ico ?? "";
   const contactDic = contact?.dic ?? "";
   const lines = Arr.map(doc.lines, (raw, i) => ({ raw, parsed: parseLine(raw), key: `l-${i}` }));
-  const kindLabel = t.translate(I18n.enumText("documentKind", doc.kind));
-  const settlementLabel = t.translate(I18n.enumText("settlement", doc.settlement));
-  const statusLabel = t.translate(I18n.enumText("documentStatus", doc.status));
+  const kindLabel = t.translate(I18n.enumText({ name: "documentKind", value: doc.kind }));
+  const settlementLabel = t.translate(I18n.enumText({ name: "settlement", value: doc.settlement }));
+  const statusLabel = t.translate(I18n.enumText({ name: "documentStatus", value: doc.status }));
   const amountDueDisplay = Format.moneyDisplay(ctx.locale, {
     amount: doc.amountDue.amount,
     currency: doc.amountDue.currency,
@@ -363,19 +362,19 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             h.div.class("kb-row kb-small kb-muted").children([
               h.span.children([
                 t.t("share.view.issuedOn", {
-                  date: Format.formatDate(ctx.locale, doc.dates.issuedOn),
+                  date: Format.formatDate({ locale: ctx.locale, date: doc.dates.issuedOn }),
                 }),
               ]),
               ...(doc.dates.taxableSupplyOn !== null
                 ? [
                     h.span.children([
-                      `${local(ctx.locale, "taxableSupply")}: ${Format.formatDate(ctx.locale, doc.dates.taxableSupplyOn)}`,
+                      `${local(ctx.locale, "taxableSupply")}: ${Format.formatDate({ locale: ctx.locale, date: doc.dates.taxableSupplyOn })}`,
                     ]),
                   ]
                 : []),
               h.span.children([
                 t.t("share.view.dueOn", {
-                  date: Format.formatDate(ctx.locale, doc.dates.dueOn),
+                  date: Format.formatDate({ locale: ctx.locale, date: doc.dates.dueOn }),
                 }),
               ]),
             ]),
@@ -383,7 +382,10 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ? [
                   h.span.class("kb-footnote").children([
                     local(ctx.locale, "updatedOn", {
-                      date: Format.formatDate(ctx.locale, Str.slice(0, 10)(doc.updatedAt)),
+                      date: Format.formatDate({
+                        locale: ctx.locale,
+                        date: Str.slice(0, 10)(doc.updatedAt),
+                      }),
                     }),
                   ]),
                 ]
@@ -429,12 +431,16 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           paymentQrView(
                             h,
                             doc.paymentQr.payload,
-                            t.translate(I18n.enumText("qrFormat", doc.paymentQr.format)),
+                            t.translate(
+                              I18n.enumText({ name: "qrFormat", value: doc.paymentQr.format }),
+                            ),
                           ),
                           h.span
                             .class("kb-small")
                             .children([
-                              t.translate(I18n.enumText("qrFormat", doc.paymentQr.format)),
+                              t.translate(
+                                I18n.enumText({ name: "qrFormat", value: doc.paymentQr.format }),
+                              ),
                             ]),
                           h.span.class("kb-footnote").children([t.t("share.view.scanHint")]),
                         ]),
@@ -540,7 +546,11 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             numeric: true,
             cell: (r) =>
               r.parsed !== undefined
-                ? Format.formatQuantity(ctx.locale, r.parsed.quantity, r.parsed.unit ?? undefined)
+                ? Format.formatQuantity({
+                    locale: ctx.locale,
+                    value: r.parsed.quantity,
+                    unit: r.parsed.unit ?? undefined,
+                  })
                 : "",
           },
           {

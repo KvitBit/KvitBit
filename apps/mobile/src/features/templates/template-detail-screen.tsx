@@ -6,6 +6,7 @@ import {
   type TemplateId,
   type VatTreatment,
 } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-port/api";
 import { formatDate } from "@kvitbit/ui-port/format";
 import * as Arr from "effect/Array";
@@ -113,27 +114,36 @@ export function TemplateDetailScreen(props: {
   const [actionBusy, setActionBusy] = useState(false);
 
   const templateRemote = useRemote(
-    templateId === null
-      ? null
-      : (client) => client.templates.get({ params: { workspaceId: workspace.id, templateId } }),
-    [workspace.id, templateId],
+    useMemo(
+      () =>
+        templateId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              client.templates.get({ params: { workspaceId: workspace.id, templateId } }),
+      [workspace.id, templateId],
+    ),
   );
 
   const contactsRemote = useRemote(
-    (client) =>
-      client.contacts.search({ params: { workspaceId: workspace.id }, query: { limit: 50 } }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.contacts.search({ params: { workspaceId: workspace.id }, query: { limit: 50 } }),
+      [workspace.id],
+    ),
   );
 
   const runsRemote = useRemote(
-    templateId === null || tab !== "runs"
-      ? null
-      : (client) =>
-          client.templates.runs({
-            params: { workspaceId: workspace.id, templateId },
-            query: { limit: 30 },
-          }),
-    [workspace.id, templateId, tab],
+    useMemo(
+      () =>
+        templateId === null || tab !== "runs"
+          ? null
+          : (client: KvitbitApiClient) =>
+              client.templates.runs({
+                params: { workspaceId: workspace.id, templateId },
+                query: { limit: 30 },
+              }),
+      [workspace.id, templateId, tab],
+    ),
   );
 
   const loaded: TemplateViewData | null =
@@ -707,7 +717,7 @@ export function TemplateDetailScreen(props: {
           {tpl.schedule?.nextOccurrence !== undefined && tpl.schedule?.nextOccurrence !== null ? (
             <Text variant="meta" color="onSurfaceVariant">
               {t("templates.list.nextRun", {
-                date: formatDate(locale, tpl.schedule.nextOccurrence),
+                date: formatDate({ locale, date: tpl.schedule.nextOccurrence }),
               })}
             </Text>
           ) : null}
@@ -771,7 +781,7 @@ export function TemplateDetailScreen(props: {
             </Text>
             {Arr.map(previewDates, (d) => (
               <Text key={d} variant="bodyMedium" numeric>
-                {formatDate(locale, d)}
+                {formatDate({ locale, date: d })}
               </Text>
             ))}
           </Card>
@@ -824,7 +834,7 @@ export function TemplateDetailScreen(props: {
               return (
                 <ListRow
                   key={`${run.occurrence}-${run.at}`}
-                  title={formatDate(locale, run.occurrence)}
+                  title={formatDate({ locale, date: run.occurrence })}
                   subtitle={
                     doc !== null
                       ? t("templates.runs.issued", { number: doc.number })

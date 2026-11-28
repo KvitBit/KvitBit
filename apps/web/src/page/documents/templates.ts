@@ -818,7 +818,6 @@ const updateImpl = (
         ? {
             model: { ...model, busy: true, formError: null, pendingUse: { templateId, key } },
             commands: [
-              // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
               mintRequestKeyCommand("MintTemplateUseKey", (requestKey) =>
                 Message.GotTemplateUseKey({ key: requestKey }),
               ),
@@ -1058,14 +1057,26 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const runs = loaded?.runs ?? [];
 
   const vatOptions: ReadonlyArray<{ readonly value: VatTreatment; readonly label: string }> = [
-    { value: "standard", label: textOf(t, I18n.enumText("vatTreatment", "standard")) },
-    { value: "reduced", label: textOf(t, I18n.enumText("vatTreatment", "reduced")) },
-    { value: "reverse_charge", label: textOf(t, I18n.enumText("vatTreatment", "reverse_charge")) },
+    {
+      value: "standard",
+      label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "standard" })),
+    },
+    {
+      value: "reduced",
+      label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "reduced" })),
+    },
+    {
+      value: "reverse_charge",
+      label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "reverse_charge" })),
+    },
     {
       value: "exempt_intra_eu_goods",
-      label: textOf(t, I18n.enumText("vatTreatment", "exempt_intra_eu_goods")),
+      label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "exempt_intra_eu_goods" })),
     },
-    { value: "outside_scope", label: textOf(t, I18n.enumText("vatTreatment", "outside_scope")) },
+    {
+      value: "outside_scope",
+      label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "outside_scope" })),
+    },
   ];
 
   const tabBar = isNew
@@ -1110,8 +1121,14 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           value: model.kind,
           onChange: (value) => Message.ChangedKind({ value }),
           options: [
-            { value: "invoice", label: textOf(t, I18n.enumText("documentKind", "invoice")) },
-            { value: "proforma", label: textOf(t, I18n.enumText("documentKind", "proforma")) },
+            {
+              value: "invoice",
+              label: textOf(t, I18n.enumText({ name: "documentKind", value: "invoice" })),
+            },
+            {
+              value: "proforma",
+              label: textOf(t, I18n.enumText({ name: "documentKind", value: "proforma" })),
+            },
           ],
         }),
         selectField(h, {
@@ -1151,11 +1168,20 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           options: [
             {
               value: "bank_transfer",
-              label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+              label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "bank_transfer" })),
             },
-            { value: "cash", label: textOf(t, I18n.enumText("paymentMethod", "cash")) },
-            { value: "card", label: textOf(t, I18n.enumText("paymentMethod", "card")) },
-            { value: "other", label: textOf(t, I18n.enumText("paymentMethod", "other")) },
+            {
+              value: "cash",
+              label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "cash" })),
+            },
+            {
+              value: "card",
+              label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "card" })),
+            },
+            {
+              value: "other",
+              label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "other" })),
+            },
           ],
         }),
       ]),
@@ -1282,9 +1308,18 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.cadenceUnit,
                 onChange: (value) => Message.ChangedCadenceUnit({ value }),
                 options: [
-                  { value: "weeks", label: textOf(t, I18n.enumText("cadenceUnit", "weeks")) },
-                  { value: "months", label: textOf(t, I18n.enumText("cadenceUnit", "months")) },
-                  { value: "years", label: textOf(t, I18n.enumText("cadenceUnit", "years")) },
+                  {
+                    value: "weeks",
+                    label: textOf(t, I18n.enumText({ name: "cadenceUnit", value: "weeks" })),
+                  },
+                  {
+                    value: "months",
+                    label: textOf(t, I18n.enumText({ name: "cadenceUnit", value: "months" })),
+                  },
+                  {
+                    value: "years",
+                    label: textOf(t, I18n.enumText({ name: "cadenceUnit", value: "years" })),
+                  },
                 ],
               }),
             ]),
@@ -1309,8 +1344,14 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.issueAs,
                 onChange: (value) => Message.ChangedIssueAs({ value }),
                 options: [
-                  { value: "invoice", label: textOf(t, I18n.enumText("issueAs", "invoice")) },
-                  { value: "proforma", label: textOf(t, I18n.enumText("issueAs", "proforma")) },
+                  {
+                    value: "invoice",
+                    label: textOf(t, I18n.enumText({ name: "issueAs", value: "invoice" })),
+                  },
+                  {
+                    value: "proforma",
+                    label: textOf(t, I18n.enumText({ name: "issueAs", value: "proforma" })),
+                  },
                 ],
               }),
             ]),
@@ -1358,7 +1399,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               cell: (r) =>
                 badge(
                   h,
-                  textOf(t, I18n.enumText("scheduleRunOutcome", r.outcome)),
+                  textOf(t, I18n.enumText({ name: "scheduleRunOutcome", value: r.outcome })),
                   r.outcome === "issued" ? "paid" : r.outcome === "failed" ? "error" : "outline",
                 ),
             },
@@ -1387,7 +1428,10 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   ? "—"
                   : badge(
                       h,
-                      textOf(t, I18n.enumText("deliveryStatus", r.delivery.status)),
+                      textOf(
+                        t,
+                        I18n.enumText({ name: "deliveryStatus", value: r.delivery.status }),
+                      ),
                       "outline",
                     ),
             },

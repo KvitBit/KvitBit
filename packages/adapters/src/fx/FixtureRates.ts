@@ -18,11 +18,7 @@ import * as Str from "effect/String";
 export class NoFixingOnOrBefore extends Schema.TaggedError<
   NoFixingOnOrBefore,
   { readonly brand: unique symbol }
->()(
-  // biome-ignore lint/security/noSecrets: The exported Effect error discriminant is a fixed literal.
-  "NoFixingOnOrBefore",
-  { message: Schema.String },
-) {}
+>()("NoFixingOnOrBefore", { message: Schema.String }) {}
 
 export const make = (fixings: Iterable<CnbFixing>): ExchangeRates["Service"] => {
   const newestFirst = [...fixings].sort((a, b) => Str.localeCompare(a.fixingDate)(b.fixingDate));

@@ -344,7 +344,7 @@ export interface FormSpec<Draft, Input> {
 
 export const Form: {
   readonly init: <D, I>(draft: D, baseRevision?: number) => Form<D, I>
-  readonly change: <D, I>(form: Form<D, I>, path: FieldPath, value: unknown) => Form<D, I> // clears server issue at path
+  readonly change: <D, I>(form: Form<D, I>, path: FieldPath, update: (draft: D) => D) => Form<D, I> // clears server issue at path
   readonly validate: <D, I>(form: Form<D, I>, spec: FormSpec<D, I>, ctx: ScreenContext) =>
     Either.Either<I, Form<D, I>>
   readonly applyServer: <D, I>(form: Form<D, I>, error: Invalid) => Form<D, I>

@@ -9,8 +9,8 @@ import {
 } from "@kvitbit/ui-port/api";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import { useCallback, useEffect, useState } from "react";
-import { useApi } from "../../runtime/api-runtime";
+import { useEffect, useState } from "react";
+import { useApi, useReloadSignal } from "../../runtime/api-runtime";
 import { runFeatureCallback } from "../ui-effect";
 
 // A scan may take longer than a single request. Time out each read independently.
@@ -39,12 +39,10 @@ export const scanFeedPages = Effect.fn("scanFeedPages")(function* <A, E, F>({
 export function usePagedFeed<A, E>(load: ((api: KvitbitApiClient) => Effect.Effect<A, E>) | null) {
   const { run } = useApi();
   const [state, setState] = useState<Remote<A>>(RemoteOps.idle);
-  const [revision, setRevision] = useState(0);
-  const reload = useCallback(() => setRevision((current) => current + 1), []);
+  const [signal, reload] = useReloadSignal();
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: revision restarts the scan on refresh.
   useEffect(() => {
-    if (load === null) return;
+    if (load === null || signal.aborted) return;
     let cancelled = false;
     setState((current) => RemoteOps.load(current));
 
@@ -56,7 +54,7 @@ export function usePagedFeed<A, E>(load: ((api: KvitbitApiClient) => Effect.Effe
     const interrupt = runFeatureCallback({
       effect: scan,
       onExit: (exit) => {
-        if (cancelled) return;
+        if (cancelled || signal.aborted) return;
         setState((current) =>
           Exit.isSuccess(exit)
             ? RemoteOps.ready(exit.value)
@@ -69,7 +67,7 @@ export function usePagedFeed<A, E>(load: ((api: KvitbitApiClient) => Effect.Effe
       cancelled = true;
       interrupt();
     };
-  }, [load, revision, run]);
+  }, [load, run, signal]);
 
   return { state, reload };
 }

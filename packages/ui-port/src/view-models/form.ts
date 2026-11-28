@@ -10,8 +10,10 @@
 import type { Locale } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as Exit from "effect/Exit";
 import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
@@ -60,6 +62,16 @@ export interface FormContext {
   readonly locale: Locale;
 }
 
+type StandardValidator<Draft, Input> = StandardSchema.StandardSchemaV1<Draft, Input>["~standard"];
+
+interface FormValidator<Draft, Input> extends StandardSchema.StandardSchemaV1<Draft, Input> {
+  readonly "~standard": Omit<StandardValidator<Draft, Input>, "validate"> & {
+    readonly validate: (
+      value: Parameters<StandardValidator<Draft, Input>["validate"]>[0],
+    ) => StandardSchema.StandardSchemaV1.Result<Input>;
+  };
+}
+
 /**
  * One schema per locale, from draft text to the core input. Issue codes come from the schema: a
  * check or transformation annotated with `message: <IssueCode>` reports that code; a missing
@@ -69,7 +81,7 @@ export interface FormSpec<Draft, Input, Ctx extends FormContext = FormContext> {
   /** Effect Schema from draft text to the core input; decimals use `DecimalText(locale)`. */
   readonly schema: (locale: Locale) => Schema.Codec<Input, Draft>;
   /** The same schema as a Standard Schema V1 validator, for adapter widgets (issue codes as messages). */
-  readonly standard: (locale: Locale) => StandardSchema.StandardSchemaV1<Draft, Input>;
+  readonly standard: (locale: Locale) => FormValidator<Draft, Input>;
   /** Client-only rules the server also enforces. */
   readonly refine?: (input: Input, ctx: Ctx) => ReadonlyArray<FieldIssue>;
 }
@@ -108,30 +120,30 @@ export const FormSpec = {
     readonly schema: (locale: Locale) => Schema.Codec<Input, Draft>;
     readonly refine?: (input: Input, ctx: Ctx) => ReadonlyArray<FieldIssue>;
   }): FormSpec<Draft, Input, Ctx> => {
-    const standard = (locale: Locale): StandardSchema.StandardSchemaV1<Draft, Input> => {
-      const base = Schema.toStandardSchemaV1(options.schema(locale), {
-        leafHook: issueCode,
-        // every field's issue at once, as a submit shows them all (F3)
-        parseOptions: { errors: "all" },
-      });
-      const normalize = (
-        result: StandardSchema.StandardSchemaV1.Result<Input>,
-      ): StandardSchema.StandardSchemaV1.Result<Input> =>
-        result.issues === undefined
-          ? result
-          : {
-              issues: Arr.map(result.issues, (issue) => ({
-                ...issue,
-                message: toIssueCode(issue.message),
-              })),
-            };
+    const standard = (locale: Locale): FormValidator<Draft, Input> => {
+      const decode = Schema.decodeUnknownExit(options.schema(locale), { errors: "all" });
+      const format = SchemaIssue.makeFormatterStandardSchemaV1({ leafHook: issueCode });
       return {
         "~standard": {
-          ...base["~standard"],
-          validate: (value) => {
-            const result = base["~standard"].validate(value);
-            return result instanceof Promise ? result.then(normalize) : normalize(result);
-          },
+          version: 1,
+          vendor: "effect",
+          validate: Fn.flow(decode, (exit): StandardSchema.StandardSchemaV1.Result<Input> => {
+            if (Exit.isSuccess(exit)) return { value: exit.value };
+            const failure = Cause.findErrorOption(exit.cause);
+            if (
+              Option.isNone(failure) ||
+              Cause.hasDies(exit.cause) ||
+              Cause.hasInterrupts(exit.cause)
+            ) {
+              return { issues: [{ message: "form.validation_unavailable" }] };
+            }
+            return {
+              issues: Arr.map(format(failure.value.issue).issues, (entry) => ({
+                ...entry,
+                message: toIssueCode(entry.message),
+              })),
+            };
+          }),
         },
       };
     };
@@ -146,8 +158,6 @@ export const FormSpec = {
     locale: Locale,
   ): Result.Result<Input, ReadonlyArray<FieldIssue>> => {
     const result = spec.standard(locale)["~standard"].validate(draft);
-    // biome-ignore lint/plugin/no-throw-in-effect-modules: Async validation violates the synchronous FormSpec contract.
-    if (result instanceof Promise) throw new Error("FormSpec schemas must decode synchronously");
     if (result.issues === undefined) return Result.succeed(result.value);
     return Result.fail(
       Arr.map(result.issues, (issue) => ({ path: toFieldPath(issue.path), code: issue.message })),
@@ -181,31 +191,6 @@ const isUnder: {
     path === prefix || Fn.pipe(path, Str.startsWith(`${prefix}.`)),
 );
 
-// biome-ignore lint/plugin/no-unknown-parameters: Widget paths can traverse and replace values before draft validation.
-const setAt = (value: unknown, keys: ReadonlyArray<string>, next: unknown): unknown => {
-  const [head, ...tail] = keys;
-  if (head === undefined) return next;
-  if (Arr.isArray(value)) {
-    const index = Number(head);
-    const copy = [...value];
-    copy[index] = setAt(copy[index], tail, next);
-    return copy;
-  }
-  const record = Predicate.isObjectOrArray(value) ? value : {};
-  const field: unknown = Reflect.get(record, head);
-  return { ...record, [head]: setAt(field, tail, next) };
-};
-
-/** Reads a value at a dotted path, undefined when absent. */
-// biome-ignore lint/plugin/no-unknown-parameters: Raw drafts can contain any value at a widget path.
-const getAt = (value: unknown, path: FieldPath): unknown =>
-  path === ""
-    ? value
-    : Arr.reduce(Str.split(path, "."), value, (acc, key) => {
-        const field: unknown = Predicate.isObjectOrArray(acc) ? Reflect.get(acc, key) : undefined;
-        return field;
-      });
-
 const withoutKey = <E>(submit: SubmitState<E>): SubmitState<E> =>
   submit._tag === "Idle" ? submit : { ...submit, requestKey: Option.none() };
 
@@ -222,19 +207,16 @@ export const Form = {
     submitted: false,
   }),
   /**
-   * Sets the raw value at `path` and clears server issues at or below it. A real edit also drops
+   * Updates the raw draft for `path` and clears server issues at or below it. A real edit also drops
    * the intent's Idempotency-Key (section 2.3): the changed payload is a new intent, so it must not
    * replay or mismatch the old key. Setting a structurally equal value (a fresh array holding the
    * same lines) keeps it for an unchanged retry. The key is dropped on the first real edit, so
    * while it is kept the draft equals the one submitted under it.
    */
-  // biome-ignore lint/plugin/no-unknown-parameters: Widget values are validated by the form's Schema after editing.
-  change: <D, E>(form: Form<D, E>, path: FieldPath, value: unknown): Form<D, E> => {
-    const edited = !Equal.equals(getAt(form.draft, path), value);
-    const draft = edited
-      ? // biome-ignore lint/nursery/noUnsafeTypeAssertion: The typed draft contract permits raw edits by path. The form validates them on decode.
-        (setAt(form.draft, path === "" ? [] : Str.split(path, "."), value) as D)
-      : form.draft;
+  change: <D, E>(form: Form<D, E>, path: FieldPath, update: (draft: D) => D): Form<D, E> => {
+    const candidate = update(form.draft);
+    const edited = !Equal.equals(form.draft, candidate);
+    const draft = edited ? candidate : form.draft;
     return {
       ...form,
       draft,

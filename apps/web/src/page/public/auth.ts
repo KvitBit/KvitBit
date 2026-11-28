@@ -222,7 +222,6 @@ const PeekInviteCmd = defineApiCommand({
 
 const AcceptSignedUpInviteCmd = defineApiCommand({
   message: Message,
-  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
   name: "AuthAcceptSignedUpInvite",
   args: { token: Schema.String, seq: Remote.Seq },
   execute: ({ token, seq }) =>
@@ -1240,12 +1239,13 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             busy: model.submitting,
             disabled: model.submitting || !isBotProofReady(model.botProof),
           }),
-          h.div.class("kb-auth-footer").children([
-            h.a
-              .attr("href", href({ _tag: "SignIn" }))
-              // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
-              .children([local(ctx.locale, "backToSignIn")]),
-          ]),
+          h.div
+            .class("kb-auth-footer")
+            .children([
+              h.a
+                .attr("href", href({ _tag: "SignIn" }))
+                .children([local(ctx.locale, "backToSignIn")]),
+            ]),
         ]);
       }
 

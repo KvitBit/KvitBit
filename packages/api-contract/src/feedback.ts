@@ -125,12 +125,26 @@ const QUERY_OR_FRAGMENT = /[?#]/;
 const PERCENT_ESCAPE = /%[\da-f]{2}/i;
 const decodePath = (path: string) => Result.try(() => decodeURIComponent(path));
 
+const replaceMatches = (
+  value: string,
+  pattern: RegExp,
+  replacement: (match: RegExpMatchArray) => string,
+): string => {
+  let previousEnd = 0;
+  let output = "";
+  for (const match of Str.matchAll(pattern)(value)) {
+    const [matched] = match;
+    if (matched === undefined || match.index === undefined) continue;
+    output += Str.slice(previousEnd, match.index)(value) + replacement(match);
+    previousEnd = match.index + matched.length;
+  }
+  return output + Str.slice(previousEnd)(value);
+};
+
 // Decode bytes individually so a malformed escape cannot hide an encoded route.
 const decodePercentBytes = (value: string) =>
-  // Effect String.replaceAll accepts only a constant replacement.
-  // @effect-diagnostics-next-line preferEffectString:off The replacer decodes each captured byte, and Effect replaceAll accepts only literal replacements.
-  value.replaceAll(PERCENT_BYTE, (_, byte: string) =>
-    String.fromCharCode(Number.parseInt(byte, 16)),
+  replaceMatches(value, PERCENT_BYTE, ([matched, byte]) =>
+    byte === undefined ? (matched ?? "") : String.fromCharCode(Number.parseInt(byte, 16)),
   );
 
 const hasSensitivePath = (value: string) => {
@@ -158,9 +172,9 @@ const hasSensitivePath = (value: string) => {
 
 /** Removes embedded URLs on sensitive routes, including root-relative links. */
 export const redactFeedbackUrls = (value: string) =>
-  // Effect String.replaceAll accepts only a constant replacement.
-  // @effect-diagnostics-next-line preferEffectString:off The replacer classifies each URL independently, and Effect replaceAll accepts only literal replacements.
-  value.replaceAll(EMBEDDED_URL, (url) => (hasSensitivePath(url) ? REDACTED_VALUE : url));
+  replaceMatches(value, EMBEDDED_URL, ([url = ""]) =>
+    hasSensitivePath(url) ? REDACTED_VALUE : url,
+  );
 
 /** Removes URL credentials, query, fragment and paths that may contain access tokens. */
 export const sanitizeFeedbackPageUrl = (value: string) => {

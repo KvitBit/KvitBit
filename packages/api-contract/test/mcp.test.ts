@@ -198,7 +198,6 @@ describe("MCP tool catalog", () => {
 });
 
 const DOC = "01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f";
-// biome-ignore lint/security/noSecrets: Fixed fake confirmation token.
 const TOKEN = "mcpc_01JDXq9w8e7r6t5y4u3i";
 
 describe("two-step preview and confirm schemas", () => {

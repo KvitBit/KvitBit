@@ -112,10 +112,9 @@ if (!("Bun" in globalThis)) {
     await page.evaluate(() => {
       const browserConsole = globalThis.console;
       for (let i = 0; i < 23; i++) {
-        // @effect-diagnostics-next-line globalConsole:off Emit a browser warning for the redaction test.
         browserConsole.warn("fixture-secret", i);
       }
-      // @effect-diagnostics-next-line globalConsole:off Emit a browser error for the redaction test.
+
       browserConsole.error("fixture-secret");
       globalThis.dispatchEvent(new ErrorEvent("error", { message: "fixture-secret" }));
       globalThis.dispatchEvent(
@@ -210,6 +209,31 @@ if (!("Bun" in globalThis)) {
     const { submission, body } = await captureSubmission(page, "Adjust the form layout.");
     expect(submission.pins[0]).toMatchObject({ tag: "div", accessibleName: "", text: "" });
     expect(body).not.toContain("fixture-private-form-value");
+  });
+
+  test("captures visible text and omits hidden descendants", async ({ page }) => {
+    await session(page, true);
+    await page.goto(dashboard);
+    const heading = page.locator("#main h1");
+    await heading.evaluate((element) => {
+      const hidden = document.createElement("span");
+      hidden.style.display = "none";
+      hidden.textContent = "fixture-hidden-text";
+      const ariaHidden = document.createElement("span");
+      ariaHidden.setAttribute("aria-hidden", "true");
+      ariaHidden.textContent = "fixture-aria-hidden";
+      element.replaceChildren("Visible title", hidden, ariaHidden);
+    });
+    await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
+    await heading.click();
+    const { submission, body } = await captureSubmission(page, "Adjust the title.");
+    expect(submission.pins[0]).toMatchObject({
+      tag: "h1",
+      accessibleName: "Visible title",
+      text: "Visible title",
+    });
+    expect(body).not.toContain("fixture-hidden-text");
+    expect(body).not.toContain("fixture-aria-hidden");
   });
 
   test("disposes the picker when the app signs out", async ({ page }) => {

@@ -22,8 +22,8 @@ describe("makeBotProof", () => {
         fetchCount += 1;
         return Promise.resolve({ _tag: "Challenge", challenge: { parameters: {} } });
       },
-      solveChallenge: (_ch, opts) => {
-        opts?.onProgress?.(0.5);
+      solveChallenge: ({ onProgress }) => {
+        onProgress?.(0.5);
         return Promise.resolve({ _tag: "Solved", payload: "b64-proof", expiresAt });
       },
     });
@@ -87,13 +87,12 @@ describe("makeBotProof", () => {
       scope: "magic_link",
       onState: () => undefined,
       fetchChallenge: async () => ({ _tag: "Challenge", challenge: { parameters: {} } }),
-      solveChallenge: async (_c, opts) => {
+      solveChallenge: async ({ signal }) => {
         call += 1;
         const myCall = call;
         if (myCall === 1) {
           await Effect.runPromise(
             Effect.callback<void>((resume) => {
-              const signal = opts?.signal;
               const onAbort = () => {
                 abortedFirst = true;
                 resume(Effect.void);

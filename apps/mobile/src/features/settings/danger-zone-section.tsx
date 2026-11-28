@@ -1,11 +1,12 @@
 import type { MemberView, UserId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { inWorkspace } from "@kvitbit/ui-port/api";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Str from "effect/String";
 import { router } from "expo-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -38,8 +39,14 @@ export function DangerZoneSection() {
   const canClose = canCloseWorkspace(workspace.role, workspace.closed);
 
   const membersRemote = useRemote(
-    canTransfer ? (client) => client.team.listMembers({ params: inWorkspace(workspace.id) }) : null,
-    [workspace.id, canTransfer],
+    useMemo(
+      () =>
+        canTransfer
+          ? (client: KvitbitApiClient) =>
+              client.team.listMembers({ params: inWorkspace(workspace.id) })
+          : null,
+      [workspace.id, canTransfer],
+    ),
   );
 
   const [targetAdminId, setTargetAdminId] = useState<UserId | null>(null);

@@ -271,11 +271,9 @@ const superOnCreate = /super\.onCreate\(([^)]*)\)/;
 const trailingActivityBrace = /(\n\}\s*)$/;
 
 function registerPlatformPackageInMainApplication(contents) {
-  // biome-ignore lint/security/noSecrets: This checks Kotlin source for the package constructor.
   if (contents.includes("KvitbitPlatformPackage()")) return contents;
   return contents.replace(
     packageListBlock,
-    // biome-ignore lint/security/noSecrets: This inserts Kotlin package registration source.
     "PackageList(this).packages.apply {\n              add(KvitbitPlatformPackage())",
   );
 }
@@ -306,7 +304,6 @@ const withAndroidPlatformModules = (config) => {
         "app/src/main/java/cz/kvitbit/app",
       );
       fs.mkdirSync(pkgDir, { recursive: true });
-      // biome-ignore lint/security/noSecrets: This is the filename of the generated Kotlin module.
       fs.writeFileSync(path.join(pkgDir, "KvitbitDynamicColorModule.kt"), DYNAMIC_COLOR_MODULE_KT);
       fs.writeFileSync(path.join(pkgDir, "KvitbitShareIntentModule.kt"), SHARE_INTENT_MODULE_KT);
       fs.writeFileSync(path.join(pkgDir, "KvitbitPlatformPackage.kt"), PLATFORM_PACKAGE_KT);

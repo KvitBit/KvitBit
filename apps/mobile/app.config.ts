@@ -1,8 +1,8 @@
 // Expo loads its config synchronously before the app runtime exists.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Expo evaluates this configuration synchronously in its Node host.
+
 import { existsSync } from "node:fs";
 // This path is resolved on the operating system where Expo loads the config.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Resolve paths on the operating system running Expo.
+
 import { relative, resolve } from "node:path";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";

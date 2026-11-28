@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 // The signing tests generate PEM keys for the synchronous Node-compatible RSA adapter.
-// @effect-diagnostics-next-line nodeBuiltinImport:off Use Node-generated RSA keys to exercise Expo-compatible signatures.
+
 import { generateKeyPairSync } from "node:crypto";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -46,7 +46,6 @@ const SAMPLE_UPDATE: StoredUpdate = {
   launchAsset: {
     sha256: Str.repeat(64)("a"),
     hash: Str.repeat(43)("A"),
-    // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
     key: Str.repeat(2)("0123456789abcdef"),
     contentType: "application/javascript",
   },
@@ -54,7 +53,6 @@ const SAMPLE_UPDATE: StoredUpdate = {
     {
       sha256: Str.repeat(64)("b"),
       hash: Str.repeat(43)("B"),
-      // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
       key: Str.repeat(2)("fedcba9876543210"),
       contentType: "image/png",
       fileExtension: ".png",

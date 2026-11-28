@@ -224,7 +224,6 @@ const expected = {
   "E07 notice_old": {
     cs: [
       "Bezpečnostní upozornění: požadavek na změnu e-mailu",
-      // biome-ignore lint/security/noSecrets: Czech UI copy used as an expected fragment.
       ["[Bezpečnostní upozornění]", "filip.novy@atelierkalny.cz"],
     ],
     en: [
@@ -487,7 +486,6 @@ describe("subjects and overrides", () => {
   const e05 = fixtures.E05;
 
   test("line breaks in interpolated names and overrides collapse to one header line", () => {
-    // biome-ignore lint/security/noSecrets: This sample company name contains a CRLF for the header test.
     const out = renderEmail({ ...e05, workspace: { name: "Ateliér\r\nKalný" } }, "cs");
     expect(out.subject).toBe(nb("Faktura 2026-0042 — Ateliér Kalný (58_100,00_Kč)"));
     expect(renderEmail({ ...e05, subject: " A\n\nB " }, "en").subject).toBe("A B");
@@ -523,7 +521,6 @@ describe("dark mode", () => {
 describe("review round 1 regressions", () => {
   test("initials keep astral letters whole and the HTML stays well-formed", () => {
     const e04 = fixtures.E04;
-    // biome-ignore lint/security/noSecrets: Sample Japanese company names exercise astral characters.
     for (const name of ["𠮷田商店", "𠮷田 商店", "s.r.o."]) {
       const html = renderEmail({ ...e04, workspace: { name } }, "cs").html;
       // No lone surrogate (String#isWellFormed is outside this repo's TS lib).

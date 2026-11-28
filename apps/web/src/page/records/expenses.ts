@@ -131,7 +131,6 @@ const tLocal = copy({
     dedPartial: "Krácený (%)",
     dedNone: "Bez nároku (0 %)",
     dedPercent: "Koeficient (%)",
-    // biome-ignore lint/security/noSecrets: This is the Czech VAT label.
     deductibleVat: "Odpočitatelná DPH",
     fxRateLabel: "Kurz ČNB ({currency} / CZK)",
     fxLoading: "Načítám kurz ČNB…",
@@ -157,7 +156,6 @@ const tLocal = copy({
     paymentRemoved: "Platba odebrána.",
     attachmentAdded: "Příloha připojena.",
     attachmentRemoved: "Příloha odebrána.",
-    // biome-ignore lint/security/noSecrets: This is the Czech self-assessment label.
     selfAssessedRate: "Samovyměření",
     readOnlyBadge: "Režim účetní (jen pro čtení)",
   },

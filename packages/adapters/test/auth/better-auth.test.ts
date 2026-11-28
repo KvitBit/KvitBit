@@ -26,9 +26,7 @@ import {
 import { layerFromPglite, makeMigratedPglite } from "../../src/testing";
 
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-// biome-ignore lint/security/noSecrets: Public PKCE challenge used by the client fixture.
 const PKCE_CHALLENGE = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-// biome-ignore lint/security/noSecrets: Signing key for the in-process test instance.
 const TEST_AUTH_SECRET = "test-better-auth-secret-0123456789abcdef";
 const encodeJsonEffect = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const encodeJson = <A>(value: A) => encodeJsonEffect(value).pipe(Effect.runSync);
@@ -101,9 +99,7 @@ const fetchClientMetadata = (input: string | URL | Request) => {
             {
               kty: "EC",
               crv: "P-256",
-              // biome-ignore lint/security/noSecrets: Public JWK coordinate.
               x: "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
-              // biome-ignore lint/security/noSecrets: Public JWK coordinate.
               y: "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
               use: "sig",
               alg: "ES256",

@@ -26,11 +26,11 @@ export const documentStatusBadge: {
 } = Fn.dual(2, (status: DocumentStatus, t: Translator["t"]): BadgeDescriptor => {
   switch (status) {
     case "draft":
-      return { label: t(enumKey("documentStatus", "draft")), tone: "draft" };
+      return { label: t(enumKey({ name: "documentStatus", value: "draft" })), tone: "draft" };
     case "issued":
-      return { label: t(enumKey("documentStatus", "issued")), tone: "info" };
+      return { label: t(enumKey({ name: "documentStatus", value: "issued" })), tone: "info" };
     case "cancelled":
-      return { label: t(enumKey("documentStatus", "cancelled")), tone: "danger" };
+      return { label: t(enumKey({ name: "documentStatus", value: "cancelled" })), tone: "danger" };
   }
 });
 
@@ -45,15 +45,15 @@ export const settlementBadge: {
     }
     switch (settlement) {
       case "paid":
-        return { label: t(enumKey("settlement", "paid")), tone: "success" };
+        return { label: t(enumKey({ name: "settlement", value: "paid" })), tone: "success" };
       case "partially_paid":
-        return { label: t(enumKey("settlement", "partially_paid")), tone: "info" };
+        return { label: t(enumKey({ name: "settlement", value: "partially_paid" })), tone: "info" };
       case "overpaid":
-        return { label: t(enumKey("settlement", "overpaid")), tone: "warning" };
+        return { label: t(enumKey({ name: "settlement", value: "overpaid" })), tone: "warning" };
       case "credited":
-        return { label: t(enumKey("settlement", "credited")), tone: "neutral" };
+        return { label: t(enumKey({ name: "settlement", value: "credited" })), tone: "neutral" };
       case "unpaid":
-        return { label: t(enumKey("settlement", "unpaid")), tone: "neutral" };
+        return { label: t(enumKey({ name: "settlement", value: "unpaid" })), tone: "neutral" };
     }
   },
 );
@@ -64,7 +64,7 @@ export const kindBadge: {
 } = Fn.dual(
   2,
   (kind: DocumentKind, t: Translator["t"]): BadgeDescriptor => ({
-    label: t(enumKey("documentKind", kind)),
+    label: t(enumKey({ name: "documentKind", value: kind })),
     tone: kind === "proforma" ? "proforma" : "neutral",
   }),
 );

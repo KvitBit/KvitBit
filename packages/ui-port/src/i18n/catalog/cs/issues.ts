@@ -48,6 +48,7 @@ export const issues = {
 
   "issue.form.required": "Toto pole je povinné.",
   "issue.form.invalid": "Zkontrolujte tuto hodnotu.",
+  "issue.form.validation_unavailable": "Ověření není dostupné. Zkuste to znovu.",
   "issue.form.decimal_invalid": "Zadejte číslo, např. 1 234,50.",
   "issue.form.integer_invalid": "Zadejte celé číslo.",
   "issue.form.email_invalid": "Zadejte platnou e-mailovou adresu.",

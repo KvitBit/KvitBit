@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import * as BigDecimal from "effect/BigDecimal";
+import * as DateTime from "effect/DateTime";
 import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
 import * as Str from "effect/String";
 
 import {
@@ -37,7 +39,6 @@ describe("money", () => {
   });
 
   test("accepts BigDecimal without float loss and never prints -0", () => {
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     const amount = BigDecimal.fromStringUnsafe("12345678901234567.25");
     expect(spaces(formatMoney("cs", { amount, currency: "CZK" }))).toBe(
       "12 345 678 901 234 567,25 Kč",
@@ -67,8 +68,8 @@ describe("money", () => {
     expect(spaces(formatMoney("en", { amount: "99999999999999999.99", currency: "EUR" }))).toBe(
       "€99,999,999,999,999,999.99",
     );
-    expect(formatNumber("en", "1e-7", { maxFractionDigits: 7 })).toBe("0.0000001");
-    expect(formatNumber("en", 1e21)).toBe("1,000,000,000,000,000,000,000");
+    expect(formatNumber({ locale: "en", value: "1e-7", maxFractionDigits: 7 })).toBe("0.0000001");
+    expect(formatNumber({ locale: "en", value: 1e21 })).toBe("1,000,000,000,000,000,000,000");
   });
 
   test("display rounding is half away from zero with carry", () => {
@@ -94,10 +95,10 @@ describe("money", () => {
 
 describe("numbers, quantities, percent", () => {
   test("numbers and quantities", () => {
-    expect(formatNumber("cs", "1234.5")).toBe(`1${NBSP}234,5`);
-    expect(formatNumber("en", 1234.5)).toBe("1,234.5");
-    expect(formatQuantity("cs", "1.5", "h")).toBe(`1,5${NBSP}h`);
-    expect(formatQuantity("en", "2.12345")).toBe("2.1235");
+    expect(formatNumber({ locale: "cs", value: "1234.5" })).toBe(`1${NBSP}234,5`);
+    expect(formatNumber({ locale: "en", value: 1234.5 })).toBe("1,234.5");
+    expect(formatQuantity({ locale: "cs", value: "1.5", unit: "h" })).toBe(`1,5${NBSP}h`);
+    expect(formatQuantity({ locale: "en", value: "2.12345" })).toBe("2.1235");
   });
 
   test("percent and VAT rates", () => {
@@ -111,24 +112,35 @@ describe("numbers, quantities, percent", () => {
 
 describe("dates", () => {
   test("calendar dates per locale", () => {
-    expect(spaces(formatDate("cs", "2026-11-23"))).toBe("23. 11. 2026");
-    expect(formatDate("en", "2026-11-23")).toBe("23 Nov 2026");
-    expect(formatDate("en", "2026-11-23", "numeric")).toBe("23/11/2026");
-    expect(spaces(formatDate("cs", "2026-11-23", "long"))).toBe("23. listopadu 2026");
+    expect(spaces(formatDate({ locale: "cs", date: "2026-11-23" }))).toBe("23. 11. 2026");
+    expect(formatDate({ locale: "en", date: "2026-11-23" })).toBe("23 Nov 2026");
+    expect(formatDate({ locale: "en", date: "2026-11-23", style: "numeric" })).toBe("23/11/2026");
+    expect(spaces(formatDate({ locale: "cs", date: "2026-11-23", style: "long" }))).toBe(
+      "23. listopadu 2026",
+    );
   });
 
   test("dates never shift by time zone", () => {
-    expect(spaces(formatDate("cs", "2026-01-01"))).toBe("1. 1. 2026");
-    expect(spaces(formatDate("cs", { year: 2026, month: 12, day: 31 }))).toBe("31. 12. 2026");
+    expect(spaces(formatDate({ locale: "cs", date: "2026-01-01" }))).toBe("1. 1. 2026");
+    expect(spaces(formatDate({ locale: "cs", date: { year: 2026, month: 12, day: 31 } }))).toBe(
+      "31. 12. 2026",
+    );
   });
 
   test("timestamps in Europe/Prague", () => {
-    expect(spaces(formatDateTime("cs", "2026-11-23T13:05:00Z"))).toBe("23. 11. 2026 14:05");
-    expect(formatDateTime("en", "2026-07-01T22:30:00Z")).toBe("2 Jul 2026, 00:30");
-    // Native parsing of an offsetless timestamp uses the local timezone.
-    // @effect-diagnostics-next-line globalDate:off Native Date is the independent oracle for device-local timestamp parsing.
-    const native = new Date("2026-07-01T12:30:00");
-    expect(formatDateTime("en", "2026-07-01T12:30:00")).toBe(formatDateTime("en", native));
+    expect(spaces(formatDateTime({ locale: "cs", instant: "2026-11-23T13:05:00Z" }))).toBe(
+      "23. 11. 2026 14:05",
+    );
+    expect(formatDateTime({ locale: "en", instant: "2026-07-01T22:30:00Z" })).toBe(
+      "2 Jul 2026, 00:30",
+    );
+    const local = DateTime.makeZoned("2026-07-01T12:30:00", {
+      timeZone: new Intl.DateTimeFormat().resolvedOptions().timeZone,
+      adjustForTimeZone: true,
+    }).pipe(Option.getOrThrow, DateTime.toDateUtc);
+    expect(formatDateTime({ locale: "en", instant: "2026-07-01T12:30:00" })).toBe(
+      formatDateTime({ locale: "en", instant: local }),
+    );
   });
 
   test("ranges", () => {
@@ -152,6 +164,6 @@ describe("dates", () => {
     expect(parseIsoDate("2026-02-30")).toBeUndefined();
     expect(parseIsoDate("2028-02-29")).toEqual({ year: 2028, month: 2, day: 29 });
     expect(parseIsoDate("23.11.2026")).toBeUndefined();
-    expect(() => formatDate("cs", "2026-13-01")).toThrow(RangeError);
+    expect(() => formatDate({ locale: "cs", date: "2026-13-01" })).toThrow(RangeError);
   });
 });

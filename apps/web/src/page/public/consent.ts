@@ -86,7 +86,6 @@ const local = copy({
     areaColumn: "Oblast",
     readColumn: "Čtení",
     writeColumn: "Zápis",
-    // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
     redirecting: "Přesměrovávám zpět do aplikace…",
     createWorkspace: "Vytvořit pracovní prostor",
     narrowedHint: "Rozsah oprávnění byl zúžen oproti původní žádosti aplikace.",
@@ -419,7 +418,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.selectedWorkspaceId ?? "",
                 options: Arr.map(consent.workspaces, (ws) => ({
                   value: ws.id,
-                  label: `${ws.name} (${t.translate(I18n.enumText("role", ws.role))})`,
+                  label: `${ws.name} (${t.translate(I18n.enumText({ name: "role", value: ws.role }))})`,
                 })),
                 onChange: (workspaceId) =>
                   Message.SelectedWorkspace({ workspaceId: WorkspaceId.make(workspaceId) }),
@@ -435,7 +434,13 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           card(h, [
             cardTitle(h, t.t("mcp.consent.permissions"), [
               ...(currentWs !== undefined
-                ? [badge(h, t.translate(I18n.enumText("role", currentWs.role)), "outline")]
+                ? [
+                    badge(
+                      h,
+                      t.translate(I18n.enumText({ name: "role", value: currentWs.role })),
+                      "outline",
+                    ),
+                  ]
                 : []),
             ]),
             h.div.class("kb-stack").children([
@@ -444,7 +449,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 selected: model.accessMode,
                 items: Arr.map(presetItems, (m) => ({
                   id: m,
-                  label: t.translate(I18n.enumText("accessMode", m)),
+                  label: t.translate(I18n.enumText({ name: "accessMode", value: m })),
                 })),
                 onSelect: (id) =>
                   Message.SelectedPreset({
@@ -467,7 +472,9 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ]),
                 h.tbody.children(
                   Arr.map(rows, (row) => {
-                    const areaLabel = t.translate(I18n.enumText("scopeArea", row.area));
+                    const areaLabel = t.translate(
+                      I18n.enumText({ name: "scopeArea", value: row.area }),
+                    );
                     const readScope: Scope = `${row.area}:read`;
                     const writeScope: Scope = `${row.area}:write`;
                     return h.tr

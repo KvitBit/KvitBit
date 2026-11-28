@@ -268,8 +268,8 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   }
 
   const peek = model.peek.data;
-  const roleLabel = t.translate(I18n.enumText("role", peek.role));
-  const statusLabel = t.translate(I18n.enumText("invitationStatus", peek.status));
+  const roleLabel = t.translate(I18n.enumText({ name: "role", value: peek.role }));
+  const statusLabel = t.translate(I18n.enumText({ name: "invitationStatus", value: peek.status }));
   const statusBadgeTone =
     peek.status === "pending" ? "proforma" : peek.status === "accepted" ? "paid" : "error";
 
@@ -299,7 +299,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           [local(ctx.locale, "roleLabel"), roleLabel],
           [
             local(ctx.locale, "expiresLabel"),
-            Format.formatDate(ctx.locale, Str.slice(0, 10)(peek.expiresAt)),
+            Format.formatDate({ locale: ctx.locale, date: Str.slice(0, 10)(peek.expiresAt) }),
           ],
         ]),
         ...(model.acceptFailure !== null
@@ -331,13 +331,11 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   ? [
                       h.div.class("kb-row").children([
                         linkButton(h, {
-                          // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
                           label: t.t("invitation.landing.signUpToAccept"),
                           href: href({ _tag: "SignUp", invitation: model.token }),
                           variant: "primary",
                         }),
                         linkButton(h, {
-                          // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
                           label: t.t("invitation.landing.signInToAccept"),
                           href: href({ _tag: "SignIn", returnTo: href(model.route) }),
                           variant: "secondary",

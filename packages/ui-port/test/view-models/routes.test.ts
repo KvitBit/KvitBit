@@ -135,7 +135,6 @@ describe("Routes.toPath / fromPath", () => {
       "/w/acme/settings/connected-apps",
     );
     expect(p({ _tag: "Reports", ws: "acme", report: "vat_summary", period: "2026" })).toBe(
-      // biome-ignore lint/security/noSecrets: The literal is public fixture data.
       "/w/acme/reports/vat-summary?period=2026",
     );
     expect(p({ _tag: "Error", kind: "not_found" })).toBe("/error/not-found");
@@ -143,7 +142,6 @@ describe("Routes.toPath / fromPath", () => {
   });
 
   test("tolerates unknown query keys, a trailing slash, a hash and '+' for spaces", () => {
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     expect(Routes.fromPath("/w/acme/price-list/?text=a+b&utm=x#top", "/")).toEqual(
       Option.some(decode({ _tag: "PriceList", ws: "acme", text: "a b" })),
     );
@@ -166,11 +164,9 @@ describe("Routes.toPath / fromPath", () => {
       "/w/acme/reports/revenue?period=2026-13",
       "/w/acme/settings/apiKeys", // not the kebab spelling
       "/w/acme/expenses?incomplete=maybe",
-      // biome-ignore lint/security/noSecrets: The literal is public fixture data.
       "/onboarding?step=two",
       "/legal/cookies",
       "/auth/magic",
-      // biome-ignore lint/security/noSecrets: The literal is public fixture data.
       "/w/acme/documents?text=%E0%A4%A", // bad escape
       "/app/w/acme", // a PWA path is not a web path
     ];

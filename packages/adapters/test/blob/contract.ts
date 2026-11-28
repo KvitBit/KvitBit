@@ -1,7 +1,7 @@
 /** BlobStorage behaviour every adapter must share, run against each adapter's test layer. */
 
 import { describe, expect, test } from "bun:test";
-// @effect-diagnostics-next-line nodeBuiltinImport:off Node SHA-256 is an independent oracle for adapter content hashes.
+
 import { createHash } from "node:crypto"; // Independent SHA-256 implementation for the expected bytes.
 import { BlobKey, BlobStorage, BlobTooLarge, type BlobUnavailable } from "@kvitbit/domain/ports";
 import * as Arr from "effect/Array";

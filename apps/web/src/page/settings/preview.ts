@@ -260,7 +260,7 @@ export const scopeMatrixEditor: {
           Arr.map(rows, (row) => {
             const readChecked = row.level === "read" || row.level === "write";
             const writeChecked = row.level === "write";
-            const areaLabel = o.t.translate(I18n.enumText("scopeArea", row.area));
+            const areaLabel = o.t.translate(I18n.enumText({ name: "scopeArea", value: row.area }));
             return h.tr
               .key(row.area)
               .children([
@@ -320,14 +320,15 @@ export const scopeSummaryBadges: {
     areas: ReadonlyArray<{ readonly area: ScopeArea; readonly level: ViewModels.AreaLevel }>,
   ): Markup<M> => {
     const active = Arr.filter(areas, (a) => a.level !== "none");
-    if (active.length === 0) return badge(h, t.translate(I18n.enumText("scopeLevel", "none")));
+    if (active.length === 0)
+      return badge(h, t.translate(I18n.enumText({ name: "scopeLevel", value: "none" })));
     return h.div
       .class("kb-scope-pills")
       .children(
         Arr.map(active, (a) =>
           badge(
             h,
-            `${t.translate(I18n.enumText("scopeArea", a.area))}: ${t.translate(I18n.enumText("scopeLevel", a.level))}`,
+            `${t.translate(I18n.enumText({ name: "scopeArea", value: a.area }))}: ${t.translate(I18n.enumText({ name: "scopeLevel", value: a.level }))}`,
             a.level === "write" ? "proforma" : "outline",
           ),
         ),

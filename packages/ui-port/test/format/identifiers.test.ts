@@ -58,11 +58,9 @@ describe("DIČ and EU VAT IDs", () => {
   test("Czech DIČ: CZ + 8 to 10 digits, format only", () => {
     const dic = validateCzechDic("cz 27082440").pipe(ok);
     expect(dic).toBe("CZ27082440");
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     validateCzechDic("CZ7103192745").pipe(ok, expect).toBe("CZ7103192745");
     validateCzechDic("CZ640903926").pipe(ok, expect).toBe("CZ640903926");
     validateCzechDic("CZ1234567").pipe(code, expect).toBe("form.dic_invalid");
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     validateCzechDic("CZ12345678901").pipe(code, expect).toBe("form.dic_invalid");
     validateCzechDic("27082440").pipe(code, expect).toBe("form.dic_invalid");
     validateCzechDic("CZ2708244A").pipe(code, expect).toBe("form.dic_invalid");
@@ -71,7 +69,6 @@ describe("DIČ and EU VAT IDs", () => {
   test("EU VAT formats by country", () => {
     validateEuVatId("DE 123456789").pipe(ok, expect).toBe("DE123456789");
     validateEuVatId("ATU12345678").pipe(ok, expect).toBe("ATU12345678");
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     validateEuVatId("NL123456789B01").pipe(ok, expect).toBe("NL123456789B01");
     validateEuVatId("GR123456789").pipe(ok, expect).toBe("EL123456789");
     validateEuVatId("SK2020273893").pipe(ok, expect).toBe("SK2020273893");
@@ -81,9 +78,7 @@ describe("DIČ and EU VAT IDs", () => {
     expect(Result.isFailure(bad) ? bad.failure.params : undefined).toEqual({ country: "DE" });
     validateEuVatId("US123456789").pipe(code, expect).toBe("form.vat_id_country_unknown");
     validateEuVatId("CZ123").pipe(code, expect).toBe("form.dic_invalid");
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     validateEuVatId("SE556677889901").pipe(ok, expect).toBe("SE556677889901");
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     validateEuVatId("SE556677889902").pipe(code, expect).toBe("form.vat_id_invalid");
     validateEuVatId("ESX1234567L").pipe(ok, expect).toBe("ESX1234567L");
     validateEuVatId("ES12345678Z").pipe(ok, expect).toBe("ES12345678Z");

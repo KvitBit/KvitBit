@@ -31,10 +31,7 @@ export class FakeCompanyRegistryControl extends Context.Service<
     /** IČOs passed to lookup, in call order. */
     readonly lookups: Effect.Effect<ReadonlyArray<string>>;
   }
->()(
-  // biome-ignore lint/security/noSecrets: Effect checks this public service identifier against its package path.
-  "@kvitbit/adapters/registry/fake/FakeCompanyRegistryControl",
-) {}
+>()("@kvitbit/adapters/registry/fake/FakeCompanyRegistryControl") {}
 
 /** Synthetic companies; the IČOs pass the mod-11 checksum. */
 export const defaultFakeRecords: FakeRegistryRecords = {

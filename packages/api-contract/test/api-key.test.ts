@@ -11,7 +11,6 @@ import {
   parseApiKey,
 } from "../src/index";
 
-// biome-ignore lint/security/noSecrets: Fixed fake secret for API key parsing.
 const secret = "Zm9vYmFyLWJhei1xdXV4LTAxMjM0NTY3ODlhYmNkZWY_-";
 const keyId = ApiKeyId.make("01JDX3K7M9");
 

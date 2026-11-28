@@ -401,8 +401,8 @@ export function DashboardContent(props: DashboardContentProps) {
                   <ListRow
                     key={doc.id}
                     leading={FileText}
-                    title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                    subtitle={`${doc.contact.name}${doc.dueOn === null ? "" : ` · ${formatDate(locale, doc.dueOn)}`}`}
+                    title={doc.number ?? t(enumKey({ name: "documentKind", value: doc.kind }))}
+                    subtitle={`${doc.contact.name}${doc.dueOn === null ? "" : ` · ${formatDate({ locale, date: doc.dueOn })}`}`}
                     trailing={formatMoney(locale, doc.outstanding)}
                     badge={<Badge tone="warning" label={t("enum.badge.overdue")} />}
                     onPress={() =>
@@ -429,15 +429,17 @@ export function DashboardContent(props: DashboardContentProps) {
                   <ListRow
                     key={id}
                     leading={FileText}
-                    title={document.number ?? t(enumKey("documentKind", document.kind))}
-                    subtitle={formatDateTime(locale, at)}
+                    title={
+                      document.number ?? t(enumKey({ name: "documentKind", value: document.kind }))
+                    }
+                    subtitle={formatDateTime({ locale, instant: at })}
                     badge={
                       <Badge
                         tone={kind === "paid" ? "success" : "info"}
                         label={
                           kind === "paid"
                             ? local({ cs: "Platba zaznamenána", en: "Payment recorded" })
-                            : t(enumKey("badge", kind))
+                            : t(enumKey({ name: "badge", value: kind }))
                         }
                       />
                     }
@@ -476,8 +478,8 @@ export function DashboardContent(props: DashboardContentProps) {
                     <ListRow
                       key={doc.id}
                       leading={FileText}
-                      title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                      subtitle={`${doc.contactName} · ${formatDate(locale, doc.issuedOn)}`}
+                      title={doc.number ?? t(enumKey({ name: "documentKind", value: doc.kind }))}
+                      subtitle={`${doc.contactName} · ${formatDate({ locale, date: doc.issuedOn })}`}
                       trailing={formatMoney(locale, doc.total)}
                       badge={<Badge tone={badge.tone} label={t(badge.key)} />}
                       onPress={() =>
@@ -509,23 +511,29 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
   const range = useMemo(() => periodRange(preset, today), [preset, today]);
 
   const dashboard = useRemote(
-    (api) =>
-      api.reports.dashboard({
-        params: inWorkspace(workspace.id),
-        query: { from: range.from, to: range.to },
-      }),
-    [workspace.id, range.from, range.to],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.reports.dashboard({
+          params: inWorkspace(workspace.id),
+          query: { from: range.from, to: range.to },
+        }),
+      [workspace.id, range.from, range.to],
+    ),
   );
 
   const overdueDocs = useRemote(
-    (api) =>
-      loadOverdueDocuments({ api, workspaceId: workspace.id, query: { from: today, to: today } }),
-    [workspace.id, today],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        loadOverdueDocuments({ api, workspaceId: workspace.id, query: { from: today, to: today } }),
+      [workspace.id, today],
+    ),
   );
 
   const recentDocs = useRemote(
-    (api) => loadRecentDocuments({ api, workspaceId: workspace.id }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) => loadRecentDocuments({ api, workspaceId: workspace.id }),
+      [workspace.id],
+    ),
   );
 
   const loadActivity = useCallback(
@@ -534,15 +542,19 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
   );
   const activity = usePagedFeed(loadActivity);
 
+  const canWrite = canWriteWorkspace(workspace);
   const hasExpenses = useRemote(
-    canWriteWorkspace(workspace)
-      ? (api) =>
-          Effect.map(
-            api.expenses.list({ params: inWorkspace(workspace.id), query: { limit: 1 } }),
-            (page) => page.items.length > 0 || page.nextCursor !== null,
-          )
-      : null,
-    [workspace.id, workspace.role, workspace.closed],
+    useMemo(
+      () =>
+        canWrite
+          ? (api: KvitbitApiClient) =>
+              Effect.map(
+                api.expenses.list({ params: inWorkspace(workspace.id), query: { limit: 1 } }),
+                (page) => page.items.length > 0 || page.nextCursor !== null,
+              )
+          : null,
+      [workspace.id, canWrite],
+    ),
   );
 
   const refreshing = Arr.some(

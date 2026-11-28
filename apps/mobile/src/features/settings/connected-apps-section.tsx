@@ -1,10 +1,11 @@
 import type { ConnectedAppView } from "@kvitbit/api-contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { inWorkspace } from "@kvitbit/ui-port/api";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { Unplug } from "lucide-react-native";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -37,8 +38,11 @@ export function ConnectedAppsSection() {
 
   const currentUserId = session.state.status === "signed-in" ? session.state.user.id : null;
   const remote = useRemote(
-    (client) => client.connectedApps.listConnectedApps({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.connectedApps.listConnectedApps({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
 
   const [revokingId, setRevokingId] = useState<string | null>(null);

@@ -115,7 +115,6 @@ describe("expense capture replay", () => {
     const [one, two] = job.files;
     if (one === undefined || two === undefined) throw new Error("Missing receipts");
     expect(one.file.sha256).toBe(
-      // biome-ignore lint/security/noSecrets: Known SHA-256 digest of the synthetic abc receipt.
       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
     );
     expect(one.file.size).toBe(3);

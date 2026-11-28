@@ -470,11 +470,17 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
               value={taxRegime}
               onChange={setTaxRegime}
               choices={[
-                { value: "non_vat_payer", label: text(enumText("taxRegime", "non_vat_payer")) },
-                { value: "vat_payer", label: text(enumText("taxRegime", "vat_payer")) },
+                {
+                  value: "non_vat_payer",
+                  label: text(enumText({ name: "taxRegime", value: "non_vat_payer" })),
+                },
+                {
+                  value: "vat_payer",
+                  label: text(enumText({ name: "taxRegime", value: "vat_payer" })),
+                },
                 {
                   value: "identified_person",
-                  label: text(enumText("taxRegime", "identified_person")),
+                  label: text(enumText({ name: "taxRegime", value: "identified_person" })),
                 },
               ]}
             />

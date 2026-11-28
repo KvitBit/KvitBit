@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-/* biome-ignore lint/correctness/noNodejsModules: Use Node crypto as an independent oracle for the mobile KDFs. */ // @effect-diagnostics-next-line nodeBuiltinImport:off Node crypto provides an independent oracle for the TypeScript KDFs.
+
 import crypto, { createHash, pbkdf2Sync } from "node:crypto";
-// biome-ignore lint/correctness/noNodejsModules: Adapt the Node argon2 callback for the oracle test.
+
 import { promisify } from "node:util";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -39,9 +39,7 @@ describe("kdf primitives", () => {
   test("blake2b matches RFC 7693 test vector for 'abc'", () => {
     const out = blake2b(new TextEncoder().encode("abc"), 64);
     expect(bytesToHex(out)).toBe(
-      // biome-ignore lint/security/noSecrets: Public RFC 7693 digest fixture.
       "ba80a53f981c4d0d6a2797b69f12f6e94c212f14685ac4b74b12bb6fdbffa2d1" +
-        // biome-ignore lint/security/noSecrets: Second half of the RFC digest fixture.
         "7d87c5392aab792dc252d5de4533cc9518d38aa8dbf1925ab92386edd4009923",
     );
   });
@@ -115,7 +113,8 @@ describe("solveChallenge", () => {
       signature: "deadbeef",
     };
     const progressValues: number[] = [];
-    const outcome = await solveChallenge(challenge, {
+    const outcome = await solveChallenge({
+      challenge,
       onProgress: (p) => progressValues.push(p),
     });
     expect(outcome._tag).toBe("Solved");
@@ -160,7 +159,7 @@ describe("solveChallenge", () => {
       },
       signature: "sig",
     };
-    const outcome = await solveChallenge(challenge);
+    const outcome = await solveChallenge({ challenge });
     expect(outcome._tag).toBe("Solved");
     if (outcome._tag !== "Solved") throw new Error("Expected a solved challenge.");
     expect(outcome.expiresAt).toBeNull();
@@ -171,9 +170,8 @@ describe("solveChallenge", () => {
   test("respects AbortSignal", async () => {
     const controller = new AbortController();
     controller.abort();
-    const options = { signal: controller.signal, parameters: {} };
-    const outcome = solveChallenge(
-      {
+    const outcome = solveChallenge({
+      challenge: {
         parameters: {
           algorithm: "SHA-256",
           nonce: "0102",
@@ -182,13 +180,13 @@ describe("solveChallenge", () => {
           keyPrefix: "000000",
         },
       },
-      options,
-    );
+      signal: controller.signal,
+    });
     await expect(outcome).resolves.toEqual({ _tag: "Aborted" });
   });
 
   test("returns Err on malformed challenge parameters", async () => {
-    const outcome = await solveChallenge({ parameters: { algorithm: "UNKNOWN" } });
+    const outcome = await solveChallenge({ challenge: { parameters: { algorithm: "UNKNOWN" } } });
     expect(outcome._tag).toBe("Err");
   });
 });

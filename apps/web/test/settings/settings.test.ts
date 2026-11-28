@@ -367,9 +367,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(Arr.every(capped, (r) => !r.writeEnabled && r.readEnabled)).toBe(true);
 
     // One-time kvb_ secret reveal & dismissal
-    // biome-ignore lint/security/noSecrets: Fake API key identifier for the reveal test.
     const keyId = ApiKeyId.make("k9x4m2p8q1r7");
-    // biome-ignore lint/security/noSecrets: Fake API key token for the reveal test.
     const secret = ApiKeyToken.make("kvb_k9x4m2p8q1r7_9fK2mP7xQ4vL8nR1wT6yB3cH5jD0sA2eF4g");
     const createdKey: ApiKeyView = {
       id: keyId,

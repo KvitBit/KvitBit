@@ -134,9 +134,8 @@ table td.kb-num {
   *,
   *::before,
   *::after {
-    /* biome-ignore lint/complexity/noImportantStyles: reduced motion must win over component transitions */
     animation-duration: 0.01ms !important;
-    /* biome-ignore lint/complexity/noImportantStyles: reduced motion must win over component transitions */
+
     transition-duration: 0.01ms !important;
   }
 }

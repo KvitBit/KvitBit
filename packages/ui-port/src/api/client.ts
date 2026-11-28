@@ -131,7 +131,10 @@ const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effe
     return decoded.pipe(
       Effect.tapError((error) =>
         Effect.sync(() => {
-          if (!(isUiError(error) || HttpClientError.isHttpClientError(error))) {
+          if (
+            Predicate.isObjectOrArray(error) &&
+            !(isUiError(error) || HttpClientError.isHttpClientError(error))
+          ) {
             annotateFailedResponse(error, response);
           }
         }),
@@ -152,31 +155,42 @@ const publishResponse = (exchange: ExchangeCell) =>
   );
 
 /** Gives every endpoint call of a client its own exchange cell (groups are nested records). */
-const withExchanges = <Client extends object>(client: Client): Client => ({
+const withExchange = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+  Effect.suspend(() => {
+    const exchange: ExchangeCell = { response: null };
+    return Effect.tap(Effect.provideService(call, Exchange, exchange), () =>
+      publishResponse(exchange),
+    );
+  });
+
+type MemberOf<T> = T extends object ? T[keyof T] : never;
+type ClientMember = MemberOf<KvitbitApiClient>;
+type Endpoint = MemberOf<ClientMember>;
+type EndpointCall = ReturnType<Endpoint>;
+
+const wrapEndpoint = (endpoint: Endpoint): Endpoint =>
+  new Proxy(endpoint, {
+    apply(target, receiver, args) {
+      // The proxy forwards a call made through the generated client's endpoint signature.
+      const call: Effect.Effect<unknown, Effect.Error<EndpointCall>> = Reflect.apply(
+        target,
+        receiver,
+        args,
+      );
+      return withExchange(call);
+    },
+  });
+
+const withExchanges = <Client extends Readonly<Record<string, ClientMember | Endpoint>>>(
+  client: Client,
+): Client => ({
   ...client,
   ...Rec.fromEntries(
     Arr.map(
-      Rec.toEntries(client),
-      ([name, member]: [string, unknown]): readonly [string, unknown] => [
+      Rec.toEntries<string, ClientMember | Endpoint>(client),
+      ([name, member]): readonly [string, ClientMember | Endpoint] => [
         name,
-        Predicate.isFunction(member)
-          ? (...args: ReadonlyArray<unknown>) => {
-              const call: unknown = member(...args);
-              return Effect.isEffect(call)
-                ? Effect.suspend(() => {
-                    const exchange: ExchangeCell = { response: null };
-                    return Effect.tap(
-                      // The generated client is traversed as data, so this wrapper cannot inspect the endpoint's channels.
-                      // @effect-diagnostics-next-line anyUnknownInErrorContext:off The generated client is traversed as data and the wrapper leaves its error channel intact.
-                      Effect.provideService(call, Exchange, exchange),
-                      () => publishResponse(exchange),
-                    );
-                  })
-                : call;
-            }
-          : Predicate.isObjectOrArray(member)
-            ? withExchanges(member)
-            : member,
+        Predicate.isFunction(member) ? wrapEndpoint(member) : withExchanges(member),
       ],
     ),
   ),

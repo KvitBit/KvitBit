@@ -36,7 +36,6 @@ const text = copy({
     remove: "Odebrat pin",
     close: "Zavřít",
     submit: "Odeslat na GitHub",
-    // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
     sending: "Odesílání…",
     failure: "Zpětnou vazbu se nepodařilo odeslat. Zkuste to znovu.",
     created: "Vytvořen požadavek #{number} na GitHubu",

@@ -1,4 +1,5 @@
 import type { ExpenseId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney, parseIsoDate } from "@kvitbit/ui-port/format";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -71,12 +72,14 @@ export function ExpensesListScreen(props: {
   const [loadingMore, setLoadingMore] = useState(false);
 
   const remote = useRemote(
-    (client) =>
-      client.expenses.list({
-        params: { workspaceId: workspace.id },
-        query: statusFilter === "incomplete" ? { incomplete: true } : {},
-      }),
-    [workspace.id, statusFilter],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.expenses.list({
+          params: { workspaceId: workspace.id },
+          query: statusFilter === "incomplete" ? { incomplete: true } : {},
+        }),
+      [workspace.id, statusFilter],
+    ),
   );
 
   const handleRefresh = useCallback(() => {
@@ -240,7 +243,9 @@ export function ExpensesListScreen(props: {
                     }
                     if (item.issuedOn !== null) {
                       const date = parseIsoDate(item.issuedOn);
-                      metaParts.push(date === undefined ? item.issuedOn : formatDate(locale, date));
+                      metaParts.push(
+                        date === undefined ? item.issuedOn : formatDate({ locale, date }),
+                      );
                     }
                     if (item.category !== null) metaParts.push(item.category);
                     if (item.attachments > 0) metaParts.push(`📎 ${item.attachments}`);

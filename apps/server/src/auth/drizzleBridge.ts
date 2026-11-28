@@ -44,7 +44,7 @@ export const withDrizzleSqlContext = <A>(callback: () => PromiseLike<A>) =>
 export const runAuthEffect = <A, E>(effect: Effect.Effect<A, E>) => {
   const context = sqlContext.getStore() ?? Context.empty();
   // Better Auth and Drizzle require promises and recognize their original rejection values.
-  // biome-ignore lint/plugin/no-direct-effect-runs: This is the Promise boundary required by Better Auth and Drizzle.
+
   return Effect.runPromiseWith(context)(
     effect.pipe(Effect.catchIf(isAuthCallbackError, (error) => Effect.die(error.cause))),
   );

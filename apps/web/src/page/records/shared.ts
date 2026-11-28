@@ -43,7 +43,7 @@ export const enumLabel: {
 } = Fn.dual(
   3,
   <E extends I18n.EnumName>(t: Translator, name: E, value: I18n.EnumLabels[E]): string =>
-    t.translate(I18n.enumText(name, value)),
+    t.translate(I18n.enumText({ name, value })),
 );
 
 // --- Common value schemas (JSON-safe for Effect UI SSR Model codecs) -------------------------------
@@ -889,7 +889,7 @@ export const dateText: {
   (iso: string | null): (locale: Locale) => string;
   (locale: Locale, iso: string | null): string;
 } = Fn.dual(2, (locale: Locale, iso: string | null): string =>
-  iso === null || iso === "" ? "—" : Format.formatDate(locale, iso),
+  iso === null || iso === "" ? "—" : Format.formatDate({ locale, date: iso }),
 );
 
 export const settlementTone = (settlement: ExpenseSettlementLiteral): BadgeTone => {

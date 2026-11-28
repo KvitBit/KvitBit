@@ -11,6 +11,7 @@ import type { MessageKey } from "./catalog";
 /** UI-only field issue codes (spec rule F1 `form.*`) and auth adapter codes (`auth.*`). */
 export const UI_ISSUE_CODES = [
   "form.required",
+  "form.validation_unavailable",
   "form.invalid",
   "form.decimal_invalid",
   "form.integer_invalid",

@@ -73,7 +73,7 @@ export type MaterialThemeFileWarning = (typeof MATERIAL_THEME_FILE_WARNINGS)[num
 
 export interface ParsedThemeFile {
   /** Sent unchanged as `ThemeSource.MaterialThemeBuilder.json`. */
-  readonly json: unknown;
+  readonly json: Schema.Json;
   readonly seed: Hex;
   readonly preview: { readonly light: RoleMap; readonly dark: RoleMap };
   /** Which of paid / proforma / overdue / draft the file defines. */
@@ -94,8 +94,10 @@ const FILE_SCHEME_KEY = {
 } as const satisfies Record<SchemeVariant, keyof MaterialThemeJson["schemes"]>;
 
 const ROLE_SET: ReadonlySet<string> = new Set(M3_COLOR_ROLES);
+const RawThemeFile = Schema.Record(Schema.String, Schema.Unknown);
+const isRawThemeFile = Schema.is(RawThemeFile);
 const Json = Schema.fromJsonString(Schema.Unknown);
-const decodeJson = Schema.decodeUnknownExit(Json);
+const decodeJson = Schema.decodeExit(Schema.fromJsonString(Schema.Json));
 const encodeJson = Schema.encodeUnknownExit(Json);
 
 const issue = (
@@ -148,13 +150,10 @@ type DecodedThemeFileWithPreview = DecodedThemeFile & {
   readonly roles: Readonly<Record<"light" | "dark", RoleMap>>;
 };
 
-// biome-ignore lint/plugin/no-unknown-parameters: This Schema boundary accepts arbitrary imported JSON.
-const decodeWithPreview = (json: unknown): Result.Result<DecodedThemeFileWithPreview, Invalid> => {
-  if (
-    Predicate.isObject(json) &&
-    "seed" in json &&
-    !(Predicate.isString(json["seed"]) && isHex(json["seed"]))
-  )
+const decodeWithPreview = (
+  json: typeof RawThemeFile.Type,
+): Result.Result<DecodedThemeFileWithPreview, Invalid> => {
+  if ("seed" in json && !(Predicate.isString(json["seed"]) && isHex(json["seed"])))
     return Result.fail(invalid(issue("theme.seed_invalid", ["seed"])));
   const exit = Schema.decodeUnknownExit(MaterialThemeJson)(json);
   if (Exit.isFailure(exit)) return Result.fail(invalid(issue("theme.json_invalid")));
@@ -213,9 +212,9 @@ const decodeWithPreview = (json: unknown): Result.Result<DecodedThemeFileWithPre
  * Shape-check an already-parsed file. Light and dark must carry every `M3ColorRole` (rule M2);
  * an incomplete contrast scheme is regenerated from the seed with `missing_contrast_schemes`.
  */
-// biome-ignore lint/plugin/no-unknown-parameters: Callers pass unvalidated theme data to the decoder.
-export const decodeMaterialTheme = (json: unknown): Result.Result<DecodedThemeFile, Invalid> =>
-  decodeWithPreview(json);
+export const decodeMaterialTheme = (
+  json: typeof RawThemeFile.Type,
+): Result.Result<DecodedThemeFile, Invalid> => decodeWithPreview(json);
 
 /**
  * Parse an uploaded file's text. The byte limit (`uploads.themeJson.maxBytes`) is checked before
@@ -230,6 +229,7 @@ export const parseMaterialThemeFile: {
   const parsed = decodeJson(source);
   if (Exit.isFailure(parsed)) return Result.fail(invalid(issue("theme.json_invalid")));
   const json = parsed.value;
+  if (!isRawThemeFile(json)) return Result.fail(invalid(issue("theme.json_invalid")));
   return Result.map(decodeWithPreview(json), (d) => {
     const { light, dark } = d.roles;
     return {
@@ -260,6 +260,7 @@ export const resolveMaterialTheme = ({
   if (Exit.isFailure(encoded)) return Result.fail(invalid(issue("theme.json_invalid")));
   if (utf8ByteLength(encoded.value) > maxBytes)
     return Result.fail(invalid(issue("theme.too_large", [], { maxBytes: String(maxBytes) })));
+  if (!isRawThemeFile(json)) return Result.fail(invalid(issue("theme.json_invalid")));
   return Result.map(decodeMaterialTheme(json), (d) =>
     withContrastWarnings(
       { _tag: "MaterialThemeBuilder", json },

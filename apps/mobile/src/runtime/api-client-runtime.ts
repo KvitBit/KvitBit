@@ -22,14 +22,7 @@ import * as Exit from "effect/Exit";
 import * as Fn from "effect/Function";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
-import {
-  createContext,
-  type DependencyList,
-  useCallback,
-  useContext,
-  useEffect,
-  useState,
-} from "react";
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { forkMobileEffect, fromMobilePromise } from "./request-intent";
 
 type ApiCall<A, E> = (api: KvitbitApiClient) => Effect.Effect<A, E, never>;
@@ -88,17 +81,28 @@ export interface RemoteHandle<A> {
   readonly set: (value: A) => void;
 }
 
+export function useReloadSignal() {
+  const [controller, setController] = useState(() => new AbortController());
+  const latest = useRef(controller);
+  const reload = useCallback(() => {
+    latest.current.abort();
+    const next = new AbortController();
+    latest.current = next;
+    setController(next);
+  }, []);
+  return [controller.signal, reload] as const;
+}
+
 /**
- * Loads `call` on mount and whenever `deps` change; keeps the stale value while reloading.
+ * Loads a stable `call` on mount and when it changes, keeping the stale value while reloading.
  * Pass `null` to stay idle (a missing parameter).
  */
-function useRemoteState<A, E>(call: ApiCall<A, E> | null, deps: DependencyList): RemoteHandle<A> {
+export function useRemote<A, E>(call: ApiCall<A, E> | null): RemoteHandle<A> {
   const { run } = useApi();
   const [state, setState] = useState<Remote<A>>(RemoteOps.idle);
-  const [tick, setTick] = useState(0);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: callers list the call's inputs in deps
+  const [signal, reload] = useReloadSignal();
   useEffect(() => {
-    if (call === null) return;
+    if (call === null || signal.aborted) return;
     let live = true;
     setState((s) => RemoteOps.load(s));
     forkMobileEffect(
@@ -106,7 +110,7 @@ function useRemoteState<A, E>(call: ApiCall<A, E> | null, deps: DependencyList):
         Effect.orElseSucceed(() => err(UiError.offline)),
         Effect.tap((result) =>
           Effect.sync(() => {
-            if (live) setState((s) => RemoteOps.fromResult(s, result));
+            if (live && !signal.aborted) setState((s) => RemoteOps.fromResult(s, result));
           }),
         ),
       ),
@@ -114,13 +118,7 @@ function useRemoteState<A, E>(call: ApiCall<A, E> | null, deps: DependencyList):
     return () => {
       live = false;
     };
-  }, [run, tick, ...deps]);
-  const reload = useCallback(() => setTick((t) => t + 1), []);
+  }, [call, run, signal]);
   const set = useCallback((value: A) => setState(RemoteOps.ready(value)), []);
   return { state, reload, set };
 }
-
-export const useRemote: {
-  (deps: DependencyList): <A, E>(call: ApiCall<A, E> | null) => RemoteHandle<A>;
-  <A, E>(call: ApiCall<A, E> | null, deps: DependencyList): RemoteHandle<A>;
-} = Fn.dual(2, useRemoteState);

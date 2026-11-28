@@ -1,10 +1,12 @@
 import { type BankAccountId, BankAccountInput } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as Str from "effect/String";
 import { Plus, Trash2 } from "lucide-react-native";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -67,8 +69,11 @@ export function BankAccountsSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.workspace.listBankAccounts({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.workspace.listBankAccounts({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
 
   const [draft, setDraft] = useState<BankAccountDraft | null>(null);
@@ -86,7 +91,7 @@ export function BankAccountsSection() {
   const openEdit = (account: BankAccountData) => {
     setDraft({
       id: account.id,
-      name: account.name ?? "",
+      name: Option.getOrElse(Option.fromNullOr(account.name), () => ""),
       iban: account.iban,
       bic: account.bic ?? "",
       currency: account.currency,

@@ -67,9 +67,7 @@ const withProviders =
 describe("auth screens", () => {
   test("safeReturnTo allows relative in-app paths and rejects external/protocol-relative URLs", () => {
     expect(safeReturnTo("/w/acme/documents")).toBe("/w/acme/documents");
-    // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
     expect(safeReturnTo("/app/w/acme/documents/123?tab=payments#receipt")).toBe(
-      // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
       "/w/acme/documents/123?tab=payments#receipt",
     );
     expect(safeReturnTo("/app//evil.example")).toBeNull();
@@ -214,7 +212,6 @@ describe("verification link continuation", () => {
         />,
       ),
     );
-    // biome-ignore lint/security/noSecrets: This test URL contains fixture values.
     expect(replacements).toEqual(["/sign-in?verified=1&returnTo=%2Finvite%2Finv1"]);
   });
 });

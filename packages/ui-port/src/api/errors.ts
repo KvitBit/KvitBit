@@ -27,6 +27,7 @@ import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as Fn from "effect/Function";
 import * as HttpClientError from "effect/http/HttpClientError";
+import * as Match from "effect/Match";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
@@ -159,7 +160,7 @@ export interface FailedResponse {
   readonly requestId: string | null;
 }
 
-const failedResponses = new WeakMap<object, FailedResponse>();
+const failedResponses = new WeakMap<WeakKey, FailedResponse>();
 
 /**
  * Associates a failure value (a response body's `SchemaError`) with the response that produced it,
@@ -168,13 +169,10 @@ const failedResponses = new WeakMap<object, FailedResponse>();
  * association. Keyed by the error object, so each failure keeps its own exchange.
  */
 export const annotateFailedResponse: {
-  // biome-ignore lint/plugin/no-unknown-parameters: Failure values can come from any Effect error channel.
-  (response: FailedResponse): (error: unknown) => void;
-  // biome-ignore lint/plugin/no-unknown-parameters: Failure values can come from any Effect error channel.
-  (error: unknown, response: FailedResponse): void;
-  // biome-ignore lint/plugin/no-unknown-parameters: Only object failures can carry response metadata.
-} = Fn.dual(2, (error: unknown, response: FailedResponse): void => {
-  if (Predicate.isObjectOrArray(error) && !failedResponses.has(error)) {
+  (response: FailedResponse): (error: WeakKey) => void;
+  (error: WeakKey, response: FailedResponse): void;
+} = Fn.dual(2, (error: WeakKey, response: FailedResponse): void => {
+  if (!failedResponses.has(error)) {
     failedResponses.set(error, { status: response.status, requestId: response.requestId });
   }
 });
@@ -194,15 +192,15 @@ const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError =>
 };
 
 /** The one mapping from a failure value (the `E` channel of a KvitbitApi call) to UiError. */
-// biome-ignore lint/plugin/no-unknown-parameters: The mapper normalizes arbitrary failure values.
-export const toUiError = (error: unknown): UiError => {
-  if (isUiError(error)) return error;
-  if (HttpClientError.isHttpClientError(error)) return fromHttpClientError(error);
-  const failed = Predicate.isObjectOrArray(error) ? failedResponses.get(error) : undefined;
-  if (failed !== undefined) return unexpected(failed.status, failed.requestId);
-  if (Cause.isTimeoutError(error)) return timeout;
-  return unexpected();
-};
+export const toUiError = Match.type<unknown>().pipe(
+  Match.when(isUiError, (error) => error),
+  Match.when(HttpClientError.isHttpClientError, fromHttpClientError),
+  Match.orElse((error): UiError => {
+    const failed = Predicate.isObjectOrArray(error) ? failedResponses.get(error) : undefined;
+    if (failed !== undefined) return unexpected(failed.status, failed.requestId);
+    return Cause.isTimeoutError(error) ? timeout : unexpected();
+  }),
+);
 
 /** Interruption only (the user navigated away, a newer query won) is `Cancelled`. */
 export const fromCause = (cause: Cause.Cause<unknown>): UiError => {

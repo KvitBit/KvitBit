@@ -7,7 +7,7 @@
  * the whole token, base64url without padding), so a key stays verifiable by either side.
  */
 // The synchronous key API uses Node's cryptographic random bytes and constant-time comparison.
-// @effect-diagnostics-next-line nodeBuiltinImport:off The synchronous key API needs cryptographic entropy and constant-time comparison.
+
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   API_KEY_PREFIX,
@@ -106,6 +106,5 @@ export const verifyApiKey: {
   (findHash: FindHash): (bearer: string) => Promise<ApiKeyVerification>;
   (bearer: string, findHash: FindHash): Promise<ApiKeyVerification>;
 } = Fn.dual(2, (bearer: string, findHash: FindHash) =>
-  // biome-ignore lint/plugin/no-direct-effect-runs: Preserve the public Promise API at the Effect boundary.
   Effect.runPromise(checkApiKey(bearer, findHash)),
 );

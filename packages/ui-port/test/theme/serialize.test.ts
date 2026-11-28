@@ -122,7 +122,6 @@ describe("themeStylesheet", () => {
   test("inlines every scheme behind data-theme, data-contrast and media queries", () => {
     for (const selector of [
       ":root {",
-      // biome-ignore lint/security/noSecrets: This is an expected CSS selector.
       ':root[data-contrast="medium"] {',
       ':root[data-contrast="high"] {',
       ':root[data-theme="dark"] {',

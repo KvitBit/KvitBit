@@ -57,10 +57,8 @@ const DEMO_RELEASE = wire(ReleaseInfo, {
   versionCode: 10000,
   releasedAt: "2026-11-20T10:00:00Z",
   apkUrl: "/api/mobile/releases/1.0.0/apk",
-  // biome-ignore lint/security/noSecrets: SHA-256 of the empty fixture APK.
   apkSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   sizeBytes: 28_450_000,
-  // biome-ignore lint/security/noSecrets: Public fingerprint of the demo signing certificate.
   signingCertSha256: Str.repeat(4)("ab12cd34ef567890"),
   minAndroidSdk: 26,
   obtainiumUrl: "obtainium://add/https://kvitbit.cz/api/mobile/releases/latest",
@@ -431,7 +429,6 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/auth/passkey/generate-authenticate-options",
     respond: () => ({
-      // biome-ignore lint/security/noSecrets: Public, fixed WebAuthn demo challenge.
       challenge: "ZGVtby13ZWJhdXRobi1jaGFsbGVuZ2U",
       rpId: "localhost",
     }),

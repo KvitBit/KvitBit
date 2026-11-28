@@ -1,4 +1,5 @@
 import type { TemplateId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { formatDate } from "@kvitbit/ui-port/format";
 import * as Arr from "effect/Array";
 import { CalendarClock, FileText, Plus } from "lucide-react-native";
@@ -49,8 +50,11 @@ export function TemplatesListScreen() {
   const [filter, setFilter] = useState<TemplateFilter>("all");
 
   const remote = useRemote(
-    (client) => client.templates.list({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.templates.list({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
 
   const openNew = useCallback(() => {
@@ -124,7 +128,7 @@ export function TemplatesListScreen() {
                   if (tpl.schedule.nextOccurrence !== null) {
                     metaParts.push(
                       t("templates.list.nextRun", {
-                        date: formatDate(locale, tpl.schedule.nextOccurrence),
+                        date: formatDate({ locale, date: tpl.schedule.nextOccurrence }),
                       }),
                     );
                   }

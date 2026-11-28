@@ -8,6 +8,7 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import type { BrandingImage, Locale, PdfTemplate } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import {
   contrastNameText,
@@ -21,7 +22,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { Check, Trash2, Upload } from "lucide-react-native";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -83,10 +84,15 @@ export function BrandingSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.branding.getBranding({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.branding.getBranding({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
-  const prefsRemote = useRemote((client) => client.me.getPreferences({}), []);
+  const prefsRemote = useRemote(
+    useCallback((client: KvitbitApiClient) => client.me.getPreferences({}), []),
+  );
 
   const [pdfTemplate, setPdfTemplate] = useState<PdfTemplate>("classic");
   const [accentColor, setAccentColor] = useState("#1F5FAF");

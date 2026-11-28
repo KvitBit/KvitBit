@@ -48,7 +48,6 @@ describe("storage-layout object keys", () => {
       }),
     ).toBe("mobile/updates/channels/production/android/fp-abc123/");
 
-    // biome-ignore lint/security/noSecrets: Public timestamp format example.
     expect(formatPublicationTimestamp("2026-11-24T09:05:03.007Z")).toBe("20261124T090503007Z");
 
     expect(
@@ -120,7 +119,6 @@ describe("selectors and parsers", () => {
       launchAsset: {
         sha256: SAMPLE_SHA256,
         hash: SAMPLE_HASH_B64URL,
-        // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
         key: Str.repeat(2)("0123456789abcdef"),
         contentType: "application/javascript",
       },
@@ -128,7 +126,6 @@ describe("selectors and parsers", () => {
         {
           sha256: Str.repeat(64)("b"),
           hash: Str.repeat(43)("B"),
-          // biome-ignore lint/security/noSecrets: Deterministic Metro asset key for the fixture.
           key: Str.repeat(2)("fedcba9876543210"),
           contentType: "image/png",
           fileExtension: ".png",

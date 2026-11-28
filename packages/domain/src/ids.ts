@@ -21,7 +21,6 @@ export const UserId = Uuid7.pipe(Schema.brand("UserId"));
 export type UserId = typeof UserId.Type;
 export const ContactId = Uuid7.pipe(Schema.brand("ContactId"));
 export type ContactId = typeof ContactId.Type;
-// biome-ignore lint/security/noSecrets: This literal names the Price List Item ID brand.
 export const PriceListItemId = Uuid7.pipe(Schema.brand("PriceListItemId"));
 export type PriceListItemId = typeof PriceListItemId.Type;
 export const DocumentId = Uuid7.pipe(Schema.brand("DocumentId"));
@@ -40,7 +39,6 @@ export const ScheduleId = Uuid7.pipe(Schema.brand("ScheduleId"));
 export type ScheduleId = typeof ScheduleId.Type;
 export const NumberingSeriesId = Uuid7.pipe(Schema.brand("NumberingSeriesId"));
 export type NumberingSeriesId = typeof NumberingSeriesId.Type;
-// biome-ignore lint/security/noSecrets: This literal names the Bank Account ID brand.
 export const BankAccountId = Uuid7.pipe(Schema.brand("BankAccountId"));
 export type BankAccountId = typeof BankAccountId.Type;
 export const InvitationId = Uuid7.pipe(Schema.brand("InvitationId"));
@@ -49,7 +47,6 @@ export const InvitationToken = NonEmpty.pipe(Schema.brand("InvitationToken"));
 export type InvitationToken = typeof InvitationToken.Type;
 export const DeliveryId = Uuid7.pipe(Schema.brand("DeliveryId"));
 export type DeliveryId = typeof DeliveryId.Type;
-// biome-ignore lint/security/noSecrets: This literal names the Audit Entry ID brand.
 export const AuditEntryId = Uuid7.pipe(Schema.brand("AuditEntryId"));
 export type AuditEntryId = typeof AuditEntryId.Type;
 export const ExportId = Uuid7.pipe(Schema.brand("ExportId"));

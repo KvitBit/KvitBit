@@ -1,4 +1,6 @@
 import type { WorkspaceId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
+import { useCallback } from "react";
 import { useTransfer } from "../../platform/transfer";
 import { type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
 
@@ -13,8 +15,11 @@ export function ExpensesProbe(props: {
   const api = useApi();
   const transfer = useTransfer();
   const list = useRemote(
-    (client) => client.expenses.list({ params: { workspaceId: props.workspaceId }, query: {} }),
-    [props.workspaceId],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.expenses.list({ params: { workspaceId: props.workspaceId }, query: {} }),
+      [props.workspaceId],
+    ),
   );
   if (list.state._tag === "Ready") {
     props.onReady(api, transfer, list.state.value.items.length);

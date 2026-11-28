@@ -83,7 +83,7 @@ export const makeEmailSenderLayer: {
             from: config.from,
           });
           const smtp = yield* acquireSmtpSender(Redacted.value(config.smtpUrl.value), config.from);
-          return makeFallbackEmailSender(resend, smtp);
+          return makeFallbackEmailSender({ primary: resend, secondary: smtp });
         }
 
         if (hasResend) {

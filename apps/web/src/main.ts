@@ -236,7 +236,6 @@ const updateImpl = (model: Model, message: Message): UpdateReturn => {
       return "ws" in model.route
         ? { model: { ...model, switcherOpen: !model.switcherOpen } }
         : { model };
-    // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
     case "ClickedSignOut":
       return {
         model,
@@ -284,7 +283,7 @@ const changedDate = Subscription.make(
 );
 
 // Effect UI defines the callable component and its additional runtime properties.
-// @effect-diagnostics-next-line missingPipeableSignature:off Effect UI owns this component callable signature and its runtime properties.
+
 export const App = Html.component({
   name: "Kvitbit",
   props: Flags,

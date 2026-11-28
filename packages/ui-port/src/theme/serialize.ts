@@ -142,7 +142,6 @@ export const themeStylesheet: {
     const styleVars: CssVariables = styleVariables(style);
     const sysDark = `${root}:not([data-theme="light"])`;
     const dark = `${root}[data-theme="dark"]`;
-    // biome-ignore lint/security/noSecrets: This is a CSS selector.
     const notHigh = ':not([data-contrast="high"])';
     return Arr.join(
       [

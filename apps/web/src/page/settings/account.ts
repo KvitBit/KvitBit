@@ -1252,7 +1252,9 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
           }),
           h.span
             .class("kb-field__hint")
-            .children([t.translate(I18n.enumText("themeStyleHint", ctx.prefs.style))]),
+            .children([
+              t.translate(I18n.enumText({ name: "themeStyleHint", value: ctx.prefs.style })),
+            ]),
         ]),
         h.div.class("kb-field").children([
           h.span.class("kb-field__label").children([t.t("account.appearance.mode")]),
@@ -1295,14 +1297,18 @@ const viewAppearance = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
             .class("kb-spread")
             .children([
               h.strong.children([t.t("account.appearance.sampleCard")]),
-              badge(h, t.translate(I18n.enumText("badge", "paid")), "paid"),
+              badge(h, t.translate(I18n.enumText({ name: "badge", value: "paid" })), "paid"),
             ]),
           h.div
             .class("kb-row")
             .children([
-              badge(h, t.translate(I18n.enumText("badge", "proforma")), "proforma"),
-              badge(h, t.translate(I18n.enumText("badge", "overdue")), "overdue"),
-              badge(h, t.translate(I18n.enumText("badge", "draft")), "draft"),
+              badge(
+                h,
+                t.translate(I18n.enumText({ name: "badge", value: "proforma" })),
+                "proforma",
+              ),
+              badge(h, t.translate(I18n.enumText({ name: "badge", value: "overdue" })), "overdue"),
+              badge(h, t.translate(I18n.enumText({ name: "badge", value: "draft" })), "draft"),
             ]),
           h.div
             .class("kb-row")

@@ -184,24 +184,33 @@ export interface NumberOptions {
 }
 
 /** Locale number: cs `1 234,5` (NBSP grouping), en `1,234.5`. Exact for any decimal input. */
-// A decimal input is a string and can overlap the locale at the call boundary.
-// @effect-diagnostics-next-line missingPipeableSignature:off The data-first API accepts any decimal text and has an optional options argument.
-export const formatNumber = (
-  locale: Locale,
-  value: DecimalInput,
-  options: NumberOptions = {},
-): string =>
+export const formatNumber = ({
+  locale,
+  value,
+  minFractionDigits = 0,
+  maxFractionDigits = 3,
+  grouping = true,
+}: NumberOptions & {
+  readonly locale: Locale;
+  readonly value: DecimalInput;
+}): string =>
   formatExact(locale, value, {
-    minimumFractionDigits: options.minFractionDigits ?? 0,
-    maximumFractionDigits: options.maxFractionDigits ?? 3,
-    useGrouping: options.grouping ?? true,
+    minimumFractionDigits: minFractionDigits,
+    maximumFractionDigits: maxFractionDigits,
+    useGrouping: grouping,
   });
 
 /** Quantity with an optional unit: cs `1,5 h`, en `1.5 h`. Up to 4 decimals, no padding. */
-// The value and optional unit accept strings, which overlap the locale.
-// @effect-diagnostics-next-line missingPipeableSignature:off The value and optional unit can both be strings, overlapping the locale argument.
-export const formatQuantity = (locale: Locale, value: DecimalInput, unit?: string): string => {
-  const n = formatNumber(locale, value, { maxFractionDigits: 4 });
+export const formatQuantity = ({
+  locale,
+  value,
+  unit,
+}: {
+  readonly locale: Locale;
+  readonly value: DecimalInput;
+  readonly unit?: string | undefined;
+}): string => {
+  const n = formatNumber({ locale, value, maxFractionDigits: 4 });
   return unit === undefined || unit === "" ? n : `${n} ${unit}`;
 };
 
@@ -223,7 +232,9 @@ export const formatPercent: {
     percent: DecimalInput,
     options: { readonly maxFractionDigits?: number } = {},
   ): string => {
-    const n = formatNumber(locale, percent, {
+    const n = formatNumber({
+      locale,
+      value: percent,
       maxFractionDigits: options.maxFractionDigits ?? 2,
       grouping: false,
     });

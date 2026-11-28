@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-// biome-ignore lint/correctness/noUnresolvedImports: Bun and TypeScript resolve the package's own exports.
+
 import * as Brand from "@kvitbit/brand";
 
 test("the package entry point exposes brand geometry, inks, and options", () => {

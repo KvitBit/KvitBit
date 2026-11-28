@@ -1,10 +1,7 @@
 // Bun 1.4.4 looks up lockfile v2 tarballs by the first 16 integrity bytes.
 // bun2nix creates URL-keyed entries, so copy the prefetched package under
 // the integrity key before Bun installs dependencies.
-// @effect-diagnostics nodeBuiltinImport:off Nix copies prefetched cache entries before installing dependencies.
-// @effect-diagnostics preferEffectArray:off Read Bun lockfile arrays before Effect is installed.
-// @effect-diagnostics preferEffectRecord:off Enumerate Bun lockfile entries before Effect is installed.
-// @effect-diagnostics preferEffectString:off Parse tarball specifiers before Effect is installed.
+
 import { cpSync } from "node:fs";
 import { join } from "node:path";
 import { isLockObject, isLockString } from "./bun-lock-boundary";

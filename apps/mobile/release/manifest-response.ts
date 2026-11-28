@@ -1,5 +1,5 @@
 // Effect's crypto APIs do not provide synchronous RSA signing or X.509 verification.
-// @effect-diagnostics-next-line nodeBuiltinImport:off The synchronous Expo signing API accepts Node RSA keys and X.509 certificates.
+
 import { createSign, type KeyObject, randomUUID, verify } from "node:crypto";
 import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
@@ -132,9 +132,9 @@ export const parseMultipartMixed: {
     const afterDelimiter = cursor + delimiter.length;
     if (Str.startsWith("--", afterDelimiter)(framed)) return parts;
 
-    // @effect-diagnostics-next-line preferEffectString:off Native indexOf accepts an offset, so each scan starts at the current delimiter.
-    const next = framed.indexOf(delimiter, afterDelimiter);
-    if (next === -1) return undefined;
+    const offset = Str.indexOf(delimiter)(Str.slice(afterDelimiter)(framed));
+    if (Option.isNone(offset)) return undefined;
+    const next = afterDelimiter + offset.value;
 
     parts.push(parsePart(Str.slice(afterDelimiter + CRLF.length, next)(framed)));
     cursor = next;

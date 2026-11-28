@@ -81,7 +81,9 @@ describe("translate", () => {
     expect(translate("en", message("issue.ico.checksum"))).toBe(
       "This IČO is not valid. Check the digits.",
     );
-    expect(translate("cs", enumText("documentKind", "proforma"))).toBe("Zálohová faktura");
+    expect(translate("cs", enumText({ name: "documentKind", value: "proforma" }))).toBe(
+      "Zálohová faktura",
+    );
   });
 
   test("unknown keys render as the key, missing params stay visible", () => {

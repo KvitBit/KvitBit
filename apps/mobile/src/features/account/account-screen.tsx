@@ -1,11 +1,12 @@
 import type { ThemeContrast, ThemeMode, ThemeStyle } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { describeError } from "@kvitbit/ui-port/api";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { KeyRound, LogOut, MonitorSmartphone, ShieldAlert, Trash2 } from "lucide-react-native";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
@@ -71,9 +72,15 @@ export function AccountScreen(props: {
   const [sessions, setSessions] = useState<ReadonlyArray<SessionView> | null>(null);
 
   // Danger: Delete account
+  const userId = user?.id;
   const workspaces = useRemote(
-    props.tab === "danger" && user !== null ? (api) => api.myWorkspaces.listMine() : null,
-    [props.tab, user?.id],
+    useMemo(
+      () =>
+        props.tab === "danger" && userId !== undefined
+          ? (api: KvitbitApiClient) => api.myWorkspaces.listMine()
+          : null,
+      [props.tab, userId],
+    ),
   );
   const [deletePhrase, setDeletePhrase] = useState("");
   const [deletePassword, setDeletePassword] = useState("");
@@ -405,9 +412,9 @@ export function AccountScreen(props: {
               value={appTheme.preference.mode}
               onChange={(mode) => appTheme.setPreference({ ...appTheme.preference, mode })}
               choices={[
-                { value: "system", label: text(enumText("themeMode", "system")) },
-                { value: "light", label: text(enumText("themeMode", "light")) },
-                { value: "dark", label: text(enumText("themeMode", "dark")) },
+                { value: "system", label: text(enumText({ name: "themeMode", value: "system" })) },
+                { value: "light", label: text(enumText({ name: "themeMode", value: "light" })) },
+                { value: "dark", label: text(enumText({ name: "themeMode", value: "dark" })) },
               ]}
             />
             <SegmentedChoice<ThemeStyle>
@@ -415,8 +422,11 @@ export function AccountScreen(props: {
               value={appTheme.preference.style}
               onChange={(style) => appTheme.setPreference({ ...appTheme.preference, style })}
               choices={[
-                { value: "elegant", label: text(enumText("themeStyle", "elegant")) },
-                { value: "cozy", label: text(enumText("themeStyle", "cozy")) },
+                {
+                  value: "elegant",
+                  label: text(enumText({ name: "themeStyle", value: "elegant" })),
+                },
+                { value: "cozy", label: text(enumText({ name: "themeStyle", value: "cozy" })) },
               ]}
             />
             <SegmentedChoice<ThemeContrast>
@@ -424,9 +434,15 @@ export function AccountScreen(props: {
               value={appTheme.preference.contrast}
               onChange={(contrast) => appTheme.setPreference({ ...appTheme.preference, contrast })}
               choices={[
-                { value: "standard", label: text(enumText("themeContrast", "standard")) },
-                { value: "medium", label: text(enumText("themeContrast", "medium")) },
-                { value: "high", label: text(enumText("themeContrast", "high")) },
+                {
+                  value: "standard",
+                  label: text(enumText({ name: "themeContrast", value: "standard" })),
+                },
+                {
+                  value: "medium",
+                  label: text(enumText({ name: "themeContrast", value: "medium" })),
+                },
+                { value: "high", label: text(enumText({ name: "themeContrast", value: "high" })) },
               ]}
             />
             {appTheme.dynamicAvailable ? (
@@ -658,7 +674,7 @@ export function AccountScreen(props: {
                       <ListRow
                         key={ws.id}
                         title={ws.name}
-                        subtitle={text(enumText("role", ws.role))}
+                        subtitle={text(enumText({ name: "role", value: ws.role }))}
                       />
                     ))}
                   </View>

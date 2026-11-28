@@ -85,7 +85,6 @@ export const persistPrefs = (prefs: Prefs): Effect.Effect<void> =>
       }),
     );
     if (globalThis.document !== undefined) {
-      // biome-ignore lint/suspicious/noDocumentCookie: the Cookie Store API is not available in every supported browser
       document.cookie = `${PREFS_COOKIE}=${encodeURIComponent(json)}; path=/; max-age=31536000; samesite=lax`;
     }
   });

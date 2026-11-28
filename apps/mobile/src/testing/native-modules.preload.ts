@@ -1,8 +1,6 @@
 import { mock } from "bun:test";
-// Run Node crypto as the oracle and native-module test stand-in.
-/* biome-ignore lint/correctness/noNodejsModules: Bun runs this test preload. */ // @effect-diagnostics-next-line nodeBuiltinImport:off The Bun preload supplies synchronous cryptography to native test mocks.
-import { createHash, randomBytes, randomUUID } from "node:crypto";
 import * as EffectArray from "effect/Array";
+import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -25,8 +23,9 @@ Object.assign(globalThis, { __DEV__: false });
 const StyleFields = Schema.Record(Schema.String, Schema.Unknown);
 const decodeStyle = Schema.decodeUnknownOption(StyleFields);
 
-// biome-ignore lint/plugin/no-unknown-parameters: Native style props can include nested arrays and false placeholders.
-const flattenStyle = (style: unknown): typeof StyleFields.Type | undefined =>
+type StyleInput = typeof StyleFields.Type | Array<StyleInput> | false | number | null | undefined;
+
+const flattenStyle = (style: StyleInput): typeof StyleFields.Type | undefined =>
   EffectArray.isArray(style)
     ? EffectArray.reduce(style, {}, (merged, entry) => Object.assign(merged, flattenStyle(entry)))
     : Option.getOrUndefined(decodeStyle(style));
@@ -214,13 +213,13 @@ mock.module("expo-linking", () => ({
 
 mock.module("expo-crypto", () => ({
   CryptoDigestAlgorithm: { SHA256: "SHA-256" },
-  randomUUID,
-  getRandomBytes: (count: number) => new Uint8Array(randomBytes(count)),
+  randomUUID: SecureRandom.uuidV4Unsafe,
+  getRandomBytes: SecureRandom.randomBytesUnsafe,
   digestStringAsync: (_algorithm: string, value: string) =>
-    resolve(() => createHash("sha256").update(value).digest("hex")),
+    resolve(() => Bun.CryptoHasher.hash("sha256", value, "hex")),
   digest: (_algorithm: string, data: Uint8Array) =>
     resolve(() => {
-      const digest = createHash("sha256").update(data).digest();
+      const digest = Bun.CryptoHasher.hash("sha256", data);
       return digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength);
     }),
 }));

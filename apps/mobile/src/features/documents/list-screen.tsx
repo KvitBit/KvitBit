@@ -124,29 +124,32 @@ function DocumentsList({
 
   const kindChoices: ReadonlyArray<Choice<FilterValue<DocumentKind>>> = [
     { value: "all", label: t("common.state.all") },
-    { value: "invoice", label: t(enumKey("documentKindPlural", "invoice")) },
-    { value: "proforma", label: t(enumKey("documentKindPlural", "proforma")) },
+    { value: "invoice", label: t(enumKey({ name: "documentKindPlural", value: "invoice" })) },
+    { value: "proforma", label: t(enumKey({ name: "documentKindPlural", value: "proforma" })) },
     {
       value: "payment_tax_document",
-      label: t(enumKey("documentKindPlural", "payment_tax_document")),
+      label: t(enumKey({ name: "documentKindPlural", value: "payment_tax_document" })),
     },
-    { value: "credit_note", label: t(enumKey("documentKindPlural", "credit_note")) },
+    {
+      value: "credit_note",
+      label: t(enumKey({ name: "documentKindPlural", value: "credit_note" })),
+    },
   ];
 
   const statusChoices: ReadonlyArray<Choice<FilterValue<DocumentStatus>>> = [
     { value: "all", label: t("common.state.all") },
-    { value: "draft", label: t(enumKey("documentStatus", "draft")) },
-    { value: "issued", label: t(enumKey("documentStatus", "issued")) },
-    { value: "cancelled", label: t(enumKey("documentStatus", "cancelled")) },
+    { value: "draft", label: t(enumKey({ name: "documentStatus", value: "draft" })) },
+    { value: "issued", label: t(enumKey({ name: "documentStatus", value: "issued" })) },
+    { value: "cancelled", label: t(enumKey({ name: "documentStatus", value: "cancelled" })) },
   ];
 
   const settlementChoices: ReadonlyArray<Choice<FilterValue<DocumentSettlement>>> = [
     { value: "all", label: t("common.state.all") },
-    { value: "unpaid", label: t(enumKey("settlement", "unpaid")) },
-    { value: "partially_paid", label: t(enumKey("settlement", "partially_paid")) },
-    { value: "paid", label: t(enumKey("settlement", "paid")) },
-    { value: "overpaid", label: t(enumKey("settlement", "overpaid")) },
-    { value: "credited", label: t(enumKey("settlement", "credited")) },
+    { value: "unpaid", label: t(enumKey({ name: "settlement", value: "unpaid" })) },
+    { value: "partially_paid", label: t(enumKey({ name: "settlement", value: "partially_paid" })) },
+    { value: "paid", label: t(enumKey({ name: "settlement", value: "paid" })) },
+    { value: "overpaid", label: t(enumKey({ name: "settlement", value: "overpaid" })) },
+    { value: "credited", label: t(enumKey({ name: "settlement", value: "credited" })) },
   ];
 
   const openNew = (newKind: "invoice" | "proforma" | "credit_note") => {
@@ -278,7 +281,7 @@ function DocumentsList({
                   const settleB = settlementBadge(doc.settlement, doc.overdue, t);
                   const kindB = kindBadge(doc.kind, t);
                   const numberLabel = doc.number ?? t("documents.list.draftNumber");
-                  const datePart = `${formatDate(locale, doc.issuedOn)} · ${t("documents.list.column.due")} ${formatDate(locale, doc.dueOn)}`;
+                  const datePart = `${formatDate({ locale, date: doc.issuedOn })} · ${t("documents.list.column.due")} ${formatDate({ locale, date: doc.dueOn })}`;
                   return (
                     <ListRow
                       key={doc.id}

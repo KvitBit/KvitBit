@@ -403,7 +403,6 @@ describe("allocateNumber", () => {
         return [conflict, yield* counterOf(seriesId, "2026")] as const;
       }),
     );
-    // biome-ignore lint/security/noSecrets: Public SQL error tag.
     expect(error).toMatchObject({ _tag: "NumberingExhausted", firstCounter: 1, attempts: 6 });
     expect(counter).toBeUndefined();
   });

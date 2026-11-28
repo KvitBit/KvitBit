@@ -73,7 +73,6 @@ const workspace: WorkspaceSummary = {
   closed: false,
 };
 
-// biome-ignore lint/security/noSecrets: Street address used by the contact and registry test fixtures.
 const sampleStreet = "Budějovická 778/3a";
 
 const sampleContact: ContactRecord = {

@@ -373,32 +373,32 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const tabItems = [
     {
       id: "all",
-      label: textOf(t, I18n.enumText("documentTab", "all")),
+      label: textOf(t, I18n.enumText({ name: "documentTab", value: "all" })),
       href: href({ _tag: "Documents", ws: slug, query: {} }),
     },
     {
       id: "drafts",
-      label: textOf(t, I18n.enumText("documentTab", "drafts")),
+      label: textOf(t, I18n.enumText({ name: "documentTab", value: "drafts" })),
       href: href({ _tag: "Documents", ws: slug, query: { status: "draft" } }),
     },
     {
       id: "invoices",
-      label: textOf(t, I18n.enumText("documentTab", "invoices")),
+      label: textOf(t, I18n.enumText({ name: "documentTab", value: "invoices" })),
       href: href({ _tag: "Documents", ws: slug, query: { kind: "invoice" } }),
     },
     {
       id: "proformas",
-      label: textOf(t, I18n.enumText("documentTab", "proformas")),
+      label: textOf(t, I18n.enumText({ name: "documentTab", value: "proformas" })),
       href: href({ _tag: "Documents", ws: slug, query: { kind: "proforma" } }),
     },
     {
       id: "tax_documents",
-      label: textOf(t, I18n.enumText("documentTab", "tax_documents")),
+      label: textOf(t, I18n.enumText({ name: "documentTab", value: "tax_documents" })),
       href: href({ _tag: "Documents", ws: slug, query: { kind: "payment_tax_document" } }),
     },
     {
       id: "credit_notes",
-      label: textOf(t, I18n.enumText("documentTab", "credit_notes")),
+      label: textOf(t, I18n.enumText({ name: "documentTab", value: "credit_notes" })),
       href: href({ _tag: "Documents", ws: slug, query: { kind: "credit_note" } }),
     },
   ];
@@ -555,11 +555,17 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             onChange: (value) => Message.SelectedStatus({ value }),
             options: [
               { value: "", label: txt(locale, "allStatuses") },
-              { value: "draft", label: textOf(t, I18n.enumText("documentStatus", "draft")) },
-              { value: "issued", label: textOf(t, I18n.enumText("documentStatus", "issued")) },
+              {
+                value: "draft",
+                label: textOf(t, I18n.enumText({ name: "documentStatus", value: "draft" })),
+              },
+              {
+                value: "issued",
+                label: textOf(t, I18n.enumText({ name: "documentStatus", value: "issued" })),
+              },
               {
                 value: "cancelled",
-                label: textOf(t, I18n.enumText("documentStatus", "cancelled")),
+                label: textOf(t, I18n.enumText({ name: "documentStatus", value: "cancelled" })),
               },
             ],
           }),
@@ -570,14 +576,26 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             onChange: (value) => Message.SelectedSettlement({ value }),
             options: [
               { value: "", label: txt(locale, "allSettlements") },
-              { value: "unpaid", label: textOf(t, I18n.enumText("settlement", "unpaid")) },
+              {
+                value: "unpaid",
+                label: textOf(t, I18n.enumText({ name: "settlement", value: "unpaid" })),
+              },
               {
                 value: "partially_paid",
-                label: textOf(t, I18n.enumText("settlement", "partially_paid")),
+                label: textOf(t, I18n.enumText({ name: "settlement", value: "partially_paid" })),
               },
-              { value: "paid", label: textOf(t, I18n.enumText("settlement", "paid")) },
-              { value: "overpaid", label: textOf(t, I18n.enumText("settlement", "overpaid")) },
-              { value: "credited", label: textOf(t, I18n.enumText("settlement", "credited")) },
+              {
+                value: "paid",
+                label: textOf(t, I18n.enumText({ name: "settlement", value: "paid" })),
+              },
+              {
+                value: "overpaid",
+                label: textOf(t, I18n.enumText({ name: "settlement", value: "overpaid" })),
+              },
+              {
+                value: "credited",
+                label: textOf(t, I18n.enumText({ name: "settlement", value: "credited" })),
+              },
             ],
           }),
           checkbox(h, {

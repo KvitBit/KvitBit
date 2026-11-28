@@ -51,15 +51,15 @@ interface Holder {
  * restart starts again from `primary`; durable routing needs the delivery record to store the
  * provider.
  */
-// @effect-diagnostics-next-line missingPipeableSignature:off A curried secondary and its options can also satisfy the positional sender signature.
-export function makeFallbackEmailSender(
-  primary: EmailSenderService,
-  secondary: EmailSenderService,
-  options: FallbackOptions = {},
-): EmailSenderService {
-  const retentionMillis = Duration.toMillis(
-    Duration.fromInputUnsafe(options.deliveredRetention ?? Duration.days(7)),
-  );
+export function makeFallbackEmailSender({
+  primary,
+  secondary,
+  deliveredRetention = Duration.days(7),
+}: FallbackOptions & {
+  readonly primary: EmailSenderService;
+  readonly secondary: EmailSenderService;
+}): EmailSenderService {
+  const retentionMillis = Duration.toMillis(Duration.fromInputUnsafe(deliveredRetention));
   const holders = new Map<string, Holder>();
   const locks = new Map<string, { readonly semaphore: Semaphore.Semaphore; users: number }>();
 

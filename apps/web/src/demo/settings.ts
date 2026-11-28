@@ -282,7 +282,6 @@ let invitationsState: Array<InvitationView> = [
 
 let apiKeysState: Array<ApiKeyView> = [
   {
-    // biome-ignore lint/security/noSecrets: This is a public demo key ID.
     id: ApiKeyId.make("k9x4m2p8q1r7"),
     name: "Pohoda export script",
     prefix: "kvb_k9x4m2p8q1r7",
@@ -294,7 +293,6 @@ let apiKeysState: Array<ApiKeyView> = [
     expiresAt: null,
   },
   {
-    // biome-ignore lint/security/noSecrets: This is a public demo key ID.
     id: ApiKeyId.make("b3v7n5w2z8c4"),
     name: "E-shop webhook",
     prefix: "kvb_b3v7n5w2z8c4",
@@ -873,7 +871,6 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/auth/passkey/generate-register-options",
     respond: () => ({
-      // biome-ignore lint/security/noSecrets: Public, fixed WebAuthn demo challenge.
       challenge: "ZGVtby1yZWdpc3Rlci1jaGFsbGVuZ2U",
       rp: { name: "Kvitbit", id: "localhost" },
       user: { id: btoa("demo-user-id"), name: "jana@novak.cz", displayName: "Jana Nováková" },

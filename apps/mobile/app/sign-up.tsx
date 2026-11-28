@@ -1,6 +1,8 @@
 import { InvitationToken } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import * as Schema from "effect/Schema";
 import { useLocalSearchParams } from "expo-router";
+import { useCallback } from "react";
 import { SignUpScreen } from "../src/features/auth/sign-up-screen";
 import { useI18n } from "../src/i18n/i18n-provider";
 import { param } from "../src/navigation/routes";
@@ -9,7 +11,9 @@ import { EmptyState, RemoteView, Screen } from "../src/ui";
 
 function InvitedSignUp({ token }: { readonly token: InvitationToken }) {
   const { t } = useI18n();
-  const invite = useRemote((api) => api.invitations.peek({ params: { token } }), [token]);
+  const invite = useRemote(
+    useCallback((api: KvitbitApiClient) => api.invitations.peek({ params: { token } }), [token]),
+  );
   return (
     <RemoteView state={invite.state} onRetry={invite.reload}>
       {(value) =>

@@ -20,6 +20,7 @@ import * as Arr from "effect/Array";
 import * as Fn from "effect/Function";
 import * as Predicate from "effect/Predicate";
 import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
 
 /** Where an effective value came from. `default` is the product fallback below the Workspace. */
 export type SettingSource = "document" | "contact" | "workspace" | "default";
@@ -238,16 +239,20 @@ const normalizeDefaults = (defaults: ContactDefaults): ContactDefaults => {
   return out;
 };
 
-const definedEntries = (value: Parameters<typeof Object.entries<unknown>>[0]) =>
-  Arr.filter(
-    // Arrays participate by enumerable keys too. Record.toEntries accepts only records.
-    // @effect-diagnostics-next-line preferEffectRecord:off The comparison must enumerate array keys, including sparse array entries.
-    Object.entries<unknown>(value),
-    ([, entry]) => entry !== undefined,
-  );
+const definedEntries = <A>(value: A): ReadonlyArray<readonly [string, unknown]> => {
+  if (Arr.isArray(value)) {
+    return Arr.filterMap(value, (entry, index) =>
+      entry === undefined ? Result.failVoid : Result.succeed([String(index), entry] as const),
+    );
+  }
+  if (!Predicate.isObject(value)) return [];
+  return Arr.filterMap(Rec.keys(value), (key) => {
+    const entry = value[key];
+    return entry === undefined ? Result.failVoid : Result.succeed([key, entry] as const);
+  });
+};
 
-// biome-ignore lint/plugin/no-unknown-parameters: Recursive comparison visits values from arbitrary nested object keys.
-const deepEqual = (a: unknown, b: unknown): boolean => {
+const deepEqual = <A>(a: A, b: A): boolean => {
   if (a === b) return true;
   if (!(Predicate.isObjectOrArray(a) && Predicate.isObjectOrArray(b))) return false;
   if (Arr.isArray(a) !== Arr.isArray(b)) return false;

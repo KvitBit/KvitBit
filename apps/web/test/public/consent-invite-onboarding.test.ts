@@ -260,7 +260,6 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     const replay = Onboarding.update(m, submit, ctx);
     expect(replay.model).toEqual(minting.model);
     expect(Arr.map(replay.commands ?? [], (command) => command.name)).toEqual([
-      // biome-ignore lint/security/noSecrets: This is a command name.
       "OnboardingRequestKeys",
     ]);
     expect(minting.model.createRequestKey).toBeNull();
@@ -328,7 +327,6 @@ describe("Workspace Onboarding Wizard (Screen 07)", () => {
     expect(cs.html).toContain("kb-onboarding");
     expect(cs.html).toContain("ARES");
 
-    // biome-ignore lint/security/noSecrets: This URL contains the wizard step number.
     const en = await renderPath("/onboarding?step=5", { locale: "en", session: signedIn });
     expect(en.html).toContain("Live miniature invoice preview");
   });

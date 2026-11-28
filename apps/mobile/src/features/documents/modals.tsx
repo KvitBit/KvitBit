@@ -161,7 +161,7 @@ export function RecordPaymentModal(props: {
         value={method}
         choices={Arr.map(PAYMENT_METHODS, (m) => ({
           value: m,
-          label: t(enumKey("paymentMethod", m)),
+          label: t(enumKey({ name: "paymentMethod", value: m })),
         }))}
         onChange={setMethod}
       />
@@ -322,8 +322,8 @@ export function SendEmailModal(props: {
         label={t("documents.send.language")}
         value={language}
         choices={[
-          { value: "cs", label: t(enumKey("locale", "cs")) },
-          { value: "en", label: t(enumKey("locale", "en")) },
+          { value: "cs", label: t(enumKey({ name: "locale", value: "cs" })) },
+          { value: "en", label: t(enumKey({ name: "locale", value: "en" })) },
         ]}
         onChange={setLanguage}
       />
@@ -331,8 +331,8 @@ export function SendEmailModal(props: {
         label={t("documents.send.purpose")}
         value={purpose}
         choices={[
-          { value: "document", label: t(enumKey("deliveryPurpose", "document")) },
-          { value: "reminder", label: t(enumKey("deliveryPurpose", "reminder")) },
+          { value: "document", label: t(enumKey({ name: "deliveryPurpose", value: "document" })) },
+          { value: "reminder", label: t(enumKey({ name: "deliveryPurpose", value: "reminder" })) },
         ]}
         onChange={setPurpose}
       />

@@ -123,7 +123,6 @@ const FEATURES: ReadonlyArray<{
 
 const FetchConfig = defineApiCommand({
   message: Message,
-  // biome-ignore lint/security/noSecrets: This is a statically declared UI command or message name.
   name: "PublicLandingFetchConfig",
   args: { seq: Remote.Seq },
   execute: ({ seq }) =>

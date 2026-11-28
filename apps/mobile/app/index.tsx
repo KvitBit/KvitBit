@@ -1,6 +1,7 @@
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import * as Effect from "effect/Effect";
 import { Redirect } from "expo-router";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { onboardingStore } from "../src/features/onboarding/onboarding-persistence";
 import { forkFeatureEffect } from "../src/features/ui-effect";
 import { hrefOf } from "../src/navigation/routes";
@@ -22,9 +23,12 @@ export default function Index() {
   const onboardingChecked =
     onboardingScopeKey !== null && pendingOnboarding?.key === onboardingScopeKey;
   const shouldLoadWorkspaces = signedIn && onboardingChecked && !pendingOnboarding.pending;
-  const workspaces = useRemote(shouldLoadWorkspaces ? (api) => api.myWorkspaces.listMine() : null, [
-    shouldLoadWorkspaces,
-  ]);
+  const workspaces = useRemote(
+    useMemo(
+      () => (shouldLoadWorkspaces ? (api: KvitbitApiClient) => api.myWorkspaces.listMine() : null),
+      [shouldLoadWorkspaces],
+    ),
+  );
 
   useEffect(() => {
     forkFeatureEffect(Effect.map(Effect.promise(lastWorkspace.read), setRemembered));

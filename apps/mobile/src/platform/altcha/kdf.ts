@@ -10,7 +10,6 @@ import * as Effect from "effect/Effect";
 import * as EffectString from "effect/String";
 import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
 
-// biome-ignore lint/security/noSecrets: Standard hexadecimal alphabet.
 const HEX = "0123456789abcdef";
 
 export const bytesToHex = (bytes: Uint8Array): string => {
@@ -32,7 +31,6 @@ export const hexToBytes = (hex: string): Uint8Array | null => {
   return out;
 };
 
-// biome-ignore lint/security/noSecrets: Standard base64 alphabet.
 const B64_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 export const utf8ToBase64 = (text: string): string => {

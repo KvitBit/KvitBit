@@ -181,8 +181,8 @@ export function ContactDetailView(props: ContactDetailViewProps) {
     defaults.reminderPolicy === undefined || defaults.reminderPolicy.mode === "inherit"
       ? t("contacts.override.workspaceDefault")
       : defaults.reminderPolicy.mode === "disabled"
-        ? t(enumKey("reminderMode", "disabled"))
-        : `${t(enumKey("reminderMode", "custom"))} (${Arr.join(Arr.map(defaults.reminderPolicy.offsetsDays, String), ", ")})`;
+        ? t(enumKey({ name: "reminderMode", value: "disabled" }))
+        : `${t(enumKey({ name: "reminderMode", value: "custom" }))} (${Arr.join(Arr.map(defaults.reminderPolicy.offsetsDays, String), ", ")})`;
 
   return (
     <View style={styles.stack}>
@@ -207,7 +207,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
               <Badge
                 key={role}
                 tone={role === "customer" ? "info" : "neutral"}
-                label={t(enumKey("contactRole", role))}
+                label={t(enumKey({ name: "contactRole", value: role }))}
               />
             ))}
             {contact.archived ? <Badge tone="draft" label={t("common.action.archive")} /> : null}
@@ -223,8 +223,8 @@ export function ContactDetailView(props: ContactDetailViewProps) {
         {contact.registryFetchedAt !== null ? (
           <Text variant="meta" color="onSurfaceVariant">
             {local({
-              cs: `Z ARES (${formatDateTime(locale, contact.registryFetchedAt)})`,
-              en: `From ARES (${formatDateTime(locale, contact.registryFetchedAt)})`,
+              cs: `Z ARES (${formatDateTime({ locale, instant: contact.registryFetchedAt })})`,
+              en: `From ARES (${formatDateTime({ locale, instant: contact.registryFetchedAt })})`,
             })}
           </Text>
         ) : null}
@@ -265,8 +265,8 @@ export function ContactDetailView(props: ContactDetailViewProps) {
             <Banner
               tone="warning"
               text={local({
-                cs: `Subjekt byl ukončen dne ${formatDate(locale, props.aresDiff.result.terminatedOn)}.`,
-                en: `Entity was terminated on ${formatDate(locale, props.aresDiff.result.terminatedOn)}.`,
+                cs: `Subjekt byl ukončen dne ${formatDate({ locale, date: props.aresDiff.result.terminatedOn })}.`,
+                en: `Entity was terminated on ${formatDate({ locale, date: props.aresDiff.result.terminatedOn })}.`,
               })}
             />
           ) : null}
@@ -335,7 +335,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
             title={t("contacts.editor.defaults.language")}
             trailing={
               defaults.language !== undefined
-                ? t(enumKey("locale", defaults.language))
+                ? t(enumKey({ name: "locale", value: defaults.language }))
                 : t("contacts.override.workspaceDefault")
             }
             badge={
@@ -361,7 +361,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
             title={t("contacts.editor.defaults.paymentMethod")}
             trailing={
               defaults.paymentMethod !== undefined
-                ? t(enumKey("paymentMethod", defaults.paymentMethod))
+                ? t(enumKey({ name: "paymentMethod", value: defaults.paymentMethod }))
                 : t("contacts.override.workspaceDefault")
             }
             badge={
@@ -417,8 +417,8 @@ export function ContactDetailView(props: ContactDetailViewProps) {
                   <ListRow
                     key={doc.id}
                     leading={FileText}
-                    title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                    subtitle={formatDate(locale, doc.issuedOn)}
+                    title={doc.number ?? t(enumKey({ name: "documentKind", value: doc.kind }))}
+                    subtitle={formatDate({ locale, date: doc.issuedOn })}
                     trailing={formatMoney(locale, doc.total)}
                     badge={
                       doc.overdue ? (
@@ -456,7 +456,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
                     leading={Receipt}
                     title={expense.supplierDocumentNumber ?? t("expenses.editor.title")}
                     {...(expense.issuedOn !== null && parseIsoDate(expense.issuedOn) !== null
-                      ? { subtitle: formatDate(locale, expense.issuedOn) }
+                      ? { subtitle: formatDate({ locale, date: expense.issuedOn }) }
                       : {})}
                     {...(expense.total !== null && expense.currency !== null
                       ? {
@@ -640,7 +640,10 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   const languageChoices: ReadonlyArray<Choice<Locale | typeof INHERIT>> = useMemo(
     () => [
       { value: INHERIT, label: t("contacts.override.workspaceDefault") },
-      ...Arr.map(CONTACT_LANGUAGES, (lang) => ({ value: lang, label: t(enumKey("locale", lang)) })),
+      ...Arr.map(CONTACT_LANGUAGES, (lang) => ({
+        value: lang,
+        label: t(enumKey({ name: "locale", value: lang })),
+      })),
     ],
     [t],
   );
@@ -650,7 +653,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
       { value: INHERIT, label: t("contacts.override.workspaceDefault") },
       ...Arr.map(CONTACT_PAYMENT_METHODS, (method) => ({
         value: method,
-        label: t(enumKey("paymentMethod", method)),
+        label: t(enumKey({ name: "paymentMethod", value: method })),
       })),
     ],
     [t],
@@ -658,9 +661,9 @@ export function ContactEditorView(props: ContactEditorViewProps) {
 
   const reminderChoices: ReadonlyArray<Choice<"inherit" | "disabled" | "custom">> = useMemo(
     () => [
-      { value: "inherit", label: t(enumKey("reminderMode", "inherit")) },
-      { value: "disabled", label: t(enumKey("reminderMode", "disabled")) },
-      { value: "custom", label: t(enumKey("reminderMode", "custom")) },
+      { value: "inherit", label: t(enumKey({ name: "reminderMode", value: "inherit" })) },
+      { value: "disabled", label: t(enumKey({ name: "reminderMode", value: "disabled" })) },
+      { value: "custom", label: t(enumKey({ name: "reminderMode", value: "custom" })) },
     ],
     [t],
   );
@@ -799,12 +802,12 @@ export function ContactEditorView(props: ContactEditorViewProps) {
             error={fieldError(["legalForm"])}
           />
           <SwitchRow
-            label={t(enumKey("contactRole", "customer"))}
+            label={t(enumKey({ name: "contactRole", value: "customer" }))}
             value={form.roles.includes("customer")}
             onChange={(v) => toggleRole("customer", v)}
           />
           <SwitchRow
-            label={t(enumKey("contactRole", "supplier"))}
+            label={t(enumKey({ name: "contactRole", value: "supplier" }))}
             value={form.roles.includes("supplier")}
             onChange={(v) => toggleRole("supplier", v)}
           />
@@ -1093,48 +1096,57 @@ function WorkspaceContactDetail({
   }, []);
 
   const contactRemote = useRemote(
-    contactId === null
-      ? null
-      : (client) =>
-          Effect.map(
-            client.contacts.get({ params: inWorkspace(workspace.id, { contactId }) }),
-            (view) => parseContactView(view),
-          ),
-    [workspace.id, contactId],
+    useMemo(
+      () =>
+        contactId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              Effect.map(
+                client.contacts.get({ params: inWorkspace(workspace.id, { contactId }) }),
+                (view) => parseContactView(view),
+              ),
+      [workspace.id, contactId],
+    ),
   );
 
   const documentsRemote = useRemote(
-    contactId === null
-      ? null
-      : (client) =>
-          Effect.map(
-            client.documents.list({
-              params: inWorkspace(workspace.id),
-              query: { contact: contactId, limit: 10 },
-            }),
-            (page) => parseDocumentSummaries(page.items),
-          ),
-    [workspace.id, contactId],
+    useMemo(
+      () =>
+        contactId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              Effect.map(
+                client.documents.list({
+                  params: inWorkspace(workspace.id),
+                  query: { contact: contactId, limit: 10 },
+                }),
+                (page) => parseDocumentSummaries(page.items),
+              ),
+      [workspace.id, contactId],
+    ),
   );
 
   const today = pragueToday();
   const receivablesRemote = useRemote(
-    contactId === null
-      ? null
-      : (client) =>
-          Effect.map(
-            client.reports.run({
-              params: inWorkspace(workspace.id, { report: "receivables" }),
-              query: { from: today, to: today },
-            }),
-            (view) => {
-              const report = decodeReportView(view, "receivables");
-              return report.report === "receivables"
-                ? summarizeContactReceivables({ report, contactId })
-                : null;
-            },
-          ),
-    [workspace.id, contactId, today],
+    useMemo(
+      () =>
+        contactId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              Effect.map(
+                client.reports.run({
+                  params: inWorkspace(workspace.id, { report: "receivables" }),
+                  query: { from: today, to: today },
+                }),
+                (view) => {
+                  const report = decodeReportView(view, "receivables");
+                  return report.report === "receivables"
+                    ? summarizeContactReceivables({ report, contactId })
+                    : null;
+                },
+              ),
+      [workspace.id, contactId, today],
+    ),
   );
 
   const record = contactRemote.state._tag === "Ready" ? contactRemote.state.value : null;
@@ -1207,8 +1219,8 @@ function WorkspaceContactDetail({
                 ico,
                 tone: "warning",
                 text: local({
-                  cs: `Subjekt byl ukončen dne ${formatDate(locale, res.value.terminatedOn)}. Kontakt přesto můžete uložit.`,
-                  en: `Entity was terminated on ${formatDate(locale, res.value.terminatedOn)}. You can still save.`,
+                  cs: `Subjekt byl ukončen dne ${formatDate({ locale, date: res.value.terminatedOn })}. Kontakt přesto můžete uložit.`,
+                  en: `Entity was terminated on ${formatDate({ locale, date: res.value.terminatedOn })}. You can still save.`,
                 }),
               });
             } else {

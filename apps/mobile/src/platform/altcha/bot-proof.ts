@@ -53,9 +53,8 @@ const RetryAfter = Schema.Struct({
 });
 const isRetryAfter = Schema.is(RetryAfter);
 
-// biome-ignore lint/plugin/no-unknown-parameters: The response body can be any JSON value or absent.
-const parseRetryAfter = (header: string | null, body: unknown): number => {
-  if (isRetryAfter(body)) return Math.ceil(body.retryAfterSeconds);
+const parseRetryAfter = (header: string | null, body: typeof RetryAfter.Type | null): number => {
+  if (body !== null) return Math.ceil(body.retryAfterSeconds);
   if (header !== null) {
     const parsed = Number.parseInt(header, 10);
     if (Number.isFinite(parsed) && parsed > 0) return parsed;
@@ -114,11 +113,12 @@ const readChallenge = Effect.fn("BotProof.readChallenge")(function* (
     return { _tag: "Challenge", challenge: body };
   }
 
+  const retryAfter = isRetryAfter(body) ? body : null;
   if (response.status === 429) {
     return {
       _tag: "Err",
       error: RateLimited.make({
-        retryAfterSeconds: parseRetryAfter(response.headers.get("retry-after"), body),
+        retryAfterSeconds: parseRetryAfter(response.headers.get("retry-after"), retryAfter),
       }),
     };
   }
@@ -127,7 +127,7 @@ const readChallenge = Effect.fn("BotProof.readChallenge")(function* (
       _tag: "Err",
       error: Unavailable.make({
         dependency: "database",
-        retryAfterSeconds: parseRetryAfter(response.headers.get("retry-after"), body),
+        retryAfterSeconds: parseRetryAfter(response.headers.get("retry-after"), retryAfter),
       }),
     };
   }
@@ -289,6 +289,8 @@ const derive = Effect.fn("BotProof.derive")(function* (
 });
 
 /** Solve a fetched ALTCHA PoW v2 challenge in pure TS, yielding between chunks. */
-// @effect-diagnostics-next-line missingPipeableSignature:off The challenge is open JSON and can overlap the optional solve settings.
-export const solveChallenge = (challenge: ChallengeJson, options?: SolveOptions) =>
+export const solveChallenge = ({
+  challenge,
+  ...options
+}: SolveOptions & { readonly challenge: ChallengeJson }) =>
   runMobileEffect(solve(challenge, options));

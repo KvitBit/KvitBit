@@ -16,10 +16,7 @@ describe("transfer http helpers", () => {
         groupBy: undefined,
         from: "2026-01-01",
       }),
-    ).toBe(
-      // biome-ignore lint/security/noSecrets: URL for the test-only placeholder domain.
-      "https://a.cz/api/v1/reports/vat/export?format=csv&from=2026-01-01",
-    );
+    ).toBe("https://a.cz/api/v1/reports/vat/export?format=csv&from=2026-01-01");
   });
 
   test("authHeaders sends the bearer on Android and nothing with the cookie", () => {

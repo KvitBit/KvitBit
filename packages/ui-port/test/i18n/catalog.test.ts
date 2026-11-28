@@ -119,7 +119,6 @@ describe("catalog parity", () => {
 
   test("Czech copy is actually Czech: diacritics present across the catalog", () => {
     const text = Arr.join(Arr.flatMap(Rec.values(csRecord), forms), " ");
-    // biome-ignore lint/security/noSecrets: The literal is public fixture data.
     for (const ch of "áčďéěíňóřšťúůýž") expect(text).toContain(ch);
   });
 });

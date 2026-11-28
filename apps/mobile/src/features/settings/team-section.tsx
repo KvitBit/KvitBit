@@ -1,11 +1,12 @@
 import type { InvitationView, MemberView } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { router } from "expo-router";
 import { MailPlus, RefreshCw, Trash2, UserMinus } from "lucide-react-native";
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -55,14 +56,20 @@ export function TeamSection() {
   const invitableRoles = invitableRolesFor(workspace.role);
 
   const membersRemote = useRemote(
-    (client) => client.team.listMembers({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) => client.team.listMembers({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
   const invitationsRemote = useRemote(
-    canInvite
-      ? (client) => client.team.listInvitations({ params: inWorkspace(workspace.id) })
-      : null,
-    [workspace.id, canInvite],
+    useMemo(
+      () =>
+        canInvite
+          ? (client: KvitbitApiClient) =>
+              client.team.listInvitations({ params: inWorkspace(workspace.id) })
+          : null,
+      [workspace.id, canInvite],
+    ),
   );
 
   const [inviteEmail, setInviteEmail] = useState("");

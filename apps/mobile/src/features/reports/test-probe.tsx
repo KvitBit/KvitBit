@@ -1,4 +1,6 @@
 import { IsoDate, type WorkspaceId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
+import { useCallback } from "react";
 import { useTransfer } from "../../platform/transfer";
 import { type ApiRunner, useApi, useRemote } from "../../runtime/api-runtime";
 import { decodeReportView } from "./model";
@@ -14,12 +16,14 @@ export function ReportsProbe(props: {
   const api = useApi();
   const transfer = useTransfer();
   const vat = useRemote(
-    (c) =>
-      c.reports.run({
-        params: { workspaceId: props.workspaceId, report: "vat_summary" },
-        query: { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") },
-      }),
-    [],
+    useCallback(
+      (c: KvitbitApiClient) =>
+        c.reports.run({
+          params: { workspaceId: props.workspaceId, report: "vat_summary" },
+          query: { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") },
+        }),
+      [props.workspaceId],
+    ),
   );
   if (vat.state._tag === "Ready") {
     const decoded = decodeReportView(vat.state.value, "vat_summary");

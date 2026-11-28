@@ -426,7 +426,6 @@ describe("Public Share Link page (Screen 04)", () => {
     ],
     [
       "demo-unpaid-eur",
-      // biome-ignore lint/security/noSecrets: Expected EPC QR payload for the demo invoice.
       "BCD\n002\n1\nSCT\nFIOBCZPPXXX\nNovak Design s.r.o.\nCZ9320100000002000145399\nEUR1815.00\n\n20260043",
     ],
   ])("decodes the rendered payment symbol for %s", async (token, expectedPayload) => {

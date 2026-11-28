@@ -65,13 +65,10 @@ test("the frozen verifier accepts the browser's proof for a signed default Argon
         keyLength: 32,
         keyPrefix: "0",
         memoryCost: 19_456,
-        // biome-ignore lint/security/noSecrets: Public nonce from the signed challenge fixture.
         nonce: "7407d6a4c7e62682432eabaccc103c74",
         parallelism: 1,
-        // biome-ignore lint/security/noSecrets: Public salt from the signed challenge fixture.
         salt: "ecf173ac326d6604dd54b6a31ba04d7e",
       },
-      // biome-ignore lint/security/noSecrets: Signature from the signed challenge fixture.
       signature: "7e6804b169fe2d40f759832e084f51a398ba9bcd3fb8b06d91584ec4f9cf635e",
     }),
   );

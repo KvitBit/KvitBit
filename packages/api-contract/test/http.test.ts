@@ -230,7 +230,6 @@ describe("SchemaErrors middleware", () => {
     expect(paths).toContainEqual(["query", "overdue"]);
   });
 
-  // biome-ignore lint/security/noSecrets: The test title names an Effect error type.
   test("response encoding failures pass through as HttpApiSchemaError", () => {
     for (const kind of ["Body", "ResponseHeaders"] as const) {
       const error = run(kind);

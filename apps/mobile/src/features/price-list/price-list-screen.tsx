@@ -1,4 +1,5 @@
 import type { CurrencyCode, VatTreatment, WorkspaceSummary } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import {
   describeError,
   type FieldIssue,
@@ -130,7 +131,10 @@ function PriceListEditor(props: PriceListEditorProps) {
   const vatChoices: ReadonlyArray<Choice<VatTreatment | typeof DEFAULT_VAT>> = useMemo(
     () => [
       { value: DEFAULT_VAT, label: t("contacts.override.workspaceDefault") },
-      ...Arr.map(VAT_TREATMENTS, (vat) => ({ value: vat, label: t(enumKey("vatTreatment", vat)) })),
+      ...Arr.map(VAT_TREATMENTS, (vat) => ({
+        value: vat,
+        label: t(enumKey({ name: "vatTreatment", value: vat })),
+      })),
     ],
     [t],
   );
@@ -307,7 +311,7 @@ export function PriceListContent(props: PriceListContentProps) {
               {Arr.map(props.visibleItems, (item) => {
                 const vatLabel =
                   item.vat !== null
-                    ? t(enumKey("vatTreatment", item.vat))
+                    ? t(enumKey({ name: "vatTreatment", value: item.vat }))
                     : t("contacts.override.workspaceDefault");
                 const subtitleParts = Arr.filter(
                   [item.description, vatLabel],
@@ -378,18 +382,20 @@ export function PriceListScreen() {
   const [includeArchived, setIncludeArchived] = useState<boolean>(false);
 
   const itemsRemote = useRemote(
-    (client) =>
-      Effect.map(
-        client.priceList.list({
-          params: inWorkspace(workspace.id),
-          query: {
-            text: Str.trim(searchText) || undefined,
-            includeArchived,
-          },
-        }),
-        parsePriceListItems,
-      ),
-    [workspace.id, searchText, includeArchived],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        Effect.map(
+          client.priceList.list({
+            params: inWorkspace(workspace.id),
+            query: {
+              text: Str.trim(searchText) || undefined,
+              includeArchived,
+            },
+          }),
+          parsePriceListItems,
+        ),
+      [workspace.id, searchText, includeArchived],
+    ),
   );
 
   const [optimistic, setOptimistic] = useState(() => listOps.init([]));

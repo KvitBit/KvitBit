@@ -16,7 +16,6 @@
  * its path is stored as a key.
  */
 
-// @effect-diagnostics-next-line nodeBuiltinImport:off Node rmdir removes only an empty directory, which FileSystem.remove cannot guarantee.
 import { rmdir } from "node:fs/promises"; // FileSystem.remove cannot remove only an empty directory.
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";

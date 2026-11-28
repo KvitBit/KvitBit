@@ -65,8 +65,8 @@ export function ContactsListContent(props: ContactsListContentProps) {
   const roleChoices: ReadonlyArray<Choice<RoleFilter>> = useMemo(
     () => [
       { value: "all", label: t("common.state.all") },
-      { value: "customer", label: t(enumKey("contactRole", "customer")) },
-      { value: "supplier", label: t(enumKey("contactRole", "supplier")) },
+      { value: "customer", label: t(enumKey({ name: "contactRole", value: "customer" })) },
+      { value: "supplier", label: t(enumKey({ name: "contactRole", value: "supplier" })) },
     ],
     [t],
   );
@@ -172,7 +172,7 @@ export function ContactsListContent(props: ContactsListContentProps) {
                       <Badge
                         key={role}
                         tone={role === "customer" ? "info" : "neutral"}
-                        label={t(enumKey("contactRole", role))}
+                        label={t(enumKey({ name: "contactRole", value: role }))}
                       />
                     ))}
                     {contact.archived ? (

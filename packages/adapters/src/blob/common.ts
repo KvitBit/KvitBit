@@ -17,11 +17,7 @@ import * as Str from "effect/String";
 export class InvalidBlobKey extends Schema.TaggedError<
   InvalidBlobKey,
   { readonly brand: unique symbol }
->()(
-  // biome-ignore lint/security/noSecrets: The public Effect error discriminant is a fixed literal.
-  "InvalidBlobKey",
-  { key: Schema.String, reason: Schema.String },
-) {}
+>()("InvalidBlobKey", { key: Schema.String, reason: Schema.String }) {}
 
 /** Directory under a LocalDisk root that holds in-progress writes; no key may start with it. */
 export const partialDir = ".partial";

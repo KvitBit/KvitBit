@@ -149,7 +149,6 @@ const serializeAttestation = (response: AuthenticatorResponse): typeof JsonObjec
   const transports = invokeOptional(response, "getTransports");
   const authData = invokeOptional(response, "getAuthenticatorData");
   const pubKey = invokeOptional(response, "getPublicKey");
-  // biome-ignore lint/security/noSecrets: Standard WebAuthn method name.
   const pubKeyAlg = invokeOptional(response, "getPublicKeyAlgorithm");
   const fields = {
     clientDataJSON: bytesToBase64Url(response.clientDataJSON),

@@ -27,7 +27,6 @@ export const toBase64Url = (value: string): string =>
     "",
   )(EffectString.replaceAll("/", "_")(EffectString.replaceAll("+", "-")(value)));
 
-// biome-ignore lint/security/noSecrets: Standard base64 alphabet.
 const B64_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 export const bytesToBase64Url = (input: ArrayBuffer | Uint8Array): string => {
@@ -72,14 +71,13 @@ const isAttachment = Schema.is(Schema.Literals(["platform", "cross-platform"]));
 const isFiniteNumber = Schema.is(Schema.Finite);
 const isJsonArray = Schema.is(Schema.Array(Schema.Unknown));
 const isJsonObject = Schema.is(JsonObject);
-const NativeFields = Schema.Struct({
+export const NativeFields = Schema.Struct({
   id: Schema.String,
   rawId: Schema.optionalKey(Schema.Unknown),
   authenticatorAttachment: Schema.optionalKey(Schema.Unknown),
   clientExtensionResults: Schema.optionalKey(Schema.Unknown),
   response: JsonObject,
 });
-const decodeNative = Schema.decodeUnknownOption(NativeFields);
 const Registration = Schema.Struct({
   clientDataJSON: Schema.String,
   attestationObject: Schema.String,
@@ -112,11 +110,10 @@ const normalize = (
 };
 
 /** Normalizes a native registration result into WebAuthn Level 3 JSON. */
-// biome-ignore lint/plugin/no-unknown-parameters: The native package's response is checked here.
-export const normalizeRegistrationResponse = (raw: unknown): typeof JsonObject.Type | null => {
-  const decoded = decodeNative(raw);
-  if (Option.isNone(decoded)) return null;
-  const { response } = decoded.value;
+export const normalizeRegistrationResponse = (
+  fields: typeof NativeFields.Type,
+): typeof JsonObject.Type | null => {
+  const { response } = fields;
   if (!isRegistration(response)) return null;
   const output = {
     clientDataJSON: toBase64Url(response.clientDataJSON),
@@ -134,15 +131,14 @@ export const normalizeRegistrationResponse = (raw: unknown): typeof JsonObject.T
     Object.assign(output, { publicKeyAlgorithm: response["publicKeyAlgorithm"] });
   if (isNonEmptyText(response["publicKey"]))
     Object.assign(output, { publicKey: toBase64Url(response["publicKey"]) });
-  return normalize(decoded.value, output);
+  return normalize(fields, output);
 };
 
 /** Normalizes a native authentication result into WebAuthn Level 3 JSON. */
-// biome-ignore lint/plugin/no-unknown-parameters: The native package's response is checked here.
-export const normalizeAuthenticationResponse = (raw: unknown): typeof JsonObject.Type | null => {
-  const decoded = decodeNative(raw);
-  if (Option.isNone(decoded)) return null;
-  const { response } = decoded.value;
+export const normalizeAuthenticationResponse = (
+  fields: typeof NativeFields.Type,
+): typeof JsonObject.Type | null => {
+  const { response } = fields;
   if (!isAuthentication(response)) return null;
   const output = {
     clientDataJSON: toBase64Url(response.clientDataJSON),
@@ -150,7 +146,7 @@ export const normalizeAuthenticationResponse = (raw: unknown): typeof JsonObject
     signature: toBase64Url(response.signature),
   };
   return normalize(
-    decoded.value,
+    fields,
     isNonEmptyText(response["userHandle"])
       ? { ...output, userHandle: toBase64Url(response["userHandle"]) }
       : output,

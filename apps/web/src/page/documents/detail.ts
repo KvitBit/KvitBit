@@ -712,8 +712,7 @@ const executeIdempotentWrite = (
               const ptd = res.issued[0];
               const toast =
                 ptd !== undefined && ptd.number !== null
-                  ? // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
-                    txt(locale, "dlgPayPtdToast", { number: ptd.number })
+                  ? txt(locale, "dlgPayPtdToast", { number: ptd.number })
                   : txt(locale, "toastPaid");
               return Message.ActionSucceeded({ toast, reload: true });
             },
@@ -1243,8 +1242,8 @@ const renderActiveDialog = (
               value: model.sendLanguage,
               onChange: (value) => Message.ChangedSendLanguage({ value }),
               options: [
-                { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
-                { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
+                { value: "cs", label: textOf(t, I18n.enumText({ name: "locale", value: "cs" })) },
+                { value: "en", label: textOf(t, I18n.enumText({ name: "locale", value: "en" })) },
               ],
             }),
             selectField(h, {
@@ -1256,11 +1255,11 @@ const renderActiveDialog = (
               options: [
                 {
                   value: "document",
-                  label: textOf(t, I18n.enumText("deliveryPurpose", "document")),
+                  label: textOf(t, I18n.enumText({ name: "deliveryPurpose", value: "document" })),
                 },
                 {
                   value: "reminder",
-                  label: textOf(t, I18n.enumText("deliveryPurpose", "reminder")),
+                  label: textOf(t, I18n.enumText({ name: "deliveryPurpose", value: "reminder" })),
                 },
               ],
             }),
@@ -1316,11 +1315,23 @@ const renderActiveDialog = (
               options: [
                 {
                   value: "bank_transfer",
-                  label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+                  label: textOf(
+                    t,
+                    I18n.enumText({ name: "paymentMethod", value: "bank_transfer" }),
+                  ),
                 },
-                { value: "cash", label: textOf(t, I18n.enumText("paymentMethod", "cash")) },
-                { value: "card", label: textOf(t, I18n.enumText("paymentMethod", "card")) },
-                { value: "other", label: textOf(t, I18n.enumText("paymentMethod", "other")) },
+                {
+                  value: "cash",
+                  label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "cash" })),
+                },
+                {
+                  value: "card",
+                  label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "card" })),
+                },
+                {
+                  value: "other",
+                  label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "other" })),
+                },
               ],
             }),
             textField(h, {
@@ -1449,7 +1460,6 @@ const renderActiveDialog = (
           actions: [
             button(h, { label: sharedCopy(locale, "cancel"), onClick: Message.ClosedDialog() }),
             button(h, {
-              // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
               label: txt(locale, "dlgRemovePaySubmit"),
               onClick: Message.SubmittedRemovePayment(),
               variant: "danger",
@@ -1765,7 +1775,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         [txt(locale, "dueOn"), h.span.class("kb-num").children([fmtDate(locale, doc.dates.dueOn)])],
         [
           txt(locale, "paymentMethod"),
-          textOf(t, I18n.enumText("paymentMethod", doc.paymentMethod)),
+          textOf(t, I18n.enumText({ name: "paymentMethod", value: doc.paymentMethod })),
         ],
         ...(issuer?.bankAccount !== null && issuer?.bankAccount !== undefined
           ? [
@@ -1869,7 +1879,12 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         .children([
                           h.span
                             .class("kb-small kb-muted")
-                            .children([textOf(t, I18n.enumText("documentRelation", rel.relation))]),
+                            .children([
+                              textOf(
+                                t,
+                                I18n.enumText({ name: "documentRelation", value: rel.relation }),
+                              ),
+                            ]),
                           mono(h, rel.number),
                         ]),
                       kindBadge(h, locale, rel.kind),
@@ -1895,7 +1910,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         h.span.class("kb-small").children([Arr.join(del.to, ", ")]),
                         badge(
                           h,
-                          textOf(t, I18n.enumText("deliveryStatus", del.status)),
+                          textOf(t, I18n.enumText({ name: "deliveryStatus", value: del.status })),
                           del.status === "sent"
                             ? "paid"
                             : del.status === "failed"
@@ -1938,7 +1953,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             },
             {
               header: txt(locale, "payColMethod"),
-              cell: (p) => textOf(t, I18n.enumText("paymentMethod", p.method)),
+              cell: (p) => textOf(t, I18n.enumText({ name: "paymentMethod", value: p.method })),
             },
             {
               header: txt(locale, "payColAmount"),
@@ -1948,7 +1963,6 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             },
             { header: txt(locale, "payColNote"), cell: (p) => p.note ?? "—" },
             {
-              // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
               header: txt(locale, "payColTaxDoc"),
               cell: (p) =>
                 p.taxDocument === null
@@ -2034,7 +2048,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           .class("kb-spread")
                           .children([
                             h.span.children([
-                              `${textOf(t, I18n.enumText("shareEvent", ev.kind))} · ${textOf(t, I18n.enumText("device", ev.device))}`,
+                              `${textOf(t, I18n.enumText({ name: "shareEvent", value: ev.kind }))} · ${textOf(t, I18n.enumText({ name: "device", value: ev.device }))}`,
                             ]),
                             h.span
                               .class("kb-small kb-muted kb-num")

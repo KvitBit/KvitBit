@@ -46,7 +46,11 @@ describe("FallbackEmailSender", () => {
     const secondary = scripted("smtp", "ok");
     const options = { deliveredRetention: 1_000, send: false };
     const exit = await run(
-      makeFallbackEmailSender(primary.sender, secondary.sender, options).send(message(), {
+      makeFallbackEmailSender({
+        primary: primary.sender,
+        secondary: secondary.sender,
+        ...options,
+      }).send(message(), {
         idempotencyKey: "k1",
       }),
     );
@@ -58,9 +62,12 @@ describe("FallbackEmailSender", () => {
     const primary = scripted("resend", EmailNotAccepted.make({ cause: { status: 503 } }));
     const secondary = scripted("smtp", "ok");
     const exit = await run(
-      makeFallbackEmailSender(primary.sender, secondary.sender).send(message(), {
-        idempotencyKey: "k1",
-      }),
+      makeFallbackEmailSender({ primary: primary.sender, secondary: secondary.sender }).send(
+        message(),
+        {
+          idempotencyKey: "k1",
+        },
+      ),
     );
     expect(exit).toEqual(Exit.succeed({ provider: "smtp", providerMessageId: "smtp-id" }));
     expect(Arr.map(secondary.calls, (c) => c.key)).toEqual(["k1"]);
@@ -73,9 +80,12 @@ describe("FallbackEmailSender", () => {
     const primary = scripted("resend", error);
     const secondary = scripted("smtp", "ok");
     const exit = await run(
-      makeFallbackEmailSender(primary.sender, secondary.sender).send(message(), {
-        idempotencyKey: "k1",
-      }),
+      makeFallbackEmailSender({ primary: primary.sender, secondary: secondary.sender }).send(
+        message(),
+        {
+          idempotencyKey: "k1",
+        },
+      ),
     );
     expect(Exit.isFailure(exit)).toBe(true);
     exit.pipe(failureTags, expect).toEqual([tag]);
@@ -112,7 +122,10 @@ describe("FallbackEmailSender pinning", () => {
   test("a refused retry after OutcomeUnknown stays on the primary and stays unknown", async () => {
     const primary = sequenced("resend", [EmailOutcomeUnknown.make({}), EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
+    });
     const first = await run(fallback.send(message(), opts));
     const retry = await run(fallback.send(message(), opts));
     first.pipe(tags, expect).toEqual(["EmailOutcomeUnknown"]);
@@ -127,7 +140,10 @@ describe("FallbackEmailSender pinning", () => {
     const first = Promise.withResolvers<"ok" | SendError>();
     const primary = sequenced("resend", [first.promise, EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
+    });
     const a = run(fallback.send(message(), opts));
     const b = run(fallback.send(message(), opts));
     await Bun.sleep(5);
@@ -142,7 +158,10 @@ describe("FallbackEmailSender pinning", () => {
     const pending = Promise.withResolvers<"ok" | SendError>();
     const primary = sequenced("resend", [pending.promise, EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
+    });
     const fiber = Effect.runFork(fallback.send(message(), opts));
     await Bun.sleep(5);
     await fiber.pipe(Fiber.interrupt, Effect.runPromise);
@@ -155,7 +174,10 @@ describe("FallbackEmailSender pinning", () => {
   test("a key that failed over stays on the secondary", async () => {
     const primary = sequenced("resend", [EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", [EmailOutcomeUnknown.make({}), "ok"]);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
+    });
     await run(fallback.send(message(), opts));
     const retry = await run(fallback.send(message(), opts));
     expect(retry).toEqual(Exit.succeed({ provider: "smtp", providerMessageId: "smtp-id" }));
@@ -166,7 +188,10 @@ describe("FallbackEmailSender pinning", () => {
   test("a key both providers refused may be tried from the primary again", async () => {
     const primary = sequenced("resend", [EmailNotAccepted.make({}), "ok"]);
     const secondary = sequenced("smtp", [EmailNotAccepted.make({})]);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
+    });
     (await run(fallback.send(message(), opts))).pipe(tags, expect).toEqual(["EmailNotAccepted"]);
     (await run(fallback.send(message(), opts))).pipe(tags, expect).toEqual(["success"]);
     expect(primary.calls).toEqual(["k1", "k1"]);
@@ -179,7 +204,9 @@ describe("FallbackEmailSender pinning", () => {
       EmailNotAccepted.make({}),
     ]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
       deliveredRetention: "1 millis",
     });
     await run(fallback.send(message(), opts));
@@ -194,7 +221,10 @@ describe("FallbackEmailSender pinning", () => {
     const others = Array.from({ length: 10_050 }, () => "ok" as const);
     const primary = sequenced("resend", ["ok", ...others, EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender);
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
+    });
     await run(fallback.send(message(), opts));
     await Effect.runPromise(
       Effect.forEach(
@@ -214,7 +244,9 @@ describe("FallbackEmailSender pinning", () => {
   ])("a %s retry of a delivered key re-pins it with no expiry", async (_name, retryError) => {
     const primary = sequenced("resend", ["ok", retryError, "ok", EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
       deliveredRetention: "1 millis",
     });
     await run(fallback.send(message(), opts));
@@ -230,7 +262,9 @@ describe("FallbackEmailSender pinning", () => {
   test("an accepted key is forgotten only after the retention window", async () => {
     const primary = sequenced("resend", ["ok", "ok", EmailNotAccepted.make({})]);
     const secondary = sequenced("smtp", []);
-    const fallback = makeFallbackEmailSender(primary.sender, secondary.sender, {
+    const fallback = makeFallbackEmailSender({
+      primary: primary.sender,
+      secondary: secondary.sender,
       deliveredRetention: "1 millis",
     });
     await run(fallback.send(message(), opts));

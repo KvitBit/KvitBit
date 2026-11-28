@@ -76,7 +76,6 @@ const BY_SCALE: ReadonlyArray<readonly [CurrencyCode, number]> = [
 ];
 
 describe("minor units: every three-letter code", () => {
-  // biome-ignore lint/security/noSecrets: The alphabet is the exhaustive input set for each letter.
   const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
   const codes: Array<CurrencyCode> = [];
   for (const a of LETTERS)

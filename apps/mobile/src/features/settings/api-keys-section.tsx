@@ -1,5 +1,6 @@
 import type { AccessMode, ApiKeyCreate, ApiKeyCreated, ApiKeyView } from "@kvitbit/api-contract";
 import { IsoDate } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { inWorkspace } from "@kvitbit/ui-port/api";
 import {
   type AreaLevel,
@@ -14,7 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Str from "effect/String";
 import { Copy, KeyRound, Plus, Trash2 } from "lucide-react-native";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -55,8 +56,14 @@ export function ApiKeysSection() {
 
   const editable = canManageApiKeys(workspace.role, workspace.closed);
   const remote = useRemote(
-    editable ? (client) => client.apiKeys.listApiKeys({ params: inWorkspace(workspace.id) }) : null,
-    [workspace.id, editable],
+    useMemo(
+      () =>
+        editable
+          ? (client: KvitbitApiClient) =>
+              client.apiKeys.listApiKeys({ params: inWorkspace(workspace.id) })
+          : null,
+      [workspace.id, editable],
+    ),
   );
 
   const [creatingOpen, setCreatingOpen] = useState(false);

@@ -917,11 +917,7 @@ const sourceViolations = (filename: string, code: string, page: boolean): Readon
 describe("static architecture invariants", () => {
   test("detects dynamic React imports and computed DOM mutations", () => {
     const source = Arr.join(
-      [
-        'const view = () => { import("react/dom");',
-        // biome-ignore lint/security/noSecrets: Source text for the computed DOM mutation fixture.
-        'element["replaceChildren"](); };',
-      ],
+      ['const view = () => { import("react/dom");', 'element["replaceChildren"](); };'],
       " ",
     );
     expect(sourceViolations("fixture.ts", source, true)).toEqual([

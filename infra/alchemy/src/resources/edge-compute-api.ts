@@ -132,19 +132,15 @@ const operationErrorCodes = (operation: ComputeOperation) =>
 class EdgeComputeOperationFailed extends Schema.TaggedError<
   EdgeComputeOperationFailed,
   { readonly brand: unique symbol }
->()(
-  // biome-ignore lint/security/noSecrets: This fixed Effect error tag is a public discriminant.
-  "EdgeComputeOperationFailed",
-  {
-    resource: Schema.String,
-    operation: Schema.String,
-    /** Numeric RPC code (google.rpc.Code), when reported. */
-    code: Schema.UndefinedOr(Schema.Finite),
-    /** Compute error code (e.g. `RESOURCE_NOT_FOUND`), when reported. */
-    reason: Schema.UndefinedOr(Schema.String),
-    detail: Schema.String,
-  },
-) {
+>()("EdgeComputeOperationFailed", {
+  resource: Schema.String,
+  operation: Schema.String,
+  /** Numeric RPC code (google.rpc.Code), when reported. */
+  code: Schema.UndefinedOr(Schema.Finite),
+  /** Compute error code (e.g. `RESOURCE_NOT_FOUND`), when reported. */
+  reason: Schema.UndefinedOr(Schema.String),
+  detail: Schema.String,
+}) {
   override get message() {
     return `${this.resource}: operation ${this.operation} failed (${this.reason ?? this.code ?? "error"}): ${this.detail}`;
   }
@@ -170,15 +166,11 @@ class EdgeComputeOperationTimedOut extends Schema.TaggedError<
 class EdgeComputeOperationUnreadable extends Schema.TaggedError<
   EdgeComputeOperationUnreadable,
   { readonly brand: unique symbol }
->()(
-  // biome-ignore lint/security/noSecrets: This fixed Effect error tag is a public discriminant.
-  "EdgeComputeOperationUnreadable",
-  {
-    resource: Schema.String,
-    operation: Schema.String,
-    reason: Schema.String,
-  },
-) {
+>()("EdgeComputeOperationUnreadable", {
+  resource: Schema.String,
+  operation: Schema.String,
+  reason: Schema.String,
+}) {
   override get message() {
     return `${this.resource}: operation ${this.operation} status unreadable: ${this.reason}`;
   }

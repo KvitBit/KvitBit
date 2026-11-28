@@ -270,16 +270,22 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
     (r) =>
       ({
         value: r,
-        label: t.translate(I18n.enumText("taxRegime", r)),
+        label: t.translate(I18n.enumText({ name: "taxRegime", value: r })),
       }) as const,
   );
 
   return h.div.class("kb-stack").children([
     card(h, [
       cardTitle(h, t.t("settings.taxRegime.title"), [
-        badge(h, t.translate(I18n.enumText("taxRegime", currentRegime)), "proforma"),
+        badge(
+          h,
+          t.translate(I18n.enumText({ name: "taxRegime", value: currentRegime })),
+          "proforma",
+        ),
       ]),
-      h.p.class("kb-muted").children([t.translate(I18n.enumText("taxRegimeHint", currentRegime))]),
+      h.p
+        .class("kb-muted")
+        .children([t.translate(I18n.enumText({ name: "taxRegimeHint", value: currentRegime }))]),
       h.p.class("kb-small kb-muted").children([t.t("settings.taxRegime.keepsOld")]),
       ...(editable
         ? [
@@ -327,7 +333,8 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                 },
                 {
                   header: sCopy(ctx.locale, "tax.regime"),
-                  cell: (row) => t.translate(I18n.enumText("taxRegime", row.regime)),
+                  cell: (row) =>
+                    t.translate(I18n.enumText({ name: "taxRegime", value: row.regime })),
                 },
               ],
             }),
@@ -338,7 +345,9 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
           dialog(h, {
             id: "kb-tax-confirm-dialog",
             title: t.t("settings.taxRegime.confirmTitle", {
-              regime: t.translate(I18n.enumText("taxRegime", model.taxForm.nextRegime)),
+              regime: t.translate(
+                I18n.enumText({ name: "taxRegime", value: model.taxForm.nextRegime }),
+              ),
             }),
             body: [
               h.p.children([
@@ -620,7 +629,9 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                     ? node.on("click", Message.SelectedPdfTemplate({ template: tpl }))
                     : node.disabled(true),
               ]).children([
-                h.strong.children([t.translate(I18n.enumText("pdfTemplate", tpl))]),
+                h.strong.children([
+                  t.translate(I18n.enumText({ name: "pdfTemplate", value: tpl })),
+                ]),
                 h.span
                   .class("kb-small kb-muted")
                   .children([
@@ -779,7 +790,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
     (k) =>
       ({
         value: k,
-        label: t.translate(I18n.enumText("documentKind", k)),
+        label: t.translate(I18n.enumText({ name: "documentKind", value: k })),
       }) as const,
   );
   const preview = previewNumberingPattern(f.pattern, Number.parseInt(f.nextNumber, 10) || 1);
@@ -797,7 +808,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
               columns: [
                 {
                   header: sCopy(ctx.locale, "numbering.kind"),
-                  cell: (s) => t.translate(I18n.enumText("documentKind", s.kind)),
+                  cell: (s) => t.translate(I18n.enumText({ name: "documentKind", value: s.kind })),
                 },
                 {
                   header: sCopy(ctx.locale, "numbering.name"),
@@ -961,7 +972,7 @@ const viewDocumentDefaults = (
     (m) =>
       ({
         value: m,
-        label: t.translate(I18n.enumText("paymentMethod", m)),
+        label: t.translate(I18n.enumText({ name: "paymentMethod", value: m })),
       }) as const,
   );
 
@@ -1159,7 +1170,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
     (r) =>
       ({
         value: r,
-        label: t.translate(I18n.enumText("role", r)),
+        label: t.translate(I18n.enumText({ name: "role", value: r })),
       }) as const,
   );
 
@@ -1218,7 +1229,7 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                         })
                       : badge(
                           h,
-                          t.translate(I18n.enumText("role", m.role)),
+                          t.translate(I18n.enumText({ name: "role", value: m.role })),
                           m.role === "owner" ? "paid" : "outline",
                         ),
                 },
@@ -1290,12 +1301,16 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                 { header: t.t("common.field.email"), cell: (i) => i.email },
                 {
                   header: t.t("common.field.role"),
-                  cell: (i) => t.translate(I18n.enumText("role", i.role)),
+                  cell: (i) => t.translate(I18n.enumText({ name: "role", value: i.role })),
                 },
                 {
                   header: t.t("common.field.status"),
                   cell: (i) =>
-                    badge(h, t.translate(I18n.enumText("invitationStatus", i.status)), "proforma"),
+                    badge(
+                      h,
+                      t.translate(I18n.enumText({ name: "invitationStatus", value: i.status })),
+                      "proforma",
+                    ),
                 },
                 {
                   header: t.t("common.field.expires"),

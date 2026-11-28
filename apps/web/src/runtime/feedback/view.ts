@@ -1,5 +1,5 @@
 import * as EffectRecord from "effect/Record";
-// biome-ignore lint/correctness/noUnresolvedImports: Vite inlines this stylesheet for the shadow root.
+
 import css from "./feedback-overlay.css?inline";
 
 const create = <K extends keyof HTMLElementTagNameMap>(

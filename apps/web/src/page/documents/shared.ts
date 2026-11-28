@@ -331,7 +331,8 @@ export const fmtMoney: {
   (locale: AppLocale, money: Money): string;
 } = Fn.dual(2, fmtMoneyImpl);
 
-const fmtDateImpl = (locale: AppLocale, iso: IsoDate): string => Format.formatDate(locale, iso);
+const fmtDateImpl = (locale: AppLocale, iso: IsoDate): string =>
+  Format.formatDate({ locale, date: iso });
 
 export const fmtDate: {
   (iso: IsoDate): (locale: AppLocale) => string;
@@ -339,7 +340,7 @@ export const fmtDate: {
 } = Fn.dual(2, fmtDateImpl);
 
 const fmtDateTimeImpl = (locale: AppLocale, iso: string): string =>
-  Format.formatDateTime(locale, iso);
+  Format.formatDateTime({ locale, instant: iso });
 
 export const fmtDateTime: {
   (iso: string): (locale: AppLocale) => string;
@@ -347,7 +348,7 @@ export const fmtDateTime: {
 } = Fn.dual(2, fmtDateTimeImpl);
 
 const fmtNumImpl = (locale: AppLocale, bd: BigDecimal.BigDecimal, maxFrac = 2): string =>
-  Format.formatNumber(locale, bd, { minFractionDigits: 0, maxFractionDigits: maxFrac });
+  Format.formatNumber({ locale, value: bd, minFractionDigits: 0, maxFractionDigits: maxFrac });
 
 export const fmtNum: {
   (bd: BigDecimal.BigDecimal, maxFrac?: number): (locale: AppLocale) => string;
@@ -385,7 +386,7 @@ export const formatAddress = (addr: AddressData): string =>
 
 const kindBadgeImpl = <M>(h: Html.H<M>, locale: AppLocale, kind: DocumentKind): Markup<M> => {
   const t = translator(locale);
-  const label = textOf(t, I18n.enumText("documentKind", kind));
+  const label = textOf(t, I18n.enumText({ name: "documentKind", value: kind }));
   const tone: BadgeTone = kind === "proforma" ? "proforma" : "outline";
   return badge(h, label, tone);
 };
@@ -409,22 +410,24 @@ const documentBadgesImpl = <M>(
   const t = translator(locale);
   const out: Array<Markup<M>> = [];
   if (doc.status === "draft") {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "draft")), "draft"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "draft" })), "draft"));
   } else if (doc.status === "cancelled") {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "cancelled")), "error"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "cancelled" })), "error"));
   } else if (doc.overdue) {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "overdue")), "overdue"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "overdue" })), "overdue"));
   } else if (doc.settlement === "paid" || doc.settlement === "overpaid") {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "paid")), "paid"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "paid" })), "paid"));
   } else if (doc.settlement === "partially_paid") {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "partially_paid")), "proforma"));
+    out.push(
+      badge(h, textOf(t, I18n.enumText({ name: "badge", value: "partially_paid" })), "proforma"),
+    );
   } else if (doc.settlement === "credited") {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "credited")), "neutral"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "credited" })), "neutral"));
   } else {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "issued")), "neutral"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "issued" })), "neutral"));
   }
   if (doc.locked) {
-    out.push(badge(h, textOf(t, I18n.enumText("badge", "locked")), "outline"));
+    out.push(badge(h, textOf(t, I18n.enumText({ name: "badge", value: "locked" })), "outline"));
   }
   return out;
 };
@@ -459,7 +462,7 @@ const sourceBadgeImpl = <M>(
   source: ViewModels.SettingSource,
 ): Markup<M> => {
   const t = translator(locale);
-  const label = textOf(t, I18n.enumText("settingSource", source));
+  const label = textOf(t, I18n.enumText({ name: "settingSource", value: source }));
   const tone: BadgeTone =
     source === "document" ? "proforma" : source === "contact" ? "paid" : "outline";
   return badge(h, label, tone);
@@ -606,7 +609,6 @@ const sharedCopyTable: Copy<
     save: "Uložit",
     close: "Zavřít",
     back: "Zpět",
-    // biome-ignore lint/security/noSecrets: This is static user-facing copy or a translation key.
     loading: "Načítání…",
     noWorkspace: "Pracovní prostor nebyl nalezen.",
     copied: "Zkopírováno do schránky",

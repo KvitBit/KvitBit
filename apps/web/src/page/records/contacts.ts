@@ -1761,7 +1761,7 @@ export const view: {
           [
             tLocal(ctx.locale, "registrySynced"),
             contact.registryFetchedAt !== null
-              ? Format.formatDateTime(ctx.locale, contact.registryFetchedAt)
+              ? Format.formatDateTime({ locale: ctx.locale, instant: contact.registryFetchedAt })
               : "—",
           ],
         ]),

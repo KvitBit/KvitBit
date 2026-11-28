@@ -39,7 +39,6 @@ export const app = {
   "shell.workspaceSwitcher.current": "Current workspace",
   "shell.workspaceSwitcher.create": "Create workspace",
   "shell.workspaceSwitcher.empty": "No workspaces match.",
-  // biome-ignore lint/security/noSecrets: The literal is localized UI text.
   "shell.workspaceSwitcher.switching": "Switching to {workspace}…",
   "shell.workspaceSwitcher.role": "Your role: {role}",
 

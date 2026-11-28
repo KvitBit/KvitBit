@@ -1,4 +1,3 @@
-// @effect-diagnostics-next-line nodeBuiltinImport:off Playwright runs in Node and renders the fixture in Bun.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { expect, type Page, test } from "@playwright/test";

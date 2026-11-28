@@ -22,7 +22,6 @@ const SIGN_UP_PATH = "/sign-up/email";
 
 // Better Auth can log Drizzle errors with raw SQL parameters before returning a response.
 const logInvitationSignUpError = () =>
-  // biome-ignore lint/plugin/no-direct-effect-runs: Better Auth requires a synchronous logger callback.
   Effect.runSync(Effect.logError("Invitation signup request failed"));
 
 const InvitationBody = Schema.Record(Schema.String, Schema.Unknown);
