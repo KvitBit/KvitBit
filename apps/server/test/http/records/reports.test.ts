@@ -14,16 +14,19 @@ import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, makeHarness, type TestUser } from "../harness";
 
 let h: Harness;
 let owner: TestUser;
 let member: MemberCaller;
 let wsBase: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 beforeEach(async () => {
+  analytics = captureAnalytics();
   h = makeHarness({
+    analytics: analytics.layer,
     fixings: [
       {
         fixingDate: IsoDate.make("2026-11-23"),
@@ -124,6 +127,22 @@ describe("reports group", () => {
     expect(pdf.headers.get("content-type")).toBe("application/pdf");
     expect(pdf.headers.get("content-disposition")).toStartWith("attachment; filename=");
     expect((await pdf.arrayBuffer()).byteLength).toBeGreaterThan(0);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "report_exported",
+          distinctId: owner.id,
+          properties: { workspaceId: member.workspaceId, report: "revenue", format: "csv" },
+        },
+      ],
+      [
+        {
+          event: "report_exported",
+          distinctId: owner.id,
+          properties: { workspaceId: member.workspaceId, report: "revenue", format: "pdf" },
+        },
+      ],
+    ]);
   });
 
   test("fxRate returns CNB fixing for seeded currency and 422 for missing rate", async () => {

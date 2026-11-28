@@ -8,8 +8,8 @@ import * as Reports from "../../src/page/records/reports";
 import { periodOptions, periodToRange, type ReportDataRecord } from "../../src/page/records/shared";
 import { ctxFor, DEMO_WORKSPACES, renderPath, signedIn, WS } from "../support";
 
-const escapedContactLabelPattern =
-  /kb-bar-chart__label[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/;
+const dataSlotBarPattern =
+  /data-slot="bar-chart-label"[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/;
 
 const SAMPLE_REVENUE: ReportDataRecord = {
   report: "revenue",
@@ -231,7 +231,7 @@ describe("Reports Suite page TEA", () => {
       view: (h, current) => Reports.view(current, ctx, h),
     });
     const { html } = await Effect.runPromise(HtmlServer.renderToHtml(report, {}));
-    expect(html).toMatch(escapedContactLabelPattern);
+    expect(html).toMatch(dataSlotBarPattern);
     expect(html).toContain(
       'title="&lt;contact-label class=&quot;vip&quot;&gt;A &amp; B&lt;/contact-label&gt;: 242000"',
     );
@@ -245,7 +245,7 @@ describe("Reports Suite page TEA", () => {
     );
     for (const res of reports) {
       expect(res.title).toContain("Přehledy");
-      expect(res.html).toContain("kb-tabs");
+      expect(res.html).toContain('data-slot="tabs"');
     }
 
     const nonVatWs = DEMO_WORKSPACES[1]?.slug ?? WS;

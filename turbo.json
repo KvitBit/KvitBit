@@ -1,26 +1,370 @@
 {
   "$schema": "https://turborepo.com/schema.json",
+  "remoteCache": {
+    "enabled": true
+  },
   "globalDependencies": ["tsconfig.base.json", "tsconfig.effect.json"],
   "globalEnv": ["NODE_ENV"],
   "tasks": {
+    "transit": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "!test/**",
+        "!e2e/**",
+        "!release/**",
+        "!**/*.test.*",
+        "!**/*.spec.*",
+        "!**/*.integration.*",
+        "!**/*.contention.*",
+        "!**/*.md"
+      ]
+    },
     "build": {
-      "dependsOn": ["^build"],
-      "env": ["EXPO_PUBLIC_*", "VITE_*"],
+      "dependsOn": ["^transit", "^build"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "!test/**",
+        "!e2e/**",
+        "!release/**",
+        "!**/*.test.*",
+        "!**/*.spec.*",
+        "!**/*.md"
+      ],
       "passThroughEnv": ["CI", "EXPO_NO_TELEMETRY"],
       "outputs": ["dist/**"]
     },
     "typecheck": {
-      "dependsOn": ["^typecheck"],
+      "dependsOn": ["^transit"],
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"],
+      "outputs": ["*.tsbuildinfo"]
+    },
+    "lint": {
+      "dependsOn": [],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/biome.jsonc", "!**/*.md", "$TURBO_ROOT$/lint/**"],
       "outputs": []
     },
     "test": {
-      "dependsOn": ["^typecheck"],
-      "env": ["CI", "TZ", "KVITBIT_FORMAL_WIDE"],
+      "dependsOn": ["^transit"],
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
       "outputs": []
+    },
+    "test:suite": {
+      "dependsOn": ["test"],
+      "cache": false
     },
     "db:generate": {
       "cache": false,
       "outputs": ["drizzle/**"]
+    },
+    "//#lint:root": {
+      "inputs": [
+        "biome.jsonc",
+        "package.json",
+        "tsconfig.base.json",
+        "turbo.json",
+        "formal/**",
+        "!formal/.cache/**",
+        "!formal/*.tsbuildinfo",
+        "scripts/**",
+        "!scripts/**/*.tsbuildinfo",
+        "!**/*.md",
+        "lint/**",
+        "knip.jsonc"
+      ],
+      "outputs": []
+    },
+    "//#typecheck:formal": {
+      "inputs": [
+        "formal/tsconfig.json",
+        "formal/**/*.ts",
+        "!formal/.cache/**",
+        "packages/core/src/**",
+        "packages/domain/src/**",
+        "packages/api-contract/src/**",
+        "packages/db/src/**",
+        "tsconfig.base.json"
+      ],
+      "outputs": ["formal/*.tsbuildinfo"]
+    },
+    "//#test:issue-pool": {
+      "inputs": ["scripts/issue-pool/**", "!scripts/issue-pool/*.tsbuildinfo"],
+      "outputs": []
+    },
+    "//#test:cache-graph": {
+      "inputs": [
+        "package.json",
+        "turbo.json",
+        "formal/manifest.json",
+        "scripts/turbo-cache-guard/**",
+        "!scripts/turbo-cache-guard/*.tsbuildinfo",
+        "packages/*/package.json",
+        "packages/*/turbo.json",
+        "apps/*/package.json",
+        "apps/*/turbo.json",
+        "infra/*/package.json",
+        "infra/*/turbo.json",
+        "packages/**/*.test.*",
+        "packages/**/*.spec.*",
+        "apps/**/*.test.*",
+        "apps/**/*.spec.*",
+        "infra/**/*.test.*",
+        "infra/**/*.spec.*",
+        "scripts/**/*.test.*",
+        "scripts/**/*.spec.*",
+        "!**/node_modules/**",
+        "!**/dist/**",
+        "!**/.turbo/**",
+        "!**/.expo/**",
+        "!**/.cache/**"
+      ],
+      "outputs": []
+    },
+    "//#test:alert-inbox": {
+      "inputs": ["scripts/alert-inbox/**", "infra/alchemy/src/mail-forwarder/mime.ts"],
+      "outputs": []
+    },
+    "//#check:bun-nix": {
+      "inputs": ["bun.lock", "bun.nix", "scripts/generate-bun-nix.ts"],
+      "outputs": []
+    },
+    "//#formal:selftest": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/selftest/**",
+        "formal/manifest.json",
+        "packages/core/src/**",
+        "packages/domain/src/**"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:digests": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/selftest/Counter.tla",
+        "formal/selftest/imports.replay.test.ts",
+        "packages/core/src/**",
+        "packages/domain/src/**",
+        "packages/api-contract/src/**",
+        "packages/db/drizzle/20261123175822_init/migration.sql",
+        "apps/server/src/**",
+        "infra/alchemy/src/**",
+        "infra/alchemy/alchemy.run.ts",
+        ".github/workflows/deploy.yml"
+      ],
+      "outputs": []
+    },
+    "//#formal:tlc:counter": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/selftest/Counter*"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:tlc:lifecycle": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/lifecycle/*.tla",
+        "formal/lifecycle/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:tlc:outbox": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/outbox/*.tla",
+        "formal/outbox/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:tlc:numbering": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/numbering/*.tla",
+        "formal/numbering/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:tlc:idempotency": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/idempotency/*.tla",
+        "formal/idempotency/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:replay:imports": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/manifest.json",
+        "formal/selftest/imports.replay.test.ts",
+        "packages/core/src/**",
+        "packages/domain/src/**"
+      ],
+      "outputs": []
+    },
+    "//#formal:replay:lifecycle": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/manifest.json",
+        "formal/lifecycle/lifecycle.replay.test.ts",
+        "packages/core/src/**",
+        "packages/domain/src/**"
+      ],
+      "outputs": []
+    },
+    "//#formal:replay:outbox": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/manifest.json",
+        "formal/outbox/outbox.replay.test.ts",
+        "packages/core/src/**",
+        "packages/domain/src/**"
+      ],
+      "outputs": []
+    },
+    "//#formal:replay:numbering": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/manifest.json",
+        "formal/numbering/numbering.replay.test.ts",
+        "packages/core/src/**",
+        "packages/domain/src/**"
+      ],
+      "outputs": []
+    },
+    "//#formal:replay:idempotency": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/manifest.json",
+        "formal/idempotency/requestLogCas.replay.test.ts",
+        "packages/core/src/**",
+        "packages/domain/src/**"
+      ],
+      "outputs": []
+    },
+    "//#formal:all": {
+      "dependsOn": [
+        "//#formal:selftest",
+        "//#formal:digests",
+        "//#formal:tlc:counter",
+        "//#formal:tlc:lifecycle",
+        "//#formal:tlc:outbox",
+        "//#formal:tlc:numbering",
+        "//#formal:tlc:idempotency",
+        "//#formal:replay:imports",
+        "//#formal:replay:lifecycle",
+        "//#formal:replay:outbox",
+        "//#formal:replay:numbering",
+        "//#formal:replay:idempotency"
+      ],
+      "cache": false
+    },
+    "//#formal:wide:lifecycle": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/lifecycle/*.tla",
+        "formal/lifecycle/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:wide:outbox": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/outbox/*.tla",
+        "formal/outbox/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:wide:numbering": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/numbering/*.tla",
+        "formal/numbering/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:wide:idempotency": {
+      "inputs": [
+        "formal/run-formal.ts",
+        "formal/toolchain/**",
+        "formal/manifest.json",
+        "formal/idempotency/*.tla",
+        "formal/idempotency/*.cfg"
+      ],
+      "passThroughEnv": ["JAVA_HOME", "TLA2TOOLS"],
+      "outputs": []
+    },
+    "//#formal:wide": {
+      "dependsOn": [
+        "//#formal:selftest",
+        "//#formal:digests",
+        "//#formal:tlc:counter",
+        "//#formal:wide:lifecycle",
+        "//#formal:wide:outbox",
+        "//#formal:wide:numbering",
+        "//#formal:wide:idempotency",
+        "//#formal:replay:imports",
+        "//#formal:replay:lifecycle",
+        "//#formal:replay:outbox",
+        "//#formal:replay:numbering",
+        "//#formal:replay:idempotency"
+      ],
+      "cache": false
+    },
+    "//#typecheck:scripts": {
+      "inputs": [
+        "package.json",
+        "scripts/**",
+        "lint/**",
+        "formal/**",
+        "infra/alchemy/src/mail-forwarder/mime.ts",
+        "!**/*.tsbuildinfo",
+        "!formal/.cache/**"
+      ],
+      "outputs": ["scripts/*.tsbuildinfo"]
+    },
+    "//#test:static-checks": {
+      "inputs": [
+        "scripts/check-changed*.ts",
+        "package.json",
+        "bun.lock",
+        "biome.jsonc",
+        "knip.jsonc",
+        "lint/**",
+        ".githooks/**"
+      ],
+      "outputs": []
     }
   }
 }

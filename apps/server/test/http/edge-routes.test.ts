@@ -1,17 +1,28 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import * as BunServices from "@effect/platform-bun/BunServices";
 import { generateId } from "@kvitbit/adapters/auth";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
+import { POSTHOG_PROXY_PATH } from "../../src/http/analyticsProxy";
 import { RequestIdsLive } from "../../src/http/edge/requestId";
+import { captureAnalytics, posthogSettings } from "../analytics-fixture";
 import { as, type Harness, json, makeHarness } from "./harness";
+
+const decodeWorkspace = Schema.decodeUnknownResult(Schema.Struct({ id: Schema.String }));
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
 
 const randomRequestId = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
@@ -126,8 +137,176 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect(await res.json()).toMatchObject({
       version: "1.2.3",
       botProtection: "none",
+      analytics: { posthog: null },
       features: { signUp: false, mcp: true, apiKeys: true },
     });
+  });
+
+  test("GET /api/v1/config exposes the configured PostHog project via the first-party proxy path", async () => {
+    harness = makeHarness({ config: { posthog: posthogSettings } });
+    const response = await harness.fetch("/api/v1/config");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      analytics: { posthog: { apiKey: posthogSettings.apiKey, host: POSTHOG_PROXY_PATH } },
+    });
+  });
+
+  test("POST /_kvb/* proxies allowlisted PostHog ingestion with credentials stripped and visitor IP forwarded", async () => {
+    const upstreamCalls: Array<{
+      readonly url: string;
+      readonly method: string | undefined;
+      readonly headers: Headers;
+      readonly body: string;
+      readonly redirect: string | undefined;
+    }> = [];
+    const proxyFetch = mock((input: string | URL | Request, init?: RequestInit) => {
+      const url = Predicate.isString(input) ? input : input instanceof URL ? input.href : input.url;
+      const body =
+        init?.body instanceof Uint8Array
+          ? new TextDecoder().decode(init.body)
+          : String(init?.body ?? "");
+      upstreamCalls.push({
+        url,
+        method: init?.method,
+        headers: new Headers(init?.headers),
+        body,
+        redirect: init?.redirect,
+      });
+      return Promise.resolve(
+        new Response(encodeJson({ status: 1 }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "set-cookie": "ph_session=should-not-leak",
+          },
+        }),
+      );
+    });
+
+    harness = makeHarness({
+      config: { posthog: posthogSettings, trustedProxyHops: 2 },
+      feedbackFetch: Object.assign(proxyFetch, { preconnect: () => undefined }),
+    });
+
+    const payload = encodeJson({ event: "$pageview", properties: { $pathname: "/" } });
+    const ok = await harness.fetch(
+      `${POSTHOG_PROXY_PATH}/e/?ip=0&ver=1.455.4&compression=gzip-js&extra=dropped`,
+      {
+        method: "POST",
+        headers: {
+          host: "kvitbit.com",
+          origin: "https://kvitbit.com",
+          "content-type": "application/json",
+          "user-agent": "KvitbitTestBrowser/1.0",
+          cookie: "__Secure-kvitbit.session_token=secret-session",
+          authorization: "Bearer kvb_secret_token",
+          "x-api-key": "secret-key",
+          referer: "https://kvitbit.com/i/private-share-token",
+          "x-forwarded-for": "198.51.100.7, 203.0.113.9",
+        },
+        body: payload,
+      },
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ status: 1 });
+    expect(ok.headers.get("set-cookie")).toBeNull();
+    expect(ok.headers.get("cache-control")).toBe("no-store");
+    expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
+
+    expect(upstreamCalls).toHaveLength(1);
+    const forwarded = upstreamCalls[0];
+    if (forwarded === undefined) throw new Error("Expected upstream proxy call");
+    expect(forwarded.url).toBe(`${posthogSettings.host}/e/?ip=0&ver=1.455.4&compression=gzip-js`);
+    expect(forwarded.method).toBe("POST");
+    expect(forwarded.redirect).toBe("manual");
+    expect(forwarded.body).toBe(payload);
+    expect(forwarded.headers.get("x-forwarded-for")).toBe("198.51.100.7");
+    expect(forwarded.headers.get("user-agent")).toBe("KvitbitTestBrowser/1.0");
+    expect(forwarded.headers.get("content-type")).toBe("application/json");
+    expect(forwarded.headers.get("cookie")).toBeNull();
+    expect(forwarded.headers.get("authorization")).toBeNull();
+    expect(forwarded.headers.get("x-api-key")).toBeNull();
+    expect(forwarded.headers.get("referer")).toBeNull();
+    expect(forwarded.headers.get("origin")).toBeNull();
+
+    // Disallowed subpaths, third-party origins, and oversized payloads are rejected before upstream fetch.
+    expect(
+      (await harness.fetch(`${POSTHOG_PROXY_PATH}/flags/`, { method: "POST", body: "{}" })).status,
+    ).toBe(404);
+    expect(
+      (
+        await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, {
+          method: "POST",
+          headers: { host: "kvitbit.com", origin: "https://evil.example" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: EffectString.repeat(64 * 1024 + 1)("x"),
+        })
+      ).status,
+    ).toBe(413);
+    expect(upstreamCalls).toHaveLength(1);
+
+    // Upstream redirects and network errors fail closed as 502.
+    proxyFetch.mockResolvedValueOnce(
+      new Response(null, { status: 302, headers: { location: "http://169.254.169.254" } }),
+    );
+    expect(
+      (await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, { method: "POST", body: "{}" })).status,
+    ).toBe(502);
+
+    proxyFetch.mockRejectedValueOnce(new Error("upstream unreachable"));
+    expect(
+      (await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, { method: "POST", body: "{}" })).status,
+    ).toBe(502);
+  });
+
+  test("POST /_kvb/e/ returns 404 when PostHog is disabled", async () => {
+    harness = makeHarness({ config: { posthog: null } });
+    const response = await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(response.status).toBe(404);
+  });
+
+  test("workspace creation succeeds when PostHog capture throws", async () => {
+    const analytics = captureAnalytics();
+    analytics.capture.mockImplementation(() => {
+      throw new Error("test SDK failure");
+    });
+    const app = makeHarness({ analytics: analytics.layer });
+    harness = app;
+    const owner = app.addUser("Private owner name");
+    const create = () =>
+      app.fetch("/api/v1/workspaces", {
+        ...json({ name: "Private workspace name" }),
+        method: "POST",
+        headers: {
+          ...as.mobile(owner),
+          "content-type": "application/json",
+          "idempotency-key": "analytics-ws-1",
+        },
+      });
+    const response = await create();
+    expect(response.status).toBe(201);
+    const workspace = decodeWorkspace(await response.json()).pipe(Result.getOrThrow);
+    expect((await create()).headers.get("idempotent-replayed")).toBe("true");
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "workspace_created",
+          distinctId: owner.id,
+          properties: { workspaceId: workspace.id },
+        },
+      ],
+    ]);
   });
 
   test("GET /api/v1/bot-protection/challenges/sign_up returns 204 when NoopBotProtection is active", async () => {
@@ -222,6 +401,7 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect((await harness.fetch("/assets/missing.js")).status).toBe(404);
     expect((await harness.fetch("/.well-known/unknown")).status).toBe(404);
     expect((await harness.fetch("/api/does-not-exist")).status).toBe(404);
+    expect((await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`)).status).toBe(404);
 
     // PWA routes under /app/
     const pwaSpa = await harness.fetch("/app/w/123/invoices");

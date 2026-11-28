@@ -1,3 +1,5 @@
+const desktopOnly = /@desktop/;
+
 import { defineConfig, devices } from "@playwright/test";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
@@ -39,6 +41,7 @@ export default defineConfig({
     },
     {
       name: "mobile",
+      grepInvert: desktopOnly,
       use: {
         ...devices["Pixel 5"],
         viewport: { width: 390, height: 844 },

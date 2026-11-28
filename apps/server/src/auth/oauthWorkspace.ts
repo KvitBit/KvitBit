@@ -11,7 +11,8 @@ import {
   OAuthScopeToken,
   READ_SCOPES,
 } from "@kvitbit/api-contract";
-import { betterAuth } from "better-auth";
+import { EmailNotAccepted, EmailOutcomeUnknown, EmailRejected } from "@kvitbit/domain/ports";
+import { type BetterAuthOptions, betterAuth } from "better-auth";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import * as Arr from "effect/Array";
 import * as DateTime from "effect/DateTime";
@@ -95,6 +96,9 @@ const TokenBinding = Schema.Struct({
 });
 const tokenBinding = Schema.is(TokenBinding);
 const isString = Schema.is(Schema.String);
+const isDeliveryError = Schema.is(
+  Schema.Union([EmailRejected, EmailNotAccepted, EmailOutcomeUnknown]),
+);
 const isResponse = Schema.is(Schema.instanceOf(Response));
 
 const oauthRedirect = Schema.is(
@@ -177,7 +181,10 @@ class OAuthRefreshReplayMissing extends Schema.TaggedError<
 >()("MissingReplay", {}) {}
 
 export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
-  Effect.fn("makeWorkspaceAuth")(function* (config: AuthConfig) {
+  Effect.fn("makeWorkspaceAuth")(function* (
+    config: AuthConfig,
+    databaseHooks: NonNullable<BetterAuthOptions["databaseHooks"]>,
+  ) {
     const authorizeConsent = Effect.fn("authorizeWorkspaceConsent")(function* () {
       // The provider's earlier hook verifies the signed query before populating this state.
       const decision = decisionContext.getStore();
@@ -288,8 +295,12 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
         and u.deleted_at is null
       for share of c`.pipe(Effect.map((rows) => rows.length > 0));
 
-    const auth = betterAuth({
+    const serverOptions: ReturnType<typeof authOptions> &
+      Pick<BetterAuthOptions, "databaseHooks" | "logger" | "onAPIError"> = {
       ...options,
+      databaseHooks,
+      logger: { disabled: true },
+      onAPIError: { throw: true },
       database: (initOptions) => {
         const adapter = options.database(initOptions);
         const findOne = Effect.fn("oauth.findOne")(function* <T>(
@@ -372,7 +383,8 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
           },
         };
       },
-    });
+    };
+    const auth = betterAuth<ReturnType<typeof authOptions>>(serverOptions);
 
     const consentPage = new URL(config.oauthConsentPage, config.baseURL);
     const handleOAuth = Effect.fn("oauth.handle")(function* (request: Request) {
@@ -423,5 +435,17 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
       );
     });
 
-    return { ...auth, handler: (request: Request) => runAuthEffect(handleOAuth(request)) };
+    const handler = (request: Request) =>
+      runAuthEffect(
+        handleOAuth(request).pipe(
+          Effect.catch(({ cause }) => {
+            if (isResponse(cause)) return Effect.succeed(cause);
+            if (isDeliveryError(cause)) return Effect.succeed(new Response(null, { status: 500 }));
+            return Effect.logError("Authentication request failed").pipe(
+              Effect.as(new Response(null, { status: 500 })),
+            );
+          }),
+        ),
+      );
+    return { ...auth, fetch: handler, handler };
   });

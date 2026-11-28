@@ -12,14 +12,17 @@
 
 import { createServer } from "node:http";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
-import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import * as Effect from "effect/Effect";
+import * as HttpMiddleware from "effect/http/HttpMiddleware";
 import * as HttpRouter from "effect/http/HttpRouter";
 import * as Layer from "effect/Layer";
 import * as Str from "effect/String";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
+import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
+import { withRequestLogging } from "./http/edge/requestId";
+import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import {
@@ -28,6 +31,7 @@ import {
   SingleRunnerRuntimeLive,
   WorkflowHandlersLive,
 } from "./runtime";
+import { AnalyticsLive } from "./runtime/analytics";
 import { CoreExternalPortsLive } from "./wiring";
 
 const ServerCoreLive = ServerDocumentProjectionsLive.pipe(Layer.provideMerge(CoreLive));
@@ -38,6 +42,8 @@ const ServerRuntimeLive = Layer.unwrap(
 
     const httpLayer = HttpRouter.serve(AllRoutesLive, {
       routerConfig: { maxParamLength: 2048 },
+      disableLogger: true,
+      middleware: (handle) => handle.pipe(HttpMiddleware.logger, withRequestLogging),
     }).pipe(
       Layer.provide(EdgeServicesLive),
       Layer.provide(
@@ -69,15 +75,19 @@ const ServerRuntimeLive = Layer.unwrap(
       Layer.provide(PgDatabaseLive),
     );
   }),
-);
+).pipe(Layer.provide(AnalyticsLive));
 
 export const serverProgram = Effect.gen(function* () {
+  const boot = yield* loadBootRuntimeConfig("server");
   const config = yield* ServerConfig;
   yield* Effect.logInfo("Starting Kvitbit server", {
+    env: boot.env,
     host: config.host,
     port: config.port,
     runnerMode: config.runnerMode,
     appOrigin: config.appOrigin,
+    emailMode: boot.email.mode,
+    blobDriver: boot.blob.driver,
   });
   return yield* Layer.launch(ServerRuntimeLive);
 });
@@ -88,5 +98,5 @@ const isMain =
   import.meta.main ?? (Str.endsWith("main.ts")(entryPath) || Str.endsWith("main.js")(entryPath));
 
 if (isMain) {
-  NodeRuntime.runMain(serverProgram);
+  runServerMain(serverProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
 }

@@ -14,6 +14,9 @@ export const auth = {
 
   "auth.signIn.title": "Přihlášení do Kvitbitu",
   "auth.signIn.submit": "Přihlásit se",
+  "auth.signIn.methodPassword": "Heslo",
+  "auth.signIn.methodMagicLink": "Odkaz e-mailem",
+  "auth.signIn.methodPasskey": "Přístupový klíč",
   "auth.signIn.withPasskey": "Přihlásit se přístupovým klíčem",
   "auth.signIn.withMagicLink": "Poslat přihlašovací odkaz e-mailem",
   "auth.signIn.withPassword": "Přihlásit se heslem",

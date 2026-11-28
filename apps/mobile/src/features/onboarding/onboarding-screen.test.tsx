@@ -211,6 +211,37 @@ describe("OnboardingScreen resume and root launcher", () => {
     mock.module("../../ui", () => realUi);
   });
 
+  test("step 1 splits a pasted full address across empty address inputs", async () => {
+    const userId = "user-paste-address";
+    const { origin } = startFakeServer(userId, {});
+    await tokenStore.write("test-bearer");
+    await root.render(signedInTree(origin, <OnboardingScreen initialStep={1} />));
+
+    const input = (id: string) =>
+      root.container().querySelector<HTMLInputElement>(`[data-testid="${id}"]`);
+    await waitFor(() => input("onboarding-street") !== null, "onboarding street input");
+
+    const setValue = async (el: HTMLInputElement, value: string) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      await act(() => {
+        setter?.call(el, value);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    };
+
+    const streetEl = input("onboarding-street");
+    const cityEl = input("onboarding-city");
+    const postalEl = input("onboarding-postal");
+    if (streetEl === null || cityEl === null || postalEl === null) {
+      throw new Error("missing onboarding address inputs");
+    }
+
+    await setValue(streetEl, "Jankovcova 1522/53, 170 00 Praha 7");
+    expect(streetEl.value).toBe("Jankovcova 1522/53");
+    expect(cityEl.value).toBe("Praha 7");
+    expect(postalEl.value).toBe("170 00");
+  });
+
   test("remounting after a failed bank step resumes at step 3 and skips create and issuer", async () => {
     const userId = "user-screen-resume";
     const { origin, calls } = startFakeServer(userId, {

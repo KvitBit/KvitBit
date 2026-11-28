@@ -30,7 +30,7 @@ import {
 
 export type CssVariables = Readonly<Record<`--${string}`, string>>;
 
-const kebab = (s: string): string => {
+export const kebab = (s: string): string => {
   let result = "";
   for (const char of s) {
     result += char >= "A" && char <= "Z" ? `-${Str.toLowerCase(char)}` : char;

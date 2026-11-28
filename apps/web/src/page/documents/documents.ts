@@ -40,11 +40,13 @@ import {
   mono,
   page,
   pageHeader,
+  searchInput,
   select,
   skeletonTable,
   table,
   tabs,
 } from "../../ui/kit";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   canRole,
@@ -206,13 +208,13 @@ const loadDocumentsCommand = (
 
 const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const ws = ctx.workspace;
-  const searchInput = route.query.text ?? "";
+  const initialSearch = route.query.text ?? "";
   if (ws === null) {
-    return { model: { route, searchInput, list: Remote.idle, loadingMore: false } };
+    return { model: { route, searchInput: initialSearch, list: Remote.idle, loadingMore: false } };
   }
   const list = Remote.load(Remote.idle);
   return {
-    model: { route, searchInput, list, loadingMore: false },
+    model: { route, searchInput: initialSearch, list, loadingMore: false },
     commands: [loadDocumentsCommand(ws.id, route.query, Remote.seqOf(list), undefined, false)],
   };
 };
@@ -448,7 +450,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     }
                   : {}),
             })
-          : h.div.class("kb-stack").children([
+          : h.div.class(ui.stack).children([
               table(h, {
                 caption: txt(locale, "caption"),
                 rows: data.items,
@@ -463,7 +465,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           "href",
                           href({ _tag: "Document", ws: slug, id: row.id, tab: "preview" }),
                         )
-                        .class("kb-queue-item__link")
+                        .class("font-medium no-underline hover:underline")
                         .children([mono(h, row.number ?? txt(locale, "draftNumber"))]),
                   },
                   {
@@ -487,7 +489,9 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   {
                     header: txt(locale, "colStatus"),
                     cell: (row) =>
-                      h.span.class("kb-docs-badges").children(documentBadges(h, locale, row)),
+                      h.span
+                        .class("inline-flex flex-wrap items-center gap-1")
+                        .children(documentBadges(h, locale, row)),
                   },
                   {
                     header: txt(locale, "colTotal"),
@@ -497,9 +501,9 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   },
                 ],
               }),
-              h.div.class("kb-docs-pager").children([
+              h.div.class("flex items-center justify-between gap-3").children([
                 h.span
-                  .class("kb-small kb-muted kb-num")
+                  .class(cn(ui.small, ui.muted, ui.num))
                   .children([txt(locale, "showingCount", { count: data.items.length })]),
                 ...(data.nextCursor === null
                   ? []
@@ -536,22 +540,24 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       items: tabItems,
       selected: activeTabId(q),
     }),
-    h.div.class("kb-docs-toolbar").children([
+    h.div.class("flex flex-wrap items-end justify-between gap-2.5").children([
       h.form
-        .class("kb-docs-filters")
+        .class("flex flex-1 flex-wrap items-center gap-2")
         .on("submit", Message.SubmittedSearch(), { preventDefault: true })
         .children([
-          h.input
-            .class("kb-input kb-docs-search")
-            .attr("type", "search")
-            .attr("aria-label", txt(locale, "searchLabel"))
-            .attr("placeholder", txt(locale, "searchPlaceholder"))
-            .value(model.searchInput)
-            .on("input", ({ value }) => Message.ChangedSearch({ value })),
+          h.div.class("min-w-[220px] max-w-[360px] flex-[1_1_240px]").children([
+            searchInput(h, {
+              value: model.searchInput,
+              placeholder: txt(locale, "searchPlaceholder"),
+              ariaLabel: txt(locale, "searchLabel"),
+              onInput: (value) => Message.ChangedSearch({ value }),
+            }),
+          ]),
           select(h, {
             id: "docs-status",
             label: txt(locale, "statusLabel"),
             value: q.status ?? "",
+            className: "w-auto min-w-[150px]",
             onChange: (value) => Message.SelectedStatus({ value }),
             options: [
               { value: "", label: txt(locale, "allStatuses") },
@@ -573,6 +579,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             id: "docs-settlement",
             label: txt(locale, "settlementLabel"),
             value: q.settlement ?? "",
+            className: "w-auto min-w-[150px]",
             onChange: (value) => Message.SelectedSettlement({ value }),
             options: [
               { value: "", label: txt(locale, "allSettlements") },

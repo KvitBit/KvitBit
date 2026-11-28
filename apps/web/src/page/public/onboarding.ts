@@ -55,8 +55,10 @@ import {
   mono,
   pageHeader,
   selectField,
+  separator,
   textField,
 } from "../../ui/kit";
+import { cn, controlVariants, ui } from "../../ui/styles";
 import { callApi, failureMessage, slugifyName } from "./_shared";
 
 export const Route = RouteCases.Onboarding;
@@ -168,6 +170,11 @@ export const Message = UiSchema.TaggedEnum({
     ]),
     value: Schema.String,
   },
+  PastedAddress: {
+    street: Schema.String,
+    city: Schema.String,
+    postalCode: Schema.String,
+  },
   SelectedTaxRegime: { regime: TaxRegime },
   SelectedBankCurrency: { currency: CurrencyCode },
   SelectedDefaultCurrency: { currency: CurrencyCode },
@@ -237,11 +244,13 @@ const local = copy({
     bicInvalid: "Zadejte platný BIC.",
     slugInvalid: "Adresa prostoru musí mít 3 až 40 znaků.",
     legalForm: "Právní forma",
-    invoiceSeries: "Řada faktur",
-    proformaSeries: "Řada zálohových faktur",
-    ptdSeries: "Řada daňových dokladů k platbě",
-    creditNoteSeries: "Řada opravných dokladů",
+    documentType: "Typ dokladu",
     startNumber: "Počáteční číslo",
+    firstNumbers: "První čísla",
+    invalidStart: "Zadejte 1 nebo více",
+    invalidPattern: "Uveďte N pro počítadlo",
+    patternTooLong: "Nejvýše 20 znaků",
+    defaultsIntro: "Použije se automaticky pro nové doklady.",
     seriesInvalid: "Zadejte vzor a kladné celé počáteční číslo pro každou řadu.",
     resume: "Dokončit nastavení",
     defaultCurrency: "Výchozí měna",
@@ -267,11 +276,13 @@ const local = copy({
     bicInvalid: "Enter a valid BIC.",
     slugInvalid: "Use 3 to 40 characters for the workspace address.",
     legalForm: "Legal form",
-    invoiceSeries: "Invoice series",
-    proformaSeries: "Proforma series",
-    ptdSeries: "Payment tax document series",
-    creditNoteSeries: "Credit note series",
+    documentType: "Document type",
     startNumber: "Starting number",
+    firstNumbers: "First numbers",
+    invalidStart: "Enter 1 or higher",
+    invalidPattern: "Include N for counter",
+    patternTooLong: "At most 20 characters",
+    defaultsIntro: "Applied automatically to new documents.",
     seriesInvalid: "Enter a pattern and a positive whole starting number for each series.",
     resume: "Finish workspace setup",
     defaultCurrency: "Default currency",
@@ -345,28 +356,24 @@ const CreateWorkspaceCmd = defineApiCommand({
 const setupSeries = [
   {
     kind: "invoice",
-    label: "invoiceSeries",
     name: "Invoices",
     pattern: "invoicePattern",
     start: "invoiceStart",
   },
   {
     kind: "proforma",
-    label: "proformaSeries",
     name: "Proformas",
     pattern: "proformaPattern",
     start: "proformaStart",
   },
   {
     kind: "payment_tax_document",
-    label: "ptdSeries",
     name: "Payment tax documents",
     pattern: "ptdPattern",
     start: "ptdStart",
   },
   {
     kind: "credit_note",
-    label: "creditNoteSeries",
     name: "Credit notes",
     pattern: "creditNotePattern",
     start: "creditNoteStart",
@@ -581,6 +588,7 @@ const alphaRuns = /([A-Za-z]+)/;
 const numberingRun = /^[YMN]+$/;
 const numberingTokens = /(YYYY|YY|MM|N+)/;
 const numericCounter = /^N+$/;
+const wholeNumberText = /^\d+$/;
 const alphaWords = /[A-Za-z]+/g;
 const numberingChunks = /Y+|M+|N+/g;
 const containsAsciiControl = (value: string): boolean => {
@@ -610,14 +618,19 @@ const formatPatternSample = (pattern: string, counter: number, date: string): st
   );
 };
 
-const validSeries = (pattern: string, start: string): boolean => {
+type SeriesValidationIssue = "start" | "pattern" | "tooLong" | null;
+
+const validStartNumber = (start: string): boolean => {
   const counter = Number(start);
-  if (
-    !(wholeNumberText.test(start) && Number.isSafeInteger(counter)) ||
-    counter < 1 ||
-    counter > 2_147_483_646
-  )
-    return false;
+  return (
+    wholeNumberText.test(start) &&
+    Number.isSafeInteger(counter) &&
+    counter >= 1 &&
+    counter <= 2_147_483_646
+  );
+};
+
+const validPatternSyntax = (pattern: string): boolean => {
   const words: ReadonlyArray<string> = Option.getOrNull(Str.match(alphaWords)(pattern)) ?? [];
   const matchingWords = Arr.filter(words, (word) => numberingRun.test(word));
   const runs = Arr.flatMap(
@@ -636,9 +649,18 @@ const validSeries = (pattern: string, start: string): boolean => {
     )
   )
     return false;
-  const hasControlCharacter = containsAsciiControl(pattern);
-  return !hasControlCharacter && formatPatternSample(pattern, counter, "2026-01-01").length <= 20;
+  return !containsAsciiControl(pattern);
 };
+
+const seriesValidationIssue = (pattern: string, start: string): SeriesValidationIssue => {
+  if (!validStartNumber(start)) return "start";
+  if (!validPatternSyntax(pattern)) return "pattern";
+  if (formatPatternSample(pattern, Number(start), "2026-01-01").length > 20) return "tooLong";
+  return null;
+};
+
+const validSeries = (pattern: string, start: string): boolean =>
+  seriesValidationIssue(pattern, start) === null;
 
 const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => ({
   model: {
@@ -817,6 +839,13 @@ const updateWizard = (
         }
       }
       return { model: next };
+    },
+    PastedAddress: ({ street, city, postalCode }) => {
+      if (editingLocked(model)) return { model };
+      if (model.createdWorkspace !== null && model.setupDone.issuingEntity) return { model };
+      return {
+        model: { ...model, street, city, postalCode, stepError: null, submitFailure: null },
+      };
     },
     SelectedTaxRegime: ({ regime }) => ({
       model:
@@ -1100,39 +1129,57 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     (model.step === 2 && workspaceCreated) ||
     (model.step === 3 && bankLocked(model));
 
+  const pasteAddress = (field: Format.AddressField) => (text: string) => {
+    const next = Format.applyAddressPaste(
+      {
+        street: model.street,
+        city: model.city,
+        postalCode: model.postalCode,
+        country: model.country,
+      },
+      field,
+      text,
+      { includeCountry: false },
+    );
+    return next === undefined
+      ? undefined
+      : Message.PastedAddress({
+          street: next.street,
+          city: next.city,
+          postalCode: next.postalCode,
+        });
+  };
+
   const stepContent = (() => {
     switch (model.step) {
       case 1:
         return card(h, [
           cardTitle(h, t.t("onboarding.wizard.step.entity")),
-          h.div.class("kb-stack").children([
-            h.p.class("kb-muted").children([t.t("onboarding.wizard.entity.intro")]),
-            h.div
-              .class("kb-row")
-              .style({ alignItems: "flex-end" })
-              .children([
-                h.div.style({ flex: "1", minWidth: "200px" }).children([
-                  textField(h, {
-                    id: "onb-ico",
-                    label: t.t("common.field.ico"),
-                    value: model.ico,
-                    mono: true,
-                    placeholder: "01234567",
-                    onInput: (value) => Message.ChangedField({ field: "ico", value }),
-                  }),
-                ]),
-                button(h, {
-                  label: aresBusy
-                    ? t.t("onboarding.wizard.entity.lookingUp")
-                    : t.t("onboarding.wizard.entity.lookup"),
-                  onClick: Message.ClickedLookupAres(),
-                  variant: "secondary",
-                  icon: icon(h, "search", 16),
-                  busy: aresBusy,
-                  disabled: aresBusy || workspaceCreated,
-                  testId: "onboarding-ares-lookup",
+          h.div.class(ui.stack).children([
+            h.p.class(ui.muted).children([t.t("onboarding.wizard.entity.intro")]),
+            h.div.class(cn(ui.row, "items-end")).children([
+              h.div.class("min-w-[200px] flex-1").children([
+                textField(h, {
+                  id: "onb-ico",
+                  label: t.t("common.field.ico"),
+                  value: model.ico,
+                  mono: true,
+                  placeholder: "01234567",
+                  onInput: (value) => Message.ChangedField({ field: "ico", value }),
                 }),
               ]),
+              button(h, {
+                label: aresBusy
+                  ? t.t("onboarding.wizard.entity.lookingUp")
+                  : t.t("onboarding.wizard.entity.lookup"),
+                onClick: Message.ClickedLookupAres(),
+                variant: "secondary",
+                icon: icon(h, "search", 16),
+                busy: aresBusy,
+                disabled: aresBusy || workspaceCreated,
+                testId: "onboarding-ares-lookup",
+              }),
+            ]),
             ...(model.ares._tag === "Loaded"
               ? [banner(h, { text: t.t("onboarding.wizard.entity.found"), tone: "info" })]
               : []),
@@ -1157,7 +1204,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   }),
                 ]
               : []),
-            h.div.class("kb-grid").children([
+            h.div.class(ui.grid).children([
               textField(h, {
                 id: "onb-legal-name",
                 label: t.t("onboarding.wizard.entity.legalName"),
@@ -1192,12 +1239,14 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 label: t.t("common.field.street"),
                 value: model.street,
                 onInput: (value) => Message.ChangedField({ field: "street", value }),
+                onPaste: pasteAddress("street"),
               }),
               textField(h, {
                 id: "onb-city",
                 label: t.t("common.field.city"),
                 value: model.city,
                 onInput: (value) => Message.ChangedField({ field: "city", value }),
+                onPaste: pasteAddress("city"),
               }),
               textField(h, {
                 id: "onb-postal",
@@ -1205,6 +1254,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 value: model.postalCode,
                 mono: true,
                 onInput: (value) => Message.ChangedField({ field: "postalCode", value }),
+                onPaste: pasteAddress("postalCode"),
               }),
               textField(h, {
                 id: "onb-legal-form",
@@ -1226,24 +1276,26 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       case 2:
         return card(h, [
           cardTitle(h, t.t("onboarding.wizard.step.tax")),
-          h.div.class("kb-stack").children([
-            h.p.class("kb-muted").children([t.t("onboarding.wizard.tax.intro")]),
-            h.div.class("kb-regime-grid").children(
+          h.div.class(ui.stack).children([
+            h.p.class(ui.muted).children([t.t("onboarding.wizard.tax.intro")]),
+            h.div.class("grid grid-cols-[repeat(auto-fit,minmax(210px,1fr))] gap-3").children(
               Arr.map(["non_vat_payer", "vat_payer", "identified_person"] as const, (regime) =>
                 h.button
                   .attr("type", "button")
-                  .class("kb-regime-card")
+                  .class(
+                    "flex cursor-pointer flex-col gap-1.5 rounded-panel border border-outline-variant bg-surface-container-lowest p-3.5 text-left aria-[pressed=true]:border-primary aria-[pressed=true]:bg-primary-container aria-[pressed=true]:text-on-primary-container",
+                  )
                   .attr("aria-pressed", String(model.taxRegime === regime ? "true" : "false"))
                   .on("click", Message.SelectedTaxRegime({ regime }))
                   .children([
                     h.strong.children([
                       t.translate(I18n.enumText({ name: "taxRegime", value: regime })),
                     ]),
-                    h.span.class("kb-small").children([t.t(`enum.taxRegimeHint.${regime}`)]),
+                    h.span.class(ui.small).children([t.t(`enum.taxRegimeHint.${regime}`)]),
                   ]),
               ),
             ),
-            h.div.class("kb-grid").children([
+            h.div.class(ui.grid).children([
               ...(model.taxRegime !== "non_vat_payer"
                 ? [
                     textField(h, {
@@ -1263,12 +1315,12 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       case 3:
         return card(h, [
           cardTitle(h, t.t("onboarding.wizard.step.bank")),
-          h.div.class("kb-stack").children([
-            h.p.class("kb-muted").children([t.t("onboarding.wizard.bank.intro")]),
+          h.div.class(ui.stack).children([
+            h.p.class(ui.muted).children([t.t("onboarding.wizard.bank.intro")]),
             ...(Str.trim(model.iban) === ""
               ? [banner(h, { text: t.t("onboarding.wizard.bank.noQrWarning"), tone: "info" })]
               : []),
-            h.div.class("kb-grid").children([
+            h.div.class(ui.grid).children([
               textField(h, {
                 id: "onb-cz-account",
                 label: local(ctx.locale, "czechAccountLabel"),
@@ -1307,77 +1359,267 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   }),
               }),
             ]),
-            h.span.class("kb-small kb-muted").children([t.t("onboarding.wizard.bank.optional")]),
+            h.span.class(cn(ui.small, ui.muted)).children([t.t("onboarding.wizard.bank.optional")]),
           ]),
         ]);
 
       case 4: {
-        const previewList = Arr.join(
-          Arr.map([1, 2, 3], (n) =>
-            formatPatternSample(
-              model.invoicePattern || "YYYY-NNNN",
-              n + (Number(model.invoiceStart) || 1) - 1,
-              ctx.today,
-            ),
-          ),
-          ", ",
-        );
-        return card(h, [
-          cardTitle(h, local(ctx.locale, "step4Title")),
-          h.div.class("kb-stack").children([
-            h.p.class("kb-muted").children([t.t("onboarding.wizard.numbering.intro")]),
-            banner(h, {
-              text: t.t("onboarding.wizard.numbering.preview", { numbers: previewList }),
-              tone: "info",
-            }),
-            h.div.class("kb-grid").children([
-              ...Arr.map(eligibleSeries(model.taxRegime), ({ kind, label, pattern, start }) =>
-                h.div.class("kb-stack").children([
-                  textField(h, {
-                    id: `onb-pattern-${kind}`,
-                    label: local(ctx.locale, label),
-                    value: model[pattern],
-                    mono: true,
-                    onInput: (value) => Message.ChangedField({ field: pattern, value }),
-                  }),
-                  textField(h, {
-                    id: `onb-start-${kind}`,
-                    label: local(ctx.locale, "startNumber"),
-                    type: "number",
-                    value: model[start],
-                    onInput: (value) => Message.ChangedField({ field: start, value }),
-                  }),
+        const series = eligibleSeries(model.taxRegime);
+        return card(
+          h,
+          [
+            h.div
+              .class("mb-5 flex flex-col gap-1 [&_[data-slot=card-title]]:mb-0")
+              .children([
+                cardTitle(h, local(ctx.locale, "step4Title")),
+                h.p.class(ui.muted).children([t.t("onboarding.wizard.numbering.intro")]),
+              ]),
+            h.div.class("flex flex-col gap-5").children([
+              h.section
+                .class("flex flex-col gap-3")
+                .attr("aria-labelledby", "onb-series-heading")
+                .children([
+                  h.div
+                    .class("flex flex-col gap-0.5")
+                    .children([
+                      h.h3.id("onb-series-heading").children([t.t("settings.numbering.title")]),
+                      h.p
+                        .class(cn(ui.small, ui.muted))
+                        .children([t.t("settings.numbering.patternHint")]),
+                    ]),
+                  h.div
+                    .class(
+                      "overflow-hidden rounded-panel border border-outline-variant bg-surface-container-lowest",
+                    )
+                    .attr("data-slot", "series-ledger")
+                    .children([
+                      h.div
+                        .class(
+                          "hidden items-center gap-3 border-b border-outline-variant bg-surface-container-low px-3.5 py-[9px] text-[0.75rem] font-medium text-on-surface-variant min-[681px]:grid min-[681px]:grid-cols-[minmax(156px,1.15fr)_minmax(156px,1.15fr)_124px_minmax(156px,1fr)]",
+                        )
+                        .attr("aria-hidden", "true")
+                        .children([
+                          h.span.children([local(ctx.locale, "documentType")]),
+                          h.span.children([t.t("settings.numbering.pattern")]),
+                          h.span.children([local(ctx.locale, "startNumber")]),
+                          h.span.class("text-right").children([local(ctx.locale, "firstNumbers")]),
+                        ]),
+                      ...Arr.map(series, ({ kind, pattern, start }) => {
+                        const titleText = t.translate(
+                          I18n.enumText({ name: "documentKindPlural", value: kind }),
+                        );
+                        const patternValue = model[pattern];
+                        const startValue = model[start];
+                        const trimmedPattern = Str.trim(patternValue);
+                        const issue = seriesValidationIssue(trimmedPattern, startValue);
+                        const startInvalid = !validStartNumber(startValue);
+                        const patternInvalid =
+                          !validPatternSyntax(trimmedPattern) || issue === "tooLong";
+                        const counter = Number(startValue);
+                        const firstSample =
+                          issue === null
+                            ? formatPatternSample(trimmedPattern, counter, ctx.today)
+                            : null;
+                        const secondSample =
+                          issue === null
+                            ? formatPatternSample(trimmedPattern, counter + 1, ctx.today)
+                            : null;
+                        const rowHeadingId = `onb-series-title-${kind}`;
+                        const rowPreviewId = `onb-series-preview-${kind}`;
+                        const issueMessage =
+                          issue === "start"
+                            ? local(ctx.locale, "invalidStart")
+                            : issue === "tooLong"
+                              ? local(ctx.locale, "patternTooLong")
+                              : issue === "pattern"
+                                ? local(ctx.locale, "invalidPattern")
+                                : null;
+
+                        return h.div
+                          .key(kind)
+                          .class(
+                            cn(
+                              "grid grid-cols-[minmax(0,1fr)_minmax(112px,0.75fr)] items-end gap-x-3 gap-y-2.5 border-b border-outline-variant px-3 py-3.5 transition-colors duration-150 ease-out [grid-template-areas:'kind_preview'_'pattern_start'] last:border-b-0 hover:bg-surface-container-low focus-within:bg-surface-container min-[681px]:grid-cols-[minmax(156px,1.15fr)_minmax(156px,1.15fr)_124px_minmax(156px,1fr)] min-[681px]:items-center min-[681px]:gap-3 min-[681px]:px-3.5 min-[681px]:py-3 min-[681px]:[grid-template-areas:none]",
+                              issue !== null &&
+                                "bg-[color-mix(in_srgb,var(--md-sys-color-error-container)_32%,var(--md-sys-color-surface-container-lowest))]",
+                            ),
+                          )
+                          .attr("data-slot", "series-row")
+                          .attr("role", "group")
+                          .attr("aria-labelledby", rowHeadingId)
+                          .attr("data-series-kind", kind)
+                          .children([
+                            h.div
+                              .class(
+                                "min-w-0 self-center [grid-area:kind] min-[681px]:[grid-area:auto]",
+                              )
+                              .children([
+                                h.span
+                                  .id(rowHeadingId)
+                                  .class("text-[0.875rem] font-semibold text-on-surface")
+                                  .attr("data-slot", "series-row-title")
+                                  .children([titleText]),
+                              ]),
+                            h.div
+                              .class(
+                                "flex min-w-0 flex-col gap-1 [grid-area:pattern] min-[681px]:[grid-area:auto]",
+                              )
+                              .children([
+                                h.label
+                                  .class(
+                                    "text-[0.75rem] font-medium text-on-surface-variant min-[681px]:sr-only",
+                                  )
+                                  .attr("for", `onb-pattern-${kind}`)
+                                  .children([t.t("settings.numbering.pattern")]),
+                                withAttributes(h.input.class(), [
+                                  (element) =>
+                                    element.class(cn(controlVariants({ kind: "input" }), ui.mono)),
+                                  (element) => element.id(`onb-pattern-${kind}`),
+                                  (element) => element.attr("name", `onb-pattern-${kind}`),
+                                  (element) => element.attr("type", "text"),
+                                  (element) => element.attr("spellcheck", "false"),
+                                  (element) => element.attr("autocomplete", "off"),
+                                  (element) => element.value(patternValue),
+                                  (element) =>
+                                    element.on("input", ({ value }) =>
+                                      Message.ChangedField({ field: pattern, value }),
+                                    ),
+                                  (node) =>
+                                    patternInvalid
+                                      ? node
+                                          .attr("aria-invalid", "true")
+                                          .attr("aria-describedby", rowPreviewId)
+                                      : node,
+                                ]),
+                              ]),
+                            h.div
+                              .class(
+                                "flex min-w-0 flex-col gap-1 [grid-area:start] min-[681px]:[grid-area:auto]",
+                              )
+                              .children([
+                                h.label
+                                  .class(
+                                    "text-[0.75rem] font-medium text-on-surface-variant min-[681px]:sr-only",
+                                  )
+                                  .attr("for", `onb-start-${kind}`)
+                                  .children([local(ctx.locale, "startNumber")]),
+                                withAttributes(h.input.class(), [
+                                  (element) =>
+                                    element.class(
+                                      cn(
+                                        controlVariants({ kind: "input" }),
+                                        ui.mono,
+                                        "tabular-nums",
+                                      ),
+                                    ),
+                                  (element) => element.id(`onb-start-${kind}`),
+                                  (element) => element.attr("name", `onb-start-${kind}`),
+                                  (element) => element.attr("type", "number"),
+                                  (element) => element.attr("inputmode", "numeric"),
+                                  (element) => element.attr("min", "1"),
+                                  (element) => element.attr("step", "1"),
+                                  (element) => element.value(startValue),
+                                  (element) =>
+                                    element.on("input", ({ value }) =>
+                                      Message.ChangedField({ field: start, value }),
+                                    ),
+                                  (node) =>
+                                    startInvalid
+                                      ? node
+                                          .attr("aria-invalid", "true")
+                                          .attr("aria-describedby", rowPreviewId)
+                                      : node,
+                                ]),
+                              ]),
+                            h.div
+                              .id(rowPreviewId)
+                              .class(
+                                "flex min-w-0 flex-col items-end justify-center gap-0.5 self-center text-right [grid-area:preview] min-[681px]:[grid-area:auto]",
+                              )
+                              .attr("data-slot", "series-row-preview")
+                              .attr("aria-live", "polite")
+                              .children(
+                                firstSample !== null && secondSample !== null
+                                  ? [
+                                      h.span
+                                        .class(
+                                          cn(
+                                            "max-w-full truncate font-medium text-on-surface",
+                                            ui.mono,
+                                          ),
+                                        )
+                                        .children([firstSample]),
+                                      h.span
+                                        .class(
+                                          cn("max-w-full truncate", ui.small, ui.mono, ui.muted),
+                                        )
+                                        .children([secondSample]),
+                                    ]
+                                  : [
+                                      h.span
+                                        .class("text-[0.75rem] leading-4 text-error")
+                                        .attr("data-slot", "series-row-error")
+                                        .attr("role", "alert")
+                                        .children([issueMessage ?? ""]),
+                                    ],
+                              ),
+                          ]);
+                      }),
+                    ]),
                 ]),
-              ),
-              selectField(h, {
-                id: "onb-def-currency",
-                disabled: workspaceCreated,
-                label: local(ctx.locale, "defaultCurrency"),
-                value: model.defaultCurrency,
-                options: [
-                  { value: "CZK", label: "CZK" },
-                  { value: "EUR", label: "EUR" },
-                ],
-                onChange: (v) =>
-                  Message.SelectedDefaultCurrency({
-                    currency: CurrencyCode.make(v === "EUR" ? "EUR" : "CZK"),
-                  }),
-              }),
-              selectField(h, {
-                id: "onb-def-lang",
-                disabled: workspaceCreated,
-                label: local(ctx.locale, "defaultLanguage"),
-                value: model.defaultLanguage,
-                options: [
-                  { value: "cs", label: "Čeština" },
-                  { value: "en", label: "English" },
-                ],
-                onChange: (v) =>
-                  Message.SelectedDefaultLanguage({ language: v === "en" ? "en" : "cs" }),
-              }),
+              separator(h),
+              h.section
+                .class("flex flex-col gap-3")
+                .attr("aria-labelledby", "onb-defaults-heading")
+                .children([
+                  h.div
+                    .class("flex flex-col gap-0.5")
+                    .children([
+                      h.h3
+                        .id("onb-defaults-heading")
+                        .children([t.t("settings.documentDefaults.title")]),
+                      h.p
+                        .class(cn(ui.small, ui.muted))
+                        .children([local(ctx.locale, "defaultsIntro")]),
+                    ]),
+                  h.div
+                    .class("grid grid-cols-1 gap-4 min-[561px]:grid-cols-2")
+                    .attr("data-slot", "onboarding-defaults")
+                    .children([
+                      selectField(h, {
+                        id: "onb-def-currency",
+                        disabled: workspaceCreated,
+                        label: local(ctx.locale, "defaultCurrency"),
+                        value: model.defaultCurrency,
+                        options: [
+                          { value: "CZK", label: "CZK" },
+                          { value: "EUR", label: "EUR" },
+                        ],
+                        onChange: (v) =>
+                          Message.SelectedDefaultCurrency({
+                            currency: CurrencyCode.make(v === "EUR" ? "EUR" : "CZK"),
+                          }),
+                      }),
+                      selectField(h, {
+                        id: "onb-def-lang",
+                        disabled: workspaceCreated,
+                        label: local(ctx.locale, "defaultLanguage"),
+                        value: model.defaultLanguage,
+                        options: [
+                          { value: "cs", label: "Čeština" },
+                          { value: "en", label: "English" },
+                        ],
+                        onChange: (v) =>
+                          Message.SelectedDefaultLanguage({ language: v === "en" ? "en" : "cs" }),
+                      }),
+                    ]),
+                ]),
             ]),
-          ]),
-        ]);
+          ],
+          [],
+          false,
+          "p-4 min-[761px]:p-6",
+        );
       }
 
       default: {
@@ -1397,156 +1639,175 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         });
         return card(h, [
           cardTitle(h, local(ctx.locale, "previewHeading")),
-          h.div.class("kb-stack").children([
-            h.p.class("kb-muted").children([local(ctx.locale, "previewIntro")]),
-            h.div.class("kb-mini-invoice").children([
-              h.div.class("kb-mini-invoice__head").children([
-                h.div
-                  .class("kb-stack")
-                  .style({ "--kb-gap": "2px" })
-                  .children([
-                    h.strong.children([model.legalName || "—"]),
-                    ...(model.ico !== ""
-                      ? [
-                          h.span
-                            .class("kb-small kb-muted")
-                            .children([
-                              `IČO ${model.ico}${model.dic !== "" ? ` · DIČ ${model.dic}` : ""}`,
-                            ]),
-                        ]
-                      : []),
-                    ...(model.street !== "" || model.city !== ""
-                      ? [
-                          h.span
-                            .class("kb-small kb-muted")
-                            .children([
-                              Arr.join(
-                                Arr.filter([model.street, model.postalCode, model.city], Boolean),
-                                ", ",
-                              ),
-                            ]),
-                        ]
-                      : []),
-                  ]),
-                h.div
-                  .class("kb-stack")
-                  .style({ alignItems: "flex-end", "--kb-gap": "4px" })
-                  .children([
-                    mono(h, sampleNumber),
-                    badge(
-                      h,
-                      t.translate(I18n.enumText({ name: "taxRegime", value: model.taxRegime })),
-                      isVat ? "proforma" : "outline",
-                    ),
-                  ]),
-              ]),
-              dl(h, [
-                [t.t("common.field.name"), local(ctx.locale, "sampleCustomer")],
-                [t.t("common.field.description"), local(ctx.locale, "sampleLine")],
-                [t.t("common.field.subtotal"), amount(h, net.text)],
-                ...(isVat ? [[t.t("common.field.vat"), "21 %"] as const] : []),
-                [t.t("common.field.total"), amount(h, total.text)],
-                [
-                  t.t("common.field.iban"),
-                  model.iban !== ""
-                    ? mono(h, model.iban)
-                    : h.span.class("kb-muted").children([local(ctx.locale, "qrMissing")]),
-                ],
-              ]),
+          h.div
+            .class(ui.stack)
+            .children([
+              h.p.class(ui.muted).children([local(ctx.locale, "previewIntro")]),
               h.div
-                .class("kb-row")
+                .class(
+                  "flex flex-col gap-3.5 rounded-panel border border-outline-variant bg-surface-container-lowest p-5 text-[0.8125rem]",
+                )
                 .children([
-                  badge(
-                    h,
-                    model.iban !== ""
-                      ? local(ctx.locale, "qrIncluded")
-                      : local(ctx.locale, "qrMissing"),
-                    model.iban !== "" ? "paid" : "draft",
-                  ),
+                  h.div
+                    .class("flex justify-between gap-3 border-b border-outline-variant pb-2.5")
+                    .children([
+                      h.div
+                        .class("flex flex-col gap-0.5")
+                        .children([
+                          h.strong.children([model.legalName || "—"]),
+                          ...(model.ico !== ""
+                            ? [
+                                h.span
+                                  .class(cn(ui.small, ui.muted))
+                                  .children([
+                                    `IČO ${model.ico}${model.dic !== "" ? ` · DIČ ${model.dic}` : ""}`,
+                                  ]),
+                              ]
+                            : []),
+                          ...(model.street !== "" || model.city !== ""
+                            ? [
+                                h.span
+                                  .class(cn(ui.small, ui.muted))
+                                  .children([
+                                    Arr.join(
+                                      Arr.filter(
+                                        [model.street, model.postalCode, model.city],
+                                        Boolean,
+                                      ),
+                                      ", ",
+                                    ),
+                                  ]),
+                              ]
+                            : []),
+                        ]),
+                      h.div
+                        .class("flex flex-col items-end gap-1")
+                        .children([
+                          mono(h, sampleNumber),
+                          badge(
+                            h,
+                            t.translate(
+                              I18n.enumText({ name: "taxRegime", value: model.taxRegime }),
+                            ),
+                            isVat ? "proforma" : "outline",
+                          ),
+                        ]),
+                    ]),
+                  dl(h, [
+                    [t.t("common.field.name"), local(ctx.locale, "sampleCustomer")],
+                    [t.t("common.field.description"), local(ctx.locale, "sampleLine")],
+                    [t.t("common.field.subtotal"), amount(h, net.text)],
+                    ...(isVat ? [[t.t("common.field.vat"), "21 %"] as const] : []),
+                    [t.t("common.field.total"), amount(h, total.text)],
+                    [
+                      t.t("common.field.iban"),
+                      model.iban !== ""
+                        ? mono(h, model.iban)
+                        : h.span.class(ui.muted).children([local(ctx.locale, "qrMissing")]),
+                    ],
+                  ]),
+                  h.div
+                    .class(ui.row)
+                    .children([
+                      badge(
+                        h,
+                        model.iban !== ""
+                          ? local(ctx.locale, "qrIncluded")
+                          : local(ctx.locale, "qrMissing"),
+                        model.iban !== "" ? "paid" : "draft",
+                      ),
+                    ]),
                 ]),
+              h.span.class(ui.footnote).children([t.t("onboarding.wizard.nothingSaved")]),
             ]),
-            h.span.class("kb-footnote").children([t.t("onboarding.wizard.nothingSaved")]),
-          ]),
         ]);
       }
     }
   })();
 
-  return h.div.class("kb-onboarding").children([
-    pageHeader(h, {
-      title: t.t("onboarding.wizard.title"),
-      subtitle: t.t("onboarding.wizard.stepOf", { step: model.step, steps: 5 }),
-    }),
-    h.nav
-      .class("kb-stepper")
-      .attr("aria-label", t.t("onboarding.wizard.title"))
-      .children(
-        Arr.map(steps, (s) =>
-          withAttributes(h.button.class(), [
-            (element) => element.attr("type", "button"),
-            (element) => element.class("kb-stepper__item"),
-            (node) => (s.num === model.step ? node.attr("aria-current", "step") : node),
-            (node) => (model.submitting ? node.attr("disabled", "") : node),
-            (element) => element.on("click", Message.ClickedStep({ step: s.num })),
-          ]).children([
-            h.span.class("kb-stepper__num").children([String(s.num)]),
-            h.span.children([s.label]),
-          ]),
+  return h.div
+    .class("mx-auto flex w-full max-w-[860px] flex-col gap-5 px-5 pt-7 pb-16")
+    .attr("data-slot", "onboarding")
+    .children([
+      pageHeader(h, {
+        title: t.t("onboarding.wizard.title"),
+        subtitle: t.t("onboarding.wizard.stepOf", { step: model.step, steps: 5 }),
+      }),
+      h.nav
+        .class("grid grid-cols-2 gap-2 min-[761px]:grid-cols-5")
+        .attr("aria-label", t.t("onboarding.wizard.title"))
+        .children(
+          Arr.map(steps, (s) =>
+            withAttributes(h.button.class(), [
+              (element) => element.attr("type", "button"),
+              (element) =>
+                element.class(
+                  "flex cursor-pointer items-center gap-2 rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2 text-left text-[0.75rem] text-on-surface-variant aria-[current=step]:border-primary aria-[current=step]:bg-primary-container aria-[current=step]:font-semibold aria-[current=step]:text-on-primary-container",
+                ),
+              (node) => (s.num === model.step ? node.attr("aria-current", "step") : node),
+              (node) => (model.submitting ? node.attr("disabled", "") : node),
+              (element) => element.on("click", Message.ClickedStep({ step: s.num })),
+            ]).children([
+              h.span
+                .class(
+                  "inline-flex h-5 w-5 flex-none items-center justify-center rounded-badge border border-current text-[0.6875rem]",
+                )
+                .children([String(s.num)]),
+              h.span.children([s.label]),
+            ]),
+          ),
         ),
-      ),
-    ...(model.stepError !== null ? [banner(h, { text: model.stepError, tone: "error" })] : []),
-    ...(model.submitFailure !== null
-      ? [banner(h, { text: failureMessage(t, model.submitFailure), tone: "error" })]
-      : []),
-    withAttributes(h.el("fieldset").attr("style", "min-width:0;margin:0;padding:0;border:0"), [
-      (node) => (disableStepFields ? node.attr("disabled", "") : node),
-    ]).children([stepContent]),
-    h.div.class("kb-onboarding__actions").children([
-      model.step > 1
-        ? button(h, {
-            label: t.t("common.action.back"),
-            onClick: Message.ClickedBack(),
-            variant: "secondary",
-            disabled: model.submitting,
-          })
-        : h.span.children([]),
-      h.div.class("kb-row").children([
-        ...(model.step === 3
-          ? [
-              button(h, {
-                label: t.t("common.action.skip"),
-                onClick: Message.ClickedNext(),
-                variant: "ghost",
-              }),
-            ]
-          : []),
-        model.step < 5
+      ...(model.stepError !== null ? [banner(h, { text: model.stepError, tone: "error" })] : []),
+      ...(model.submitFailure !== null
+        ? [banner(h, { text: failureMessage(t, model.submitFailure), tone: "error" })]
+        : []),
+      withAttributes(h.fieldset.class("m-0 min-w-0 border-0 p-0"), [
+        (node) => (disableStepFields ? node.attr("disabled", "") : node),
+      ]).children([stepContent]),
+      h.div.class("flex flex-wrap items-center justify-between gap-3 pt-2").children([
+        model.step > 1
           ? button(h, {
-              label: t.t("common.action.next"),
-              onClick: Message.ClickedNext(),
-              variant: "primary",
-              testId: "onboarding-next",
-            })
-          : button(h, {
-              label: model.submitting
-                ? t.t("onboarding.wizard.creating")
-                : workspaceCreated
-                  ? local(ctx.locale, "resume")
-                  : t.t("onboarding.wizard.submit"),
-              onClick: Message.ClickedCreateWorkspace(),
-              variant: "primary",
-              busy: model.submitting,
+              label: t.t("common.action.back"),
+              onClick: Message.ClickedBack(),
+              variant: "secondary",
               disabled: model.submitting,
-              testId: "onboarding-submit",
-            }),
+            })
+          : h.span.children([]),
+        h.div.class(ui.row).children([
+          ...(model.step === 3
+            ? [
+                button(h, {
+                  label: t.t("common.action.skip"),
+                  onClick: Message.ClickedNext(),
+                  variant: "ghost",
+                }),
+              ]
+            : []),
+          model.step < 5
+            ? button(h, {
+                label: t.t("common.action.next"),
+                onClick: Message.ClickedNext(),
+                variant: "primary",
+                testId: "onboarding-next",
+              })
+            : button(h, {
+                label: model.submitting
+                  ? t.t("onboarding.wizard.creating")
+                  : workspaceCreated
+                    ? local(ctx.locale, "resume")
+                    : t.t("onboarding.wizard.submit"),
+                onClick: Message.ClickedCreateWorkspace(),
+                variant: "primary",
+                busy: model.submitting,
+                disabled: model.submitting,
+                testId: "onboarding-submit",
+              }),
+        ]),
       ]),
-    ]),
-  ]);
+    ]);
 };
 
 export const view: {
   (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
   (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
 } = Fn.dual(3, viewImpl);
-
-const wholeNumberText = /^\d+$/;

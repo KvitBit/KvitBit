@@ -11,8 +11,17 @@
     "./testing": "./src/testing/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:policy": "bun test test/policy test/policy.test.ts",
+    "test:engines": "bun test test/engines/fx.test.ts test/engines/numbering.test.ts test/engines/numbering.property.test.ts test/engines/schedules.test.ts test/engines/statutory.test.ts test/engines/vat.test.ts test/engines/vat-rounding.property.test.ts",
+    "test:advance-chain": "bun test test/engines/advance-chain.property.test.ts",
+    "test:fk": "bun test test/numberReservationFk.pglite.test.ts",
+    "test:modules": "bun test test/modules",
+    "test:compose": "bun test test/compose test/e2e",
+    "test:unit": "bun test test/fakes.test.ts test/fx.test.ts test/importGraph.test.ts test/jobs.test.ts test/membership.test.ts test/overrides.test.ts test/shared.test.ts test/store.test.ts test/testingEntry.test.ts"
   },
   "dependencies": {
     "@kvitbit/domain": "workspace:*",

@@ -7,8 +7,14 @@
     "start": "bun src/main.ts",
     "worker": "bun src/worker.ts",
     "migrate": "bun src/migrate.ts",
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:persistence": "bun test test/persistence",
+    "test:http": "bun test test/http",
+    "test:mcp": "bun test test/mcp",
+    "test:runtime": "bun test test/runtime test/analytics.test.ts"
   },
   "dependencies": {
     "@better-auth/oauth-provider": "1.7.27",
@@ -24,6 +30,7 @@
     "@kvitbit/domain": "workspace:*",
     "better-auth": "1.7.27",
     "drizzle-orm": "1.0.0-rc.5",
-    "effect": "4.1.4"
+    "effect": "4.1.4",
+    "posthog-node": "^6.2.0"
   }
 }

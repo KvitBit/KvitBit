@@ -1,8 +1,8 @@
 import { type ReactNode, useState } from "react";
-import { StyleSheet, TextInput, type TextInputProps, View } from "react-native";
+import { TextInput, type TextInputProps, View } from "react-native";
 import { useTheme } from "../theme/theme-provider";
+import { fieldBoxVariants } from "./styles";
 import { Text, textStyle } from "./text";
-import { space, touchTarget } from "./tokens";
 
 export interface TextFieldProps
   extends Omit<TextInputProps, "style" | "value" | "onChangeText" | "editable"> {
@@ -29,23 +29,13 @@ export function TextField({
   const [focused, setFocused] = useState<boolean>(false);
   const c = theme.colors;
   const hasError: boolean = (error ?? "").length > 0;
-  const border = hasError ? c.error : focused === true ? c.primary : c.outline;
+  const state = hasError ? "error" : focused === true ? "focused" : "idle";
   return (
-    <View style={styles.wrap}>
+    <View className="gap-1">
       <Text variant="labelMedium" color={hasError ? "error" : "onSurfaceVariant"}>
         {label}
       </Text>
-      <View
-        style={[
-          styles.box,
-          {
-            borderColor: border,
-            borderWidth: focused === true || hasError ? 2 : 1,
-            borderRadius: theme.shape.control,
-            backgroundColor: disabled === true ? c.surfaceContainerHighest : c.surface,
-          },
-        ]}
-      >
+      <View className={fieldBoxVariants({ state, disabled: disabled === true })}>
         <TextInput
           {...input}
           accessibilityLabel={label}
@@ -59,7 +49,8 @@ export function TextField({
             input.onBlur?.(e);
           }}
           placeholderTextColor={c.onSurfaceVariant}
-          style={[textStyle(theme.fonts.bodyLarge), styles.input, { color: c.onSurface }]}
+          className="flex-1 px-4 py-3 text-on-surface"
+          style={textStyle(theme.fonts.bodyLarge)}
         />
         {trailing}
       </View>
@@ -75,9 +66,3 @@ export function TextField({
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  wrap: { gap: space.xs },
-  box: { flexDirection: "row", alignItems: "center", minHeight: touchTarget + 8 },
-  input: { flex: 1, paddingHorizontal: space.lg, paddingVertical: space.md },
-});

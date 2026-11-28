@@ -7,7 +7,6 @@
  *
  * Absent or non-existent directories are simply not mounted. Path traversal is rejected.
  */
-
 import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import * as BunPath from "@effect/platform-bun/BunPath";
 import * as Arr from "effect/Array";
@@ -20,6 +19,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Str from "effect/String";
+import { POSTHOG_PROXY_PATH } from "./analyticsProxy";
 import { HttpConfig } from "./config";
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
@@ -101,8 +101,22 @@ const PWA_NO_CACHE = new Set(["index.html", "sw.js", "manifest.webmanifest"]);
 const isHashedAsset = (rel: string): boolean =>
   Str.startsWith("assets/")(rel) || Str.startsWith("_expo/static/")(rel) || HASHED_ASSET.test(rel);
 
-const WEB_EXCLUDED_PREFIXES = ["/api/", "/mcp/", "/app/", "/assets/", "/.well-known/"];
-const WEB_EXCLUDED_EXACT = new Set(["/api", "/mcp", "/app", "/assets", "/.well-known"]);
+const WEB_EXCLUDED_PREFIXES = [
+  "/api/",
+  "/mcp/",
+  "/app/",
+  "/assets/",
+  "/.well-known/",
+  `${POSTHOG_PROXY_PATH}/`,
+];
+const WEB_EXCLUDED_EXACT = new Set([
+  "/api",
+  "/mcp",
+  "/app",
+  "/assets",
+  "/.well-known",
+  POSTHOG_PROXY_PATH,
+]);
 
 const isWebFallbackExcluded = (pathname: string): boolean =>
   WEB_EXCLUDED_EXACT.has(pathname) ||

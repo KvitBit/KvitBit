@@ -13,6 +13,8 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import { AuthServer } from "../../auth/AuthServer";
+import { bindAuthLogging } from "../../auth/logging";
+import { Analytics } from "../../runtime/analytics";
 import { HttpConfig } from "../config";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { isRequestBodyTooLarge } from "../edge/request";
@@ -29,6 +31,7 @@ export const FeedbackRoutesLive = HttpRouter.use(
   Effect.fnUntraced(function* (router) {
     const config = yield* HttpConfig;
     const auth = yield* AuthServer;
+    const analytics = yield* Analytics;
     const sql = yield* SqlClient.SqlClient;
     const client = yield* HttpClient.HttpClient;
     const fetch = yield* FetchHttpClient.Fetch;
@@ -49,12 +52,15 @@ export const FeedbackRoutesLive = HttpRouter.use(
           return forbidden;
         }
 
+        const runAuth = yield* bindAuthLogging;
         const session = yield* Effect.tryPromise({
           try: () =>
-            auth.api.getSession({
-              headers: new Headers({ cookie }),
-              query: { disableCookieCache: true, disableRefresh: true },
-            }),
+            runAuth(() =>
+              auth.api.getSession({
+                headers: new Headers({ cookie }),
+                query: { disableCookieCache: true, disableRefresh: true },
+              }),
+            ),
           catch: () => forbidden,
         }).pipe(Effect.orElseSucceed(() => null));
         if (
@@ -98,12 +104,16 @@ export const FeedbackRoutesLive = HttpRouter.use(
           submission.success,
           page,
         ).pipe(Effect.provideService(FetchHttpClient.Fetch, fetch));
-        return issue === undefined
-          ? HttpServerResponse.empty({ status: 502 })
-          : HttpServerResponse.jsonUnsafe(issue, {
-              status: 201,
-              headers: { "cache-control": "no-store" },
-            });
+        if (issue === undefined) return HttpServerResponse.empty({ status: 502 });
+        yield* analytics.capture({
+          event: "feedback_submitted",
+          userId: session.user.id,
+          hasPin: submission.success.pins.length > 0,
+        });
+        return HttpServerResponse.jsonUnsafe(issue, {
+          status: 201,
+          headers: { "cache-control": "no-store" },
+        });
       }),
     );
   }),

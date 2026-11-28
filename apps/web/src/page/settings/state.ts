@@ -206,6 +206,12 @@ export const Message = UiSchema.TaggedEnum({
   FailedConnectedApps: { seq: Remote.Seq, failure: Failure },
 
   // Issuing Entity
+  PastedEntityAddress: {
+    street: Schema.String,
+    city: Schema.String,
+    postalCode: Schema.String,
+    country: Schema.String,
+  },
   ChangedEntityField: {
     field: Schema.Literals([
       "name",

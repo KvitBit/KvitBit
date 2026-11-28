@@ -19,7 +19,8 @@ import { WorkflowStartersLive } from "./workflows";
 
 export { makeBlobStorageLayer } from "./blob";
 export type { EmailWiringConfig } from "./config";
-export { makeEmailSenderLayer, parseSmtpUrl } from "./email";
+export { EmailWiringConfigSchema } from "./config";
+export { EmailSenderLive, makeEmailSenderLayer, parseSmtpUrl } from "./email";
 export { documentViewToRenderModel, makePdfRenderersLayer } from "./pdf";
 export {
   deriveInvitationTokenKey,

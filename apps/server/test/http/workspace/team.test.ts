@@ -19,7 +19,7 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
-
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
@@ -27,6 +27,7 @@ let owner: TestUser;
 let teammate: TestUser;
 let workspaceId: string;
 let base: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const decodeInvitation = Fn.flow(Schema.decodeUnknownEffect(InvitationView), Effect.runSync);
 const decodeInvitations = Fn.flow(
@@ -126,7 +127,9 @@ const countEdgeCredentials = async (user: TestUser) =>
   );
 
 beforeEach(async () => {
+  analytics = captureAnalytics();
   h = makeHarness({
+    analytics: analytics.layer,
     users: [
       {
         userId: UserId.make("01900000-0000-7000-8000-000000000001"),
@@ -186,6 +189,15 @@ describe("team group", () => {
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
     expect(await replay.json()).toEqual(invitationWire);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "team_invitation_sent",
+          distinctId: owner.id,
+          properties: { workspaceId, role: "member" },
+        },
+      ],
+    ]);
 
     const listRes = await req(owner, "/invitations", "GET");
     expect(listRes.status).toBe(200);

@@ -19,6 +19,8 @@ import {
   Remote as RemoteOps,
 } from "@kvitbit/ui-port/api";
 import {
+  type AddressField,
+  applyAddressInputChange,
   formatDate,
   formatDateTime,
   formatMoney,
@@ -50,7 +52,7 @@ import {
   Trash2,
 } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate, param } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -77,7 +79,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -185,7 +186,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
         : `${t(enumKey({ name: "reminderMode", value: "custom" }))} (${Arr.join(Arr.map(defaults.reminderPolicy.offsetsDays, String), ", ")})`;
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {workspace.closed ? <Banner tone="warning" text={t("shell.closedWorkspace")} /> : null}
       {contact.archived ? (
         <Banner
@@ -198,11 +199,11 @@ export function ContactDetailView(props: ContactDetailViewProps) {
       ) : null}
 
       <Card>
-        <View style={styles.headerRow}>
-          <Text variant="titleLarge" style={styles.flex}>
+        <View className="flex-row items-center gap-2">
+          <Text variant="titleLarge" className="flex-1">
             {contact.name}
           </Text>
-          <View style={styles.badges}>
+          <View className="flex-row flex-wrap gap-1">
             {Arr.map(contact.roles, (role) => (
               <Badge
                 key={role}
@@ -230,7 +231,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
         ) : null}
 
         {editable ? (
-          <View style={styles.actionRow}>
+          <View className="mt-1 flex-row flex-wrap gap-2">
             <Button
               label={t("contacts.detail.newInvoice")}
               icon={FilePlus2}
@@ -277,7 +278,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
               subtitle={`${item.before ?? t("common.state.notSet")} → ${item.after ?? t("common.state.notSet")}`}
             />
           ))}
-          <View style={styles.actionRow}>
+          <View className="mt-1 flex-row flex-wrap gap-2">
             <Button
               label={t("common.action.apply")}
               busy={props.applyingAres}
@@ -293,7 +294,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
       ) : null}
 
       <Section title={t("contacts.detail.particulars")}>
-        <Card style={styles.listCard}>
+        <Card className="gap-0 p-1">
           <ListRow
             title={t("common.field.ico")}
             trailing={contact.ico ?? t("common.state.notSet")}
@@ -321,7 +322,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
       </Section>
 
       <Section title={t("contacts.detail.billingDefaults")}>
-        <Card style={styles.listCard}>
+        <Card className="gap-0 p-1">
           <ListRow
             title={t("contacts.editor.defaults.currency")}
             trailing={defaults.currency ?? t("contacts.override.workspaceDefault")}
@@ -392,7 +393,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
         <RemoteView state={props.receivables} onRetry={props.onRetryReceivables}>
           {(summary) =>
             summary === null ? null : (
-              <Card style={styles.listCard}>
+              <Card className="gap-0 p-1">
                 <ListRow
                   title={local({ cs: "Dlužná částka", en: "Outstanding balance" })}
                   trailing={formatMoney(locale, summary.outstanding)}
@@ -412,7 +413,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
                 <EmptyState title={t("common.state.empty")} />
               </Card>
             ) : (
-              <Card style={styles.listCard}>
+              <Card className="gap-0 p-1">
                 {Arr.map(docs, (doc) => (
                   <ListRow
                     key={doc.id}
@@ -449,7 +450,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
                 />
               </Card>
             ) : (
-              <Card style={styles.listCard}>
+              <Card className="gap-0 p-1">
                 {Arr.map(expenses, (expense) => (
                   <ListRow
                     key={expense.id}
@@ -483,7 +484,7 @@ export function ContactDetailView(props: ContactDetailViewProps) {
       </Section>
 
       {editable ? (
-        <View style={styles.actionRow}>
+        <View className="mt-1 flex-row flex-wrap gap-2">
           <Button
             kind="outlined"
             icon={Pencil}
@@ -677,8 +678,25 @@ export function ContactEditorView(props: ContactEditorViewProps) {
   const country = Str.toUpperCase(Str.trim(form.country));
   const czech = country === "CZ";
 
+  const updateAddressField = (field: Exclude<AddressField, "country">, value: string) => {
+    onChangeForm((prev) => {
+      const pasted = applyAddressInputChange(
+        {
+          street: prev.street,
+          city: prev.city,
+          postalCode: prev.postalCode,
+          country: prev.country,
+        },
+        field,
+        value,
+        { defaultCountry: "CZ" },
+      );
+      return pasted === undefined ? { ...prev, [field]: value } : { ...prev, ...pasted };
+    });
+  };
+
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {!props.isNew ? (
         <Banner
           tone="info"
@@ -746,9 +764,9 @@ export function ContactEditorView(props: ContactEditorViewProps) {
       {czech || form.ico !== "" ? (
         <Card>
           {czech ? (
-            <View style={styles.headerRow}>
+            <View className="flex-row items-center gap-2">
               <Building2 size={20} color="#666" />
-              <Text variant="titleMedium" style={styles.flex}>
+              <Text variant="titleMedium" className="flex-1">
                 {t("contacts.editor.icoFirst")}
               </Text>
             </View>
@@ -836,18 +854,18 @@ export function ContactEditorView(props: ContactEditorViewProps) {
           <TextField
             label={t(czech ? "common.field.street" : "common.field.address")}
             value={form.street}
-            onChangeText={(street) => onChangeForm((prev) => ({ ...prev, street }))}
+            onChangeText={(street) => updateAddressField("street", street)}
             multiline={!czech}
           />
           <TextField
             label={t("common.field.city")}
             value={form.city}
-            onChangeText={(city) => onChangeForm((prev) => ({ ...prev, city }))}
+            onChangeText={(city) => updateAddressField("city", city)}
           />
           <TextField
             label={t("common.field.postalCode")}
             value={form.postalCode}
-            onChangeText={(postalCode) => onChangeForm((prev) => ({ ...prev, postalCode }))}
+            onChangeText={(postalCode) => updateAddressField("postalCode", postalCode)}
           />
         </Card>
       </Section>
@@ -855,8 +873,8 @@ export function ContactEditorView(props: ContactEditorViewProps) {
       <Section title={t("contacts.editor.invoicingEmails")}>
         <Card>
           {Arr.map(form.billingEmails, (email) => (
-            <View key={email} style={styles.emailRow}>
-              <Text variant="bodyMedium" style={styles.flex}>
+            <View key={email} className="flex-row items-center gap-2">
+              <Text variant="bodyMedium" className="flex-1">
                 {email}
               </Text>
               <IconButton
@@ -1002,7 +1020,7 @@ export function ContactEditorView(props: ContactEditorViewProps) {
         </Card>
       </Section>
 
-      <View style={styles.actionRow}>
+      <View className="mt-1 flex-row flex-wrap gap-2">
         <Button
           label={t("common.action.save")}
           busy={props.saving}
@@ -1664,14 +1682,3 @@ function WorkspaceContactDetail({
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  stack: { gap: space.lg },
-  stackSm: { gap: space.sm },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  actionRow: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, marginTop: space.xs },
-  listCard: { padding: space.xs, gap: 0 },
-  badges: { flexDirection: "row", flexWrap: "wrap", gap: space.xs },
-  emailRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-});

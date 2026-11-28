@@ -4,8 +4,8 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import {
-  argon2id,
   bytesToHex,
+  createArgon2id,
   hexToBytes,
   pbkdf2Sha256,
   sha256,
@@ -98,6 +98,33 @@ const ProofJson = Schema.fromJsonString(
   }),
 );
 
+const makeArgon2id = Effect.fnUntraced(function* (params: ParsedParameters) {
+  let wasm = yield* Effect.tryPromise({
+    try: () => import("./_altcha-wasm"),
+    catch: () => "WasmImportFailed" as const,
+  }).pipe(Effect.orElseSucceed(() => undefined));
+  let fallback: ReturnType<typeof createArgon2id> | undefined;
+  return (password: Uint8Array) =>
+    Effect.suspend(() => {
+      const module = wasm;
+      const deriveFallback = () =>
+        Effect.sync(() => {
+          fallback ??= createArgon2id(params);
+          return fallback(password, params.salt);
+        });
+      if (module === undefined) return deriveFallback();
+      return Effect.tryPromise({
+        try: () => module.deriveArgon2id({ password, salt: params.salt, params }),
+        catch: () => "WasmDerivationFailed" as const,
+      }).pipe(
+        Effect.catch(() => {
+          wasm = undefined;
+          return deriveFallback();
+        }),
+      );
+    });
+});
+
 /**
  * Solves an ALTCHA PoW v2 challenge on-device and returns the base64 `X-Altcha` header value.
  * Matches `altcha-lib` for ARGON2ID, PBKDF2/SHA-256, and SHA-256.
@@ -106,6 +133,8 @@ export const solveAltchaChallenge = Effect.fn("solveAltchaChallenge")(
   function* (challenge: AltchaChallenge) {
     const params = parseParameters(challenge);
     if ("reason" in params) return yield* params;
+    const deriveArgon2id =
+      params.algorithm === "ARGON2ID" ? yield* makeArgon2id(params) : undefined;
     const password = new Uint8Array(params.nonce.length + 4);
     password.set(params.nonce, 0);
     const passwordView = new DataView(password.buffer);
@@ -116,13 +145,8 @@ export const solveAltchaChallenge = Effect.fn("solveAltchaChallenge")(
     for (let counter = 0; counter < maxAttempts; counter++) {
       passwordView.setUint32(params.nonce.length, counter, false);
       const derived =
-        params.algorithm === "ARGON2ID"
-          ? argon2id(password, params.salt, {
-              memoryCost: params.memoryCost,
-              cost: params.cost,
-              parallelism: params.parallelism,
-              keyLength: params.keyLength,
-            })
+        deriveArgon2id !== undefined
+          ? yield* deriveArgon2id(password)
           : params.algorithm === "PBKDF2/SHA-256"
             ? yield* pbkdf2Sha256({
                 password,

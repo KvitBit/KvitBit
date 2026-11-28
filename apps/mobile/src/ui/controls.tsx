@@ -1,8 +1,8 @@
 import * as EffectArray from "effect/Array";
-import { Pressable, Switch as RNSwitch, StyleSheet, View } from "react-native";
+import { Pressable, Switch as RNSwitch, View } from "react-native";
 import { useTheme } from "../theme/theme-provider";
+import { chipVariants } from "./styles";
 import { Text } from "./text";
-import { space, touchTarget } from "./tokens";
 
 export interface Choice<T extends string> {
   readonly value: T;
@@ -16,16 +16,14 @@ export function SegmentedChoice<T extends string>(props: {
   readonly choices: ReadonlyArray<Choice<T>>;
   readonly onChange: (value: T) => void;
 }) {
-  const theme = useTheme();
-  const c = theme.colors;
   return (
-    <View style={styles.wrap}>
+    <View className="gap-1">
       {props.label === undefined ? null : (
         <Text variant="labelMedium" color="onSurfaceVariant">
           {props.label}
         </Text>
       )}
-      <View accessibilityRole="radiogroup" style={styles.chips}>
+      <View accessibilityRole="radiogroup" className="flex-row flex-wrap gap-2">
         {EffectArray.map(props.choices, (choice) => {
           const selected = choice.value === props.value;
           return (
@@ -34,14 +32,7 @@ export function SegmentedChoice<T extends string>(props: {
               accessibilityRole="radio"
               accessibilityState={{ selected }}
               onPress={() => props.onChange(choice.value)}
-              style={[
-                styles.chip,
-                {
-                  borderRadius: theme.shape.control,
-                  borderColor: selected ? c.secondaryContainer : c.outline,
-                  backgroundColor: selected ? c.secondaryContainer : undefined,
-                },
-              ]}
+              className={chipVariants({ selected })}
             >
               <Text
                 variant="labelLarge"
@@ -66,8 +57,8 @@ export function SwitchRow(props: {
 }) {
   const theme = useTheme();
   return (
-    <View style={styles.switchRow}>
-      <View style={styles.flex}>
+    <View className="min-h-14 flex-row items-center gap-3">
+      <View className="flex-1">
         <Text variant="row">{props.label}</Text>
         {props.description === undefined ? null : (
           <Text variant="meta" color="onSurfaceVariant">
@@ -86,16 +77,3 @@ export function SwitchRow(props: {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  wrap: { gap: space.xs },
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  chip: { minHeight: 40, paddingHorizontal: space.lg, justifyContent: "center", borderWidth: 1 },
-  switchRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.md,
-    minHeight: touchTarget + 8,
-  },
-});

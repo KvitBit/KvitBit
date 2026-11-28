@@ -249,15 +249,15 @@ describe("Expenses page TEA", () => {
   test("SSR renders expenses list, capture, and editor routes in cs and en", async () => {
     const csList = await renderPath(`/w/${WS}/expenses`, { locale: "cs" });
     expect(csList.title).toContain("Náklady");
-    expect(csList.html).toContain("kb-dropzone");
+    expect(csList.html).toContain('data-slot="dropzone"');
 
     const enList = await renderPath(`/w/${WS}/expenses`, { locale: "en" });
     expect(enList.title).toContain("Expenses");
 
     const capture = await renderPath(`/w/${WS}/expenses/capture`, { locale: "cs" });
-    expect(capture.html).toContain("kb-capture-stage");
+    expect(capture.html).toContain('data-slot="capture-stage"');
 
     const newExp = await renderPath(`/w/${WS}/expenses/new?mode=edit`, { locale: "en" });
-    expect(newExp.html).toContain("kb-expense-split");
+    expect(newExp.html).toContain('data-slot="expense-split"');
   });
 });

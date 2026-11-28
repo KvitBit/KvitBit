@@ -55,11 +55,13 @@ import {
   page,
   pageHeader,
   selectField,
+  separator,
   skeleton,
   table,
   tabs,
   textField,
 } from "../../ui/kit";
+import { buttonVariants, cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   canRole,
@@ -1359,6 +1361,7 @@ const renderActiveDialog = (
           id: "dlg-cancel",
           title: txt(locale, "dlgCancelTitle"),
           onClose: Message.ClosedDialog(),
+          alert: true,
           body: [
             ...err,
             textField(h, {
@@ -1446,6 +1449,7 @@ const renderActiveDialog = (
           id: "dlg-remove-pay",
           title: txt(locale, "dlgRemovePayTitle"),
           onClose: Message.ClosedDialog(),
+          alert: true,
           body: [
             ...err,
             textField(h, {
@@ -1548,7 +1552,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       pageHeader(h, { title: txt(locale, "title") }),
       card(h, [
         h.div
-          .class("kb-stack")
+          .class(ui.stack)
           .attr("aria-busy", String(true))
           .children([
             skeleton(h, "35%", "1.5rem"),
@@ -1636,7 +1640,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   if (doc.status === "issued") {
     actions.push(
       h.a
-        .class("kb-btn")
+        .class(buttonVariants({ variant: "secondary" }))
         .attr("href", pdfUrl)
         .attr("target", "_blank")
         .attr("rel", "noopener")
@@ -1708,223 +1712,255 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ],
   });
 
-  const previewTab = h.div.class("kb-detail-layout").children([
-    h.section.class("kb-invoice-sheet").children([
-      h.div
-        .class("kb-spread")
+  const vatTotalRowClass = cn("flex items-baseline justify-between gap-3 py-1.5", ui.num);
+  const auditListClass = "m-0 flex list-none flex-col p-0";
+  const auditItemClass =
+    "flex flex-col gap-1 border-b border-outline-variant py-2.5 last:border-b-0";
+
+  const previewTab = h.div
+    .class(
+      "grid grid-cols-1 items-start gap-4 min-[1025px]:grid-cols-[minmax(0,1.6fr)_minmax(280px,0.85fr)]",
+    )
+    .children([
+      h.section
+        .class(
+          "flex flex-col gap-4 rounded-panel border border-outline-variant bg-surface-container-lowest p-5",
+        )
         .children([
           h.div
-            .class("kb-row")
+            .class(ui.spread)
             .children([
-              kindBadge(h, locale, doc.kind),
-              mono(h, doc.number ?? txt(locale, "draftTitle")),
-            ]),
-          amount(h, fmtMoney(locale, doc.totals.gross)),
-        ]),
-      h.div
-        .class("kb-invoice-parties")
-        .children([
-          h.div
-            .class("kb-party-block")
-            .children([
-              h.span.class("kb-party-block__label").children([txt(locale, "issuerLabel")]),
-              h.strong.children([issuer?.name ?? ws.name]),
-              ...(issuer !== undefined
-                ? [
-                    h.span.class("kb-small").children([formatAddress(issuer.address)]),
-                    ...(issuer.ico !== null
-                      ? [h.span.class("kb-small kb-mono").children([`IČO ${issuer.ico}`])]
-                      : []),
-                    ...(issuer.dic !== null
-                      ? [h.span.class("kb-small kb-mono").children([`DIČ ${issuer.dic}`])]
-                      : []),
-                  ]
-                : []),
-            ]),
-          h.div
-            .class("kb-party-block")
-            .children([
-              h.span.class("kb-party-block__label").children([txt(locale, "customerLabel")]),
-              h.strong.children([contact?.name ?? "—"]),
-              ...(contact !== undefined
-                ? [
-                    h.span.class("kb-small").children([formatAddress(contact.address)]),
-                    ...(contact.ico !== null
-                      ? [h.span.class("kb-small kb-mono").children([`IČO ${contact.ico}`])]
-                      : []),
-                    ...(contact.dic !== null
-                      ? [h.span.class("kb-small kb-mono").children([`DIČ ${contact.dic}`])]
-                      : []),
-                  ]
-                : []),
-            ]),
-        ]),
-      dl(h, [
-        [
-          txt(locale, "issuedOn"),
-          h.span.class("kb-num").children([fmtDate(locale, doc.dates.issuedOn)]),
-        ],
-        ...(doc.dates.taxableSupplyOn !== null
-          ? [
-              [
-                txt(locale, "taxableSupplyOn"),
-                h.span.class("kb-num").children([fmtDate(locale, doc.dates.taxableSupplyOn)]),
-              ] as const,
-            ]
-          : []),
-        [txt(locale, "dueOn"), h.span.class("kb-num").children([fmtDate(locale, doc.dates.dueOn)])],
-        [
-          txt(locale, "paymentMethod"),
-          textOf(t, I18n.enumText({ name: "paymentMethod", value: doc.paymentMethod })),
-        ],
-        ...(issuer?.bankAccount !== null && issuer?.bankAccount !== undefined
-          ? [
-              [
-                txt(locale, "bankAccount"),
-                mono(h, issuer.bankAccount.iban ?? issuer.bankAccount.accountNumber ?? "—"),
-              ] as const,
-            ]
-          : []),
-      ]),
-      table(h, {
-        caption: txt(locale, "linesCaption"),
-        rows: lines,
-        rowKey: (l) => l.id,
-        columns: [
-          { header: txt(locale, "colDesc"), cell: (l) => l.description },
-          {
-            header: txt(locale, "colQty"),
-            align: "end",
-            numeric: true,
-            cell: (l) =>
-              `${fmtNum(locale, l.quantity)}${l.unit !== null && l.unit !== "" ? ` ${l.unit}` : ""}`,
-          },
-          {
-            header: txt(locale, "colPrice"),
-            align: "end",
-            numeric: true,
-            cell: (l) => fmtNum(locale, l.unitPrice, 2),
-          },
-          {
-            header: txt(locale, "colVat"),
-            align: "end",
-            numeric: true,
-            cell: (l) => fmtVatRate(locale, l.ratePercent),
-          },
-          {
-            header: txt(locale, "colTotal"),
-            align: "end",
-            numeric: true,
-            cell: (l) => fmtNum(locale, l.amount, 2),
-          },
-        ],
-      }),
-      h.div
-        .class("kb-stack")
-        .children([
-          h.div
-            .class("kb-vat-total-row")
-            .children([
-              h.span.class("kb-muted").children([txt(locale, "netTotal")]),
-              amount(h, fmtMoney(locale, doc.totals.net)),
-            ]),
-          h.div
-            .class("kb-vat-total-row")
-            .children([
-              h.span.class("kb-muted").children([txt(locale, "vatTotal")]),
-              amount(h, fmtMoney(locale, doc.totals.vat)),
-            ]),
-          h.div
-            .class("kb-vat-total-row kb-vat-total-row--grand")
-            .children([
-              h.span.children([txt(locale, "grandTotal")]),
+              h.div
+                .class(ui.row)
+                .children([
+                  kindBadge(h, locale, doc.kind),
+                  mono(h, doc.number ?? txt(locale, "draftTitle")),
+                ]),
               amount(h, fmtMoney(locale, doc.totals.gross)),
             ]),
-          ...(doc.totals.vatCzk !== null
+          h.div
+            .class(
+              "grid grid-cols-1 gap-4 border-y border-outline-variant py-3 min-[641px]:grid-cols-2",
+            )
+            .children([
+              h.div
+                .class("flex flex-col gap-1")
+                .children([
+                  h.span
+                    .class("text-[0.6875rem] uppercase tracking-[0.04em] text-on-surface-variant")
+                    .children([txt(locale, "issuerLabel")]),
+                  h.strong.children([issuer?.name ?? ws.name]),
+                  ...(issuer !== undefined
+                    ? [
+                        h.span.class(ui.small).children([formatAddress(issuer.address)]),
+                        ...(issuer.ico !== null
+                          ? [h.span.class(cn(ui.small, ui.mono)).children([`IČO ${issuer.ico}`])]
+                          : []),
+                        ...(issuer.dic !== null
+                          ? [h.span.class(cn(ui.small, ui.mono)).children([`DIČ ${issuer.dic}`])]
+                          : []),
+                      ]
+                    : []),
+                ]),
+              h.div
+                .class("flex flex-col gap-1")
+                .children([
+                  h.span
+                    .class("text-[0.6875rem] uppercase tracking-[0.04em] text-on-surface-variant")
+                    .children([txt(locale, "customerLabel")]),
+                  h.strong.children([contact?.name ?? "—"]),
+                  ...(contact !== undefined
+                    ? [
+                        h.span.class(ui.small).children([formatAddress(contact.address)]),
+                        ...(contact.ico !== null
+                          ? [h.span.class(cn(ui.small, ui.mono)).children([`IČO ${contact.ico}`])]
+                          : []),
+                        ...(contact.dic !== null
+                          ? [h.span.class(cn(ui.small, ui.mono)).children([`DIČ ${contact.dic}`])]
+                          : []),
+                      ]
+                    : []),
+                ]),
+            ]),
+          dl(h, [
+            [
+              txt(locale, "issuedOn"),
+              h.span.class(ui.num).children([fmtDate(locale, doc.dates.issuedOn)]),
+            ],
+            ...(doc.dates.taxableSupplyOn !== null
+              ? [
+                  [
+                    txt(locale, "taxableSupplyOn"),
+                    h.span.class(ui.num).children([fmtDate(locale, doc.dates.taxableSupplyOn)]),
+                  ] as const,
+                ]
+              : []),
+            [
+              txt(locale, "dueOn"),
+              h.span.class(ui.num).children([fmtDate(locale, doc.dates.dueOn)]),
+            ],
+            [
+              txt(locale, "paymentMethod"),
+              textOf(t, I18n.enumText({ name: "paymentMethod", value: doc.paymentMethod })),
+            ],
+            ...(issuer?.bankAccount !== null && issuer?.bankAccount !== undefined
+              ? [
+                  [
+                    txt(locale, "bankAccount"),
+                    mono(h, issuer.bankAccount.iban ?? issuer.bankAccount.accountNumber ?? "—"),
+                  ] as const,
+                ]
+              : []),
+          ]),
+          table(h, {
+            caption: txt(locale, "linesCaption"),
+            rows: lines,
+            rowKey: (l) => l.id,
+            columns: [
+              { header: txt(locale, "colDesc"), cell: (l) => l.description },
+              {
+                header: txt(locale, "colQty"),
+                align: "end",
+                numeric: true,
+                cell: (l) =>
+                  `${fmtNum(locale, l.quantity)}${l.unit !== null && l.unit !== "" ? ` ${l.unit}` : ""}`,
+              },
+              {
+                header: txt(locale, "colPrice"),
+                align: "end",
+                numeric: true,
+                cell: (l) => fmtNum(locale, l.unitPrice, 2),
+              },
+              {
+                header: txt(locale, "colVat"),
+                align: "end",
+                numeric: true,
+                cell: (l) => fmtVatRate(locale, l.ratePercent),
+              },
+              {
+                header: txt(locale, "colTotal"),
+                align: "end",
+                numeric: true,
+                cell: (l) => fmtNum(locale, l.amount, 2),
+              },
+            ],
+          }),
+          h.div
+            .class(ui.stack)
+            .children([
+              h.div
+                .class(vatTotalRowClass)
+                .children([
+                  h.span.class(ui.muted).children([txt(locale, "netTotal")]),
+                  amount(h, fmtMoney(locale, doc.totals.net)),
+                ]),
+              h.div
+                .class(vatTotalRowClass)
+                .children([
+                  h.span.class(ui.muted).children([txt(locale, "vatTotal")]),
+                  amount(h, fmtMoney(locale, doc.totals.vat)),
+                ]),
+              h.div
+                .class(
+                  cn(
+                    vatTotalRowClass,
+                    "mt-1 border-t border-outline-variant pt-2.5 font-display text-[1.125rem] font-[var(--kb-font-display-weight)]",
+                  ),
+                )
+                .children([
+                  h.span.children([txt(locale, "grandTotal")]),
+                  amount(h, fmtMoney(locale, doc.totals.gross)),
+                ]),
+              ...(doc.totals.vatCzk !== null
+                ? [
+                    h.div
+                      .class(cn(vatTotalRowClass, ui.small, ui.muted))
+                      .children([
+                        h.span.children([txt(locale, "vatCzkTotal")]),
+                        amount(h, fmtMoney(locale, doc.totals.vatCzk)),
+                      ]),
+                  ]
+                : []),
+            ]),
+          ...(doc.statutoryNotes.length > 0
             ? [
+                separator(h),
                 h.div
-                  .class("kb-vat-total-row kb-small kb-muted")
+                  .class(ui.stack)
                   .children([
-                    h.span.children([txt(locale, "vatCzkTotal")]),
-                    amount(h, fmtMoney(locale, doc.totals.vatCzk)),
+                    h.span.class(cn(ui.small, ui.muted)).children([txt(locale, "statutoryNotes")]),
+                    ...Arr.map(doc.statutoryNotes, (n) => h.p.class(ui.small).children([n.text])),
                   ]),
               ]
             : []),
         ]),
-      ...(doc.statutoryNotes.length > 0
-        ? [
-            h.hr.class("kb-divider"),
-            h.div
-              .class("kb-stack")
-              .children([
-                h.span.class("kb-small kb-muted").children([txt(locale, "statutoryNotes")]),
-                ...Arr.map(doc.statutoryNotes, (n) => h.p.class("kb-small").children([n.text])),
+      h.div.class(ui.stack).children([
+        ...(doc.related.length > 0
+          ? [
+              card(h, [
+                cardTitle(h, txt(locale, "relatedDocs")),
+                h.div.class("flex flex-col gap-2").children(
+                  Arr.map(doc.related, (rel) =>
+                    h.a
+                      .class(
+                        "flex items-center justify-between gap-2 rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2 no-underline hover:border-outline",
+                      )
+                      .attr(
+                        "href",
+                        href({ _tag: "Document", ws: slug, id: rel.id, tab: "preview" }),
+                      )
+                      .children([
+                        h.div
+                          .class(ui.stack)
+                          .children([
+                            h.span
+                              .class(cn(ui.small, ui.muted))
+                              .children([
+                                textOf(
+                                  t,
+                                  I18n.enumText({ name: "documentRelation", value: rel.relation }),
+                                ),
+                              ]),
+                            mono(h, rel.number),
+                          ]),
+                        kindBadge(h, locale, rel.kind),
+                      ]),
+                  ),
+                ),
               ]),
-          ]
-        : []),
-    ]),
-    h.div.class("kb-stack").children([
-      ...(doc.related.length > 0
-        ? [
-            card(h, [
-              cardTitle(h, txt(locale, "relatedDocs")),
-              h.div.class("kb-related-list").children(
-                Arr.map(doc.related, (rel) =>
-                  h.a
-                    .class("kb-related-link")
-                    .attr("href", href({ _tag: "Document", ws: slug, id: rel.id, tab: "preview" }))
+            ]
+          : []),
+        card(h, [
+          cardTitle(h, txt(locale, "deliveriesTitle")),
+          doc.deliveries.length === 0
+            ? h.p.class(cn(ui.small, ui.muted)).children([txt(locale, "noDeliveries")])
+            : h.ul.class(auditListClass).children(
+                Arr.map(doc.deliveries, (del) =>
+                  h.li
+                    .key(del.id)
+                    .class(auditItemClass)
                     .children([
                       h.div
-                        .class("kb-stack")
+                        .class(ui.spread)
                         .children([
-                          h.span
-                            .class("kb-small kb-muted")
-                            .children([
-                              textOf(
-                                t,
-                                I18n.enumText({ name: "documentRelation", value: rel.relation }),
-                              ),
-                            ]),
-                          mono(h, rel.number),
+                          h.span.class(ui.small).children([Arr.join(del.to, ", ")]),
+                          badge(
+                            h,
+                            textOf(t, I18n.enumText({ name: "deliveryStatus", value: del.status })),
+                            del.status === "sent"
+                              ? "paid"
+                              : del.status === "failed"
+                                ? "error"
+                                : "neutral",
+                          ),
                         ]),
-                      kindBadge(h, locale, rel.kind),
+                      h.span.class(cn(ui.footnote, ui.num)).children([fmtDateTime(locale, del.at)]),
                     ]),
                 ),
               ),
-            ]),
-          ]
-        : []),
-      card(h, [
-        cardTitle(h, txt(locale, "deliveriesTitle")),
-        doc.deliveries.length === 0
-          ? h.p.class("kb-small kb-muted").children([txt(locale, "noDeliveries")])
-          : h.ul.class("kb-audit-list").children(
-              Arr.map(doc.deliveries, (del) =>
-                h.li
-                  .key(del.id)
-                  .class("kb-audit-item")
-                  .children([
-                    h.div
-                      .class("kb-spread")
-                      .children([
-                        h.span.class("kb-small").children([Arr.join(del.to, ", ")]),
-                        badge(
-                          h,
-                          textOf(t, I18n.enumText({ name: "deliveryStatus", value: del.status })),
-                          del.status === "sent"
-                            ? "paid"
-                            : del.status === "failed"
-                              ? "error"
-                              : "neutral",
-                        ),
-                      ]),
-                    h.span.class("kb-footnote kb-num").children([fmtDateTime(locale, del.at)]),
-                  ]),
-              ),
-            ),
+        ]),
       ]),
-    ]),
-  ]);
+    ]);
 
   const paymentsTab = card(h, [
     cardTitle(h, txt(locale, "tabPayments"), [
@@ -2008,50 +2044,54 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 })
               : undefined,
           })
-        : h.div.class("kb-stack").children([
-            h.div.class("kb-share-url").children([
-              h.span
-                .class("kb-mono")
-                .attr("data-feedback-private", "")
-                .style({ flex: "1" })
-                .children([doc.share.url]),
-              button(h, {
-                label: txt(locale, "shareCopy"),
-                onClick: Message.ClickedCopyShare({ url: doc.share.url }),
-                small: true,
-              }),
-              ...(canWriteShare
-                ? [
-                    button(h, {
-                      label: txt(locale, "shareRevoke"),
-                      onClick: Message.ClickedRevokeShare(),
-                      variant: "danger",
-                      small: true,
-                      busy: model.busy,
-                    }),
-                  ]
-                : []),
-            ]),
+        : h.div.class(ui.stack).children([
+            h.div
+              .attr("data-slot", "share-url")
+              .class(
+                "flex items-center gap-2 overflow-x-auto rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2",
+              )
+              .children([
+                h.span
+                  .class(cn(ui.mono, "flex-1"))
+                  .attr("data-feedback-private", "")
+                  .children([doc.share.url]),
+                button(h, {
+                  label: txt(locale, "shareCopy"),
+                  onClick: Message.ClickedCopyShare({ url: doc.share.url }),
+                  small: true,
+                }),
+                ...(canWriteShare
+                  ? [
+                      button(h, {
+                        label: txt(locale, "shareRevoke"),
+                        onClick: Message.ClickedRevokeShare(),
+                        variant: "danger",
+                        small: true,
+                        busy: model.busy,
+                      }),
+                    ]
+                  : []),
+              ]),
             h.span
-              .class("kb-small kb-muted kb-num")
+              .class(cn(ui.small, ui.muted, ui.num))
               .children([txt(locale, "shareStats", { views: doc.share.views })]),
             h.h3.children([txt(locale, "shareEventsTitle")]),
             shareViews.length === 0
-              ? h.p.class("kb-small kb-muted").children([txt(locale, "shareEventsEmpty")])
-              : h.ul.class("kb-audit-list").children(
+              ? h.p.class(cn(ui.small, ui.muted)).children([txt(locale, "shareEventsEmpty")])
+              : h.ul.class(auditListClass).children(
                   Arr.map(shareViews, (ev) =>
                     h.li
                       .key(ev.id)
-                      .class("kb-audit-item")
+                      .class(auditItemClass)
                       .children([
                         h.div
-                          .class("kb-spread")
+                          .class(ui.spread)
                           .children([
                             h.span.children([
                               `${textOf(t, I18n.enumText({ name: "shareEvent", value: ev.kind }))} · ${textOf(t, I18n.enumText({ name: "device", value: ev.device }))}`,
                             ]),
                             h.span
-                              .class("kb-small kb-muted kb-num")
+                              .class(cn(ui.small, ui.muted, ui.num))
                               .children([fmtDateTime(locale, ev.at)]),
                           ]),
                       ]),
@@ -2064,22 +2104,22 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     cardTitle(h, txt(locale, "tabHistory")),
     history.length === 0
       ? emptyState(h, { title: txt(locale, "historyEmpty") })
-      : h.ul.class("kb-audit-list").children(
+      : h.ul.class(auditListClass).children(
           Arr.map(history, (entry) =>
             h.li
               .key(entry.id)
-              .class("kb-audit-item")
+              .class(auditItemClass)
               .children([
                 h.div
-                  .class("kb-spread")
+                  .class(ui.spread)
                   .children([
-                    h.span.class("kb-mono").children([entry.action]),
+                    h.span.class(ui.mono).children([entry.action]),
                     h.span
-                      .class("kb-small kb-muted kb-num")
+                      .class(cn(ui.small, ui.muted, ui.num))
                       .children([fmtDateTime(locale, entry.at)]),
                   ]),
                 ...(entry.reason !== null
-                  ? [h.span.class("kb-small kb-muted").children([entry.reason])]
+                  ? [h.span.class(cn(ui.small, ui.muted)).children([entry.reason])]
                   : []),
               ]),
           ),
@@ -2098,7 +2138,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   return page(h, [
     pageHeader(h, {
       eyebrow: h.div
-        .class("kb-row")
+        .class(ui.row)
         .children([kindBadge(h, locale, doc.kind), ...documentBadges(h, locale, doc)]),
       title: doc.number ?? txt(locale, "draftTitle"),
       subtitle: contact?.name,

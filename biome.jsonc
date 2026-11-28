@@ -6,6 +6,7 @@
     "useIgnoreFile": true,
     "defaultBranch": "main"
   },
+  "css": { "parser": { "tailwindDirectives": true } },
   "files": {
     "ignoreUnknown": true,
     "includes": ["**", "!**/drizzle/meta", "!assets", "!**/*.md"]
@@ -63,7 +64,9 @@
         "**",
         "!**/generated/**",
         // Bun's bootstrap JSONC parser supplies an untyped value.
-        "!scripts/bun-lock-boundary.ts"
+        "!scripts/bun-lock-boundary.ts",
+        // The logger must redact arbitrary data and defects before any serialization.
+        "!apps/server/src/logging/redact.ts"
       ]
     },
     {
@@ -123,6 +126,9 @@
         "!packages/adapters/src/auth/better-auth.ts",
         // The public API key verifier accepts a Promise lookup and returns a Promise.
         "!packages/adapters/src/auth/api-key.ts",
+        // Native PostHog and SMTP callbacks use the program's captured Effect context.
+        "!apps/server/src/runtime/analytics.ts",
+        "!infra/alchemy/src/mail-forwarder/smtp.ts",
         "!apps/web/src/entry.ts",
         "!apps/mobile/src/runtime/request-intent.ts"
       ]
@@ -136,6 +142,9 @@
         "src/**",
         "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
         "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        // Deployment validation needs exact raw keys, including empty and unknown opt-outs.
+        "!apps/server/src/{main,worker}.ts",
+        "!infra/alchemy/src/{config,preflight-cli}.ts",
         "!apps/mobile/src/config/env.ts"
       ]
     },
@@ -332,6 +341,11 @@
         }
       }
     },
+    // Metro loads the configuration in its Node host.
+    {
+      "includes": ["apps/mobile/metro.config.cjs"],
+      "linter": { "rules": { "correctness": { "noNodejsModules": "off" } } }
+    },
     // Bun uses Node crypto as an independent KDF oracle for the mobile implementation.
     {
       "includes": ["apps/mobile/src/platform/altcha/bot-proof.test.ts"],
@@ -356,10 +370,23 @@
       ],
       "linter": { "rules": { "correctness": { "noUnresolvedImports": "off" } } }
     },
-    // Reduced-motion durations must override component transitions and animations.
+    // HtmlScene exposes its own assertions for hydration input events.
     {
-      "includes": ["apps/web/src/styles/base.css"],
-      "linter": { "rules": { "complexity": { "noImportantStyles": "off" } } }
+      "includes": [
+        "apps/web/test/public/consent-invite-onboarding.test.ts",
+        "apps/web/test/records/contacts.test.ts"
+      ],
+      "linter": { "rules": { "suspicious": { "useExpect": "off" } } }
+    },
+    // Reduced motion overrides transitions. The fixed background has a scroll fallback.
+    {
+      "includes": ["apps/web/src/styles/index.css"],
+      "linter": {
+        "rules": {
+          "complexity": { "noImportantStyles": "off" },
+          "suspicious": { "useBaseline": "off" }
+        }
+      }
     },
     {
       "includes": ["apps/mobile/src/config/env.ts"],

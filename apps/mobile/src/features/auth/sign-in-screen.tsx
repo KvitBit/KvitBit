@@ -5,11 +5,11 @@ import * as Str from "effect/String";
 import { router } from "expo-router";
 import { KeyRound, Mail } from "lucide-react-native";
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { safeReturnTo } from "../../navigation/return-to";
 import { navigate } from "../../navigation/routes";
-import { Banner, Button, Card, Screen, SegmentedChoice, space, Text, TextField } from "../../ui";
+import { Banner, Button, Card, Screen, SegmentedChoice, Text, TextField } from "../../ui";
 import { runFeatureEffect } from "../ui-effect";
 import { checkEmailHref } from "./auth-links";
 import type { AuthClient } from "./auth-port";
@@ -170,8 +170,8 @@ export function SignInScreen(props: {
             if (next === "magic_link") magicBot.start();
           }}
           choices={[
-            { value: "password", label: t("auth.signIn.withPassword") },
-            { value: "magic_link", label: t("auth.signIn.withMagicLink") },
+            { value: "password", label: t("auth.signIn.methodPassword") },
+            { value: "magic_link", label: t("auth.signIn.methodMagicLink") },
           ]}
         />
 
@@ -224,7 +224,7 @@ export function SignInScreen(props: {
         ) : null}
       </Card>
 
-      <View style={styles.dividerRow}>
+      <View className="items-center">
         <Text variant="bodySmall" color="onSurfaceVariant">
           {t("auth.signIn.or")}
         </Text>
@@ -241,7 +241,7 @@ export function SignInScreen(props: {
         testID="sign-in-passkey"
       />
 
-      <View style={styles.footerRow}>
+      <View className="flex-row items-center justify-center gap-1">
         <Text variant="bodyMedium" color="onSurfaceVariant">
           {t("auth.signIn.noAccount")}
         </Text>
@@ -255,13 +255,3 @@ export function SignInScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  dividerRow: { alignItems: "center" },
-  footerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: space.xs,
-  },
-});

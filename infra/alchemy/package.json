@@ -4,8 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:selfhost": "bun test test/selfhost.test.ts",
+    "test:stack": "bun test test/stack.test.ts",
+    "test:mail": "bun test test/mail-forwarder.test.ts",
+    "test:infra": "bun test test/bootstrap-stage.test.ts test/monitoring-provider.test.ts test/turbo-cache.test.ts",
     "plan": "bunx alchemy plan",
     "deploy": "bunx alchemy deploy",
     "destroy": "bunx alchemy destroy"

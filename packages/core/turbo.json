@@ -1,0 +1,115 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": [
+        "test:policy",
+        "test:engines",
+        "test:advance-chain",
+        "test:fk",
+        "test:modules",
+        "test:compose",
+        "test:unit"
+      ],
+      "cache": false
+    },
+    "test:policy": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/contract.ts",
+        "src/internal/**",
+        "src/policy/**",
+        "test/policy/**",
+        "test/policy.test.ts",
+        "test/helpers/**"
+      ],
+      "env": ["TZ", "KVITBIT_FORMAL_WIDE"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:engines": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/engines/**",
+        "test/engines/**",
+        "!test/engines/advance-chain.property.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:advance-chain": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/engines/advance-chain.property.test.ts",
+        "test/engines/random.ts",
+        "test/modules/documents/fixtures.ts",
+        "test/helpers/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:fk": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/numberReservationFk.pglite.test.ts",
+        "test/modules/documents/fixtures.ts",
+        "test/helpers/**",
+        "$TURBO_ROOT$/packages/db/drizzle/20261123175822_init/migration.sql"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:modules": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/**", "test/modules/**", "test/helpers/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:compose": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/compose/**",
+        "test/e2e/**",
+        "test/modules/**",
+        "test/helpers/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:unit": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/*.test.ts",
+        "!test/numberReservationFk.pglite.test.ts",
+        "!test/policy.test.ts",
+        "test/helpers/**",
+        "test/modules/**/fixtures.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

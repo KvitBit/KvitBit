@@ -17,7 +17,7 @@ import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
 import { tryPlatform } from "../platform-effect";
-import { argon2id, bytesToHex, hexToBytes, pbkdf2Sha256, sha256, utf8ToBase64 } from "./kdf";
+import { bytesToHex, createArgon2id, hexToBytes, pbkdf2Sha256, sha256, utf8ToBase64 } from "./kdf";
 
 export type BotProofState =
   | { readonly _tag: "NotRequired" }
@@ -243,12 +243,17 @@ const solve = Effect.fn("BotProof.solve")(function* (
   const chunkSize = parsed.algorithm === "ARGON2ID" ? 1 : 8;
   const startedAt = yield* Clock.currentTimeMillis;
   const maxCounter = 0xffffffff;
+  let deriveArgon2id: ReturnType<typeof createArgon2id> | undefined;
+  const deriveWithWorkspace = () => {
+    deriveArgon2id ??= createArgon2id(parsed);
+    return deriveArgon2id(password, parsed.salt);
+  };
 
   for (let counter = 0; counter <= maxCounter; counter++) {
     if (aborted()) return { _tag: "Aborted" };
     passwordView.setUint32(parsed.nonce.length, counter, false);
 
-    const derived = yield* derive(password, parsed).pipe(Effect.option);
+    const derived = yield* derive(password, parsed, deriveWithWorkspace).pipe(Effect.option);
     if (Option.isNone(derived)) return { _tag: "Err", error: UiError.unexpected() };
     const derivedHex = bytesToHex(derived.value);
     if (EffectString.startsWith(parsed.keyPrefix)(derivedHex)) {
@@ -275,6 +280,7 @@ const solve = Effect.fn("BotProof.solve")(function* (
 const derive = Effect.fn("BotProof.derive")(function* (
   password: Uint8Array<ArrayBuffer>,
   params: ParsedParameters,
+  argon2: () => Uint8Array,
 ) {
   if (params.algorithm === "PBKDF2/SHA-256") {
     return yield* fromMobilePromise(() =>
@@ -283,7 +289,7 @@ const derive = Effect.fn("BotProof.derive")(function* (
   }
   return yield* tryPlatform(() =>
     params.algorithm === "ARGON2ID"
-      ? argon2id(password, params.salt, params)
+      ? argon2()
       : deriveSha256(params.salt, password, params.cost, params.keyLength),
   );
 });

@@ -7,8 +7,10 @@
     ".": "./src/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":"
   },
   "dependencies": {
     "effect": "4.1.4"

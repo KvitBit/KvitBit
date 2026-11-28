@@ -39,6 +39,7 @@ import {
   pageHeader,
   skeleton,
 } from "../../ui/kit";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   canRole,
@@ -302,7 +303,7 @@ const renderCashflowSvg = (
   points: DashboardView["cashflow"],
 ): Markup<Message> => {
   if (points.length === 0) {
-    return h.p.class("kb-muted kb-small").children([txt(locale, "cashflowEmpty")]);
+    return h.p.class(cn(ui.muted, ui.small)).children([txt(locale, "cashflowEmpty")]);
   }
   const groups = Arr.map(points, (point) => ({
     label: Str.slice(5)(point.month),
@@ -313,18 +314,22 @@ const renderCashflowSvg = (
   }));
 
   return h.div
-    .class("kb-stack")
+    .class(ui.stack)
     .children([
       barChart(h, txt(locale, "cashflowAria"), groups),
       h.div
-        .class("kb-chart-legend")
+        .class("flex items-center gap-4 text-[0.75rem] text-on-surface-variant")
         .children([
           h.span.children([
-            h.span.class("kb-chart-dot kb-chart-dot--in").children([]),
+            h.span
+              .class("mr-1.5 inline-block h-2.5 w-2.5 rounded-badge bg-primary align-middle")
+              .children([]),
             txt(locale, "cashflowIn"),
           ]),
           h.span.children([
-            h.span.class("kb-chart-dot kb-chart-dot--out").children([]),
+            h.span
+              .class("mr-1.5 inline-block h-2.5 w-2.5 rounded-badge bg-outline align-middle")
+              .children([]),
             txt(locale, "cashflowOut"),
           ]),
         ]),
@@ -358,10 +363,11 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ]
       : [];
 
+  const dashKpisClass = "grid grid-cols-1 gap-3 min-[641px]:grid-cols-2 min-[1025px]:grid-cols-4";
   const kpiRow =
     dashData === undefined
       ? h.div
-          .class("kb-dash-kpis")
+          .class(dashKpisClass)
           .attr("aria-busy", String(true))
           .children([
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
@@ -369,7 +375,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
             card(h, [skeleton(h, "50%", "0.75rem"), skeleton(h, "75%", "1.5rem")]),
           ])
-      : h.div.class("kb-dash-kpis").children([
+      : h.div.class(dashKpisClass).children([
           kpi(h, {
             label: txt(locale, "kpiRevenue"),
             value: fmtMoney(locale, dashData.revenue),
@@ -425,7 +431,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               small: true,
             }),
           ]),
-          h.ul.class("kb-checklist").children(
+          h.ul.class("m-0 flex list-none flex-col p-0").children(
             Arr.map(
               [
                 {
@@ -463,19 +469,29 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ],
               (item) =>
                 h.li
-                  .class("kb-checklist__row")
+                  .class(
+                    "flex items-center gap-3 border-b border-outline-variant py-2.5 last:border-b-0 last:pb-0",
+                  )
                   .children([
                     h.span
-                      .class(`kb-checklist__mark${item.done ? " kb-checklist__mark--done" : ""}`)
+                      .class(
+                        cn(
+                          "inline-flex h-5 w-5 flex-none items-center justify-center rounded-badge border",
+                          item.done
+                            ? "border-transparent bg-paid-container text-on-paid-container"
+                            : "border-outline text-on-surface-variant",
+                        ),
+                      )
                       .children(item.done ? [icon(h, "check", 14)] : []),
                     h.div
-                      .class("kb-checklist__text")
+                      .class("flex min-w-0 flex-1 flex-col gap-0.5")
                       .children([
                         h.strong.children([item.title]),
-                        h.span.class("kb-small kb-muted").children([item.sub]),
+                        h.span.class(cn(ui.small, ui.muted)).children([item.sub]),
                       ]),
                     h.span
-                      .class("kb-checklist__cta")
+                      .class("ml-auto flex-none")
+                      .attr("data-slot", "checklist-cta")
                       .children([linkButton(h, { label: item.cta, href: item.to, small: true })]),
                   ]),
             ),
@@ -494,7 +510,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ]),
     recentData === undefined
       ? h.div
-          .class("kb-stack")
+          .class(ui.stack)
           .attr("aria-busy", String(true))
           .children([
             skeleton(h, "100%", "2rem"),
@@ -503,33 +519,35 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           ])
       : queueItems.length === 0
         ? emptyState(h, { title: txt(locale, "queueEmpty") })
-        : h.ul.class("kb-queue-list").children(
+        : h.ul.class("m-0 flex list-none flex-col p-0").children(
             Arr.map(queueItems.slice(0, 5), (doc) =>
               h.li
                 .key(doc.id)
-                .class("kb-queue-item")
+                .class(
+                  "flex items-center justify-between gap-3 border-b border-outline-variant py-2.5 last:border-b-0 last:pb-0",
+                )
                 .children([
-                  h.div.class("kb-queue-item__meta").children([
+                  h.div.class("flex min-w-0 flex-col gap-0.5").children([
                     h.a
-                      .class("kb-queue-item__link")
+                      .class("font-medium no-underline hover:underline")
                       .attr(
                         "href",
                         href({ _tag: "Document", ws: slug, id: doc.id, tab: "preview" }),
                       )
                       .children([doc.contact.name]),
                     h.div
-                      .class("kb-row")
+                      .class(ui.row)
                       .children([
                         mono(h, doc.number ?? txt(locale, "draftLabel")),
                         h.span
-                          .class("kb-small kb-muted kb-num")
+                          .class(cn(ui.small, ui.muted, ui.num))
                           .children([
                             txt(locale, "dueLabel", { date: fmtDate(locale, doc.dueOn) }),
                           ]),
                       ]),
                   ]),
                   h.div
-                    .class("kb-row")
+                    .class(ui.row)
                     .children([
                       ...documentBadges(h, locale, doc),
                       amount(h, fmtMoney(locale, doc.total)),
@@ -550,7 +568,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ]),
     recentData === undefined
       ? h.div
-          .class("kb-stack")
+          .class(ui.stack)
           .attr("aria-busy", String(true))
           .children([
             skeleton(h, "100%", "2rem"),
@@ -568,15 +586,17 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 })
               : undefined,
           })
-        : h.ul.class("kb-queue-list").children(
+        : h.ul.class("m-0 flex list-none flex-col p-0").children(
             Arr.map(recentData.slice(0, 6), (doc) =>
               h.li
                 .key(doc.id)
-                .class("kb-queue-item")
+                .class(
+                  "flex items-center justify-between gap-3 border-b border-outline-variant py-2.5 last:border-b-0 last:pb-0",
+                )
                 .children([
-                  h.div.class("kb-queue-item__meta").children([
+                  h.div.class("flex min-w-0 flex-col gap-0.5").children([
                     h.a
-                      .class("kb-queue-item__link")
+                      .class("font-medium no-underline hover:underline")
                       .attr(
                         "href",
                         href({ _tag: "Document", ws: slug, id: doc.id, tab: "preview" }),
@@ -587,16 +607,16 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           : `${txt(locale, "draftLabel")} · ${doc.contact.name}`,
                       ]),
                     h.div
-                      .class("kb-row")
+                      .class(ui.row)
                       .children([
                         kindBadge(h, locale, doc.kind),
                         h.span
-                          .class("kb-small kb-muted kb-num")
+                          .class(cn(ui.small, ui.muted, ui.num))
                           .children([fmtDate(locale, doc.issuedOn)]),
                       ]),
                   ]),
                   h.div
-                    .class("kb-row")
+                    .class(ui.row)
                     .children([
                       ...documentBadges(h, locale, doc),
                       amount(h, fmtMoney(locale, doc.total)),
@@ -627,10 +647,12 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ...errorBanner,
     kpiRow,
     h.div
-      .class("kb-dash-main")
+      .class(
+        "grid grid-cols-1 items-start gap-4 min-[1025px]:grid-cols-[minmax(0,1.45fr)_minmax(300px,1fr)]",
+      )
       .children([
         h.div
-          .class("kb-stack")
+          .class(ui.stack)
           .children([
             card(h, [
               cardTitle(h, txt(locale, "cashflowTitle")),
@@ -640,7 +662,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ]),
             recentCard,
           ]),
-        h.div.class("kb-stack").children([queueCard, ...checklistCard]),
+        h.div.class(ui.stack).children([queueCard, ...checklistCard]),
       ]),
   ]);
 };

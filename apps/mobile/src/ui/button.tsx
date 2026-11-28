@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
-import { ActivityIndicator, Pressable, StyleSheet, View } from "react-native";
+import { ActivityIndicator, Pressable, View } from "react-native";
 import { useTheme } from "../theme/theme-provider";
 import { Icon, type IconComponent } from "./icon";
+import { buttonVariants, cn } from "./styles";
 import { Text } from "./text";
-import { touchTarget } from "./tokens";
 
 export type ButtonKind = "filled" | "tonal" | "outlined" | "text" | "danger";
 
@@ -17,7 +17,16 @@ export interface ButtonProps {
   readonly busy?: boolean;
   readonly accessibilityHint?: string;
   readonly testID?: string;
+  readonly className?: string;
 }
+
+const fgByKind = {
+  filled: "onPrimary",
+  tonal: "onSecondaryContainer",
+  outlined: "primary",
+  text: "primary",
+  danger: "onError",
+} as const;
 
 export function Button({
   label,
@@ -26,18 +35,11 @@ export function Button({
   icon,
   disabled,
   busy,
+  className,
   ...a11y
 }: ButtonProps) {
   const theme = useTheme();
-  const c = theme.colors;
-  const palette = {
-    filled: { bg: c.primary, fg: "onPrimary", border: undefined },
-    tonal: { bg: c.secondaryContainer, fg: "onSecondaryContainer", border: undefined },
-    outlined: { bg: "transparent", fg: "primary", border: c.outline },
-    text: { bg: "transparent", fg: "primary", border: undefined },
-    danger: { bg: c.error, fg: "onError", border: undefined },
-  } as const;
-  const p = palette[kind];
+  const fg = fgByKind[kind];
   const inactive = disabled === true || busy === true;
   return (
     <Pressable
@@ -47,24 +49,15 @@ export function Button({
       testID={a11y.testID}
       disabled={inactive}
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.base,
-        {
-          backgroundColor: p.bg,
-          borderRadius: theme.roundness,
-          borderWidth: p.border === undefined ? 0 : 1,
-          borderColor: p.border,
-          opacity: disabled === true ? 0.38 : pressed ? 0.85 : 1,
-        },
-      ]}
+      className={cn(buttonVariants({ kind, disabled: disabled === true }), className)}
     >
-      <View style={styles.row}>
+      <View className="flex-row items-center justify-center gap-2">
         {busy === true ? (
-          <ActivityIndicator size="small" color={c[p.fg]} />
+          <ActivityIndicator size="small" color={theme.colors[fg]} />
         ) : icon === undefined ? null : (
-          <Icon icon={icon} size={18} color={p.fg} />
+          <Icon icon={icon} size={18} color={fg} />
         )}
-        <Text variant="labelLarge" color={p.fg}>
+        <Text variant="labelLarge" color={fg}>
           {label}
         </Text>
       </View>
@@ -78,6 +71,7 @@ export function IconButton(props: {
   readonly onPress: () => void;
   readonly disabled?: boolean;
   readonly children?: ReactNode;
+  readonly className?: string;
 }) {
   return (
     <Pressable
@@ -86,18 +80,13 @@ export function IconButton(props: {
       disabled={props.disabled}
       onPress={props.onPress}
       hitSlop={4}
-      style={({ pressed }) => [
-        styles.icon,
-        { opacity: props.disabled === true ? 0.38 : pressed ? 0.6 : 1 },
-      ]}
+      className={cn(
+        "h-12 w-12 items-center justify-center active:opacity-60",
+        props.disabled === true && "opacity-40",
+        props.className,
+      )}
     >
       <Icon icon={props.icon} />
     </Pressable>
   );
 }
-
-const styles = StyleSheet.create({
-  base: { minHeight: touchTarget, paddingHorizontal: 20, justifyContent: "center" },
-  row: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
-  icon: { width: touchTarget, height: touchTarget, alignItems: "center", justifyContent: "center" },
-});

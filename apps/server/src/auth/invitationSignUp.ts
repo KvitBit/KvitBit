@@ -6,7 +6,7 @@ import {
   type BeforeHook,
 } from "@kvitbit/adapters/auth";
 import { Caller, InvitationToken, type Workspaces } from "@kvitbit/domain/contract";
-import { betterAuth } from "better-auth";
+import { type BetterAuthOptions, betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import * as Clock from "effect/Clock";
@@ -16,14 +16,12 @@ import * as Rec from "effect/Record";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { acceptLanguageLocale } from "../http/edge/request";
+import type { SignUpMethod } from "../runtime/analytics";
 import { fromAuthPromise, runAuthEffect, withDrizzleSqlContext } from "./drizzleBridge";
 
-const SIGN_UP_PATH = "/sign-up/email";
+export const SIGN_UP_PATH = "/sign-up/email";
 
 // Better Auth can log Drizzle errors with raw SQL parameters before returning a response.
-const logInvitationSignUpError = () =>
-  Effect.runSync(Effect.logError("Invitation signup request failed"));
-
 const InvitationBody = Schema.Record(Schema.String, Schema.Unknown);
 const parseInvitationBody = Schema.decodeUnknownOption(InvitationBody);
 const isString = Schema.is(Schema.String);
@@ -122,6 +120,10 @@ export const makeAuthWithInvitationSignUp = Effect.fn("auth.invitationSetup")(fu
   config: AuthConfig,
   workspaces: Workspaces["Service"],
   clock: Clock.Clock,
+  observer: {
+    readonly databaseHooks: NonNullable<BetterAuthOptions["databaseHooks"]>;
+    readonly capture: (request: Request, method: SignUpMethod) => Effect.Effect<void>;
+  },
 ) {
   // The normal OAuth provider initializes its resource rows before the invitation-only instance.
   yield* withDrizzleSqlContext(() => auth.$context);
@@ -147,11 +149,12 @@ export const makeAuthWithInvitationSignUp = Effect.fn("auth.invitationSetup")(fu
     database: drizzleAdapter(config.db, { provider: "pg", schema: authTables, transaction: true }),
     emailAndPassword: { ...options.emailAndPassword, requireEmailVerification: false },
     emailVerification: { ...options.emailVerification, sendOnSignUp: false },
-    logger: { level: "error", log: logInvitationSignUpError },
+    logger: { disabled: true },
     onAPIError: { throw: true },
     databaseHooks: {
       user: {
         create: {
+          ...observer.databaseHooks.user?.create,
           before: (user, ctx) =>
             runAuthEffect(
               Effect.sync(() => {
@@ -167,16 +170,19 @@ export const makeAuthWithInvitationSignUp = Effect.fn("auth.invitationSetup")(fu
 
   yield* withDrizzleSqlContext(() => invitationAuth.$context);
   const handleInvitationSignUp = Effect.fn("handleInvitationSignUp")(function* (request: Request) {
-    if (!(yield* usesInvitation(request))) {
-      return yield* withDrizzleSqlContext(() => auth.handler(request));
-    }
-    return yield* withDrizzleSqlContext(() => invitationAuth.handler(request)).pipe(
-      Effect.catch(() =>
-        Effect.logError("Invitation signup request failed").pipe(
-          Effect.as(Response.json({ code: "InvitationSignupFailed" }, { status: 500 })),
-        ),
-      ),
-    );
+    const method = (yield* usesInvitation(request)) ? "invitation" : "email";
+    const response = yield* method === "email"
+      ? withDrizzleSqlContext(() => auth.handler(request))
+      : withDrizzleSqlContext(() => invitationAuth.handler(request)).pipe(
+          Effect.catch(() =>
+            Effect.logError("Invitation signup request failed").pipe(
+              Effect.as(Response.json({ code: "InvitationSignupFailed" }, { status: 500 })),
+            ),
+          ),
+        );
+    if (response.ok) yield* observer.capture(request, method);
+    return response;
   });
-  return { ...auth, handler: (request: Request) => runAuthEffect(handleInvitationSignUp(request)) };
+  const handler = (request: Request) => runAuthEffect(handleInvitationSignUp(request));
+  return { ...auth, fetch: handler, handler };
 });

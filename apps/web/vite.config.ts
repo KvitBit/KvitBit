@@ -4,6 +4,7 @@ import { cpSync, existsSync, readFileSync, statSync } from "node:fs";
 // Use native paths for the Vite host, including Windows.
 
 import { extname, join, resolve } from "node:path";
+import tailwindcss from "@tailwindcss/vite";
 import * as Str from "effect/String";
 import { defineConfig, type Plugin } from "vite";
 
@@ -46,7 +47,7 @@ const brandAssets = (): Plugin => ({
 });
 
 export default defineConfig({
-  plugins: [brandAssets()],
+  plugins: [tailwindcss(), brandAssets()],
   build: {
     outDir: "dist",
     emptyOutDir: true,

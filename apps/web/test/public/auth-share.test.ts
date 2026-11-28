@@ -45,6 +45,37 @@ const decodeDemoShare = (token: string): SharedDocumentView => {
 };
 
 describe("Auth page (Screen 02)", () => {
+  test("keeps a live region mounted after a no-challenge response", async () => {
+    const route: Auth.Route = { _tag: "ResetPassword" };
+    const ctx = ctxFor({ route, locale: "en", session: anonymous });
+    const pending = Auth.init(route, ctx).model;
+    const ready = Auth.update(
+      pending,
+      Auth.Message.GotBotProof({
+        seq: pending.botSeq,
+        status: "not_required",
+        header: null,
+        reason: null,
+      }),
+      ctx,
+    ).model;
+    const component = Html.component({
+      name: "AuthProofStatus",
+      props: Auth.Model,
+      model: Auth.Model,
+      message: Auth.Message,
+    }).make({
+      init: ($) => $.set($.props),
+      update: ($) => $.set($.model),
+      view: (h, model) => Auth.view(model, ctx, h),
+    });
+
+    const pendingHtml = (await Effect.runPromise(HtmlServer.renderToHtml(component, pending))).html;
+    const readyHtml = (await Effect.runPromise(HtmlServer.renderToHtml(component, ready))).html;
+    expect(pendingHtml).toContain('role="status"');
+    expect(readyHtml).toContain('role="status"');
+  });
+
   test("SignUp starts ALTCHA solve, drops stale botSeq, validates fields, and auto-re-solves on freshBotProof", () => {
     const route: Auth.Route = { _tag: "SignUp" };
     const ctx = ctxFor({ route, locale: "en", session: anonymous });
@@ -93,7 +124,10 @@ describe("Auth page (Screen 02)", () => {
     expect(freshProof.model.submitting).toBe(false);
     expect(freshProof.model.botProof._tag).toBe("Solving");
     expect(freshProof.model.botSeq).toBe(2);
-    expect(freshProof.commands?.length).toBe(1);
+    expect(Arr.map(freshProof.commands ?? [], (command) => command._tag)).toEqual([
+      "Interrupt",
+      "Effect",
+    ]);
   });
 
   test("SignIn supports password, magic_link, and passkey unsupported state", () => {
@@ -205,6 +239,17 @@ describe("Auth page (Screen 02)", () => {
 
     const signIn = await renderPath("/sign-in", { locale: "cs", session: anonymous });
     expect(signIn.html).toContain("Přihlásit se");
+    expect(signIn.html).toContain(">Heslo<");
+    expect(signIn.html).toContain(">Odkaz e-mailem<");
+    expect(signIn.html).toContain(">Přístupový klíč<");
+    expect(signIn.html).not.toContain("Poslat přihlašovací odkaz e-mailem");
+
+    const signInEn = await renderPath("/sign-in", { locale: "en", session: anonymous });
+    expect(signInEn.html).toContain(">Password<");
+    expect(signInEn.html).toContain(">Email link<");
+    expect(signInEn.html).toContain(">Passkey<");
+    expect(signInEn.html).not.toContain("Sign in with a password");
+    expect(signInEn.html).not.toContain("Email me a sign-in link");
   });
 
   test("invited signup uses the peeked address and invitation proof, then accepts with the verified session", async () => {
@@ -416,7 +461,7 @@ describe("Public Share Link page (Screen 04)", () => {
 
   test("SSR renders /i/:token loading skeleton cleanly in cs and en", async () => {
     const { html } = await renderPath("/i/demo-unpaid-czk", { locale: "cs", session: anonymous });
-    expect(html).toContain("kb-share-wrap");
+    expect(html).toContain('data-slot="share-wrap"');
   });
 
   test.each([

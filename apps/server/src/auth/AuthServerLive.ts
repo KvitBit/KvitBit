@@ -9,6 +9,7 @@ import { type AuthConfig, generateId, makeEmailRateLimiter } from "@kvitbit/adap
 import { type EmailTemplate, renderEmail } from "@kvitbit/adapters/templates/email";
 import { Caller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
+import type { BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
 import * as Arr from "effect/Array";
 import * as Clock from "effect/Clock";
@@ -17,9 +18,10 @@ import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import { HttpConfig } from "../http/config";
 import { acceptLanguageLocale } from "../http/edge/request";
+import { Analytics } from "../runtime/analytics";
 import { AuthServer } from "./AuthServer";
 import { makeDrizzleOverSqlClient, runAuthEffect } from "./drizzleBridge";
-import { makeAuthWithInvitationSignUp } from "./invitationSignUp";
+import { makeAuthWithInvitationSignUp, SIGN_UP_PATH } from "./invitationSignUp";
 import { makeWorkspaceAuth } from "./oauthWorkspace";
 
 const DEFAULT_LINK_VALID_MINUTES = 60;
@@ -39,6 +41,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
     AuthServer,
     Effect.gen(function* () {
       const config = yield* HttpConfig;
+      const analytics = yield* Analytics;
       const sql = yield* SqlClient.SqlClient;
       const botProtection = yield* BotProtection;
       const emailSender = yield* EmailSender;
@@ -166,12 +169,38 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
           runAuthEffect(checkAccountDeletion(deleted, request)),
       };
 
-      const auth = yield* makeWorkspaceAuth(sql)(authConfig).pipe(Effect.orDie);
+      const createdSignups = new WeakMap<Request, string>();
+      const databaseHooks = {
+        user: {
+          create: {
+            after: (user, ctx) =>
+              runAuthEffect(
+                Effect.sync(() => {
+                  if (ctx?.path === SIGN_UP_PATH && ctx.request !== undefined) {
+                    createdSignups.set(ctx.request, user.id);
+                  }
+                }),
+              ),
+          },
+        },
+      } satisfies NonNullable<BetterAuthOptions["databaseHooks"]>;
+      const auth = yield* makeWorkspaceAuth(sql)(authConfig, databaseHooks).pipe(Effect.orDie);
       const withInvitations = yield* makeAuthWithInvitationSignUp(
         auth,
         authConfig,
         workspaces,
         clock,
+        {
+          databaseHooks,
+          capture: (request, method) =>
+            Effect.suspend(() => {
+              const userId = createdSignups.get(request);
+              createdSignups.delete(request);
+              return userId === undefined
+                ? Effect.void
+                : analytics.capture({ event: "user_signed_up", userId, method });
+            }),
+        },
       ).pipe(Effect.orDie);
       return AuthServer.of(withInvitations);
     }),

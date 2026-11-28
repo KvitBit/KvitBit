@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Option from "effect/Option";
+import { Analytics } from "../../runtime/analytics";
 import { HttpConfig } from "../config";
 import { RATE_LIMITS, RateLimiter } from "../edge/RateLimiter";
 import { acceptLanguageLocale, clientIp } from "../edge/request";
@@ -19,6 +20,7 @@ export const InvitationsGroupLive = HttpApiBuilder.group(
     const workspaces = yield* Workspaces;
     const limiter = yield* RateLimiter;
     const config = yield* HttpConfig;
+    const analytics = yield* Analytics;
 
     return handlers
       .handle(
@@ -51,6 +53,11 @@ export const InvitationsGroupLive = HttpApiBuilder.group(
               `accepted workspace ${member.workspaceId} missing from listMine`,
             );
           }
+          yield* analytics.capture({
+            event: "invitation_accepted",
+            userId: member.userId,
+            workspaceId: member.workspaceId,
+          });
           return summary;
         }),
       );

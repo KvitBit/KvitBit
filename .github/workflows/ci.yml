@@ -12,6 +12,11 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  TURBO_API: ${{ vars.TURBO_API }}
+  TURBO_TEAM: ${{ vars.TURBO_TEAM || 'team_kvitbit' }}
+  TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -23,9 +28,22 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-turbo-check-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-check-
+            ${{ runner.os }}-turbo-
       - run: bun install --frozen-lockfile
-      - run: bun run generate:bun-nix --check
-      - run: bunx biome ci --error-on-warnings .
+      - run: bunx turbo run //#check:bun-nix
+      - run: bun run lint
       - run: bun run knip:check
       - run: bun run typecheck
       - run: bun test ./scripts
@@ -59,6 +77,24 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-turbo-build-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-build-
+            ${{ runner.os }}-turbo-
+      - uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('bun.lock') }}
       - run: bun install --frozen-lockfile
       - name: Build web and Expo PWA
         run: bun run build
@@ -67,7 +103,11 @@ jobs:
       - name: Install Chromium for the production server
         working-directory: apps/web
         run: |
-          bunx --no-install playwright install --with-deps chromium
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            bunx --no-install playwright install-deps chromium
+          else
+            bunx --no-install playwright install --with-deps chromium
+          fi
           chromium_path="$(bun -e 'import { chromium } from "@playwright/test"; process.stdout.write(chromium.executablePath())')"
           printf 'KVITBIT_CHROMIUM_PATH=%s\n' "$chromium_path" >> "$GITHUB_ENV"
       - name: Smoke-test both builds on the production server
@@ -93,12 +133,25 @@ jobs:
           java-version: "17"
       - uses: actions/cache@v4
         with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+      - uses: actions/cache@v4
+        with:
           path: formal/.cache/tla2tools-*.jar
           key: formal-toolchain-${{ hashFiles('formal/toolchain/toolchain.json') }}
+      - uses: actions/cache@v4
+        with:
+          path: .turbo/cache
+          key: ${{ runner.os }}-turbo-formal-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-turbo-formal-
+            ${{ runner.os }}-turbo-
       - run: bun install --frozen-lockfile
       # Runs the digest gate and still runs every check, so drifted code is checked too.
       - name: Formal checks and covered-file digests
-        run: bun run verify:formal
+        run: bun run verify:formal:cached -- --continue
 
   changes:
     runs-on: ubuntu-latest
@@ -162,6 +215,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
       - run: bun install --frozen-lockfile
       - name: Postgres 17 adapter contention tests
         run: bun test ./packages/adapters/test/sql/contention.postgres.test.ts

@@ -8,7 +8,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import { ChevronLeft, ChevronRight, FileSpreadsheet, FileText } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useTransfer } from "../../platform/transfer";
@@ -27,7 +27,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
   useOverlay,
 } from "../../ui";
@@ -178,8 +177,8 @@ export function ReportsScreen(props: {
                 en: "Informational VAT summary in CZK. Not a tax filing.",
               })}
             />
-            <View style={styles.kpiRow}>
-              <Card style={styles.kpiCard}>
+            <View className="flex-row flex-wrap gap-2">
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.vat.output")}
                 </Text>
@@ -187,7 +186,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.output)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.vat.input")}
                 </Text>
@@ -195,7 +194,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.input)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.vat.balance")}
                 </Text>
@@ -244,8 +243,8 @@ export function ReportsScreen(props: {
       case "profit":
         return (
           <>
-            <View style={styles.kpiRow}>
-              <Card style={styles.kpiCard}>
+            <View className="flex-row flex-wrap gap-2">
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.profit.revenue")}
                 </Text>
@@ -253,7 +252,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.revenue)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.profit.expenses")}
                 </Text>
@@ -261,7 +260,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.expenses)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.profit.result")}
                 </Text>
@@ -290,8 +289,8 @@ export function ReportsScreen(props: {
       case "receivables":
         return (
           <>
-            <View style={styles.kpiRow}>
-              <Card style={styles.kpiCard}>
+            <View className="flex-row flex-wrap gap-2">
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.receivables.unpaid")}
                 </Text>
@@ -299,7 +298,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.total)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.receivables.overdue")}
                 </Text>
@@ -364,8 +363,8 @@ export function ReportsScreen(props: {
                 })}
               />
             ) : null}
-            <View style={styles.kpiRow}>
-              <Card style={styles.kpiCard}>
+            <View className="flex-row flex-wrap gap-2">
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("expenses.editor.base")}
                 </Text>
@@ -373,7 +372,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.net)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("common.field.vat")}
                 </Text>
@@ -381,7 +380,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.vat)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("common.field.total")}
                 </Text>
@@ -413,8 +412,8 @@ export function ReportsScreen(props: {
       case "cashflow":
         return (
           <>
-            <View style={styles.kpiRow}>
-              <Card style={styles.kpiCard}>
+            <View className="flex-row flex-wrap gap-2">
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.cashflow.in")}
                 </Text>
@@ -422,7 +421,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.in)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.cashflow.out")}
                 </Text>
@@ -430,7 +429,7 @@ export function ReportsScreen(props: {
                   {formatMoney(locale, data.totals.out)}
                 </Text>
               </Card>
-              <Card style={styles.kpiCard}>
+              <Card className="min-w-[140px] flex-1">
                 <Text variant="labelMedium" color="onSurfaceVariant">
                   {t("reports.suite.cashflow.net")}
                 </Text>
@@ -468,14 +467,14 @@ export function ReportsScreen(props: {
       <SegmentedChoice value={props.report} choices={reportChoices} onChange={selectReport} />
 
       <Card>
-        <View style={styles.periodBar}>
+        <View className="flex-row items-center justify-between">
           <IconButton
             icon={ChevronLeft}
             label={t("common.action.back")}
             disabled={previousPeriod === period}
             onPress={() => setPeriod(previousPeriod)}
           />
-          <View style={styles.periodCenter}>
+          <View className="flex-1 items-center">
             <Text variant="titleMedium" numeric>
               {period}
             </Text>
@@ -503,7 +502,7 @@ export function ReportsScreen(props: {
 
       {exportError === null ? null : <Banner text={exportError} />}
 
-      <View style={styles.exportRow}>
+      <View className="flex-row flex-wrap gap-2">
         <Button
           kind="tonal"
           icon={FileSpreadsheet}
@@ -534,11 +533,3 @@ export function ReportsScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  periodBar: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-  periodCenter: { alignItems: "center", flex: 1 },
-  exportRow: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  kpiRow: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  kpiCard: { flex: 1, minWidth: 140 },
-});

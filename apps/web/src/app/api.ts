@@ -7,12 +7,14 @@
 import { ALTCHA_HEADER } from "@kvitbit/api-contract";
 import { Api } from "@kvitbit/ui-port";
 import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as FetchHttpClient from "effect/http/FetchHttpClient";
 import type * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { browserOrigin, fetchBrowser } from "./browser";
@@ -74,6 +76,23 @@ export const WebServicesLive: Layer.Layer<WebServices> = Layer.suspend(() =>
 );
 
 export type Client = Api.KvitbitApiClient;
+
+const fetchConfig = (client: Client) => client.config.getConfig();
+
+export class StartupConfig extends Context.Service<StartupConfig, ReturnType<typeof fetchConfig>>()(
+  "@kvitbit/web/app/api/StartupConfig",
+) {
+  static readonly layer = Layer.effect(this)(
+    Effect.flatMap(Api.KvitbitApi, (client) => Effect.cached(fetchConfig(client))),
+  );
+}
+
+/** Browser analytics and the landing page share the startup config request. */
+export const getPublicConfig = (client: Client) =>
+  Effect.flatMap(
+    Effect.serviceOption(StartupConfig),
+    Option.getOrElse(() => fetchConfig(client)),
+  );
 
 /**
  * One API call as a never-failing Effect: `onSuccess` and `onFailure` build the result Message.

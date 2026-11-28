@@ -7,7 +7,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
-import { type WebServices, WebServicesLive } from "./api";
+import { StartupConfig, type WebServices, WebServicesLive } from "./api";
 
 class ApiOperation {
   readonly effect: Effect.Effect<unknown, never, WebServices>;
@@ -20,16 +20,24 @@ class ApiOperation {
 /** Runs page API effects with the client supplied by the app's transport layer. */
 export class RunApi extends Command.Service<RunApi>()("@kvitbit/web/RunApi", {
   args: { name: Schema.String, operation: Schema.instanceOf(ApiOperation) },
+  group: ["name"],
   success: Schema.Unknown,
 }) {
-  static readonly layer = this.toLayer(
+  static readonly fromClient = this.toLayer(
     Effect.gen(function* () {
       const services = yield* Effect.context<WebServices>().pipe(
         Effect.map(Context.pick(Api.KvitbitApi, HttpClient.HttpClient)),
       );
-      return ({ operation }) => Effect.provideContext(operation.effect, services);
+      const config = yield* Effect.serviceOption(StartupConfig);
+      return ({ operation }) => {
+        const effect = Effect.provideContext(operation.effect, services);
+        return Option.isSome(config)
+          ? Effect.provideService(effect, StartupConfig, config.value)
+          : effect;
+      };
     }),
-  ).pipe(Layer.provide(WebServicesLive));
+  );
+  static readonly layer = this.fromClient.pipe(Layer.provide(WebServicesLive));
 }
 
 export type PageCommand<Message> = Command.Command<Message, RunApi>;

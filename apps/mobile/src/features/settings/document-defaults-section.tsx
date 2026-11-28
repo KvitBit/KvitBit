@@ -10,7 +10,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { useCallback, useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -21,7 +21,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -127,7 +126,7 @@ export function DocumentDefaultsSection() {
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
       {() => (
-        <View style={styles.stack}>
+        <View className="gap-4">
           {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
           {errorState.banner === null ? null : (
             <Banner
@@ -236,7 +235,3 @@ export function DocumentDefaultsSection() {
     </RemoteView>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-});

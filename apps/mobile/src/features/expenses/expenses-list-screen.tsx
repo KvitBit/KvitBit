@@ -7,7 +7,7 @@ import * as Result from "effect/Result";
 import * as Str from "effect/String";
 import { Camera, Paperclip, Plus, Receipt } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -24,7 +24,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
 } from "../../ui";
@@ -162,7 +161,7 @@ export function ExpensesListScreen(props: {
         ) : null
       }
     >
-      <View style={styles.filters}>
+      <View className="gap-3">
         <TextField
           label={t("common.field.search")}
           placeholder={t("expenses.list.search")}
@@ -287,7 +286,7 @@ export function ExpensesListScreen(props: {
               )}
 
               {effectiveCursor === null ? null : (
-                <View style={styles.more}>
+                <View className="items-center py-2">
                   <Button
                     kind="outlined"
                     label={t("common.action.loadMore")}
@@ -301,7 +300,7 @@ export function ExpensesListScreen(props: {
         }}
       </RemoteView>
 
-      <View style={styles.quickBar}>
+      <View className="flex-row flex-wrap gap-2">
         <Button
           kind="tonal"
           icon={Camera}
@@ -318,9 +317,3 @@ export function ExpensesListScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  filters: { gap: space.md },
-  more: { alignItems: "center", paddingVertical: space.sm },
-  quickBar: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-});

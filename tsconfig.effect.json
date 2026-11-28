@@ -226,8 +226,21 @@
               "apps/web/vite.config.ts",
               // Alchemy derives DNS resource names from a synchronous SHA-256 digest.
               "infra/alchemy/src/resources/dns.ts",
-              // Alchemy derives rollout identifiers from a synchronous SHA-256 digest.
-              "infra/alchemy/src/resources/network.ts",
+              // Alchemy computes rollout and bundle fingerprints while declaring resources.
+              "infra/alchemy/src/env.ts",
+              "infra/alchemy/src/resources/mail.ts",
+              // Archive and relay identifiers use synchronous SHA-256 digests.
+              "infra/alchemy/src/mail-forwarder/relay.ts",
+              // The HTTP adapter fixture uses the same native server factory as production.
+              "apps/server/test/runtime/logging.test.ts",
+              // DKIM uses Node's raw public-key import, RSA and Ed25519 verification.
+              "scripts/alert-inbox/dkim.ts",
+              // Stable IDs are generated synchronously at the CLI's serialization boundary.
+              "scripts/alert-inbox/service.ts",
+              // SQLite resolves real files and checks hard links before opening a database.
+              "scripts/alert-inbox/store.ts",
+              // Independent signing and POSIX inode/lock fixtures exercise the inbox boundary.
+              "scripts/alert-inbox/alert-inbox.test.ts",
               // The public key verifier uses constant-time comparison and secure bytes synchronously.
               "packages/adapters/src/auth/api-key.ts",
               // GCS signing uses a Node RSA private key.
@@ -242,6 +255,33 @@
               "scripts/release/mobile-release.ts"
             ],
             "options": { "diagnosticSeverity": { "nodeBuiltinImport": "off" } }
+          },
+          {
+            // These executables supply the layer for their root program.
+            "include": [
+              "apps/server/src/main.ts",
+              "apps/server/src/migrate.ts",
+              "apps/server/src/worker.ts",
+              "infra/alchemy/src/preflight-cli.ts",
+              "infra/alchemy/alchemy.run.ts",
+              "scripts/alert-inbox/service.ts"
+            ],
+            "options": { "diagnosticSeverity": { "strictEffectProvide": "off" } }
+          },
+          {
+            // The Node runtime's teardown callback drains stdout after the root Effect has exited.
+            "include": ["apps/server/src/logging/logger.ts"],
+            "options": { "diagnosticSeverity": { "globalTimers": "off" } }
+          },
+          {
+            // Native SMTP sessions own cancellable idle and lifetime timers across STARTTLS.
+            "include": ["infra/alchemy/src/mail-forwarder/smtp.ts"],
+            "options": { "diagnosticSeverity": { "globalTimers": "off" } }
+          },
+          {
+            // Alchemy Resource defines a callable declaration with provider metadata.
+            "include": ["infra/alchemy/src/resources/monitoring-provider.ts"],
+            "options": { "diagnosticSeverity": { "missingPipeableSignature": "off" } }
           },
           {
             // Effect UI defines App's callable signature and attaches runtime properties.

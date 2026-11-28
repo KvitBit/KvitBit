@@ -9,8 +9,12 @@
     "./ports": "./src/ports.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:money": "bun test test/money.test.ts test/money.property.test.ts",
+    "test:unit": "bun test test/caller.test.ts test/errors.test.ts test/scope.test.ts test/services.test.ts test/vat.test.ts test/views.test.ts test/vocabulary.test.ts"
   },
   "dependencies": {
     "effect": "4.1.4"

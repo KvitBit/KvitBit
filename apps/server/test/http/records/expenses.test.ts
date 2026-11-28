@@ -5,7 +5,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
-
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
 
 const decodeExpensePage = Fn.flow(
@@ -33,6 +33,7 @@ let owner: TestUser;
 let member: MemberCaller;
 let base: string;
 let supplierId: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const PDF_BYTES = new TextEncoder().encode(
   Arr.join(["%PDF-1.4", "1 0 obj", "<<>>", "endobj", "%%EOF", ""], "\n"),
@@ -52,7 +53,8 @@ const makeExpense = () => ({
 });
 
 beforeEach(async () => {
-  h = makeHarness();
+  analytics = captureAnalytics();
+  h = makeHarness({ analytics: analytics.layer });
   owner = h.addUser("Olga");
   member = await h.createWorkspace(owner);
   base = `/api/v1/workspaces/${member.workspaceId}/expenses`;
@@ -207,6 +209,15 @@ describe("expenses group", () => {
     expect(att.contentType).toBe("application/pdf");
     expect(att.bytes).toBe(PDF_BYTES.byteLength);
     expect(uploaded.headers.get("location")).toBe(`${base}/${created.id}/attachments/${att.id}`);
+    expect(analytics.capture.mock.calls).toEqual([
+      [
+        {
+          event: "expense_receipt_uploaded",
+          distinctId: owner.id,
+          properties: { workspaceId: member.workspaceId },
+        },
+      ],
+    ]);
 
     // Idempotent by content hash
     const formAgain = new FormData();
@@ -291,5 +302,6 @@ describe("expenses group", () => {
         await tooLarge.json(),
       ).pipe(Effect.runSync)._tag,
     ).toBe("PayloadTooLarge");
+    expect(analytics.capture).not.toHaveBeenCalled();
   });
 });

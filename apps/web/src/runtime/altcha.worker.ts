@@ -10,10 +10,17 @@ globalThis.onmessage = (event: MessageEvent) => {
     solveMessage(event.data).pipe(
       Effect.flatMap(solveAltchaChallenge),
       Effect.match({
-        onSuccess: (header) => globalThis.postMessage({ header }),
+        onSuccess: (header) => globalThis.postMessage({ _tag: "Solved", header }),
         onFailure: (error) =>
-          globalThis.postMessage({ error: "reason" in error ? error.reason : error.message }),
+          globalThis.postMessage({
+            _tag: "Failed",
+            reason: "reason" in error ? error.reason : error.message,
+          }),
       }),
     ),
   );
 };
+
+globalThis.onmessageerror = () =>
+  globalThis.postMessage({ _tag: "Failed", reason: "Could not read challenge" });
+globalThis.postMessage({ _tag: "Ready" });

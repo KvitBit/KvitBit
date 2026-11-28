@@ -1,5 +1,12 @@
+import * as BunServices from "@effect/platform-bun/BunServices";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
+
+export const [fixtureFileSystem, fixturePath] = Effect.all([FileSystem.FileSystem, Path.Path], {
+  concurrency: "unbounded",
+}).pipe(Effect.provide(BunServices.layer), Effect.runSync);
 
 export const systemPath = Config.String("PATH").pipe(
   Config.withDefault("/usr/bin:/bin"),

@@ -1,0 +1,69 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": ["test:api", "test:i18n", "test:style", "test:theme", "test:view-models"],
+      "cache": false
+    },
+    "test:api": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/api/**", "src/text.ts", "test/api/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:i18n": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/format/**",
+        "src/i18n/**",
+        "src/text.ts",
+        "test/format/**",
+        "test/i18n/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:style": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/style/**", "src/theme/**", "test/style/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:theme": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/api/**",
+        "src/theme/**",
+        "src/text.ts",
+        "test/theme/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:view-models": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/api/**",
+        "src/format/**",
+        "src/i18n/**",
+        "src/view-models/**",
+        "src/text.ts",
+        "test/view-models/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

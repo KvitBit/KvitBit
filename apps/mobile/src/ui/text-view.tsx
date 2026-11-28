@@ -5,6 +5,7 @@ import {
   type TypeScaleName,
 } from "@kvitbit/ui-port/theme";
 import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { ReactNode } from "react";
 import { Text as RNText, type TextProps as RNTextProps, type TextStyle } from "react-native";
 import { useTheme } from "../theme/theme-provider";
@@ -19,6 +20,7 @@ export interface TextProps extends Omit<RNTextProps, "style"> {
   readonly numeric?: boolean;
   readonly align?: TextStyle["textAlign"];
   readonly style?: TextStyle;
+  readonly className?: string;
   readonly children?: ReactNode;
 }
 
@@ -26,10 +28,11 @@ const isOperateVariant = Schema.is(Schema.Literals(OPERATE_SCALE_NAMES));
 
 export function Text({
   variant = "body",
-  color = "onSurface",
+  color,
   numeric = false,
   align,
   style,
+  className,
   ...rest
 }: TextProps) {
   const theme = useTheme();
@@ -37,11 +40,17 @@ export function Text({
   return (
     <RNText
       {...rest}
+      {...(className === undefined ? {} : { className })}
       maxFontSizeMultiplier={2}
       style={[
         textStyle(font),
         numeric === true ? textStyle(theme.numeric) : null,
-        { color: theme.colors[color], textAlign: align },
+        color === undefined
+          ? className !== undefined && Str.includes("text-")(className)
+            ? null
+            : { color: theme.colors.onSurface }
+          : { color: theme.colors[color] },
+        align === undefined ? null : { textAlign: align },
         style,
       ]}
     />

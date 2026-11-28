@@ -7,14 +7,16 @@
  * - Composes `PersistenceLive`, `CoreExternalPortsLive`, `CoreLive`, all 4 workflows, and all
  *   5 ClusterCrons. No `KvitbitRunner` entity or `entities.ts`.
  */
-import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Str from "effect/String";
+import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
+import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
 import { ServerDocumentProjectionsLive } from "./projections/documents";
 import { ClusterWorkerRuntimeLive, CronsLive, WorkflowHandlersLive } from "./runtime";
+import { AnalyticsLive } from "./runtime/analytics";
 import { CoreExternalPortsLive } from "./wiring";
 
 const ServerCoreLive = ServerDocumentProjectionsLive.pipe(Layer.provideMerge(CoreLive));
@@ -35,11 +37,19 @@ export const WorkerLive = Layer.mergeAll(WorkflowHandlersLive, CronsLive).pipe(
   Layer.provideMerge(PersistenceLive),
   Layer.provideMerge(ClusterWorkerRuntimeLive),
   Layer.provide(PgWorkerDatabaseLive),
+  Layer.provide(AnalyticsLive),
 );
 
-export const workerProgram = Effect.logInfo("Starting Kvitbit cluster worker").pipe(
-  Effect.andThen(Layer.launch(WorkerLive)),
-);
+export const workerProgram = Effect.gen(function* () {
+  const boot = yield* loadBootRuntimeConfig("worker");
+  yield* Effect.logInfo("Starting Kvitbit cluster worker", {
+    env: boot.env,
+    appOrigin: boot.appOrigin,
+    emailMode: boot.email.mode,
+    blobDriver: boot.blob.driver,
+  });
+  return yield* Layer.launch(WorkerLive);
+});
 
 // Older Node versions lack import.meta.main.
 const entryPath = process.argv[1] ?? "";
@@ -48,5 +58,5 @@ const isMain =
   (Str.endsWith("worker.ts")(entryPath) || Str.endsWith("worker.js")(entryPath));
 
 if (isMain) {
-  NodeRuntime.runMain(workerProgram);
+  runServerMain(workerProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
 }

@@ -3,6 +3,7 @@ import * as EffectArray from "effect/Array";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import { createContext, useContext } from "react";
@@ -162,6 +163,51 @@ mock.module("react-native-safe-area-context", () => ({
   SafeAreaInsetsContext,
   SafeAreaView: "SafeAreaView",
   useSafeAreaInsets: () => useContext(SafeAreaInsetsContext),
+}));
+
+// Uniwind runtime stand-in for Bun unit tests (records theme and CSS variable syncs).
+export const uniwindState = {
+  currentTheme: "light",
+  themes: ["light", "dark"],
+  hasAdaptiveThemes: false,
+  vars: EffectRecord.fromEntries([
+    ["light", EffectRecord.empty<string, string | number>()],
+    ["dark", EffectRecord.empty<string, string | number>()],
+  ]),
+};
+
+const uniwindPassThrough = ({ children }: { readonly children?: unknown }) => children ?? null;
+
+mock.module("uniwind", () => ({
+  Uniwind: {
+    get themes() {
+      return uniwindState.themes;
+    },
+    get hasAdaptiveThemes() {
+      return uniwindState.hasAdaptiveThemes;
+    },
+    get currentTheme() {
+      return uniwindState.currentTheme;
+    },
+    setTheme: (theme: string) => {
+      uniwindState.currentTheme = theme;
+    },
+    updateCSSVariables: (theme: string, vars: Record<string, string | number>) => {
+      uniwindState.vars[theme] = { ...(uniwindState.vars[theme] ?? {}), ...vars };
+    },
+    updateInsets: () => undefined,
+    getCSSVariable: (name: string) => uniwindState.vars[uniwindState.currentTheme]?.[name],
+  },
+  withUniwind: <T>(Component: T): T => Component,
+  useCSSVariable: (name: string) => uniwindState.vars[uniwindState.currentTheme]?.[name],
+  useResolveClassNames: () => ({}),
+  useUniwind: () => ({
+    theme: uniwindState.currentTheme,
+    hasAdaptiveThemes: uniwindState.hasAdaptiveThemes,
+  }),
+  ScopedTheme: uniwindPassThrough,
+  ScopedVariables: uniwindPassThrough,
+  LayoutDirection: uniwindPassThrough,
 }));
 
 // SVG elements stand in as their names, so a test can find the icon a

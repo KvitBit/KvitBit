@@ -1,32 +1,31 @@
+import { AltchaBotProtection } from "@kvitbit/adapters/altcha";
 /**
  * Complete HTTP application composition for `@kvitbit/server`:
  * merges REST (`/api/v1/*`), Auth (`/api/auth/*`, RFC 8414), Health (`/healthz`, `/readyz`),
  * MCP Streamable HTTP (`/mcp`, RFC 9728), Mobile OTA/APK/App Links (`/api/mobile/*`,
  * `/.well-known/assetlinks.json`), and static web/PWA mounts (`/app/*`, `/*`).
  */
-import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
-import {
-  AltchaBotProtectionConfig,
-  AuthServerLive,
-  NoopBotProtection,
-  PrincipalResolverLive,
-} from "./auth";
+import * as Redacted from "effect/Redacted";
+import { AuthServerLive, NoopBotProtection, PrincipalResolverLive } from "./auth";
+import { loadBotProtectionConfig } from "./config-contract";
 import { HttpConfigLive, HttpRoutesLive, RateLimiterSql } from "./http";
 import { MobileConfigLive, MobileRoutesLive, MobileStorageLive } from "./http/mobile";
 import { McpConfigLive, McpRoutesLive } from "./mcp";
 
 /**
- * BotProtection from the environment: ALTCHA PoW v2 when `ALTCHA_HMAC_KEY` is configured,
- * otherwise `NoopBotProtection` (matching `HttpConfigLive.botProtection`).
+ * BotProtection from the validated typed-mode contract: ALTCHA PoW v2 when active,
+ * `NoopBotProtection` only when explicitly permitted in non-production (matching
+ * `HttpConfigLive.botProtection`). Fails fast in production/staging/preview when
+ * `ALTCHA_HMAC_KEY` is missing or whitespace-only without an allowed explicit mode.
  */
-const BotProtectionLive = Layer.unwrap(
-  Effect.gen(function* () {
-    const key = yield* Config.option(Config.Redacted("ALTCHA_HMAC_KEY"));
-    return Option.isSome(key) ? AltchaBotProtectionConfig() : NoopBotProtection;
-  }),
+export const BotProtectionLive = Layer.unwrap(
+  Effect.map(loadBotProtectionConfig, (resolved) =>
+    resolved.mode === "altcha" && resolved.hmacKey !== undefined
+      ? AltchaBotProtection({ hmacKey: Redacted.make(resolved.hmacKey) })
+      : NoopBotProtection,
+  ),
 );
 
 /** All route groups registered on the `effect/http` `HttpRouter`. */

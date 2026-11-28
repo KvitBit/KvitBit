@@ -1,0 +1,37 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test:suite": {
+      "dependsOn": ["test:access", "test:contracts"],
+      "cache": false
+    },
+    "test:access": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/access.ts",
+        "test/access.test.ts",
+        "test/access.property.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:contracts": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/**",
+        "!test/access.test.ts",
+        "!test/access.property.test.ts"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

@@ -1,6 +1,7 @@
 import * as Compute from "@alchemy.run/gcp/Compute";
 import * as Logging from "@alchemy.run/gcp/Logging";
 import type { Input } from "alchemy/Input";
+import type * as Output from "alchemy/Output";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import type { KvitbitEdgeConfig, KvitbitStackConfig } from "../config";
@@ -276,6 +277,7 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
   const urlMapLink = urlMap.selfLink.pipe(declaredLink("EdgeUrlMap"));
 
   let httpTarget: Input<string>;
+  let httpsForwardingRule: Output.Output<string | undefined> | undefined;
   if (edge.enableHttps) {
     const certificate = yield* Compute.SslCertificate("EdgeCertificate", {
       sslCertificateName: edgeResourceName(config, "edge-cert"),
@@ -287,13 +289,14 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
       urlMap: urlMapLink,
       sslCertificates: [certificate.selfLink.pipe(declaredLink("EdgeCertificate"))],
     });
-    yield* Compute.GlobalForwardingRule(edgeProtocolId("Https", "ForwardingRule"), {
+    const https = yield* Compute.GlobalForwardingRule(edgeProtocolId("Https", "ForwardingRule"), {
       forwardingRuleName: names.httpsForwardingRule,
       loadBalancingScheme: "EXTERNAL_MANAGED" as const,
       ipAddress: addressLink,
       portRange: "443",
       target: httpsProxy.selfLink.pipe(declaredLink(edgeProtocolId("Https", "Proxy"))),
     });
+    httpsForwardingRule = https.selfLink;
     const redirectMap = yield* Compute.UrlMap(
       edgeProtocolId("Https", "RedirectUrlMap"),
       edgeHttpsRedirectUrlMapProps(config),
@@ -321,6 +324,7 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
 
   return {
     edgeIpAddress: address.address,
+    httpsForwardingRule,
     edgeProtocol: edge.enableHttps ? ("https" as const) : ("http" as const),
     securityPolicy: policy.selfLink,
     backendServices: [dynamicBackend.selfLink, staticBackend.selfLink] as const,

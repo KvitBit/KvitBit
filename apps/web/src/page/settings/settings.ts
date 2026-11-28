@@ -60,7 +60,7 @@ import { href } from "../../app/routing";
 import { sCopy } from "./copy";
 import { BankAccount, WorkspaceDetail } from "./models";
 
-import { Message, type Model, type Route, scopePickerFromModel } from "./state";
+import { canEditSettings, Message, type Model, type Route, scopePickerFromModel } from "./state";
 
 export { Message, Model, Route, SETTINGS_SECTIONS, scopePickerFromModel } from "./state";
 export { viewSettingsPage as view } from "./views";
@@ -928,6 +928,15 @@ export const update: {
     ChangedEntityField: ({ field, value }) => ({
       model: { ...model, entityForm: { ...model.entityForm, [field]: value } },
     }),
+    PastedEntityAddress: ({ street, city, postalCode, country }) =>
+      canEditSettings(ctx)
+        ? {
+            model: {
+              ...model,
+              entityForm: { ...model.entityForm, street, city, postalCode, country },
+            },
+          }
+        : { model },
     ClickedAresLookup: () => {
       const ico = Str.replace(/\s+/g, "")(model.entityForm.ico);
       if (ico === "") return { model };

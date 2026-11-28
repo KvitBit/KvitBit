@@ -7,12 +7,17 @@ import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
+import { loadKvitbitEnv, loadValidatedAppOrigin } from "../../config-contract";
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
 
 type MobileStorageConfig =
   | { readonly _tag: "local"; readonly dir: string }
@@ -37,7 +42,6 @@ export class MobileConfig extends Context.Service<MobileConfig, MobileConfigShap
   "@kvitbit/server/http/mobile/config/MobileConfig",
 ) {}
 
-const DEFAULT_APP_ORIGIN = "http://localhost:8080";
 const DEFAULT_BLOB_DIR = "/var/lib/kvitbit/blobs";
 
 const hex64Pattern = /^[0-9a-fA-F]{64}$/;
@@ -87,17 +91,14 @@ const makeMobileConfig = (input: Partial<MobileConfigShape> = {}): MobileConfigS
   androidAssetLinksSha256: input.androidAssetLinksSha256 ?? [],
 });
 
+const failConfig = (message: string) => Effect.fail(configError(message));
+
 /** MobileConfig read from process environment variables. */
 export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = Layer.effect(
   MobileConfig,
   Effect.gen(function* () {
-    const rawOrigin = yield* Config.String("APP_ORIGIN").pipe(
-      Config.withDefault(DEFAULT_APP_ORIGIN),
-    );
-    const appOrigin = yield* Effect.try({
-      try: () => new URL(rawOrigin).origin,
-      catch: () => configError(`Invalid APP_ORIGIN URL: ${quote(rawOrigin)}`),
-    });
+    const env = yield* loadKvitbitEnv;
+    const appOrigin = yield* loadValidatedAppOrigin;
 
     const rawSigningKey = yield* nonEmptyOption("KVITBIT_MOBILE_UPDATES_SIGNING_KEY");
     const signingKeyPem = Option.map(rawSigningKey, (pem) => Redacted.make(normalizePem(pem)));
@@ -111,7 +112,55 @@ export const MobileConfigLive: Layer.Layer<MobileConfig, Config.ConfigError> = L
     const gcsEndpoint = Option.getOrUndefined(rawEndpoint);
 
     let storage: MobileStorageConfig;
-    if (Option.isSome(mobileBucket)) {
+    if (env === "production") {
+      if (Option.isSome(blobDriver) && blobDriver.value !== "gcs") {
+        return yield* failConfig(
+          `Non-production KVITBIT_BLOB_DRIVER=${encodeJson(blobDriver.value)} is forbidden in production`,
+        );
+      }
+      if (Option.isSome(mobileBucket)) {
+        storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
+      } else if (
+        Option.isSome(blobDriver) &&
+        blobDriver.value === "gcs" &&
+        Option.isSome(blobBucket)
+      ) {
+        storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
+      } else {
+        return yield* failConfig(
+          "KVITBIT_MOBILE_STORAGE_BUCKET (or KVITBIT_BLOB_DRIVER=gcs with KVITBIT_BLOB_BUCKET) is required when KVITBIT_ENV=production",
+        );
+      }
+    } else if (env === "staging" || env === "preview") {
+      if (Option.isSome(blobDriver) && blobDriver.value !== "gcs" && blobDriver.value !== "local") {
+        return yield* failConfig(
+          `Unsupported KVITBIT_BLOB_DRIVER: ${encodeJson(blobDriver.value)}`,
+        );
+      }
+      if (Option.isSome(mobileBucket)) {
+        storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
+      } else if (Option.isSome(blobDriver)) {
+        if (blobDriver.value === "gcs") {
+          if (Option.isNone(blobBucket)) {
+            return yield* failConfig(
+              "KVITBIT_BLOB_BUCKET is required when KVITBIT_BLOB_DRIVER=gcs",
+            );
+          }
+          storage = { _tag: "gcs", bucket: blobBucket.value, endpoint: gcsEndpoint };
+        } else {
+          storage = {
+            _tag: "local",
+            dir: Option.getOrElse(mobileDir, () =>
+              Option.getOrElse(blobDir, () => DEFAULT_BLOB_DIR),
+            ),
+          };
+        }
+      } else {
+        return yield* failConfig(
+          `Mobile storage must be explicitly configured via KVITBIT_MOBILE_STORAGE_BUCKET or KVITBIT_BLOB_DRIVER ('gcs' or 'local') when KVITBIT_ENV=${env}`,
+        );
+      }
+    } else if (Option.isSome(mobileBucket)) {
       storage = { _tag: "gcs", bucket: mobileBucket.value, endpoint: gcsEndpoint };
     } else if (Option.isSome(mobileDir)) {
       storage = { _tag: "local", dir: mobileDir.value };

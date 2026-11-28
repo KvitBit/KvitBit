@@ -5,14 +5,13 @@
 
 import * as Effect from "effect/Effect";
 import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
-import { Modal, Pressable, StyleSheet, View } from "react-native";
+import { Modal, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { forkMobileEffect, runMobileEffect } from "../runtime/request-intent";
 import { useTheme } from "../theme/theme-provider";
 import { Button } from "./button";
 import { type ConfirmRequest, type Overlay, OverlayContext } from "./overlay-context";
 import { Text } from "./text";
-import { space } from "./tokens";
 
 interface ToastState {
   readonly id: number;
@@ -60,16 +59,10 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
       {toast === null ? null : (
         <View
           accessibilityLiveRegion="polite"
-          style={[
-            styles.toast,
-            {
-              bottom: insets.bottom + 88,
-              backgroundColor: c.inverseSurface,
-              borderRadius: theme.shape.control,
-            },
-          ]}
+          className="absolute right-4 left-4 flex-row items-center gap-3 rounded-control bg-inverse-surface p-4"
+          style={{ bottom: insets.bottom + 88 }}
         >
-          <Text variant="bodyMedium" style={{ color: c.inverseOnSurface, flex: 1 }}>
+          <Text variant="bodyMedium" color="inverseOnSurface" className="flex-1">
             {toast.text}
           </Text>
           {toast.action === undefined ? null : (
@@ -80,7 +73,7 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
                 setToast(null);
               }}
             >
-              <Text variant="labelLarge" style={{ color: c.inversePrimary }}>
+              <Text variant="labelLarge" color="inversePrimary">
                 {toast.action.label}
               </Text>
             </Pressable>
@@ -93,13 +86,14 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
         animationType="fade"
         onRequestClose={() => close(false)}
       >
-        <View style={[styles.scrim, { backgroundColor: `${c.scrim}66` }]}>
+        <View
+          className="flex-1 items-center justify-center p-6"
+          style={{ backgroundColor: `${c.scrim}66` }}
+        >
           <View
             accessibilityRole="alert"
-            style={[
-              styles.dialog,
-              { backgroundColor: c.surfaceContainerHigh, borderRadius: theme.shape.panel + 12 },
-            ]}
+            className="w-full max-w-[560px] gap-4 bg-surface-container-high p-6"
+            style={{ borderRadius: theme.shape.panel + 12 }}
           >
             <Text variant="headlineSmall">{dialog?.title ?? ""}</Text>
             {dialog?.body === undefined ? null : (
@@ -107,7 +101,7 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
                 {dialog.body}
               </Text>
             )}
-            <View style={styles.dialogActions}>
+            <View className="flex-row justify-end gap-2">
               <Button kind="text" label={dialog?.cancelLabel ?? ""} onPress={() => close(false)} />
               <Button
                 kind={dialog?.destructive === true ? "danger" : "filled"}
@@ -121,18 +115,3 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
     </OverlayContext.Provider>
   );
 }
-
-const styles = StyleSheet.create({
-  toast: {
-    position: "absolute",
-    left: space.lg,
-    right: space.lg,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.md,
-    padding: space.lg,
-  },
-  scrim: { flex: 1, alignItems: "center", justifyContent: "center", padding: space.xl },
-  dialog: { width: "100%", maxWidth: 560, padding: space.xl, gap: space.lg },
-  dialogActions: { flexDirection: "row", justifyContent: "flex-end", gap: space.sm },
-});

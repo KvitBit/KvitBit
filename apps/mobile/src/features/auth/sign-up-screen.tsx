@@ -7,7 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { router } from "expo-router";
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { passkeyBridge } from "../../platform/passkeys/passkey-bridge";
@@ -20,7 +20,6 @@ import {
   Screen,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
 } from "../../ui";
@@ -341,7 +340,7 @@ export function SignUpScreen(props: {
         />
       </Card>
 
-      <View style={styles.footerRow}>
+      <View className="flex-row items-center justify-center gap-1">
         <Text variant="bodyMedium" color="onSurfaceVariant">
           {t("auth.signUp.haveAccount")}
         </Text>
@@ -357,12 +356,3 @@ export function SignUpScreen(props: {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  footerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: space.xs,
-  },
-});

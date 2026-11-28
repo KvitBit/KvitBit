@@ -41,6 +41,7 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import { AuthServer } from "../../auth/AuthServer";
+import { bindAuthLogging } from "../../auth/logging";
 import { processWorkspaceConsent, verifyWorkspaceConsent } from "../../auth/oauthWorkspace";
 import { HttpConfig } from "../config";
 
@@ -391,13 +392,16 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(
                 accept,
                 oauth_query: parsed.oauthQuery,
               }).pipe(Effect.orDie);
+              const runAuth = yield* bindAuthLogging;
               const response = yield* forwardProviderDecision(providerDecision, () =>
-                auth.handler(
-                  new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
-                    method: "POST",
-                    headers: forwardHeaders(request),
-                    body: providerBody,
-                  }),
+                runAuth(() =>
+                  auth.handler(
+                    new Request(`${config.appOrigin}/api/auth/oauth2/consent`, {
+                      method: "POST",
+                      headers: forwardHeaders(request),
+                      body: providerBody,
+                    }),
+                  ),
                 ),
               );
               if (response.status >= 500)

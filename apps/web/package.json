@@ -7,8 +7,14 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test test",
+    "test:suite": ":",
+    "test:altcha": "bun test test/public/altcha.test.ts",
+    "test:feedback": "bun test test/feedback",
+    "test:verify": "bun test test/verify test/ssr.smoke.test.ts test/analytics.test.ts",
+    "test:pages": "bun test test/documents test/records test/settings test/public/auth-share.test.ts test/public/consent-invite-onboarding.test.ts test/public/public-pages.test.ts",
     "e2e": "playwright test -c e2e/playwright.config.ts"
   },
   "dependencies": {
@@ -16,15 +22,22 @@
     "@kvitbit/api-contract": "workspace:*",
     "@kvitbit/domain": "workspace:*",
     "@kvitbit/ui-port": "workspace:*",
+    "@ui-sdk/core": "0.1.0-beta.16",
+    "@ui-sdk/web": "0.1.0-beta.16",
     "effect": "4.1.4",
+    "hash-wasm": "4.13.0",
+    "posthog-js": "^1.455.4",
     "uqr": "^0.1.3"
   },
   "devDependencies": {
     "@kvitbit/adapters": "workspace:*",
     "@playwright/test": "1.65.1",
+    "@tailwindcss/vite": "4.3.5",
+    "altcha-lib": "2.10.0",
     "fast-check": "4.11.0",
     "happy-dom": "20.14.6",
     "jsqr": "^1.4.0",
+    "tailwindcss": "4.3.5",
     "typescript": "6.0.2",
     "vite": "8.3.8"
   }

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://turborepo.com/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "build": {
+      "dependsOn": ["^transit", "^build"],
+      "env": ["VITE_*"],
+      "passThroughEnv": ["CI"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/assets/brand/**",
+        "!test/**",
+        "!e2e/**",
+        "!**/*.test.*",
+        "!**/*.spec.*",
+        "!**/*.md"
+      ],
+      "outputs": ["dist/**"]
+    },
+    "typecheck": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "$TURBO_DEFAULT$",
+        "$TURBO_ROOT$/packages/adapters/src/altcha/**",
+        "$TURBO_ROOT$/packages/adapters/src/testing/**",
+        "!**/*.md"
+      ],
+      "outputs": ["*.tsbuildinfo"]
+    },
+    "test:suite": {
+      "dependsOn": ["test:altcha", "test:feedback", "test:verify", "test:pages"],
+      "cache": false
+    },
+    "test:altcha": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/page/public/_altcha-solver.ts",
+        "test/public/altcha.test.ts",
+        "$TURBO_ROOT$/packages/adapters/src/altcha/**",
+        "$TURBO_ROOT$/packages/adapters/src/testing/**",
+        "$TURBO_ROOT$/packages/db/drizzle/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:feedback": {
+      "dependsOn": ["^transit"],
+      "inputs": ["package.json", "tsconfig.json", "src/runtime/**", "test/feedback/**"],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:verify": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/verify/**",
+        "test/ssr.smoke.test.ts",
+        "test/analytics.test.ts",
+        "test/support/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    },
+    "test:pages": {
+      "dependsOn": ["^transit"],
+      "inputs": [
+        "package.json",
+        "tsconfig.json",
+        "src/**",
+        "test/documents/**",
+        "test/records/**",
+        "test/settings/**",
+        "test/public/**",
+        "!test/public/altcha.test.ts",
+        "test/support/**"
+      ],
+      "env": ["TZ"],
+      "passThroughEnv": ["CI"],
+      "outputs": []
+    }
+  }
+}

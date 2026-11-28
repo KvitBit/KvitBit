@@ -18,14 +18,21 @@ import {
   RequestKey,
   type RequestOptions,
 } from "@kvitbit/domain/contract";
+import { RequestOutcome } from "@kvitbit/domain/ports";
 import * as Effect from "effect/Effect";
 import * as HttpEffect from "effect/http/HttpEffect";
 import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Option from "effect/Option";
 import * as Record from "effect/Record";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 import * as Str from "effect/String";
+
+export const requestWasReplayed = Effect.flatMap(
+  Effect.serviceOption(RequestOutcome),
+  Option.match({ onNone: () => Effect.succeed(false), onSome: (outcome) => outcome.replayed }),
+);
 
 /**
  * Rule of section 3.2: a missing `If-Match` is 428; core's `Conflict{revision_changed}` becomes

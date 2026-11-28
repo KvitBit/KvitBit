@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import * as Arr from "effect/Array";
 import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import type { ReactElement } from "react";
 import { SessionProvider } from "../../session/session-provider";
 import { clientRoot } from "../../testing/client-root";
@@ -79,7 +80,7 @@ describe("auth screens", () => {
     expect(safeReturnTo(undefined)).toBeNull();
   });
 
-  test("BotProofWidget renders nothing for NotRequired and progress/retry for active/failed", () => {
+  test("BotProofWidget reserves space before showing progress or retry", () => {
     const none = hostTree(
       <BotProofWidget state={{ _tag: "NotRequired" }} onRetry={() => undefined} />,
       withProviders(),
@@ -103,6 +104,14 @@ describe("auth screens", () => {
       withProviders(),
     );
     expect(allText(failed)).toContain("Try again");
+    const slot = findAll<{ className?: string }>(none, "View")[0];
+    expect(slot?.props.className).toContain("min-h-[72px]");
+    expect(findAll<{ className?: string }>(solving, "View")[0]?.props.className).toEqual(
+      slot?.props.className,
+    );
+    expect(findAll<{ className?: string }>(failed, "View")[0]?.props.className).toEqual(
+      slot?.props.className,
+    );
     const retryBtn = findAll<{ onPress?: () => void }>(failed, "Pressable")[0];
     retryBtn?.props.onPress?.();
     expect(retried).toBe(true);
@@ -111,9 +120,18 @@ describe("auth screens", () => {
   test("SignInScreen renders password, magic link, and passkey controls", () => {
     const tree = hostTree(<SignInScreen authClient={fakeAuthClient()} />, withProviders());
     const text = allText(tree);
+    const radios = Arr.map(
+      Arr.filter(
+        findAll<{ accessibilityRole?: string }>(tree, "Pressable"),
+        (el) => el.props.accessibilityRole === "radio",
+      ),
+      (el) => Str.trim(allText(el)),
+    );
+    expect(radios).toEqual(["Password", "Email link"]);
     expect(text).toContain("Sign in to Kvitbit");
     expect(text).toContain("Sign in with a passkey");
-    expect(text).toContain("Email me a sign-in link");
+    expect(text).not.toContain("Sign in with a password");
+    expect(text).not.toContain("Email me a sign-in link");
     expect(text).toContain("Forgot password?");
   });
 

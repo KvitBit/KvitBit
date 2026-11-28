@@ -23,7 +23,7 @@ import {
   type ThemeStyle,
   WorkspaceSlug,
 } from "@kvitbit/domain";
-import { I18n, Theme, ViewModels } from "@kvitbit/ui-port";
+import { I18n, Style, Theme, ViewModels } from "@kvitbit/ui-port";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -957,8 +957,8 @@ describe("static architecture invariants", () => {
     expect(Arr.filter(dependencies, forbiddenPackage)).toEqual([]);
   });
 
-  test("zero raw hex color literals in apps/web/src/styles/pages/**", async () => {
-    const stylesDir = join(WEB_SRC, "styles/pages");
+  test("zero raw hex color literals in apps/web/src/styles/** and full Tailwind @theme inline token parity", async () => {
+    const stylesDir = join(WEB_SRC, "styles");
     const cssFiles = walkFiles(stylesDir, ".css");
     expect(cssFiles.length).toBeGreaterThan(0);
 
@@ -979,5 +979,18 @@ describe("static architecture invariants", () => {
       { concurrency: 4 },
     ).pipe(Effect.map(Arr.getSomes), Effect.runPromise);
     expect(violations).toEqual([]);
+
+    const entryCss = stripCssComments(await Bun.file(join(stylesDir, "index.css")).text());
+    expect(entryCss).toContain('@import "tailwindcss";');
+    expect(entryCss).toContain("@theme inline");
+    expect(entryCss).toContain("--color-*: initial;");
+
+    for (const { tailwindVar, sourceVar } of [
+      ...Style.TAILWIND_COLOR_TOKENS,
+      ...Style.TAILWIND_RADIUS_TOKENS,
+      ...Style.TAILWIND_FONT_TOKENS,
+    ]) {
+      expect(entryCss).toContain(`${tailwindVar}: var(${sourceVar});`);
+    }
   });
 });

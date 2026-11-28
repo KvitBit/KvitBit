@@ -6,18 +6,29 @@
   "exports": {
     ".": "./src/index.ts",
     "./theme": "./src/theme/index.ts",
+    "./style": "./src/style/index.ts",
     "./i18n": "./src/i18n/index.ts",
     "./format": "./src/format/index.ts",
     "./api": "./src/api/index.ts",
     "./view-models": "./src/view-models/index.ts"
   },
   "scripts": {
+    "lint": "biome check --error-on-warnings .",
     "typecheck": "effect-tsgo tsc -p tsconfig.json",
-    "test": "bun test --pass-with-no-tests"
+    "test": "bun test --pass-with-no-tests",
+    "test:suite": ":",
+    "test:api": "bun test test/api",
+    "test:i18n": "bun test test/format test/i18n",
+    "test:style": "bun test test/style",
+    "test:theme": "bun test test/theme",
+    "test:view-models": "bun test test/view-models"
   },
   "dependencies": {
     "@kvitbit/api-contract": "workspace:*",
     "@kvitbit/domain": "workspace:*",
-    "effect": "4.1.4"
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "effect": "4.1.4",
+    "tailwind-merge": "3.7.1"
   }
 }

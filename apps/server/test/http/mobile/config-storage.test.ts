@@ -5,6 +5,7 @@ import * as Arr from "effect/Array";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
 import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as UrlParams from "effect/http/UrlParams";
@@ -12,6 +13,8 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Str from "effect/String";
 import {
@@ -22,6 +25,9 @@ import {
   MobileStorageLocal,
   normalizeFingerprint,
 } from "../../../src/http/mobile";
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
 
 const loadConfig = (env: Record<string, string>) =>
   MobileConfig.pipe(
@@ -92,6 +98,43 @@ describe("MobileConfigLive", () => {
       Effect.runPromise,
     );
     expect(missingBucket._tag).toBe("Failure");
+  });
+
+  test("honors explicit GCS driver in staging/preview even when image default KVITBIT_MOBILE_STORAGE_DIR is set, and rejects implicit local fallback", async () => {
+    for (const env of ["staging", "preview"] as const) {
+      const gcs = await Effect.runPromise(
+        loadConfig({
+          KVITBIT_ENV: env,
+          APP_ORIGIN: "https://staging.kvitbit.cz",
+          KVITBIT_BLOB_DRIVER: "gcs",
+          KVITBIT_BLOB_BUCKET: "shared-blobs",
+          KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
+        }),
+      );
+      expect(gcs.storage).toEqual({ _tag: "gcs", bucket: "shared-blobs", endpoint: undefined });
+
+      const implicitDisk = await Fn.pipe(
+        Effect.result(
+          loadConfig({
+            KVITBIT_ENV: env,
+            APP_ORIGIN: "https://staging.kvitbit.cz",
+            KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
+          }),
+        ),
+        Effect.runPromise,
+      );
+      expect(implicitDisk._tag).toBe("Failure");
+
+      const explicitLocal = await Effect.runPromise(
+        loadConfig({
+          KVITBIT_ENV: env,
+          APP_ORIGIN: "https://staging.kvitbit.cz",
+          KVITBIT_BLOB_DRIVER: "local",
+          KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
+        }),
+      );
+      expect(explicitLocal.storage).toEqual({ _tag: "local", dir: "/var/lib/kvitbit/mobile" });
+    }
   });
 
   test("unescapes PEM signing key and normalizes comma-separated SHA-256 fingerprints", async () => {
@@ -260,7 +303,7 @@ describe("MobileStorageGcs", () => {
               : { items: [{ name: "mobile/releases/1.1.0/release.json" }] };
           return HttpClientResponse.fromWeb(
             request,
-            new Response(JSON.stringify(body), {
+            new Response(encodeJson(body), {
               status: 200,
               headers: { "content-type": "application/json" },
             }),

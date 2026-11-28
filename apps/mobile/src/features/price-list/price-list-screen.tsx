@@ -20,7 +20,7 @@ import * as Rec from "effect/Record";
 import * as Str from "effect/String";
 import { Archive, Pencil, Plus, Tag, X } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -45,7 +45,6 @@ import {
   Screen,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -218,7 +217,7 @@ function PriceListEditor(props: PriceListEditorProps) {
         }
       />
 
-      <View style={styles.actionRow}>
+      <View className="mt-1 flex-row flex-wrap gap-2">
         <Button
           label={t("common.action.save")}
           busy={props.saving}
@@ -259,7 +258,7 @@ export function PriceListContent(props: PriceListContentProps) {
   const hasFilters = Str.trim(props.searchText) !== "" || props.includeArchived;
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {props.workspace.closed ? <Banner tone="warning" text={t("shell.closedWorkspace")} /> : null}
 
       {props.editor !== null ? <PriceListEditor {...props.editor} /> : null}
@@ -307,7 +306,7 @@ export function PriceListContent(props: PriceListContentProps) {
               )}
             </Card>
           ) : (
-            <Card style={styles.listCard}>
+            <Card className="gap-0 p-1">
               {Arr.map(props.visibleItems, (item) => {
                 const vatLabel =
                   item.vat !== null
@@ -322,7 +321,7 @@ export function PriceListContent(props: PriceListContentProps) {
                   currency: item.currency,
                 });
                 return (
-                  <View key={item.id} style={styles.itemWrap}>
+                  <View key={item.id} className="gap-0">
                     <ListRow
                       testID={`price-list-row-${item.id}`}
                       leading={Tag}
@@ -340,7 +339,7 @@ export function PriceListContent(props: PriceListContentProps) {
                         : {})}
                     />
                     {writable && !item.archived ? (
-                      <View style={styles.rowActions}>
+                      <View className="flex-row justify-end gap-1 px-1">
                         <Button
                           kind="text"
                           icon={Pencil}
@@ -702,16 +701,3 @@ export function PriceListScreen() {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  listCard: { padding: space.xs, gap: 0 },
-  actionRow: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, marginTop: space.xs },
-  itemWrap: { gap: 0 },
-  rowActions: {
-    flexDirection: "row",
-    justifyContent: "flex-end",
-    gap: space.xs,
-    paddingHorizontal: space.xs,
-  },
-});

@@ -10,7 +10,7 @@ import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { Plus } from "lucide-react-native";
 import { useCallback, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { runRequestIntent } from "../../runtime/request-intent";
@@ -24,7 +24,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -173,12 +172,12 @@ export function NumberingSection() {
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
       {(allSeries) => (
-        <View style={styles.stack}>
+        <View className="gap-4">
           {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
           {errorState.banner === null ? null : <Banner text={errorState.banner} tone="error" />}
 
           {editable ? (
-            <View style={styles.row}>
+            <View className="flex-row flex-wrap items-center gap-2">
               <Button
                 testID="numbering-add"
                 kind="tonal"
@@ -201,8 +200,8 @@ export function NumberingSection() {
               >
                 {Arr.map(items, (series) => (
                   <Card key={series.id}>
-                    <View style={styles.headerRow}>
-                      <View style={styles.flex}>
+                    <View className="flex-row items-center gap-2">
+                      <View className="flex-1">
                         <Text variant="titleSmall">{series.name}</Text>
                         <Text variant="meta" color="onSurfaceVariant" numeric>
                           {series.pattern} · {series.nextNumber}
@@ -213,7 +212,7 @@ export function NumberingSection() {
                       ) : null}
                     </View>
                     {editable ? (
-                      <View style={styles.row}>
+                      <View className="flex-row flex-wrap items-center gap-2">
                         <Button
                           kind="outlined"
                           label={t("common.action.edit")}
@@ -262,7 +261,7 @@ export function NumberingSection() {
                   }
                   onChangeText={(pattern) => setDraft({ ...draft, pattern })}
                 />
-                <View style={styles.row}>
+                <View className="flex-row flex-wrap items-center gap-2">
                   {Arr.map(PATTERN_TOKENS, (tok) => (
                     <Button
                       key={tok}
@@ -294,7 +293,7 @@ export function NumberingSection() {
                   value={draft.isDefault}
                   onChange={(isDefault) => setDraft({ ...draft, isDefault })}
                 />
-                <View style={styles.row}>
+                <View className="flex-row flex-wrap items-center gap-2">
                   <Button
                     testID="numbering-save"
                     kind="filled"
@@ -320,10 +319,3 @@ export function NumberingSection() {
     </RemoteView>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-});

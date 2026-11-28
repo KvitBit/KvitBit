@@ -44,6 +44,7 @@ import {
   selectField,
   skeleton,
 } from "../../ui/kit";
+import { cn, ui } from "../../ui/styles";
 import { callApi, failureMessage, redirectLocation } from "./_shared";
 
 export const Route = RouteCases.McpConsent;
@@ -309,35 +310,37 @@ export const title: {
 const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
 
+  const consentShellClass = "mx-auto flex w-full max-w-[680px] flex-col gap-4.5 px-5 pt-7 pb-16";
+
   if (model.redirectingTo !== null) {
     return h.div
-      .class("kb-consent-shell")
+      .class(consentShellClass)
       .attr("aria-busy", String(true))
       .children([card(h, [h.p.children([local(ctx.locale, "redirecting")])])]);
   }
 
   if (model.consent._tag === "Loading" || model.consent._tag === "Idle") {
     return h.div
-      .class("kb-consent-shell")
+      .class(consentShellClass)
       .attr("aria-busy", String(true))
       .children([card(h, [skeleton(h, "60%", "1.5rem"), skeleton(h, "100%", "12rem")])]);
   }
 
   if (model.consent._tag === "Failed") {
     const expired = model.consent.failure.tag === "NotFound";
-    return h.div.class("kb-consent-shell").children([
+    return h.div.class(consentShellClass).children([
       card(h, [
-        h.div.class("kb-stack").children([
+        h.div.class(ui.stack).children([
           h.div
-            .class("kb-row")
+            .class(ui.row)
             .children([
               icon(h, "alert", 20),
               h.h1.children([expired ? t.t("mcp.consent.expired") : t.t("common.state.error")]),
             ]),
           ...(!expired
             ? [
-                h.p.class("kb-muted").children([failureMessage(t, model.consent.failure)]),
-                h.div.class("kb-row").children([
+                h.p.class(ui.muted).children([failureMessage(t, model.consent.failure)]),
+                h.div.class(ui.row).children([
                   button(h, {
                     label: t.t("common.action.retry"),
                     onClick: Message.ClickedRetry(),
@@ -367,20 +370,21 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     (m) => m === "custom" || ViewModels.presetAvailable(picker, m),
   );
 
-  return h.div.class("kb-consent-shell").children([
+  return h.div.class(consentShellClass).children([
     card(h, [
-      h.div.class("kb-consent-client").children([
+      h.div.class("flex items-center gap-3.5").children([
         h.span
-          .class("kb-consent-client__avatar")
+          .class(
+            "inline-flex h-11 w-11 flex-none items-center justify-center rounded-control bg-primary-container font-display text-[1.125rem] text-on-primary-container",
+          )
           .attr("aria-hidden", String(true))
           .children([Str.toUpperCase(Str.slice(0, 1)(consent.client.name))]),
         h.div
-          .class("kb-stack")
-          .style({ "--kb-gap": "2px" })
+          .class("flex flex-col gap-0.5")
           .children([
             h.h1.children([t.t("mcp.consent.title", { client: consent.client.name })]),
             h.p
-              .class("kb-small kb-muted")
+              .class(cn(ui.small, ui.muted))
               .children([t.t("mcp.consent.redirectHost", { host: consent.client.redirectHost })]),
           ]),
       ]),
@@ -391,9 +395,9 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ...(consent.workspaces.length === 0
       ? [
           card(h, [
-            h.div.class("kb-stack").children([
+            h.div.class(ui.stack).children([
               banner(h, { text: t.t("mcp.consent.noWorkspace"), tone: "info" }),
-              h.div.class("kb-row").children([
+              h.div.class(ui.row).children([
                 linkButton(h, {
                   label: local(ctx.locale, "createWorkspace"),
                   href: href({ _tag: "Onboarding" }),
@@ -410,7 +414,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ]
       : [
           card(h, [
-            h.div.class("kb-stack").children([
+            h.div.class(ui.stack).children([
               selectField(h, {
                 id: "consent-workspace",
                 label: t.t("mcp.consent.workspace"),
@@ -443,7 +447,7 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   ]
                 : []),
             ]),
-            h.div.class("kb-stack").children([
+            h.div.class(ui.stack).children([
               segmented(h, {
                 label: t.t("mcp.consent.permissions"),
                 selected: model.accessMode,
@@ -456,74 +460,89 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     mode: id === "read" || id === "read_write" || id === "custom" ? id : "custom",
                   }),
               }),
-              h.table.class("kb-scope-matrix").children([
-                h.thead.children([
-                  h.tr.children([
-                    h.th.attr("scope", "col").children([local(ctx.locale, "areaColumn")]),
-                    h.th
-                      .attr("scope", "col")
-                      .class("kb-center")
-                      .children([local(ctx.locale, "readColumn")]),
-                    h.th
-                      .attr("scope", "col")
-                      .class("kb-center")
-                      .children([local(ctx.locale, "writeColumn")]),
+              h.table
+                .class("w-full border-collapse text-[0.8125rem]")
+                .attr("data-slot", "scope-matrix")
+                .children([
+                  h.thead.children([
+                    h.tr.children([
+                      h.th
+                        .class("border-b border-outline-variant px-2.5 py-2 text-left")
+                        .attr("scope", "col")
+                        .children([local(ctx.locale, "areaColumn")]),
+                      h.th
+                        .class("w-[84px] border-b border-outline-variant px-2.5 py-2 text-center")
+                        .attr("scope", "col")
+                        .children([local(ctx.locale, "readColumn")]),
+                      h.th
+                        .class("w-[84px] border-b border-outline-variant px-2.5 py-2 text-center")
+                        .attr("scope", "col")
+                        .children([local(ctx.locale, "writeColumn")]),
+                    ]),
                   ]),
+                  h.tbody.children(
+                    Arr.map(rows, (row) => {
+                      const areaLabel = t.translate(
+                        I18n.enumText({ name: "scopeArea", value: row.area }),
+                      );
+                      const readScope: Scope = `${row.area}:read`;
+                      const writeScope: Scope = `${row.area}:write`;
+                      return h.tr
+                        .key(row.area)
+                        .class("[&:last-child>td]:border-b-0")
+                        .children([
+                          h.td
+                            .class("border-b border-outline-variant px-2.5 py-2 text-left")
+                            .children([areaLabel]),
+                          h.td
+                            .class(
+                              "w-[84px] border-b border-outline-variant px-2.5 py-2 text-center",
+                            )
+                            .children([
+                              withAttributes(h.input.class(), [
+                                (element) => element.class("h-4 w-4 accent-primary"),
+                                (element) => element.attr("type", "checkbox"),
+                                (element) =>
+                                  element.attr(
+                                    "aria-label",
+                                    `${areaLabel} — ${local(ctx.locale, "readColumn")}`,
+                                  ),
+                                (element) =>
+                                  element.checked(row.level === "read" || row.level === "write"),
+                                (node) => (row.readEnabled ? node : node.disabled(true)),
+                                (element) =>
+                                  element.on("change", () =>
+                                    Message.ToggledScope({ scope: readScope }),
+                                  ),
+                              ]),
+                            ]),
+                          h.td
+                            .class(
+                              "w-[84px] border-b border-outline-variant px-2.5 py-2 text-center",
+                            )
+                            .children([
+                              withAttributes(h.input.class(), [
+                                (element) => element.class("h-4 w-4 accent-primary"),
+                                (element) => element.attr("type", "checkbox"),
+                                (element) =>
+                                  element.attr(
+                                    "aria-label",
+                                    `${areaLabel} — ${local(ctx.locale, "writeColumn")}`,
+                                  ),
+                                (element) => element.checked(row.level === "write"),
+                                (node) => (row.writeEnabled ? node : node.disabled(true)),
+                                (element) =>
+                                  element.on("change", () =>
+                                    Message.ToggledScope({ scope: writeScope }),
+                                  ),
+                              ]),
+                            ]),
+                        ]);
+                    }),
+                  ),
                 ]),
-                h.tbody.children(
-                  Arr.map(rows, (row) => {
-                    const areaLabel = t.translate(
-                      I18n.enumText({ name: "scopeArea", value: row.area }),
-                    );
-                    const readScope: Scope = `${row.area}:read`;
-                    const writeScope: Scope = `${row.area}:write`;
-                    return h.tr
-                      .key(row.area)
-                      .children([
-                        h.td.children([areaLabel]),
-                        h.td
-                          .class("kb-center")
-                          .children([
-                            withAttributes(h.input.class(), [
-                              (element) => element.attr("type", "checkbox"),
-                              (element) =>
-                                element.attr(
-                                  "aria-label",
-                                  `${areaLabel} — ${local(ctx.locale, "readColumn")}`,
-                                ),
-                              (element) =>
-                                element.checked(row.level === "read" || row.level === "write"),
-                              (node) => (row.readEnabled ? node : node.disabled(true)),
-                              (element) =>
-                                element.on("change", () =>
-                                  Message.ToggledScope({ scope: readScope }),
-                                ),
-                            ]),
-                          ]),
-                        h.td
-                          .class("kb-center")
-                          .children([
-                            withAttributes(h.input.class(), [
-                              (element) => element.attr("type", "checkbox"),
-                              (element) =>
-                                element.attr(
-                                  "aria-label",
-                                  `${areaLabel} — ${local(ctx.locale, "writeColumn")}`,
-                                ),
-                              (element) => element.checked(row.level === "write"),
-                              (node) => (row.writeEnabled ? node : node.disabled(true)),
-                              (element) =>
-                                element.on("change", () =>
-                                  Message.ToggledScope({ scope: writeScope }),
-                                ),
-                            ]),
-                          ]),
-                      ]);
-                  }),
-                ),
-              ]),
-              h.p.class("kb-footnote").children([t.t("mcp.consent.revokeHint")]),
-              h.div.class("kb-spread").children([
+              h.p.class(ui.footnote).children([t.t("mcp.consent.revokeHint")]),
+              h.div.class(ui.spread).children([
                 button(h, {
                   label: t.t("mcp.consent.deny"),
                   onClick: Message.ClickedDeny(),

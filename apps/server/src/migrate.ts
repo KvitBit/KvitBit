@@ -1,3 +1,4 @@
+import * as Str from "effect/String";
 /**
  * Explicit migration runner (`bun apps/server/src/migrate.ts`), per board #871/#913 and rule S5.
  *
@@ -11,15 +12,14 @@
  */
 
 import { fileURLToPath } from "node:url";
-import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import { PgClient } from "@effect/sql-pg";
 import { clusterStorageMigrationsLayer } from "@kvitbit/adapters/jobs";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
+import { runServerMain } from "./logging/logger";
 
 /** Resolves `packages/db/drizzle` via the `@kvitbit/db` workspace package. */
 export const defaultMigrationsFolder = (): string =>
@@ -108,5 +108,5 @@ const isMain =
   (Str.endsWith("migrate.ts")(entryPath) || Str.endsWith("migrate.js")(entryPath));
 
 if (isMain) {
-  NodeRuntime.runMain(runMigrations().pipe(Effect.provide(UnpooledOwnerDatabaseLive)));
+  runServerMain(runMigrations().pipe(Effect.provide(UnpooledOwnerDatabaseLive)));
 }

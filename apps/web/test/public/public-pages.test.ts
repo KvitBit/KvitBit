@@ -78,7 +78,7 @@ describe("Landing page (Screen 01)", () => {
 
   test("SSR renders landing in cs and en with Persuade hero and feature cards", async () => {
     const cs = await renderPath("/", { locale: "cs", session: anonymous });
-    expect(cs.html).toContain("kb-landing-hero");
+    expect(cs.html).toContain('data-slot="landing-hero"');
     expect(cs.html).toContain("kb-pattern");
     expect(cs.html).toContain("kvitbit-lockup-horizontal");
     expect(cs.html).toContain("/sign-up");
@@ -92,8 +92,8 @@ describe("Landing page (Screen 01)", () => {
       [cs.html, "Buď si kvit", "Fakturace pro české živnostníky a malé firmy"],
       [en.html, "Stay square", "Invoicing for Czech freelancers and small companies"],
     ] as const) {
-      expect(html).toContain(`<span class="kb-small kb-muted">${tagline}</span>`);
-      expect(html).toContain(`<h1 class="kb-landing-hero__title">${heading}</h1>`);
+      expect(html).toMatch(new RegExp(`data-slot="landing-tagline"[^>]*>${tagline}</span>`));
+      expect(html).toMatch(new RegExp(`data-slot="landing-title"[^>]*>${heading}</h1>`));
       expect(Str.split(html, heading)).toHaveLength(2);
     }
   });

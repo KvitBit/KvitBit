@@ -3,12 +3,18 @@ import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 import { makeFeedbackConfig } from "../../src/http/feedback/access";
+import { captureAnalytics } from "../analytics-fixture";
 import { json, makeHarness, ORIGIN } from "./harness";
+
+const decodeResponse = Schema.decodeUnknownResult(
+  Schema.Struct({ user: Schema.Struct({ id: Schema.String }) }),
+);
 
 const ownerEmail = "owner@example.cz";
 const secondOwnerEmail = "second-owner@example.cz";
@@ -21,7 +27,9 @@ const configured = makeFeedbackConfig(
 const issueResponse = async (..._args: Parameters<typeof fetch>) =>
   Response.json({ number: 42 }, { status: 201 });
 const upstream = mock(issueResponse);
+const analytics = captureAnalytics();
 const app = makeHarness({
+  analytics: analytics.layer,
   config: { feedback: configured },
   feedbackFetch: Object.assign(upstream, { preconnect: () => undefined }),
 });
@@ -45,6 +53,7 @@ const setVerified = (email: string, verified: boolean) =>
 const sessionFor = async (email: string) => {
   const signup = await authPost("sign-up/email", { name: email, email, password });
   if (signup.status !== 200) throw new Error(`Better Auth signup returned ${signup.status}`);
+  const { user } = decodeResponse(await signup.json()).pipe(Result.getOrThrow);
   await setVerified(email, true);
   const signin = await authPost("sign-in/email", { email, password });
   if (signin.status !== 200) throw new Error(`Better Auth signin returned ${signin.status}`);
@@ -62,7 +71,7 @@ const sessionFor = async (email: string) => {
   if (cookie === "" || bearer === null || bearer === "") {
     throw new Error("Better Auth did not return session credentials");
   }
-  return { cookie, authorization: `Bearer ${bearer}` };
+  return { cookie, authorization: `Bearer ${bearer}`, userId: user.id };
 };
 
 const pin = {
@@ -128,6 +137,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   await app.run(TestClock.adjust("1 minute"));
   upstream.mockReset().mockImplementation(issueResponse);
+  analytics.capture.mockClear();
 });
 
 afterAll(async () => app.dispose());
@@ -235,6 +245,15 @@ test("submits one labeled issue with structured Markdown and no active user-supp
     title: "Visual feedback: The button wraps",
   });
   expect(upstream).toHaveBeenCalledTimes(1);
+  expect(analytics.capture.mock.calls).toEqual([
+    [
+      {
+        event: "feedback_submitted",
+        distinctId: owner.userId,
+        properties: { hasPin: true },
+      },
+    ],
+  ]);
   const outbound = upstreamRequest();
   expect(outbound.url).toBe("https://api.github.com/repos/example/kvitbit/issues");
   expect(outbound.method).toBe("POST");

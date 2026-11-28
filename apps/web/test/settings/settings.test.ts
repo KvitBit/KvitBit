@@ -1,6 +1,8 @@
 import { describe, expect, it as test } from "bun:test";
 import type { View } from "@effect/ui";
 import { Html, HtmlServer } from "@effect/ui/html";
+import { HtmlScene } from "@effect/ui/html/testing";
+import { Locator } from "@effect/ui/testing";
 import {
   ALL_SCOPES,
   ApiKeyId,
@@ -24,7 +26,7 @@ import { ViewModels } from "@kvitbit/ui-port";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-
+import { definePage } from "../../src/app/page";
 import {
   czechAccountFromIban,
   previewNumberingPattern,
@@ -168,6 +170,69 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     expect(populated.outMessage?._tag).toBe("Toast");
   });
 
+  test("splits pasted full addresses across empty Issuing Entity address inputs", async () => {
+    const route: Settings.Route = { _tag: "Settings", ws: WS, section: "issuingEntity" };
+    const ctx = ctxFor({ route, locale: "en" });
+    const SettingsPage = definePage("Settings", Settings);
+    const streetInput = Locator.attr("id", "kb-entity-street");
+    const cityInput = Locator.attr("id", "kb-entity-city");
+    const postalInput = Locator.attr("id", "kb-entity-postal");
+    const countryInput = Locator.attr("id", "kb-entity-country");
+    const loadedModel = Settings.update(
+      Settings.init(route, ctx).model,
+      Settings.Message.GotWorkspace({
+        seq: 1,
+        data: {
+          ...sampleWorkspace,
+          issuingEntity: {
+            ...sampleWorkspace.issuingEntity,
+            address: { street: "", city: "", postalCode: "", country: "CZ" },
+          },
+        },
+      }),
+      ctx,
+    ).model;
+
+    await Effect.gen(function* () {
+      const scene = yield* HtmlScene.make(SettingsPage, ctx);
+      scene
+        .given(loadedModel)
+        .fire(streetInput, "paste", { text: "Friedrichstraße 123, 10117 Berlin, Germany" })
+        .expectDefaultPrevented()
+        .expect(streetInput)
+        .toHaveValue("Friedrichstraße 123")
+        .expect(cityInput)
+        .toHaveValue("Berlin")
+        .expect(postalInput)
+        .toHaveValue("10117")
+        .expect(countryInput)
+        .toHaveValue("DE");
+    }).pipe(Effect.scoped, Effect.runPromise);
+
+    // Read-only members ignore PastedEntityAddress messages.
+    const readonlyCtx = ctxFor({
+      route,
+      locale: "en",
+      session: {
+        _tag: "SignedIn",
+        user: DEMO_USER,
+        workspaces: [{ ...DEMO_WORKSPACE, role: "accountant" }],
+      },
+    });
+    const init = Settings.init(route, readonlyCtx).model;
+    const after = Settings.update(
+      init,
+      Settings.Message.PastedEntityAddress({
+        street: "A 1",
+        city: "B",
+        postalCode: "110 00",
+        country: "CZ",
+      }),
+      readonlyCtx,
+    );
+    expect(after.model.entityForm.street).toBe("");
+  });
+
   test("handles Tax Regime history and scheduled change confirmation", async () => {
     const route: Settings.Route = { _tag: "Settings", ws: WS, section: "taxRegime" };
     const ctx = ctxFor({ route, locale: "en" });
@@ -240,8 +305,8 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
     let { model } = Settings.init(route, ctx);
 
     const classicHtml = await renderText((h) => Settings.view(model, ctx, h));
-    expect(classicHtml).toContain("kb-pdf-mini--classic");
-    expect(classicHtml).not.toContain("kb-pdf-mini--modern");
+    expect(classicHtml).toContain('data-slot="pdf-mini-classic"');
+    expect(classicHtml).not.toContain('data-slot="pdf-mini-modern"');
 
     model = Settings.update(
       model,
@@ -249,8 +314,8 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
       ctx,
     ).model;
     const modernHtml = await renderText((h) => Settings.view(model, ctx, h));
-    expect(modernHtml).toContain("kb-pdf-mini--modern");
-    expect(modernHtml).not.toContain("kb-pdf-mini--classic");
+    expect(modernHtml).toContain('data-slot="pdf-mini-modern"');
+    expect(modernHtml).not.toContain('data-slot="pdf-mini-classic"');
 
     model = Settings.update(
       model,
@@ -354,7 +419,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
     // Verify all 10 areas appear in the rendered scope matrix
     const matrixHtml = await renderText((h) => Settings.view(model, ctx, h));
-    expect(matrixHtml).toContain("kb-scope-matrix");
+    expect(matrixHtml).toContain('data-slot="scope-matrix"');
     expect(matrixHtml).toContain("Documents");
     expect(matrixHtml).toContain("Share links");
 
@@ -480,7 +545,7 @@ describe("Settings page (Screens 18-21 & More hub)", () => {
 
   test("server-renders Settings and More routes cleanly via SSR", async () => {
     const s1 = await renderPath(`/w/${WS}/settings/branding`, { locale: "cs", session: signedIn });
-    expect(s1.html).toContain("kb-pdf-mini--classic");
+    expect(s1.html).toContain('data-slot="pdf-mini-classic"');
     const s2 = await renderPath(`/w/${WS}/settings/api-keys`, { locale: "en", session: signedIn });
     expect(s2.html).toContain("API keys");
     const s3 = await renderPath(`/w/${WS}/more`, { locale: "cs", session: signedIn });

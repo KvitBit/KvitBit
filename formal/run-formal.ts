@@ -511,11 +511,17 @@ const runTlc = Effect.fn("Formal.runTlc")(function* (
   const spec = path.resolve(REPO_ROOT, r.spec);
   const config = path.resolve(REPO_ROOT, r.config);
   const slug = Str.replace(TLC_LOG_SLUG_UNSAFE_CHARS, "_")(r.label);
-  const metadir = path.join(CACHE_DIR, "tlc", slug);
+  const runKey = `${slug}.${process.pid}`;
+  const metadir = path.join(CACHE_DIR, "tlc", runKey);
+  // SANY unpacks standard modules without atomic rename. Give each TLC process its own directory.
+  const tmpdir = path.join(CACHE_DIR, "tmp", runKey);
   yield* fs.remove(metadir, { recursive: true, force: true });
+  yield* fs.remove(tmpdir, { recursive: true, force: true });
+  yield* fs.makeDirectory(tmpdir, { recursive: true });
   yield* fs.makeDirectory(logDir, { recursive: true });
   const args = [
     "-XX:+UseParallelGC",
+    `-Djava.io.tmpdir=${tmpdir}`,
     "-cp",
     tools.jar,
     "tlc2.TLC",
@@ -531,6 +537,7 @@ const runTlc = Effect.fn("Formal.runTlc")(function* (
   const log = path.join(logDir, `${slug}.log`);
   yield* fs.writeFileString(log, `$ ${tools.java} ${Arr.join(args, " ")}\n${res.output}`);
   yield* fs.remove(metadir, { recursive: true, force: true });
+  yield* fs.remove(tmpdir, { recursive: true, force: true });
   const outcome: TlcOutcome = res.timedOut
     ? { verdict: "timeout", seconds: r.timeoutSeconds }
     : classifyTlc(res.status, res.output);

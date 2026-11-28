@@ -1,4 +1,4 @@
-import { FeedbackSubmission } from "@kvitbit/api-contract";
+import { FEEDBACK_LIMITS, FeedbackSubmission } from "@kvitbit/api-contract";
 import { expect, type Page, test } from "@playwright/test";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -59,8 +59,146 @@ if (!("Bun" in globalThis)) {
     await session(page, false);
     await page.goto(dashboard);
     await expect(page.locator("#main h1")).toBeVisible();
+    await page.keyboard.press("k");
     await expect(page.locator(overlay)).toHaveCount(0);
     expect(loaded).toEqual([]);
+  });
+
+  test("toggles picking with k and leaves text entry alone", async ({ page }, info) => {
+    await session(page, true);
+    await page.goto(dashboard);
+    const picker = page.locator(overlay);
+    const launch = picker.getByRole("button", { name: "Visual feedback", exact: true });
+    const stop = picker.getByRole("button", { name: "Stop picking", exact: true });
+    const hint = picker.locator("#pick kbd");
+    await expect(launch).toHaveAttribute("aria-keyshortcuts", "k");
+    await expect(hint).toHaveText("K");
+    await expect(hint).toBeVisible({ visible: info.project.name === "desktop" });
+
+    await page.keyboard.press("k");
+    await expect(stop).toHaveAttribute("aria-pressed", "true");
+    await expect(hint).toHaveText("K");
+    await page.keyboard.press("k");
+    await expect(launch).toHaveAttribute("aria-pressed", "false");
+    await expect(launch).toBeFocused();
+
+    await page.evaluate(() => {
+      const input = document.createElement("input");
+      input.id = "shortcut-input";
+      const textarea = document.createElement("textarea");
+      textarea.id = "shortcut-textarea";
+      const editor = document.createElement("div");
+      editor.id = "shortcut-editor";
+      editor.contentEditable = "true";
+      document.body.append(input, textarea, editor);
+    });
+    for (const id of ["shortcut-input", "shortcut-textarea", "shortcut-editor"]) {
+      const field = page.locator(`#${id}`);
+      await field.focus();
+      await page.keyboard.press("k");
+      const contents = () => (id === "shortcut-editor" ? field.textContent() : field.inputValue());
+      await expect.poll(contents).toBe("k");
+      await expect(launch).toHaveAttribute("aria-pressed", "false");
+    }
+
+    await launch.focus();
+    await page.keyboard.press("k");
+    await page.locator("#main h1").click();
+    const comment = picker.getByRole("textbox", { name: "What should change?" });
+    await expect(comment).toBeFocused();
+    await page.keyboard.press("k");
+    await expect(comment).toHaveValue("k");
+    await expect(launch).toHaveAttribute("aria-pressed", "false");
+
+    await picker.getByRole("button", { name: "Close" }).focus();
+    await page.keyboard.press("k");
+    await expect(stop).toHaveAttribute("aria-pressed", "true");
+    await expect(comment).toBeHidden();
+  });
+
+  test("keeps Ctrl+K and Cmd+K for the workspace switcher", { tag: "@desktop" }, async ({
+    page,
+  }) => {
+    await session(page, true);
+    await page.goto(dashboard);
+    const launch = page.locator(overlay).getByRole("button", { name: "Visual feedback" });
+    const switcher = page.getByTestId("workspace-switcher");
+    await expect(launch).toBeVisible();
+    for (const [platform, key] of [
+      ["Linux x86_64", "Control+k"],
+      ["MacIntel", "Meta+k"],
+    ] as const) {
+      await page.evaluate((navigatorPlatform) => {
+        Object.defineProperty(navigator, "platform", {
+          value: navigatorPlatform,
+          configurable: true,
+        });
+      }, platform);
+      await page.keyboard.press(key);
+      await expect(switcher).toHaveAttribute("aria-expanded", "true");
+      await expect(launch).toHaveAttribute("aria-pressed", "false");
+      await switcher.click();
+      await expect(switcher).toHaveAttribute("aria-expanded", "false");
+    }
+  });
+
+  test("ignores k after the pathname changes and at the pin limit", async ({ page }) => {
+    await session(page, true);
+    await page.goto(dashboard);
+    const picker = page.locator(overlay);
+    const launch = picker.getByRole("button", { name: "Visual feedback", exact: true });
+    await expect(launch).toBeEnabled();
+    const unhandled = await page.evaluate((pinLimit) => {
+      const originalUrl = location.href;
+      history.replaceState(history.state, "", "/legal/terms");
+      const unhandledKey = document.body.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "k", bubbles: true, cancelable: true }),
+      );
+      history.replaceState(history.state, "", originalUrl);
+
+      const targets = document.createElement("section");
+      for (let i = 1; i <= pinLimit; i++) {
+        const target = document.createElement("p");
+        target.id = `shortcut-pin-${i}`;
+        target.tabIndex = -1;
+        target.textContent = `Shortcut pin ${i}`;
+        targets.append(target);
+      }
+      document.querySelector("#main")?.append(targets);
+      return unhandledKey;
+    }, FEEDBACK_LIMITS.pins);
+    expect(unhandled).toBe(true);
+    await expect(launch).toHaveAttribute("aria-pressed", "false");
+
+    for (let i = 1; i <= FEEDBACK_LIMITS.pins; i++) {
+      await launch.focus();
+      await page.keyboard.press("k");
+      await page.locator(`#shortcut-pin-${i}`).press("Enter");
+      await expect(picker.getByText(`Pin ${i} of ${i}`)).toBeVisible();
+    }
+    const comment = picker.getByRole("textbox", { name: "What should change?" });
+    await expect(launch).toBeDisabled();
+    await picker.getByRole("button", { name: "Close" }).focus();
+    await page.keyboard.press("k");
+    await expect(launch).toHaveAttribute("aria-pressed", "false");
+    await expect(comment).toBeVisible();
+  });
+
+  test.describe("Czech labels", () => {
+    test.use({ locale: "cs-CZ" });
+
+    test("keeps the picker button's translated accessible names", async ({ page }) => {
+      await session(page, true);
+      await page.goto(dashboard);
+      const picker = page.locator(overlay);
+      await expect(
+        picker.getByRole("button", { name: "Vizuální zpětná vazba", exact: true }),
+      ).toHaveAttribute("aria-keyshortcuts", "k");
+      await page.keyboard.press("k");
+      await expect(
+        picker.getByRole("button", { name: "Ukončit výběr", exact: true }),
+      ).toHaveAttribute("aria-pressed", "true");
+    });
   });
 
   test("lets an owner pick multiple elements and send feedback to GitHub", async ({
@@ -68,15 +206,19 @@ if (!("Bun" in globalThis)) {
   }, info) => {
     const submissions: ReturnType<typeof readSubmission>[] = [];
     const issueUrl = "https://github.com/example/kvitbit/issues/42";
+    const firstResponse = Promise.withResolvers<void>();
     await session(page, true);
     await page.route("**/api/feedback", async (route) => {
       submissions.push(readSubmission(route.request().postData()));
-      if (submissions.length === 1) await route.fulfill({ status: 502, json: {} });
-      else
+      if (submissions.length === 1) {
+        await firstResponse.promise;
+        await route.fulfill({ status: 502, json: {} });
+      } else {
         await route.fulfill({
           status: 201,
           json: { issueNumber: 42, issueUrl, title: "Dashboard" },
         });
+      }
     });
     const loaded = page.waitForRequest((request) => isFeedbackAsset(request.url()));
     await page.goto(`${dashboard}?token=fixture-secret#private-fragment`);
@@ -126,7 +268,21 @@ if (!("Bun" in globalThis)) {
       );
     });
     const send = picker.getByRole("button", { name: "Send to GitHub" });
-    await send.click();
+    try {
+      await send.click();
+      await expect(launch).toBeDisabled();
+      expect(
+        await page.evaluate(() =>
+          document.body.dispatchEvent(
+            new KeyboardEvent("keydown", { key: "k", bubbles: true, cancelable: true }),
+          ),
+        ),
+      ).toBe(true);
+      await expect(launch).toHaveAttribute("aria-pressed", "false");
+      await expect(comment).toBeVisible();
+    } finally {
+      firstResponse.resolve();
+    }
     await expect(picker.getByRole("alert")).toHaveText("Feedback could not be sent. Try again.");
     await expect(comment).toHaveValue("Align the heading and the summary.");
     await send.click();
@@ -180,8 +336,8 @@ if (!("Bun" in globalThis)) {
   }) => {
     await session(page, true);
     await page.goto(`${dashboard}/documents/0193a000-0000-7000-8000-000000000259?tab=share`);
-    const row = page.locator(".kb-share-url");
-    const link = row.locator("span.kb-mono");
+    const row = page.locator('[data-slot="share-url"]');
+    const link = row.locator("span[data-feedback-private]");
     await expect(link).toContainText("/i/demo-share-token-0041");
     const picker = page.locator(overlay);
     await picker.getByRole("button", { name: "Visual feedback" }).click();
@@ -203,7 +359,7 @@ if (!("Bun" in globalThis)) {
     await page.goto(`${dashboard}/settings/issuing-entity`);
     const field = page.locator("#kb-entity-name");
     await field.fill("fixture-private-form-value");
-    const formGrid = page.locator(".kb-form-grid").filter({ has: field });
+    const formGrid = page.locator('[data-slot="form-grid"]').filter({ has: field });
     await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
     await formGrid.scrollIntoViewIfNeeded();
     await formGrid.dispatchEvent("click");
@@ -242,6 +398,18 @@ if (!("Bun" in globalThis)) {
     await page.getByRole("button", { name: "Sign out" }).click();
     await expect(page).toHaveURL(signInPathPattern);
     await expect(picker).toHaveCount(0);
+    expect(
+      await page.evaluate(() => {
+        // Return to the former path without remounting so a leaked listener would handle k.
+        const signedOutUrl = location.href;
+        history.replaceState(history.state, "", "/legal/terms");
+        const unhandled = document.body.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "k", bubbles: true, cancelable: true }),
+        );
+        history.replaceState(history.state, "", signedOutUrl);
+        return unhandled;
+      }),
+    ).toBe(true);
   });
 
   test("restores diagnostic handlers if the picker fails to mount", async ({ page }) => {

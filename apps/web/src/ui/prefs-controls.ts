@@ -1,8 +1,6 @@
 import type { Html } from "@effect/ui/html";
 /**
- * Viewer preference controls: language (cs/en), colour mode, style (Elegant/Cozy), contrast and
- * built-in theme preset. Compact form sits in the top bar and public header; the full form is
- * reused by the Account appearance tab and the Branding theme customizer.
+ * Language and colour mode controls shared by the top bar and public header.
  */
 import { Theme } from "@kvitbit/ui-port";
 import * as Arr from "effect/Array";
@@ -29,6 +27,7 @@ const localeSelect = <M>(
       { value: "en", label: LOCALE_LABEL.en },
     ],
     onChange: (v) => onChange({ ...prefs, locale: v === "en" ? "en" : "cs" }),
+    compact: true,
   });
 
 const modeSelect = <M>(
@@ -47,6 +46,7 @@ const modeSelect = <M>(
       label: t.translate(Theme.modeNameText(m)),
     })),
     onChange: (v) => onChange({ ...prefs, mode: v === "light" || v === "dark" ? v : "system" }),
+    compact: true,
   });
 
 /** Top-bar cluster: language + mode. */
@@ -57,7 +57,7 @@ const compactPrefsImpl = <M>(
   onChange: (p: Prefs) => M,
 ): Markup<M> =>
   h.div
-    .class("kb-prefs")
+    .class("flex items-center gap-1.5")
     .children([localeSelect(h, prefs, onChange), modeSelect(h, t, prefs, onChange)]);
 
 export const compactPrefs: {

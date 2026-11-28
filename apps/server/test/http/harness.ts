@@ -24,6 +24,7 @@ import {
   WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
+import type { EmailSender } from "@kvitbit/domain/ports";
 import * as Arr from "effect/Array";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -47,6 +48,7 @@ import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
 import { HttpConfigTest, HttpRoutesLive, RateLimiterMemory } from "../../src/http";
 import { acceptLanguageLocale, bearerToken } from "../../src/http/edge/request";
 import { ServerDocumentProjectionsLive } from "../../src/projections/documents";
+import { type Analytics, AnalyticsNoop } from "../../src/runtime/analytics";
 import { TestDatabase } from "./database";
 
 export const ORIGIN = "https://kvitbit.test";
@@ -131,7 +133,10 @@ export interface HarnessOptions extends TestCoreOptions {
     | Layer.Layer<BotProtection>
     | Layer.Layer<BotProtection, never, import("effect/sql").SqlClient.SqlClient>;
   readonly authOverrides?: AuthServerOverrides;
+  readonly authEmailSender?: Layer.Layer<EmailSender>;
+  readonly logger?: Layer.Layer<never>;
   readonly config?: Parameters<typeof HttpConfigTest>[0];
+  readonly analytics?: Layer.Layer<Analytics>;
   readonly feedbackFetch?: typeof globalThis.fetch;
 }
 
@@ -145,16 +150,19 @@ export const makeHarness = (options: HarnessOptions = {}) => {
   const projectedTestCore = ServerDocumentProjectionsLive.pipe(
     Layer.provideMerge(TestCore(options)),
   );
-  const dbAndCore = Layer.mergeAll(projectedTestCore, TestDatabase, configLayer).pipe(
-    Layer.provideMerge(TestClock.layer()),
-  );
+  const dbAndCore = Layer.mergeAll(
+    projectedTestCore,
+    TestDatabase,
+    configLayer,
+    options.analytics ?? AnalyticsNoop,
+  ).pipe(Layer.provideMerge(TestClock.layer()));
   const botLayer = (options.botProtection ?? NoopBotProtection).pipe(Layer.provide(dbAndCore));
   const baseCore = Layer.merge(dbAndCore, botLayer);
   const authLayer = (
     options.authOverrides === undefined
       ? AuthServerLive
       : makeAuthServerLayer(options.authOverrides)
-  ).pipe(Layer.provide(baseCore));
+  ).pipe(Layer.provide(options.authEmailSender ?? Layer.empty), Layer.provide(baseCore));
   const core = Layer.merge(baseCore, authLayer);
   const resolverLayer =
     options.principalResolver === "live"
@@ -170,6 +178,7 @@ export const makeHarness = (options: HarnessOptions = {}) => {
         ? Layer.empty
         : Layer.succeed(FetchHttpClient.Fetch, options.feedbackFetch),
     ]),
+    Layer.provideMerge(options.logger ?? Layer.empty),
   );
   const web = HttpRouter.toWebHandler(app, {
     memoMap,

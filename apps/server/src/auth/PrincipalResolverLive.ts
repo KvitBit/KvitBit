@@ -29,6 +29,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import { HttpConfig } from "../http/config";
 import { bearerToken, resolveLocale } from "../http/edge/request";
 import { AuthServer } from "./AuthServer";
+import { withDrizzleSqlContext } from "./drizzleBridge";
 import { PrincipalResolver } from "./PrincipalResolver";
 
 const isOAuthScopeToken = Schema.is(OAuthScopeToken);
@@ -163,11 +164,9 @@ export const PrincipalResolverLive = Layer.effect(
         return yield* resolveApiKey(bearer, acceptLanguage);
       }
 
-      const sessionResult = yield* Effect.tryPromise({
-        try: () => auth.api.getSession({ headers: request.headers }),
-        catch: () => Unauthorized.make({ reason: "invalid" }),
-      });
-
+      const sessionResult = yield* withDrizzleSqlContext(() =>
+        auth.api.getSession({ headers: request.headers }),
+      ).pipe(Effect.mapError(() => Unauthorized.make({ reason: "invalid" })));
       if (sessionResult === null || sessionResult === undefined) {
         return yield* Unauthorized.make({ reason: "invalid" });
       }

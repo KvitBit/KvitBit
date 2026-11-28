@@ -10,7 +10,7 @@ import * as Fn from "effect/Function";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { request, type WebServices } from "../../app/api";
-import { type AltchaSolveError, solveAltchaChallenge } from "./_altcha-solver";
+import { solveAltchaChallenge } from "./_altcha-solver";
 
 export const BotProofState = Schema.Union([
   Schema.TaggedStruct("Idle", {}),
@@ -40,46 +40,66 @@ class WorkerSolveError extends Schema.TaggedError<
 }) {}
 
 const WorkerReply = Schema.Union([
-  Schema.Struct({ header: Schema.String }),
-  Schema.Struct({ error: Schema.String }),
+  Schema.TaggedStruct("Ready", {}),
+  Schema.TaggedStruct("Solved", { header: Schema.String }),
+  Schema.TaggedStruct("Failed", { reason: Schema.String }),
 ]);
 const readWorkerReply = Schema.decodeUnknownOption(WorkerReply);
 
-const solveInBrowser = (challenge: AltchaChallenge) =>
-  Effect.suspend(
-    (): Effect.Effect<string, WorkerSolveError | Schema.SchemaError | AltchaSolveError> => {
-      if (globalThis.Worker === undefined) return solveAltchaChallenge(challenge);
-      return Effect.acquireUseRelease(
-        Effect.try({
-          try: () =>
-            new Worker(new URL("../../runtime/altcha.worker.ts", import.meta.url), {
-              type: "module",
-            }),
-          catch: () => WorkerSolveError.make({ reason: "Could not start verification worker" }),
-        }),
-        (worker) =>
-          Effect.callback<string, WorkerSolveError>((resume) => {
-            worker.onmessage = (event: MessageEvent) => {
-              const reply = readWorkerReply(event.data);
-              if (Option.isNone(reply)) {
-                resume(WorkerSolveError.make({ reason: "Invalid verification worker reply" }));
-              } else if ("header" in reply.value) {
-                resume(Effect.succeed(reply.value.header));
-              } else {
-                resume(WorkerSolveError.make({ reason: reply.value.error }));
-              }
-            };
-            worker.onerror = (event) => resume(WorkerSolveError.make({ reason: event.message }));
-            worker.postMessage(challenge);
-          }).pipe(
-            Effect.catchDefect(() =>
-              WorkerSolveError.make({ reason: "Could not send verification challenge" }),
-            ),
-          ),
-        (worker) => Effect.sync(() => worker.terminate()),
-      );
-    },
+const solveInWorker = (challenge: AltchaChallenge) =>
+  Effect.acquireUseRelease(
+    Effect.try({
+      try: () =>
+        new Worker(new URL("../../runtime/altcha.worker.ts", import.meta.url), { type: "module" }),
+      catch: () => WorkerSolveError.make({ reason: "Could not start verification worker" }),
+    }),
+    (worker) =>
+      Effect.callback<string, WorkerSolveError>((resume) => {
+        const startup = AbortSignal.timeout(3_000);
+        const stalled = () =>
+          resume(WorkerSolveError.make({ reason: "Verification worker did not start" }));
+        startup.addEventListener("abort", stalled, { once: true });
+        worker.onmessage = ({ data }: MessageEvent<unknown>) => {
+          const reply = readWorkerReply(data);
+          if (Option.isNone(reply)) {
+            resume(WorkerSolveError.make({ reason: "Invalid verification worker reply" }));
+            return;
+          }
+          switch (reply.value._tag) {
+            case "Ready":
+              startup.removeEventListener("abort", stalled);
+              break;
+            case "Solved":
+              resume(Effect.succeed(reply.value.header));
+              break;
+            case "Failed":
+              resume(WorkerSolveError.make({ reason: reply.value.reason }));
+              break;
+          }
+        };
+        worker.onerror = (event) => {
+          event.preventDefault();
+          resume(WorkerSolveError.make({ reason: event.message }));
+        };
+        worker.onmessageerror = () =>
+          resume(WorkerSolveError.make({ reason: "Could not read verification worker message" }));
+        worker.postMessage(challenge);
+        return Effect.sync(() => startup.removeEventListener("abort", stalled));
+      }).pipe(
+        Effect.catchDefect(() =>
+          WorkerSolveError.make({ reason: "Could not send verification challenge" }),
+        ),
+      ),
+    (worker) => Effect.sync(() => worker.terminate()),
   );
+
+const solveInBrowser = (challenge: AltchaChallenge) =>
+  Effect.suspend(() => {
+    if (globalThis.Worker === undefined) return solveAltchaChallenge(challenge);
+    return solveInWorker(challenge).pipe(Effect.catch(() => solveAltchaChallenge(challenge)));
+  });
+
+const failed = (reason: string): FetchAndSolveResult => ({ _tag: "Failed", reason });
 
 /**
  * Fetches a fresh ALTCHA challenge for `scope` and solves it in a single Effect UI Command Effect.
@@ -95,18 +115,26 @@ const fetchAndSolveBotProofImpl = <M>(
       challenge,
     ): FetchAndSolveResult | { readonly _tag: "Challenge"; readonly challenge: AltchaChallenge } =>
       challenge === undefined ? { _tag: "NotRequired" } : { _tag: "Challenge", challenge },
-    (failure): FetchAndSolveResult => ({ _tag: "Failed", reason: failure.tag }),
+    (failure) => failed(failure.tag),
   ).pipe(
-    Effect.andThen((out) => {
-      if (out._tag !== "Challenge") return Effect.succeed(onResult(out));
+    Effect.timeoutOrElse({
+      duration: "10 seconds",
+      orElse: () => Effect.succeed(failed("challenge_timeout")),
+    }),
+    Effect.andThen((out): Effect.Effect<FetchAndSolveResult> => {
+      if (out._tag !== "Challenge") return Effect.succeed(out);
       return solveInBrowser(out.challenge).pipe(
         Effect.match({
-          onSuccess: (header) => onResult({ _tag: "Solved", header }),
-          onFailure: (error) =>
-            onResult({ _tag: "Failed", reason: "reason" in error ? error.reason : error.message }),
+          onSuccess: (header): FetchAndSolveResult => ({ _tag: "Solved", header }),
+          onFailure: (error) => failed("reason" in error ? error.reason : error.message),
+        }),
+        Effect.timeoutOrElse({
+          duration: "30 seconds",
+          orElse: () => Effect.succeed(failed("solve_timeout")),
         }),
       );
     }),
+    Effect.map(onResult),
   );
 
 export const fetchAndSolveBotProof: {

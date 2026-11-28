@@ -1,4 +1,5 @@
 import { RequestCaller } from "@kvitbit/api-contract";
+import { Analytics } from "../../runtime/analytics";
 /** `publicShare` group handlers (http-mcp-contracts 3.4 & 3.5.1): visitor side of PublicShareLinks. */
 
 import { Api } from "@kvitbit/api-contract";
@@ -62,10 +63,14 @@ export const PublicShareGroupLive = HttpApiBuilder.group(
   "publicShare",
   Effect.fnUntraced(function* (handlers) {
     const shareLinks = yield* PublicShareLinks;
+    const analytics = yield* Analytics;
     return handlers
       .handle("open", () =>
         Effect.flatMap(RequestCaller, (caller) =>
-          withVisitorDevice(Effect.map(shareLinks.open(caller), jsonizeSharedDocumentView)),
+          withVisitorDevice(shareLinks.open(caller)).pipe(
+            Effect.tap(() => analytics.capture({ event: "share_link_opened" })),
+            Effect.map(jsonizeSharedDocumentView),
+          ),
         ),
       )
       .handle("pdf", ({ query }) =>

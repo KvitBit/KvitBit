@@ -1,12 +1,15 @@
 /** `documents` group handlers (http-mcp-contracts 3.4 & 3.5.4): one Documents method per endpoint. */
+
 import { API_PREFIX, Api, RequestCaller } from "@kvitbit/api-contract";
-import { Documents } from "@kvitbit/domain/contract";
+import { type DocumentKind, Documents, type WorkspaceId } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import { Analytics } from "../../runtime/analytics";
 import {
   compact,
   downloadResponse,
   requestOptions,
+  requestWasReplayed,
   setLocation,
   withRevision,
 } from "../conventions";
@@ -20,6 +23,34 @@ export const DocumentsGroupLive = HttpApiBuilder.group(
   "documents",
   Effect.fnUntraced(function* (handlers) {
     const documents = yield* Documents;
+    const analytics = yield* Analytics;
+    const captureDocument = Effect.fn("captureDocument")(function* (
+      event: "document_created" | "document_issued",
+      workspaceId: WorkspaceId,
+      kind: DocumentKind,
+      source: "draft" | "direct",
+    ) {
+      const caller = yield* RequestCaller;
+      if (caller._tag === "Member" && !(yield* requestWasReplayed)) {
+        yield* analytics.capture({ event, userId: caller.userId, workspaceId, kind, source });
+      }
+    });
+    const captureDraftSaved = Effect.fn("captureDraftSaved")(function* (
+      workspaceId: WorkspaceId,
+      kind: DocumentKind,
+      mode: "created" | "updated",
+    ) {
+      const caller = yield* RequestCaller;
+      if (caller._tag === "Member" && !(yield* requestWasReplayed)) {
+        yield* analytics.capture({
+          event: "document_draft_saved",
+          userId: caller.userId,
+          workspaceId,
+          kind,
+          mode,
+        });
+      }
+    });
     return handlers
       .handle("list", ({ query }) =>
         Effect.flatMap(RequestCaller, (caller) =>
@@ -35,6 +66,12 @@ export const DocumentsGroupLive = HttpApiBuilder.group(
         Effect.flatMap(RequestCaller, (caller) =>
           documents.createDraft(caller, payload, requestOptions(headers)).pipe(
             Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+            Effect.tap((view) =>
+              Effect.andThen(
+                captureDocument("document_created", params.workspaceId, view.kind, "draft"),
+                captureDraftSaved(params.workspaceId, view.kind, "created"),
+              ),
+            ),
             Effect.map(jsonizeDocumentView),
           ),
         ),
@@ -52,6 +89,9 @@ export const DocumentsGroupLive = HttpApiBuilder.group(
             )
             .pipe(
               Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+              Effect.tap((view) =>
+                captureDocument("document_issued", params.workspaceId, view.kind, "direct"),
+              ),
               Effect.map(jsonizeDocumentView),
             ),
         ),
@@ -65,7 +105,14 @@ export const DocumentsGroupLive = HttpApiBuilder.group(
         Effect.flatMap(RequestCaller, (caller) =>
           withRevision(headers["if-match"], (expectedRevision) =>
             documents.edit(caller, params.documentId, payload, expectedRevision),
-          ).pipe(Effect.map(jsonizeDocumentView)),
+          ).pipe(
+            Effect.tap((view) =>
+              captureDraftSaved(params.workspaceId, view.kind, "updated").pipe(
+                Effect.when(Effect.succeed(view.status === "draft")),
+              ),
+            ),
+            Effect.map(jsonizeDocumentView),
+          ),
         ),
       )
       .handle("discardDraft", ({ params, headers }) =>
@@ -86,7 +133,12 @@ export const DocumentsGroupLive = HttpApiBuilder.group(
                 ...compact({ send: payload.send }),
               },
             ),
-          ).pipe(Effect.map(jsonizeDocumentView)),
+          ).pipe(
+            Effect.tap((view) =>
+              captureDocument("document_issued", params.workspaceId, view.kind, "draft"),
+            ),
+            Effect.map(jsonizeDocumentView),
+          ),
         ),
       )
       .handle("lock", ({ params }) =>

@@ -6,6 +6,8 @@ import { runMobileSync } from "../runtime/request-intent";
  * Where the app finds its server. The PWA at `/app/` talks to its own origin; the Android build
  * bakes `EXPO_PUBLIC_API_ORIGIN` in at build time (app.config.ts checks it for release builds).
  */
+export const ROUTE_BASE = "/app/";
+
 const DEV_ORIGIN = "http://10.0.2.2:8080";
 const PLAIN_HTTP_HOSTS = new Set(["localhost", "127.0.0.1", "10.0.2.2"]);
 

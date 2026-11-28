@@ -54,6 +54,7 @@ import {
   table,
   tabs,
 } from "../../ui/kit";
+import { cn, ui } from "../../ui/styles";
 import {
   apiCommand,
   type CashflowReportRecord,
@@ -413,32 +414,33 @@ const reportBarChart = (
   }));
 
   return card(h, [
-    h.div
-      .class("kb-chart-card")
-      .children([
-        h.div
-          .class("kb-spread")
-          .children([
-            h.h2.children([chartTitle]),
-            ...(legend !== undefined && legend.length > 0
-              ? [
-                  h.div
-                    .class("kb-chart-legend")
-                    .children(
-                      Arr.map(legend, (l) =>
-                        h.span
-                          .class("kb-chart-legend__item")
-                          .children([
-                            h.span.class(`kb-chart-swatch ${l.cls}`).children([]),
-                            l.label,
-                          ]),
-                      ),
+    h.div.class("flex flex-col gap-3").children([
+      h.div
+        .attr("data-slot", "spread")
+        .class(ui.spread)
+        .children([
+          h.h2.children([chartTitle]),
+          ...(legend !== undefined && legend.length > 0
+            ? [
+                h.div
+                  .class("flex flex-wrap gap-3.5 text-[0.75rem] text-on-surface-variant")
+                  .children(
+                    Arr.map(legend, (l) =>
+                      h.span
+                        .class("inline-flex items-center gap-1.5")
+                        .children([
+                          h.span
+                            .class(cn("inline-block h-2.5 w-2.5 rounded-[2px]", l.cls))
+                            .children([]),
+                          l.label,
+                        ]),
                     ),
-                ]
-              : []),
-          ]),
-        barChart(h, chartTitle, groups),
-      ]),
+                  ),
+              ]
+            : []),
+        ]),
+      barChart(h, chartTitle, groups),
+    ]),
   ]);
 };
 
@@ -451,7 +453,7 @@ const renderAmountReport = (
 ): Markup<Message> => {
   const tr = translator(ctx.locale);
   const isExpenses = data.report === "expenses";
-  const kpis = h.div.class("kb-kpi-strip").children([
+  const kpis = h.div.class("grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3").children([
     kpi(h, {
       label: tLocal(ctx.locale, "net"),
       value: moneyText(ctx.locale, data.totals.net.amount, data.totals.net.currency),
@@ -541,7 +543,7 @@ const renderAmountReport = (
           ],
         });
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     ...(isExpenses && data.incomplete > 0
       ? [
           banner(h, {
@@ -562,8 +564,8 @@ const renderCashflowReport = (
   data: CashflowReportRecord,
 ): Markup<Message> => {
   const tr = translator(ctx.locale);
-  return h.div.class("kb-stack").children([
-    h.div.class("kb-kpi-strip").children([
+  return h.div.class(ui.stack).children([
+    h.div.class("grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3").children([
       kpi(h, {
         label: tr.t("reports.suite.cashflow.in"),
         value: moneyText(ctx.locale, data.totals.in.amount, data.totals.in.currency),
@@ -588,8 +590,8 @@ const renderCashflowReport = (
             secondary: parseUserDecimal(pt.out.amount) ?? 0,
           })),
           [
-            { label: tr.t("reports.suite.cashflow.in"), cls: "kb-chart-swatch--primary" },
-            { label: tr.t("reports.suite.cashflow.out"), cls: "kb-chart-swatch--secondary" },
+            { label: tr.t("reports.suite.cashflow.in"), cls: "bg-primary" },
+            { label: tr.t("reports.suite.cashflow.out"), cls: "bg-tertiary" },
           ],
         ),
     data.points.length === 0
@@ -637,8 +639,8 @@ const renderReceivablesReport = (
   const bucketLabel = (b: ReceivablesReportRecord["buckets"][number]["bucket"]): string =>
     tLocal(ctx.locale, `aging_${b}`);
 
-  return h.div.class("kb-stack").children([
-    h.div.class("kb-kpi-strip").children([
+  return h.div.class(ui.stack).children([
+    h.div.class("grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3").children([
       kpi(h, {
         label: tr.t("reports.suite.receivables.unpaid"),
         value: moneyText(ctx.locale, data.total.amount, data.total.currency),
@@ -747,9 +749,10 @@ const renderVatSummaryReport = (
 
   const thresholdCard = isNonVatPayer
     ? card(h, [
-        h.div.class("kb-threshold-card").children([
+        h.div.class("flex flex-col gap-2").children([
           h.div
-            .class("kb-spread")
+            .attr("data-slot", "spread")
+            .class(ui.spread)
             .children([
               h.h2.children([tLocal(ctx.locale, "thresholdTitle")]),
               badge(h, `${ratio} %`, ratio >= 80 ? "overdue" : "proforma"),
@@ -760,13 +763,20 @@ const renderVatSummaryReport = (
               threshold: moneyText(ctx.locale, String(TURNOVER_THRESHOLD_CZK), "CZK"),
             }),
           ]),
-          h.div.class("kb-progress-track").children([
-            h.div
-              .class(ratio >= 80 ? "kb-progress-fill kb-progress-fill--warn" : "kb-progress-fill")
-              .style({ width: `${ratio}%` })
-              .children([]),
-          ]),
-          h.p.class("kb-small kb-muted").children([tLocal(ctx.locale, "thresholdNote")]),
+          h.div
+            .class("h-2 w-full overflow-hidden rounded-badge bg-surface-container-high")
+            .children([
+              h.div
+                .class(
+                  cn(
+                    "h-full transition-[width] duration-200 ease-out",
+                    ratio >= 80 ? "bg-error" : "bg-primary",
+                  ),
+                )
+                .style({ width: `${ratio}%` })
+                .children([]),
+            ]),
+          h.p.class(cn(ui.small, ui.muted)).children([tLocal(ctx.locale, "thresholdNote")]),
         ]),
       ])
     : h.text("");
@@ -778,7 +788,7 @@ const renderVatSummaryReport = (
     card(h, [
       cardTitle(h, sectionTitle),
       lines.length === 0
-        ? h.p.class("kb-muted").children([tr.t("reports.suite.empty")])
+        ? h.p.class(ui.muted).children([tr.t("reports.suite.empty")])
         : table(h, {
             caption: sectionTitle,
             rows: lines,
@@ -816,9 +826,9 @@ const renderVatSummaryReport = (
           }),
     ]);
 
-  return h.div.class("kb-stack").children([
+  return h.div.class(ui.stack).children([
     thresholdCard,
-    h.div.class("kb-kpi-strip").children([
+    h.div.class("grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3").children([
       kpi(h, {
         label: tr.t("reports.suite.vat.output"),
         value: moneyText(ctx.locale, data.totals.output.amount, data.totals.output.currency),
@@ -855,8 +865,8 @@ const renderProfitReport = (
   data: ProfitReportRecord,
 ): Markup<Message> => {
   const tr = translator(ctx.locale);
-  return h.div.class("kb-stack").children([
-    h.div.class("kb-kpi-strip").children([
+  return h.div.class(ui.stack).children([
+    h.div.class("grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3").children([
       kpi(h, {
         label: tr.t("reports.suite.profit.revenue"),
         value: moneyText(ctx.locale, data.totals.revenue.amount, data.totals.revenue.currency),
@@ -926,47 +936,51 @@ export const view: {
         ? (["month", "contact", "currency", "category"] as const)
         : [];
 
-  const controls = h.div.class("kb-report-controls").children([
-    h.div.class("kb-row").children([
-      select(h, {
-        id: "reports-period",
-        label: tr.t("reports.suite.period"),
-        value: route.period,
-        options: periodOptions(route.period, ctx.locale),
-        onChange: (period) => Message.ChangedPeriod({ period }),
+  const controls = h.div
+    .attr("data-slot", "report-controls")
+    .class("flex flex-wrap items-center justify-between gap-3")
+    .children([
+      h.div.class(ui.row).children([
+        select(h, {
+          id: "reports-period",
+          label: tr.t("reports.suite.period"),
+          value: route.period,
+          className: "w-auto min-w-[140px]",
+          options: periodOptions(route.period, ctx.locale),
+          onChange: (period) => Message.ChangedPeriod({ period }),
+        }),
+        ...(groupItems.length > 0
+          ? [
+              segmented(h, {
+                label: tr.t("reports.suite.groupBy"),
+                selected: model.groupBy,
+                items: Arr.map(groupItems, (g) => ({
+                  id: g,
+                  label: enumLabel(tr, "reportGroupBy", g),
+                })),
+                onSelect: (id) =>
+                  Message.ChangedGroupBy({
+                    groupBy: Schema.is(GroupByLiteral)(id) ? id : model.groupBy,
+                  }),
+              }),
+            ]
+          : []),
+      ]),
+      button(h, {
+        label: tr.t("reports.suite.export"),
+        variant: "primary",
+        icon: icon(h, "download", 16),
+        onClick: Message.OpenedExport(),
       }),
-      ...(groupItems.length > 0
-        ? [
-            segmented(h, {
-              label: tr.t("reports.suite.groupBy"),
-              selected: model.groupBy,
-              items: Arr.map(groupItems, (g) => ({
-                id: g,
-                label: enumLabel(tr, "reportGroupBy", g),
-              })),
-              onSelect: (id) =>
-                Message.ChangedGroupBy({
-                  groupBy: Schema.is(GroupByLiteral)(id) ? id : model.groupBy,
-                }),
-            }),
-          ]
-        : []),
-    ]),
-    button(h, {
-      label: tr.t("reports.suite.export"),
-      variant: "primary",
-      icon: icon(h, "download", 16),
-      onClick: Message.OpenedExport(),
-    }),
-  ]);
+    ]);
 
   const body = (() => {
     if (model.data._tag === "Loading" || model.data._tag === "Idle") {
       return h.div
-        .class("kb-stack")
+        .class(ui.stack)
         .children([
           h.div
-            .class("kb-kpi-strip")
+            .class("grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-3")
             .children([
               card(h, [skeleton(h, "40%", "0.8rem"), skeleton(h, "70%", "1.6rem")]),
               card(h, [skeleton(h, "40%", "0.8rem"), skeleton(h, "70%", "1.6rem")]),
@@ -1019,26 +1033,29 @@ export const view: {
         onClose: Message.ClosedExport(),
         body: [
           h.p
-            .class("kb-muted")
+            .class(ui.muted)
             .children([tLocal(ctx.locale, "exportDesc", { period: route.period })]),
           ...(model.exportError !== null
             ? [banner(h, { text: model.exportError, tone: "error" })]
             : []),
-          h.div.class("kb-field").children([
-            h.span.class("kb-field__label").children([tr.t("reports.export.format")]),
-            segmented(h, {
-              label: tr.t("reports.export.format"),
-              selected: model.exportFormat,
-              items: [
-                { id: "csv", label: enumLabel(tr, "exportFormat", "csv") },
-                { id: "pdf", label: enumLabel(tr, "exportFormat", "pdf") },
-              ],
-              onSelect: (id) =>
-                Message.SelectedExportFormat({
-                  format: Schema.is(ExportFormatLiteral)(id) ? id : model.exportFormat,
-                }),
-            }),
-          ]),
+          h.div
+            .attr("data-slot", "field")
+            .class(ui.field)
+            .children([
+              h.span.class(ui.fieldLabel).children([tr.t("reports.export.format")]),
+              segmented(h, {
+                label: tr.t("reports.export.format"),
+                selected: model.exportFormat,
+                items: [
+                  { id: "csv", label: enumLabel(tr, "exportFormat", "csv") },
+                  { id: "pdf", label: enumLabel(tr, "exportFormat", "pdf") },
+                ],
+                onSelect: (id) =>
+                  Message.SelectedExportFormat({
+                    format: Schema.is(ExportFormatLiteral)(id) ? id : model.exportFormat,
+                  }),
+              }),
+            ]),
         ],
         actions: [
           button(h, {

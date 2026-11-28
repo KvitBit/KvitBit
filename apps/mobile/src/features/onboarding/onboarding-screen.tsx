@@ -8,13 +8,14 @@ import {
   WorkspaceSlug,
 } from "@kvitbit/domain/contract";
 import { describeError } from "@kvitbit/ui-port/api";
+import { type AddressField, applyAddressInputChange } from "@kvitbit/ui-port/format";
 import { enumText, type Locale } from "@kvitbit/ui-port/i18n";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Str from "effect/String";
 import { Building2, Search } from "lucide-react-native";
 import { useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useApi } from "../../runtime/api-runtime";
@@ -23,17 +24,7 @@ import {
   requestIntentReconciliationCopy,
 } from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
-import {
-  Banner,
-  Button,
-  Card,
-  Screen,
-  Section,
-  SegmentedChoice,
-  space,
-  Text,
-  TextField,
-} from "../../ui";
+import { Banner, Button, Card, Screen, Section, SegmentedChoice, Text, TextField } from "../../ui";
 import { lastWorkspace } from "../../workspace/last-workspace";
 import { forkFeatureEffect, runFeatureCallback } from "../ui-effect";
 import {
@@ -131,6 +122,21 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
     });
     return () => interrupt();
   }, [api.origin, userId, activeScope]);
+
+  const updateAddressField = (field: Exclude<AddressField, "country">, value: string) => {
+    const pasted = applyAddressInputChange({ street, city, postalCode, country }, field, value, {
+      includeCountry: false,
+    });
+    if (pasted !== undefined) {
+      setStreet(pasted.street);
+      setCity(pasted.city);
+      setPostalCode(pasted.postalCode);
+      return;
+    }
+    if (field === "street") setStreet(value);
+    else if (field === "city") setCity(value);
+    else setPostalCode(value);
+  };
 
   const applyAresResult = (result: RegistryResult) => {
     setIco(result.ico);
@@ -353,8 +359,8 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
             <Text variant="bodyMedium" color="onSurfaceVariant">
               {t("onboarding.wizard.entity.intro")}
             </Text>
-            <View style={styles.icoRow}>
-              <View style={styles.flex}>
+            <View className="flex-row items-end gap-2">
+              <View className="flex-1">
                 <TextField
                   label={t("common.field.ico")}
                   value={ico}
@@ -421,24 +427,27 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
             <TextField
               label={t("common.field.street")}
               value={street}
-              onChangeText={setStreet}
+              onChangeText={(value) => updateAddressField("street", value)}
               disabled={busy}
+              testID="onboarding-street"
             />
-            <View style={styles.row}>
-              <View style={styles.flex}>
+            <View className="flex-row gap-2">
+              <View className="flex-1">
                 <TextField
                   label={t("common.field.city")}
                   value={city}
-                  onChangeText={setCity}
+                  onChangeText={(value) => updateAddressField("city", value)}
                   disabled={busy}
+                  testID="onboarding-city"
                 />
               </View>
-              <View style={styles.postal}>
+              <View className="w-[120px]">
                 <TextField
                   label={t("common.field.postalCode")}
                   value={postalCode}
-                  onChangeText={setPostalCode}
+                  onChangeText={(value) => updateAddressField("postalCode", value)}
                   disabled={busy}
+                  testID="onboarding-postal"
                 />
               </View>
             </View>
@@ -554,7 +563,7 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
         </>
       )}
 
-      <View style={styles.hintRow}>
+      <View className="flex-row items-center gap-1 opacity-60">
         <Building2 size={14} />
         <Text variant="meta" color="onSurfaceVariant">
           {Str.trim(name) || t("onboarding.wizard.entity.workspaceName")}
@@ -563,11 +572,3 @@ export function OnboardingScreen(props: { readonly initialStep?: number }) {
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  flex: { flex: 1 },
-  icoRow: { flexDirection: "row", alignItems: "flex-end", gap: space.sm },
-  row: { flexDirection: "row", gap: space.sm },
-  postal: { width: 120 },
-  hintRow: { flexDirection: "row", alignItems: "center", gap: space.xs, opacity: 0.6 },
-});

@@ -119,7 +119,7 @@ describe("Dashboard page (Screen 08)", () => {
   test("renders cs and en via SSR", async () => {
     const cs = await renderPath(`/w/${WS}`, { locale: "cs" });
     expect(cs.html).toContain("Přehled");
-    expect(cs.html).toContain("kb-checklist__cta");
+    expect(cs.html).toContain('data-slot="checklist-cta"');
     const en = await renderPath(`/w/${WS}`, { locale: "en" });
     expect(en.html).toContain("Dashboard");
     expect(en.html).toContain("Workspace setup");

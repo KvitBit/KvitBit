@@ -7,6 +7,7 @@
         "lint/**/*.test.ts",
         "scripts/**/*.test.ts",
         "scripts/prepare-bun-tarball-cache.ts",
+        "scripts/issue-pool/service.ts",
         "formal/**/*.replay.test.ts",
         "formal/**/*.replay-fixture.ts"
       ]
@@ -31,7 +32,7 @@
       "playwright": { "config": ["e2e/playwright.config.ts"] }
     },
     "infra/alchemy": {
-      "entry": ["alchemy.run.ts", "test/**/*.test.ts"]
+      "entry": ["alchemy.run.ts", "src/mail-forwarder/server.ts", "test/**/*.test.ts"]
     },
     "packages/ui-port": { "entry": ["test/**/*.test.ts", "test/theme/generate-default-theme.ts"] },
     "packages/*": {

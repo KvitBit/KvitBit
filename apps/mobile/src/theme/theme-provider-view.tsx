@@ -11,6 +11,7 @@ import {
   type ThemePreference,
   themeStateOf,
 } from "./theme-state";
+import { syncUniwindTheme } from "./uniwind-theme";
 
 const useHighContrast = (): boolean => {
   const [high, setHigh] = useState(false);
@@ -78,5 +79,8 @@ export function ThemeProvider(props: {
       },
     };
   }, [scheme, highContrast, dynamic, preference, onPreferenceChange]);
+  useEffect(() => {
+    syncUniwindTheme(value);
+  }, [value]);
   return <ThemeContext.Provider value={value}>{props.children}</ThemeContext.Provider>;
 }

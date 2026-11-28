@@ -1,14 +1,15 @@
 import { Command, type Component, Head, Router, Subscription } from "@effect/ui";
 import { Html, HtmlHead } from "@effect/ui/html";
-import { ViewModels } from "@kvitbit/ui-port";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Str from "effect/String";
-import { authFetch } from "./app/api";
+import { createPageviewTracker } from "./app/analytics";
+import { authFetch, StartupConfig } from "./app/api";
 import { apiCommand, browserCommand, type RunApi } from "./app/commands";
 import type { Intent, PendingNavigation } from "./app/intent";
 import type { PageContext } from "./app/page";
@@ -19,8 +20,28 @@ import { fetchSession, workspaceBySlug } from "./app/session";
 import { shellView } from "./app/shell";
 import { browserDates } from "./app/utc-date";
 import { feedbackSubscription } from "./runtime/feedback-subscription";
+import { matchesShortcut } from "./ui/sdk";
+
+const macIphoneIpadPattern = /Mac|iPhone|iPad|iPod/i;
 
 export { Flags, Message, Model } from "./app/root";
+
+export const browserAnalytics = (origin: string) =>
+  Layer.effectDiscard(
+    Effect.gen(function* () {
+      const router = yield* Router.Router;
+      const config = yield* StartupConfig;
+      const track = createPageviewTracker({
+        origin,
+        loadConfig: config.pipe(
+          Effect.map((value) => value.analytics),
+          Effect.orElseSucceed(() => undefined),
+        ),
+      });
+      yield* track(router.location().url);
+      yield* Stream.runForEach(router.changes, ({ url }) => track(url)).pipe(Effect.forkScoped);
+    }),
+  );
 
 export class Navigate extends Command.Service<Navigate>()("@kvitbit/web/Navigate", {
   args: { path: Schema.String, replace: Schema.Boolean },
@@ -263,14 +284,15 @@ export const update: {
   (message: Message): (model: Model) => UpdateReturn;
   (model: Model, message: Message): UpdateReturn;
 } = Fn.dual(2, updateImpl);
+const isApplePlatform = (): boolean =>
+  globalThis.navigator !== undefined &&
+  macIphoneIpadPattern.test(navigator.platform || navigator.userAgent);
 
 const shortcut = Subscription.make(
   "workspace-switcher",
   Stream.suspend(() =>
     Stream.fromEventListener<KeyboardEvent>(globalThis, "keydown").pipe(
-      Stream.filter((event) =>
-        Option.isSome(ViewModels.matchShortcut(event, applePlatform.test(navigator.platform))),
-      ),
+      Stream.filter((event) => !event.repeat && matchesShortcut(event, "mod+k", isApplePlatform())),
       Stream.tap((event) => Effect.sync(() => event.preventDefault())),
       Stream.map(() => Message.PressedSwitcherShortcut()),
     ),
@@ -314,5 +336,3 @@ export const App = Html.component({
   view: (h, model) => shellView(model, contextOf(model), h),
   head: ({ model }) => [Head.title("Kvitbit"), HtmlHead.lang(model.prefs.locale)],
 });
-
-const applePlatform = /Mac|iPhone|iPad/;

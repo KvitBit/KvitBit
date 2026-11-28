@@ -2,11 +2,13 @@
  * `expenses` group handlers (http-mcp-contracts 3.4 & 3.5.4): CRUD, streamed multipart
  * attachment upload, download, and detach.
  */
+
 import { API_PREFIX, Api, ATTACHMENT_MAX_BYTES, RequestCaller } from "@kvitbit/api-contract";
 import { Expenses } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Predicate from "effect/Predicate";
+import { Analytics } from "../../runtime/analytics";
 import {
   compact,
   downloadResponse,
@@ -21,6 +23,7 @@ export const ExpensesGroupLive = HttpApiBuilder.group(
   "expenses",
   Effect.fnUntraced(function* (handlers) {
     const expenses = yield* Expenses;
+    const analytics = yield* Analytics;
     return handlers
       .handle("list", ({ query }) =>
         Effect.flatMap(RequestCaller, (caller) => expenses.list(caller, compact(query))),
@@ -65,6 +68,18 @@ export const ExpensesGroupLive = HttpApiBuilder.group(
                 `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${params.expenseId}/attachments/${view.id}`,
               );
             },
+          ).pipe(
+            Effect.tap(
+              Effect.fn("Analytics.captureReceipt")(function* () {
+                if (caller._tag === "Member") {
+                  yield* analytics.capture({
+                    event: "expense_receipt_uploaded",
+                    userId: caller.userId,
+                    workspaceId: params.workspaceId,
+                  });
+                }
+              }),
+            ),
           ),
         ),
       )

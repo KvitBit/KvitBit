@@ -18,6 +18,9 @@ import * as Schema from "effect/Schema";
 import type * as SqlClient from "effect/sql/SqlClient";
 
 const DrizzleRow = Schema.Record(Schema.String, Schema.Unknown);
+
+import { currentAuthLogContext } from "./logging";
+
 const sqlContext = new AsyncLocalStorage<Context.Context<never>>();
 
 export class AuthCallbackError extends Schema.TaggedError<
@@ -42,7 +45,7 @@ export const withDrizzleSqlContext = <A>(callback: () => PromiseLike<A>) =>
   );
 
 export const runAuthEffect = <A, E>(effect: Effect.Effect<A, E>) => {
-  const context = sqlContext.getStore() ?? Context.empty();
+  const context = sqlContext.getStore() ?? currentAuthLogContext() ?? Context.empty();
   // Better Auth and Drizzle require promises and recognize their original rejection values.
 
   return Effect.runPromiseWith(context)(

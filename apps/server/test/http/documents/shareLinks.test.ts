@@ -12,7 +12,10 @@ import * as Str from "effect/String";
 import * as TestClock from "effect/testing/TestClock";
 
 import { deviceFromUserAgent } from "../../../src/http/groups/publicShare";
+import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
+
+const distinctIdPattern = /^[a-f\d-]{36}$/;
 
 const decodeShareLink = Fn.flow(
   Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String })),
@@ -33,6 +36,7 @@ let owner: TestUser;
 let member: MemberCaller;
 let contactId: ContactId;
 let docsBase: string;
+let analytics: ReturnType<typeof captureAnalytics>;
 
 const invoiceInput = () => ({
   kind: "invoice",
@@ -96,7 +100,8 @@ describe("deviceFromUserAgent", () => {
 
 describe("shareLinks and publicShare groups", () => {
   beforeEach(async () => {
-    h = makeHarness();
+    analytics = captureAnalytics();
+    h = makeHarness({ analytics: analytics.layer });
     await h.run(TestClock.setTime(TEST_NOW));
     owner = h.addUser("Olga");
     member = await h.createWorkspace(owner);
@@ -173,6 +178,22 @@ describe("shareLinks and publicShare groups", () => {
     )(await mobileOpen.json()).pipe(Effect.runSync);
     expect(shared.number).toBe(doc.number);
     expect(shared.viewerIsIssuer).toBe(false);
+    expect(analytics.capture.mock.calls.slice(1)).toEqual([
+      [
+        {
+          event: "share_link_created",
+          distinctId: owner.id,
+          properties: { workspaceId: member.workspaceId },
+        },
+      ],
+      [
+        {
+          event: "share_link_opened",
+          distinctId: expect.stringMatching(distinctIdPattern),
+          options: { process_person_profile: false },
+        },
+      ],
+    ]);
 
     // Anonymous desktop visitor downloads the PDF in English
     const desktopPdf = await h.fetch(`/api/v1/share/${token}/pdf?language=en`, {

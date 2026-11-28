@@ -6,7 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { Unplug } from "lucide-react-native";
 import { useCallback, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { useSession } from "../../session/session-provider";
@@ -18,7 +18,6 @@ import {
   EmptyState,
   RemoteView,
   Section,
-  space,
   Text,
   useOverlay,
 } from "../../ui";
@@ -80,7 +79,7 @@ export function ConnectedAppsSection() {
   });
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {errorState.banner === null ? null : <Banner text={errorState.banner} tone="error" />}
 
       <Text variant="bodyMedium" color="onSurfaceVariant">
@@ -105,8 +104,8 @@ export function ConnectedAppsSection() {
                 );
                 return (
                   <Card key={app.grantId}>
-                    <View style={styles.headerRow}>
-                      <View style={styles.flex}>
+                    <View className="flex-row items-center gap-2">
+                      <View className="flex-1">
                         <Text variant="titleSmall">{app.client.name}</Text>
                         <Text variant="meta" color="onSurfaceVariant">
                           {app.client.redirectHost} ·{" "}
@@ -123,7 +122,7 @@ export function ConnectedAppsSection() {
                         : Str.slice(0, 10)(app.lastUsedAt)}
                     </Text>
                     {revocable ? (
-                      <View style={styles.row}>
+                      <View className="flex-row flex-wrap items-center gap-2">
                         <Button
                           testID={`revoke-app-${app.grantId}`}
                           kind="text"
@@ -144,10 +143,3 @@ export function ConnectedAppsSection() {
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-});

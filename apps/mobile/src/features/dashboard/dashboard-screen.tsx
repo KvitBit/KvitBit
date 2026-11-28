@@ -13,12 +13,11 @@ import * as Effect from "effect/Effect";
 import { useFocusEffect } from "expo-router";
 import { AlertCircle, Camera, FilePlus2, FileText, MailPlus, UserPlus } from "lucide-react-native";
 import { useCallback, useMemo, useRef, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useRemote } from "../../runtime/api-runtime";
 import { useSession } from "../../session/session-provider";
-import { useTheme } from "../../theme/theme-provider";
 import {
   Badge,
   type BadgeTone,
@@ -32,7 +31,6 @@ import {
   Screen,
   Section,
   SegmentedChoice,
-  space,
   Text,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
@@ -88,7 +86,6 @@ export interface DashboardContentProps {
 
 export function DashboardContent(props: DashboardContentProps) {
   const { t, locale, local } = useI18n();
-  const theme = useTheme();
   const { workspace } = props;
   const ws = workspace.slug;
   const writable = canWriteWorkspace(workspace);
@@ -120,10 +117,10 @@ export function DashboardContent(props: DashboardContentProps) {
 
   if (empty) {
     return (
-      <View style={styles.stack}>
+      <View className="gap-4">
         {header}
         <Section title={t("dashboard.quick.title")}>
-          <Card style={styles.listCard}>
+          <Card className="gap-0 p-1">
             <ListRow
               leading={UserPlus}
               title={t("dashboard.quick.addContact")}
@@ -151,7 +148,7 @@ export function DashboardContent(props: DashboardContentProps) {
   }
 
   return (
-    <View style={styles.stack}>
+    <View className="gap-4">
       {header}
 
       <SegmentedChoice
@@ -163,7 +160,7 @@ export function DashboardContent(props: DashboardContentProps) {
 
       {writable ? (
         <Section title={local({ cs: "Rychlé akce", en: "Quick actions" })}>
-          <View style={styles.quickActions}>
+          <View className="flex-row flex-wrap gap-2">
             <Button
               label={t("shell.fab.newInvoice")}
               icon={FilePlus2}
@@ -192,10 +189,10 @@ export function DashboardContent(props: DashboardContentProps) {
         {(data) => {
           const cashflowMax = maxCashflowAmount(data.cashflow);
           return (
-            <View style={styles.stack}>
-              <View style={styles.kpiGrid}>
+            <View className="gap-4">
+              <View className="flex-row flex-wrap gap-3">
                 <Card
-                  style={styles.kpiCard}
+                  className="min-w-[148px] grow basis-[45%]"
                   accessibilityLabel={t("dashboard.tile.revenue")}
                   onPress={() =>
                     props.onNavigate({
@@ -215,7 +212,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 </Card>
 
                 <Card
-                  style={styles.kpiCard}
+                  className="min-w-[148px] grow basis-[45%]"
                   accessibilityLabel={t("dashboard.tile.expenses")}
                   onPress={() =>
                     props.onNavigate({
@@ -235,7 +232,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 </Card>
 
                 <Card
-                  style={styles.kpiCard}
+                  className="min-w-[148px] grow basis-[45%]"
                   accessibilityLabel={t("dashboard.tile.unpaid")}
                   onPress={openReceivables}
                 >
@@ -248,11 +245,11 @@ export function DashboardContent(props: DashboardContentProps) {
                 </Card>
 
                 <Card
-                  style={styles.kpiCard}
+                  className="min-w-[148px] grow basis-[45%]"
                   accessibilityLabel={t("dashboard.tile.overdue")}
                   onPress={openReceivables}
                 >
-                  <View style={styles.kpiHead}>
+                  <View className="flex-row items-center justify-between gap-1">
                     <Text variant="labelMedium" color="onSurfaceVariant">
                       {t("dashboard.tile.overdue")}
                     </Text>
@@ -317,25 +314,21 @@ export function DashboardContent(props: DashboardContentProps) {
                   }
                 >
                   <Card>
-                    <View style={styles.legend}>
-                      <View style={styles.legendItem}>
-                        <View
-                          style={[styles.legendDot, { backgroundColor: theme.colors.primary }]}
-                        />
+                    <View className="flex-row gap-4">
+                      <View className="flex-row items-center gap-1">
+                        <View className="h-2.5 w-2.5 rounded-full bg-primary" />
                         <Text variant="labelSmall" color="onSurfaceVariant">
                           {t("dashboard.cashflow.income")}
                         </Text>
                       </View>
-                      <View style={styles.legendItem}>
-                        <View
-                          style={[styles.legendDot, { backgroundColor: theme.colors.tertiary }]}
-                        />
+                      <View className="flex-row items-center gap-1">
+                        <View className="h-2.5 w-2.5 rounded-full bg-tertiary" />
                         <Text variant="labelSmall" color="onSurfaceVariant">
                           {t("dashboard.cashflow.outgoing")}
                         </Text>
                       </View>
                     </View>
-                    <View style={styles.bars}>
+                    <View className="gap-3">
                       {Arr.map(data.cashflow, (point) => {
                         const inPct = Math.round(
                           cashflowBarRatio(point.in.amount, cashflowMax) * 100,
@@ -344,8 +337,8 @@ export function DashboardContent(props: DashboardContentProps) {
                           cashflowBarRatio(point.out.amount, cashflowMax) * 100,
                         );
                         return (
-                          <View key={point.month} style={styles.barRow}>
-                            <View style={styles.barLabelRow}>
+                          <View key={point.month} className="gap-1">
+                            <View className="flex-row items-center justify-between">
                               <Text variant="meta" color="onSurfaceVariant">
                                 {formatMonth(locale, point.month)}
                               </Text>
@@ -353,24 +346,14 @@ export function DashboardContent(props: DashboardContentProps) {
                                 {formatMoney(locale, point.net, { signed: true })}
                               </Text>
                             </View>
-                            <View style={styles.barTracks}>
+                            <View className="gap-1">
                               <View
-                                style={[
-                                  styles.barFill,
-                                  {
-                                    width: `${Math.max(inPct, 2)}%`,
-                                    backgroundColor: theme.colors.primary,
-                                  },
-                                ]}
+                                className="h-1.5 rounded-[3px] bg-primary"
+                                style={{ width: `${Math.max(inPct, 2)}%` }}
                               />
                               <View
-                                style={[
-                                  styles.barFill,
-                                  {
-                                    width: `${Math.max(outPct, 2)}%`,
-                                    backgroundColor: theme.colors.tertiary,
-                                  },
-                                ]}
+                                className="h-1.5 rounded-[3px] bg-tertiary"
+                                style={{ width: `${Math.max(outPct, 2)}%` }}
                               />
                             </View>
                           </View>
@@ -396,7 +379,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 <EmptyState title={t("dashboard.overdue.empty")} />
               </Card>
             ) : (
-              <Card style={styles.listCard}>
+              <Card className="gap-0 p-1">
                 {Arr.map(docs, (doc) => (
                   <ListRow
                     key={doc.id}
@@ -424,7 +407,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 <EmptyState title={t("dashboard.recent.empty")} />
               </Card>
             ) : (
-              <Card style={styles.listCard}>
+              <Card className="gap-0 p-1">
                 {Arr.map(events, ({ id, document, kind, at }) => (
                   <ListRow
                     key={id}
@@ -471,7 +454,7 @@ export function DashboardContent(props: DashboardContentProps) {
                 <EmptyState title={local({ cs: "Zatím žádné doklady", en: "No documents yet" })} />
               </Card>
             ) : (
-              <Card style={styles.listCard}>
+              <Card className="gap-0 p-1">
                 {Arr.map(docs, (doc) => {
                   const badge = badgeForDocument(doc);
                   return (
@@ -610,25 +593,3 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
     </Screen>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  quickActions: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  kpiGrid: { flexDirection: "row", flexWrap: "wrap", gap: space.md },
-  kpiCard: { flexGrow: 1, flexBasis: "45%", minWidth: 148 },
-  kpiHead: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: space.xs,
-  },
-  listCard: { padding: space.xs, gap: 0 },
-  legend: { flexDirection: "row", gap: space.lg },
-  legendItem: { flexDirection: "row", alignItems: "center", gap: space.xs },
-  legendDot: { width: 10, height: 10, borderRadius: 5 },
-  bars: { gap: space.md },
-  barRow: { gap: space.xs },
-  barLabelRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  barTracks: { gap: 4 },
-  barFill: { height: 6, borderRadius: 3 },
-});

@@ -6,7 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { Plus, X } from "lucide-react-native";
 import { useCallback, useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -16,7 +16,6 @@ import {
   RemoteView,
   Section,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -115,7 +114,7 @@ export function RemindersSection() {
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
       {() => (
-        <View style={styles.stack}>
+        <View className="gap-4">
           {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
           {errorState.banner === null ? null : (
             <Banner
@@ -154,7 +153,7 @@ export function RemindersSection() {
                   {t("common.state.none")}
                 </Text>
               ) : (
-                <View style={styles.chips}>
+                <View className="flex-row flex-wrap gap-2">
                   {Arr.map(offsets, (day) => (
                     <Button
                       key={day}
@@ -168,8 +167,8 @@ export function RemindersSection() {
               )}
 
               {editable ? (
-                <View style={styles.addRow}>
-                  <View style={styles.flex}>
+                <View className="flex-row items-end gap-2">
+                  <View className="flex-1">
                     <TextField
                       label={t("settings.reminders.addOffset")}
                       value={newOffset}
@@ -206,10 +205,3 @@ export function RemindersSection() {
     </RemoteView>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  chips: { flexDirection: "row", flexWrap: "wrap", gap: space.sm },
-  addRow: { flexDirection: "row", alignItems: "flex-end", gap: space.sm },
-});

@@ -5,7 +5,7 @@ import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Str from "effect/String";
 import { useCallback, useEffect, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import {
@@ -17,7 +17,6 @@ import {
   RemoteView,
   Section,
   SegmentedChoice,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -118,7 +117,7 @@ export function TaxRegimeSection() {
         const parsed = parseWorkspaceView(raw);
         const unchanged = selectedRegime === parsed.taxRegime;
         return (
-          <View style={styles.stack}>
+          <View className="gap-4">
             {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
             {errorState.banner === null ? null : (
               <Banner
@@ -142,7 +141,7 @@ export function TaxRegimeSection() {
             </Card>
 
             <Section title={local({ cs: "Historie daňového režimu", en: "Regime history" })}>
-              <Card style={styles.listCard}>
+              <Card className="gap-0 px-3 py-1">
                 {parsed.taxRegimeHistory.length === 0 ? (
                   <ListRow
                     title={t(`enum.taxRegime.${parsed.taxRegime}`)}
@@ -205,8 +204,3 @@ export function TaxRegimeSection() {
     </RemoteView>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  listCard: { paddingVertical: space.xs, paddingHorizontal: space.md, gap: 0 },
-});

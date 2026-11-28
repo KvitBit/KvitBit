@@ -7,7 +7,7 @@ import * as Option from "effect/Option";
 import * as Str from "effect/String";
 import { Plus, Trash2 } from "lucide-react-native";
 import { useCallback, useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
 import { runRequestIntent } from "../../runtime/request-intent";
@@ -22,7 +22,6 @@ import {
   Section,
   SegmentedChoice,
   SwitchRow,
-  space,
   Text,
   TextField,
   useOverlay,
@@ -231,7 +230,7 @@ export function BankAccountsSection() {
                 (a) => a.id !== replacementTarget.id && a.currency === replacementTarget.currency,
               );
         return (
-          <View style={styles.stack}>
+          <View className="gap-4">
             {editable ? null : <Banner text={t("settings.readOnly")} tone="info" />}
             {errorState.banner === null ? null : <Banner text={errorState.banner} tone="error" />}
 
@@ -255,7 +254,7 @@ export function BankAccountsSection() {
                       }))}
                       onChange={setReplacementId}
                     />
-                    <View style={styles.row}>
+                    <View className="flex-row flex-wrap items-center gap-2">
                       <Button
                         kind="danger"
                         label={t("common.action.remove")}
@@ -305,8 +304,8 @@ export function BankAccountsSection() {
               >
                 {Arr.map(accounts, (account) => (
                   <Card key={account.id}>
-                    <View style={styles.headerRow}>
-                      <View style={styles.flex}>
+                    <View className="flex-row items-center gap-2">
+                      <View className="flex-1">
                         <Text variant="titleSmall">{account.name ?? account.iban}</Text>
                         <Text variant="meta" color="onSurfaceVariant" numeric>
                           {account.iban}
@@ -324,7 +323,7 @@ export function BankAccountsSection() {
                       />
                     ) : null}
                     {editable ? (
-                      <View style={styles.row}>
+                      <View className="flex-row flex-wrap items-center gap-2">
                         <Button
                           kind="outlined"
                           label={t("common.action.edit")}
@@ -397,7 +396,7 @@ export function BankAccountsSection() {
                     value={draft.isDefault}
                     onChange={(isDefault) => setDraft({ ...draft, isDefault })}
                   />
-                  <View style={styles.row}>
+                  <View className="flex-row flex-wrap items-center gap-2">
                     <Button
                       testID="bank-account-save"
                       kind="filled"
@@ -424,10 +423,3 @@ export function BankAccountsSection() {
     </RemoteView>
   );
 }
-
-const styles = StyleSheet.create({
-  stack: { gap: space.lg },
-  flex: { flex: 1 },
-  headerRow: { flexDirection: "row", alignItems: "center", gap: space.sm },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: space.sm, alignItems: "center" },
-});

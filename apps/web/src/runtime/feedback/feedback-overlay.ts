@@ -19,6 +19,7 @@ import { fetchBrowser } from "../../app/browser";
 import { copy } from "../../app/i18n";
 import type { Locale, Prefs } from "../../app/prefs";
 import { captureDiagnostics, capturePin } from "./capture";
+import { isFeedbackShortcut } from "./shortcut";
 import { renderFeedbackControls } from "./view";
 
 const text = copy({
@@ -153,6 +154,7 @@ const installFeedback = (
     highlightTag,
     markers,
     pick,
+    pickLabel,
     pickError,
     review,
     composer,
@@ -173,7 +175,7 @@ const installFeedback = (
   const nativePopover = Predicate.isFunction(composer.showPopover);
   if (nativePopover) composer.setAttribute("popover", "manual");
 
-  pick.textContent = text(locale, "pick");
+  pickLabel.textContent = text(locale, "pick");
   commentLabel.textContent = text(locale, "comment");
   close.setAttribute("aria-label", text(locale, "close"));
   dismiss.setAttribute("aria-label", text(locale, "close"));
@@ -235,7 +237,7 @@ const installFeedback = (
   };
 
   const refresh = () => {
-    pick.textContent = text(locale, picking ? "stop" : "pick");
+    pickLabel.textContent = text(locale, picking ? "stop" : "pick");
     pick.setAttribute("aria-pressed", String(picking));
     pick.disabled = submitting || (!picking && pins.length >= FEEDBACK_LIMITS.pins);
     review.hidden = pins.length === 0;
@@ -271,6 +273,11 @@ const installFeedback = (
     announcement.textContent = active ? text(locale, "instructions") : "";
     refresh();
     requestLayout();
+  };
+
+  const stopPicking = () => {
+    setPicking(false);
+    pick.focus({ preventScroll: true });
   };
 
   const showComposer = (pin: Pin) => {
@@ -476,8 +483,7 @@ const installFeedback = (
         event.preventDefault();
         event.stopImmediatePropagation();
         if (picking) {
-          setPicking(false);
-          pick.focus({ preventScroll: true });
+          stopPicking();
         } else {
           closeComposer();
           review.focus({ preventScroll: true });
@@ -487,6 +493,24 @@ const installFeedback = (
       }
     },
     { capture: true, signal },
+  );
+  globalThis.addEventListener(
+    "keydown",
+    (event) => {
+      if (
+        !(event instanceof KeyboardEvent) ||
+        location.pathname !== pagePath ||
+        pick.disabled ||
+        !isFeedbackShortcut(event, document)
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (picking) stopPicking();
+      else setPicking(true);
+    },
+    { signal },
   );
   globalThis.addEventListener("scroll", requestLayout, { capture: true, passive: true, signal });
   globalThis.addEventListener("resize", requestLayout, { signal });

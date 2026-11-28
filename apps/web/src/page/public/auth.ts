@@ -1,4 +1,4 @@
-import { UiSchema } from "@effect/ui";
+import { Command, UiSchema } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
 /**
  * Screen 02 — Authentication flows:
@@ -17,7 +17,7 @@ import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { authFetch, Failure, failureFromUnknown } from "../../app/api";
-import { apiCommand, defineApiCommand, type PageCommand } from "../../app/commands";
+import { apiCommand, defineApiCommand, type PageCommand, RunApi } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
 import {
@@ -30,9 +30,10 @@ import * as Remote from "../../app/remote";
 import { href, magicSignInCallback, safeReturnTo } from "../../app/routing";
 import { performPasskeyAuthentication } from "../../app/webauthn";
 import { lockup } from "../../ui/brand";
-import { attribute, type Markup } from "../../ui/html";
+import type { Markup } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import { banner, button, card, checkbox, segmented, textField } from "../../ui/kit";
+import { botProofVariants, buttonVariants, cn, ui } from "../../ui/styles";
 import {
   BotProofState,
   botProofHeader,
@@ -201,9 +202,10 @@ const mapBotResult = (seq: Remote.Seq, res: FetchAndSolveResult) => {
   }
 };
 
+const botProofCommandName = "AuthBotProof";
 const BotProofCmd = defineApiCommand({
   message: Message,
-  name: "AuthBotProof",
+  name: botProofCommandName,
   args: { scope: BotScope, seq: Remote.Seq },
   execute: ({ scope, seq }) => fetchAndSolveBotProof(scope, (res) => mapBotResult(seq, res)),
 });
@@ -288,6 +290,11 @@ const AuthGetCmd = defineApiCommand({
 });
 
 const startBotProof = (scope: BotScope, seq: Remote.Seq) => BotProofCmd({ scope, seq });
+const stopBotProof = () => Command.interrupt(RunApi, { name: botProofCommandName });
+const restartBotProof = (scope: BotScope, seq: Remote.Seq) => [
+  stopBotProof(),
+  startBotProof(scope, seq),
+];
 
 const runPasskeyAuth = (seq: Remote.Seq) =>
   apiCommand(
@@ -439,7 +446,7 @@ const updateImpl = (model: Model, message: Message, ctx: PageContext): PageRetur
           localError: null,
           submitFailure: null,
         },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     SelectedSignInMethod: ({ method }) => {
@@ -456,6 +463,7 @@ const updateImpl = (model: Model, message: Message, ctx: PageContext): PageRetur
             localError: null,
             submitFailure: null,
           },
+          commands: [stopBotProof()],
         };
       }
       const botSeq = model.botSeq + 1;
@@ -468,7 +476,7 @@ const updateImpl = (model: Model, message: Message, ctx: PageContext): PageRetur
           localError: null,
           submitFailure: null,
         },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     GotBotProof: ({ seq, status, header, reason }) => {
@@ -487,7 +495,7 @@ const updateImpl = (model: Model, message: Message, ctx: PageContext): PageRetur
       const botSeq = model.botSeq + 1;
       return {
         model: { ...model, botSeq, botProof: { _tag: "Solving", seq: botSeq }, localError: null },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     GotInvitation: ({ seq, peek }) => {
@@ -650,7 +658,7 @@ const updateImpl = (model: Model, message: Message, ctx: PageContext): PageRetur
       const botSeq = model.botSeq + 1;
       return {
         model: { ...model, linkState: "idle", botSeq, botProof: { _tag: "Solving", seq: botSeq } },
-        commands: [startBotProof(scope, botSeq)],
+        commands: restartBotProof(scope, botSeq),
       };
     },
     ClickedResendEmail: () => {
@@ -834,7 +842,7 @@ const updateImpl = (model: Model, message: Message, ctx: PageContext): PageRetur
             botSeq,
             botProof: { _tag: "Solving", seq: botSeq },
           },
-          commands: [startBotProof(scope, botSeq)],
+          commands: restartBotProof(scope, botSeq),
         };
       }
       return {
@@ -885,32 +893,38 @@ export const title: {
 
 const botProofBar = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
-  if (model.botProof._tag === "Idle" || model.botProof._tag === "NotRequired") return h.text("");
-  if (model.botProof._tag === "Solving") {
-    return h.div
-      .class("kb-bot-proof")
-      .attr("role", "status")
-      .attr("aria-live", "polite")
-      .children([h.span.children([t.t("auth.botProof.verifying")])]);
-  }
-  if (model.botProof._tag === "Solved") {
-    return h.div
-      .class("kb-bot-proof kb-bot-proof--verified")
-      .attr("role", "status")
-      .children([
-        h.span.class("kb-row").children([icon(h, "check", 16), t.t("auth.botProof.verified")]),
-      ]);
-  }
+  const state = model.botProof._tag;
+  const stackedSlot = "grid [&>*]:[grid-area:1/1] [&>*]:min-w-0";
   return h.div
-    .class("kb-bot-proof kb-bot-proof--failed")
-    .attr("role", "alert")
+    .key("auth-bot-proof")
+    .class(stackedSlot)
     .children([
-      h.span.children([t.t("auth.botProof.failed")]),
-      button(h, {
-        label: local(ctx.locale, "retryCheck"),
-        onClick: Message.ClickedRetryBotProof(),
-        small: true,
-      }),
+      h.div
+        .class(stackedSlot)
+        .attr("role", "status")
+        .children([
+          h.div
+            .class(botProofVariants({ state: "idle" }))
+            .attr("data-active", String(state === "Solving"))
+            .children([t.t("auth.botProof.verifying")]),
+          h.div
+            .class(botProofVariants({ state: "verified" }))
+            .attr("data-active", String(state === "Solved"))
+            .children([
+              h.span.class(ui.row).children([icon(h, "check", 16), t.t("auth.botProof.verified")]),
+            ]),
+        ]),
+      h.div
+        .class(botProofVariants({ state: "failed" }))
+        .attr("data-active", String(state === "Failed"))
+        .children([
+          h.span.attr("role", "alert").children([t.t("auth.botProof.failed")]),
+          button(h, {
+            label: local(ctx.locale, "retryCheck"),
+            onClick: Message.ClickedRetryBotProof(),
+            small: true,
+          }),
+        ]),
     ]);
 };
 
@@ -920,17 +934,25 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     model.localError ??
     (model.submitFailure !== null ? failureMessage(t, model.submitFailure) : null);
 
+  const authFormClass = "flex flex-col gap-3.5";
+  const authHeaderClass = "flex flex-col gap-1.5";
+  const authFooterClass =
+    "flex flex-wrap items-center justify-between gap-2 text-[0.8125rem] text-on-surface-variant";
+
   const body = (() => {
     if (model.linkState === "sent") {
-      return h.div.class("kb-auth-form").children([
-        h.h1.children([t.t("auth.checkEmail.title")]),
-        h.p.class("kb-muted").children([t.t("auth.checkEmail.body", { email: model.email })]),
-        button(h, {
-          label: local(ctx.locale, "changeEmail"),
-          onClick: Message.ClickedChangeEmail(),
-          variant: "secondary",
-        }),
-      ]);
+      return h.div
+        .class(authFormClass)
+        .attr("data-slot", "auth-form")
+        .children([
+          h.h1.children([t.t("auth.checkEmail.title")]),
+          h.p.class(ui.muted).children([t.t("auth.checkEmail.body", { email: model.email })]),
+          button(h, {
+            label: local(ctx.locale, "changeEmail"),
+            onClick: Message.ClickedChangeEmail(),
+            variant: "secondary",
+          }),
+        ]);
     }
     switch (model.route._tag) {
       case "SignUp": {
@@ -938,123 +960,165 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         const invite = invitationPath(model);
         const emailLocked = invite !== undefined;
         const inviteReady = model.invitation._tag === "Loaded" && invited?.status === "pending";
-        return h.div.class("kb-auth-form").children([
-          h.div
-            .class("kb-auth-header")
-            .children([
-              h.h1.children([t.t("auth.signUp.title")]),
-              h.p.class("kb-muted").children([t.t("auth.signUp.subtitle")]),
-            ]),
-          ...(invited !== undefined
-            ? [banner(h, { text: t.t("auth.signUp.invitationNote"), tone: "info" })]
-            : []),
-          ...(model.invitation._tag === "Failed"
-            ? [
-                banner(h, { text: local(ctx.locale, "invitationUnavailable"), tone: "error" }),
-                button(h, {
-                  label: t.t("common.action.retry"),
-                  onClick: Message.ClickedRetryInvitation(),
-                  variant: "secondary",
-                }),
-              ]
-            : []),
-          ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
-          ...(emailLocked
-            ? []
-            : [
-                segmented(h, {
-                  label: t.t("auth.signUp.title"),
-                  selected: model.signUpMethod,
-                  items: [
-                    { id: "password", label: t.t("auth.signUp.methodPassword") },
-                    { id: "passkey", label: t.t("auth.signUp.methodPasskey") },
-                  ],
-                  onSelect: (id) =>
-                    Message.SelectedSignUpMethod({
-                      method: id === "passkey" ? "passkey" : "password",
-                    }),
-                }),
+        return h.div
+          .class(authFormClass)
+          .attr("data-slot", "auth-form")
+          .children([
+            h.div
+              .class(authHeaderClass)
+              .children([
+                h.h1.children([t.t("auth.signUp.title")]),
+                h.p.class(ui.muted).children([t.t("auth.signUp.subtitle")]),
               ]),
-          textField(h, {
-            id: "auth-signup-email",
-            label: t.t("common.field.email"),
-            type: "email",
-            value: model.email,
-            onInput: (value) => Message.ChangedEmail({ value }),
-            autocomplete: "email",
-            required: true,
-            disabled: emailLocked,
-            error: fieldIssue(t, model.submitFailure, "email"),
-          }),
-          textField(h, {
-            id: "auth-signup-name",
-            label: local(ctx.locale, "fullName"),
-            value: model.name,
-            onInput: (value) => Message.ChangedName({ value }),
-            autocomplete: "name",
-          }),
-          ...(model.signUpMethod === "password"
-            ? [
-                textField(h, {
-                  id: "auth-signup-password",
-                  label: t.t("common.field.password"),
-                  type: "password",
-                  value: model.password,
-                  onInput: (value) => Message.ChangedPassword({ value }),
-                  hint: t.t("auth.signUp.passwordHint"),
-                  autocomplete: "new-password",
-                  required: true,
-                  error: fieldIssue(t, model.submitFailure, "password"),
-                }),
-              ]
-            : [h.p.class("kb-small kb-muted").children([local(ctx.locale, "passkeySignUpHint")])]),
-          checkbox(h, {
-            id: "auth-signup-terms",
-            label: t.t("auth.signUp.acceptTerms"),
-            checked: model.acceptedTerms,
-            onToggle: (checked) => Message.ToggledTerms({ checked }),
-          }),
-          botProofBar(model, ctx, h),
-          button(h, {
-            label: t.t("auth.signUp.submit"),
-            onClick: Message.SubmittedSignUp(),
-            variant: "primary",
-            busy: model.submitting,
-            disabled:
-              model.submitting || !isBotProofReady(model.botProof) || (emailLocked && !inviteReady),
-            testId: "auth-signup-submit",
-          }),
-          h.div
-            .class("kb-auth-footer")
-            .children([
-              h.span.children([t.t("auth.signUp.haveAccount")]),
-              h.a.attr("href", signInPath(invite)).children([local(ctx.locale, "signInNow")]),
-            ]),
-        ]);
+            ...(invited !== undefined
+              ? [banner(h, { text: t.t("auth.signUp.invitationNote"), tone: "info" })]
+              : []),
+            ...(model.invitation._tag === "Failed"
+              ? [
+                  banner(h, { text: local(ctx.locale, "invitationUnavailable"), tone: "error" }),
+                  button(h, {
+                    label: t.t("common.action.retry"),
+                    onClick: Message.ClickedRetryInvitation(),
+                    variant: "secondary",
+                  }),
+                ]
+              : []),
+            ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
+            ...(emailLocked
+              ? []
+              : [
+                  segmented(h, {
+                    label: t.t("auth.signUp.title"),
+                    selected: model.signUpMethod,
+                    fill: true,
+                    items: [
+                      { id: "password", label: t.t("auth.signUp.methodPassword") },
+                      { id: "passkey", label: t.t("auth.signUp.methodPasskey") },
+                    ],
+                    onSelect: (id) =>
+                      Message.SelectedSignUpMethod({
+                        method: id === "passkey" ? "passkey" : "password",
+                      }),
+                  }),
+                ]),
+            textField(h, {
+              id: "auth-signup-email",
+              label: t.t("common.field.email"),
+              type: "email",
+              value: model.email,
+              onInput: (value) => Message.ChangedEmail({ value }),
+              autocomplete: "email",
+              required: true,
+              disabled: emailLocked,
+              error: fieldIssue(t, model.submitFailure, "email"),
+            }),
+            textField(h, {
+              id: "auth-signup-name",
+              label: local(ctx.locale, "fullName"),
+              value: model.name,
+              onInput: (value) => Message.ChangedName({ value }),
+              autocomplete: "name",
+            }),
+            ...(model.signUpMethod === "password"
+              ? [
+                  textField(h, {
+                    id: "auth-signup-password",
+                    label: t.t("common.field.password"),
+                    type: "password",
+                    value: model.password,
+                    onInput: (value) => Message.ChangedPassword({ value }),
+                    hint: t.t("auth.signUp.passwordHint"),
+                    autocomplete: "new-password",
+                    required: true,
+                    error: fieldIssue(t, model.submitFailure, "password"),
+                  }),
+                ]
+              : [
+                  h.p
+                    .class(cn(ui.small, ui.muted))
+                    .children([local(ctx.locale, "passkeySignUpHint")]),
+                ]),
+            checkbox(h, {
+              id: "auth-signup-terms",
+              label: t.t("auth.signUp.acceptTerms"),
+              checked: model.acceptedTerms,
+              onToggle: (checked) => Message.ToggledTerms({ checked }),
+            }),
+            botProofBar(model, ctx, h),
+            button(h, {
+              label: t.t("auth.signUp.submit"),
+              onClick: Message.SubmittedSignUp(),
+              variant: "primary",
+              busy: model.submitting,
+              disabled:
+                model.submitting ||
+                !isBotProofReady(model.botProof) ||
+                (emailLocked && !inviteReady),
+              testId: "auth-signup-submit",
+            }),
+            h.div
+              .class(authFooterClass)
+              .children([
+                h.span.children([t.t("auth.signUp.haveAccount")]),
+                h.a.attr("href", signInPath(invite)).children([local(ctx.locale, "signInNow")]),
+              ]),
+          ]);
       }
 
       case "SignIn": {
-        return h.div.class("kb-auth-form").children([
-          h.div.class("kb-auth-header").children([h.h1.children([t.t("auth.signIn.title")])]),
-          ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
-          segmented(h, {
-            label: t.t("auth.signIn.title"),
-            selected: model.signInMethod,
-            items: [
-              { id: "password", label: t.t("auth.signIn.withPassword") },
-              { id: "magic_link", label: t.t("auth.signIn.withMagicLink") },
-              { id: "passkey", label: t.t("auth.signIn.withPasskey") },
-            ],
-            onSelect: (id) =>
-              Message.SelectedSignInMethod({
-                method:
-                  id === "magic_link" ? "magic_link" : id === "passkey" ? "passkey" : "password",
-              }),
-          }),
-          ...(model.signInMethod === "passkey"
-            ? [
-                h.p.class("kb-muted").children([t.t("auth.passkey.prompt")]),
-                button(h, {
+        return h.div
+          .class(authFormClass)
+          .attr("data-slot", "auth-form")
+          .children([
+            h.div.class(authHeaderClass).children([h.h1.children([t.t("auth.signIn.title")])]),
+            ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
+            segmented(h, {
+              label: t.t("auth.signIn.title"),
+              selected: model.signInMethod,
+              fill: true,
+              sizing: "auto",
+              items: [
+                { id: "password", label: t.t("auth.signIn.methodPassword") },
+                { id: "magic_link", label: t.t("auth.signIn.methodMagicLink") },
+                { id: "passkey", label: t.t("auth.signIn.methodPasskey") },
+              ],
+              onSelect: (id) =>
+                Message.SelectedSignInMethod({
+                  method:
+                    id === "magic_link" ? "magic_link" : id === "passkey" ? "passkey" : "password",
+                }),
+            }),
+            ...(model.signInMethod === "passkey"
+              ? [h.p.class(ui.muted).children([t.t("auth.passkey.prompt")])]
+              : [
+                  textField(h, {
+                    id: "auth-signin-email",
+                    label: t.t("common.field.email"),
+                    type: "email",
+                    value: model.email,
+                    onInput: (value) => Message.ChangedEmail({ value }),
+                    autocomplete: "email",
+                    required: true,
+                    error: fieldIssue(t, model.submitFailure, "email"),
+                  }),
+                  ...(model.signInMethod === "password"
+                    ? [
+                        textField(h, {
+                          id: "auth-signin-password",
+                          label: t.t("common.field.password"),
+                          type: "password",
+                          value: model.password,
+                          onInput: (value) => Message.ChangedPassword({ value }),
+                          autocomplete: "current-password",
+                          required: true,
+                          error: fieldIssue(t, model.submitFailure, "password"),
+                        }),
+                      ]
+                    : []),
+                ]),
+            botProofBar(model, ctx, h),
+            model.signInMethod === "passkey"
+              ? button(h, {
                   label: t.t("auth.signIn.withPasskey"),
                   onClick: Message.ClickedPasskeySignIn(),
                   variant: "primary",
@@ -1062,35 +1126,8 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   busy: model.submitting,
                   disabled: model.submitting,
                   testId: "auth-passkey-btn",
-                }),
-              ]
-            : [
-                textField(h, {
-                  id: "auth-signin-email",
-                  label: t.t("common.field.email"),
-                  type: "email",
-                  value: model.email,
-                  onInput: (value) => Message.ChangedEmail({ value }),
-                  autocomplete: "email",
-                  required: true,
-                  error: fieldIssue(t, model.submitFailure, "email"),
-                }),
-                ...(model.signInMethod === "password"
-                  ? [
-                      textField(h, {
-                        id: "auth-signin-password",
-                        label: t.t("common.field.password"),
-                        type: "password",
-                        value: model.password,
-                        onInput: (value) => Message.ChangedPassword({ value }),
-                        autocomplete: "current-password",
-                        required: true,
-                        error: fieldIssue(t, model.submitFailure, "password"),
-                      }),
-                    ]
-                  : []),
-                botProofBar(model, ctx, h),
-                button(h, {
+                })
+              : button(h, {
                   label:
                     model.signInMethod === "magic_link"
                       ? t.t("auth.signIn.sendLink")
@@ -1101,152 +1138,170 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   disabled: model.submitting || !isBotProofReady(model.botProof),
                   testId: "auth-signin-submit",
                 }),
+            h.div
+              .class(authFooterClass)
+              .children([
+                h.a
+                  .attr("href", href({ _tag: "ResetPassword" }))
+                  .children([local(ctx.locale, "forgotLink")]),
+                h.a
+                  .attr("href", href({ _tag: "SignUp" }))
+                  .children([local(ctx.locale, "signUpLink")]),
               ]),
-          h.div
-            .class("kb-auth-footer")
-            .children([
-              h.a
-                .attr("href", href({ _tag: "ResetPassword" }))
-                .children([local(ctx.locale, "forgotLink")]),
-              h.a
-                .attr("href", href({ _tag: "SignUp" }))
-                .children([local(ctx.locale, "signUpLink")]),
-            ]),
-        ]);
+          ]);
       }
 
       case "CheckEmail": {
-        return h.div.class("kb-auth-form").children([
-          h.div
-            .class("kb-auth-header")
-            .children([
-              h.div
-                .class("kb-row")
-                .children([icon(h, "mail", 22), h.h1.children([t.t("auth.checkEmail.title")])]),
-              h.p.class("kb-muted").children([t.t("auth.checkEmail.body", { email: model.email })]),
-            ]),
-          ...(model.infoNotice !== null
-            ? [banner(h, { text: model.infoNotice, tone: "info" })]
-            : []),
-          ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
-          button(h, {
-            label: t.t("auth.checkEmail.resend"),
-            onClick: Message.ClickedResendEmail(),
-            variant: "secondary",
-            busy: model.submitting,
-            disabled: model.submitting,
-          }),
-          h.div
-            .class("kb-auth-footer")
-            .children([
-              h.a
-                .attr("href", href({ _tag: "SignIn" }))
-                .children([t.t("auth.checkEmail.wrongEmail")]),
-            ]),
-        ]);
+        return h.div
+          .class(authFormClass)
+          .attr("data-slot", "auth-form")
+          .children([
+            h.div
+              .class(authHeaderClass)
+              .children([
+                h.div
+                  .class(ui.row)
+                  .children([icon(h, "mail", 22), h.h1.children([t.t("auth.checkEmail.title")])]),
+                h.p.class(ui.muted).children([t.t("auth.checkEmail.body", { email: model.email })]),
+              ]),
+            ...(model.infoNotice !== null
+              ? [banner(h, { text: model.infoNotice, tone: "info" })]
+              : []),
+            ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
+            button(h, {
+              label: t.t("auth.checkEmail.resend"),
+              onClick: Message.ClickedResendEmail(),
+              variant: "secondary",
+              busy: model.submitting,
+              disabled: model.submitting,
+            }),
+            h.div
+              .class(authFooterClass)
+              .children([
+                h.a
+                  .attr("href", href({ _tag: "SignIn" }))
+                  .children([t.t("auth.checkEmail.wrongEmail")]),
+              ]),
+          ]);
       }
 
       case "AuthLink": {
         if (model.linkState === "verified") {
-          return h.div.class("kb-auth-form").children([
-            banner(h, { text: local(ctx.locale, "verifySignIn"), tone: "info" }),
-            h.a
-              .class("kb-btn kb-btn--primary")
-              .attr("href", signInPath(undefined))
-              .children([local(ctx.locale, "signInNow")]),
-          ]);
+          return h.div
+            .class(authFormClass)
+            .attr("data-slot", "auth-form")
+            .children([
+              banner(h, { text: local(ctx.locale, "verifySignIn"), tone: "info" }),
+              h.a
+                .class(buttonVariants({ variant: "primary" }))
+                .attr("href", signInPath(undefined))
+                .children([local(ctx.locale, "signInNow")]),
+            ]);
         }
         if (model.linkState === "expired") {
-          return h.div.class("kb-auth-form").children([
-            h.h1.children([t.t("auth.link.expired.title")]),
-            h.p.class("kb-muted").children([t.t("auth.link.expired.body")]),
-            h.a
-              .class("kb-btn kb-btn--primary")
-              .attr("href", href({ _tag: "SignIn" }))
-              .children([t.t("auth.link.sendNew")]),
-          ]);
+          return h.div
+            .class(authFormClass)
+            .attr("data-slot", "auth-form")
+            .children([
+              h.h1.children([t.t("auth.link.expired.title")]),
+              h.p.class(ui.muted).children([t.t("auth.link.expired.body")]),
+              h.a
+                .class(buttonVariants({ variant: "primary" }))
+                .attr("href", href({ _tag: "SignIn" }))
+                .children([t.t("auth.link.sendNew")]),
+            ]);
         }
         return h.div
-          .class("kb-auth-form")
+          .class(authFormClass)
+          .attr("data-slot", "auth-form")
           .attr("aria-busy", String(true))
           .children([h.h1.children([t.t("auth.link.verifying")])]);
       }
 
       case "ResetPassword": {
         if (model.resetDone) {
-          return h.div.class("kb-auth-form").children([
-            banner(h, { text: t.t("auth.resetPassword.done"), tone: "info" }),
-            h.a
-              .class("kb-btn kb-btn--primary")
-              .attr("href", href({ _tag: "SignIn" }))
-              .children([local(ctx.locale, "signInNow")]),
-          ]);
+          return h.div
+            .class(authFormClass)
+            .attr("data-slot", "auth-form")
+            .children([
+              banner(h, { text: t.t("auth.resetPassword.done"), tone: "info" }),
+              h.a
+                .class(buttonVariants({ variant: "primary" }))
+                .attr("href", href({ _tag: "SignIn" }))
+                .children([local(ctx.locale, "signInNow")]),
+            ]);
         }
         if (model.route.token !== undefined) {
-          return h.div.class("kb-auth-form").children([
-            h.h1.children([t.t("auth.resetPassword.title")]),
-            ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
-            textField(h, {
-              id: "auth-reset-new",
-              label: t.t("auth.resetPassword.newPassword"),
-              type: "password",
-              value: model.password,
-              onInput: (value) => Message.ChangedPassword({ value }),
-              hint: t.t("auth.signUp.passwordHint"),
-              autocomplete: "new-password",
-              required: true,
-            }),
-            textField(h, {
-              id: "auth-reset-confirm",
-              label: t.t("auth.resetPassword.confirmPassword"),
-              type: "password",
-              value: model.confirmPassword,
-              onInput: (value) => Message.ChangedConfirmPassword({ value }),
-              autocomplete: "new-password",
-              required: true,
-            }),
-            button(h, {
-              label: t.t("auth.resetPassword.submit"),
-              onClick: Message.SubmittedResetConfirm(),
-              variant: "primary",
-              busy: model.submitting,
-              disabled: model.submitting,
-            }),
-          ]);
-        }
-        return h.div.class("kb-auth-form").children([
-          h.div
-            .class("kb-auth-header")
+          return h.div
+            .class(authFormClass)
+            .attr("data-slot", "auth-form")
             .children([
               h.h1.children([t.t("auth.resetPassword.title")]),
-              h.p.class("kb-muted").children([t.t("auth.resetPassword.requestBody")]),
-            ]),
-          ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
-          textField(h, {
-            id: "auth-reset-email",
-            label: t.t("common.field.email"),
-            type: "email",
-            value: model.email,
-            onInput: (value) => Message.ChangedEmail({ value }),
-            autocomplete: "email",
-            required: true,
-          }),
-          botProofBar(model, ctx, h),
-          button(h, {
-            label: t.t("auth.resetPassword.send"),
-            onClick: Message.SubmittedResetRequest(),
-            variant: "primary",
-            busy: model.submitting,
-            disabled: model.submitting || !isBotProofReady(model.botProof),
-          }),
-          h.div
-            .class("kb-auth-footer")
-            .children([
-              h.a
-                .attr("href", href({ _tag: "SignIn" }))
-                .children([local(ctx.locale, "backToSignIn")]),
-            ]),
-        ]);
+              ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
+              textField(h, {
+                id: "auth-reset-new",
+                label: t.t("auth.resetPassword.newPassword"),
+                type: "password",
+                value: model.password,
+                onInput: (value) => Message.ChangedPassword({ value }),
+                hint: t.t("auth.signUp.passwordHint"),
+                autocomplete: "new-password",
+                required: true,
+              }),
+              textField(h, {
+                id: "auth-reset-confirm",
+                label: t.t("auth.resetPassword.confirmPassword"),
+                type: "password",
+                value: model.confirmPassword,
+                onInput: (value) => Message.ChangedConfirmPassword({ value }),
+                autocomplete: "new-password",
+                required: true,
+              }),
+              button(h, {
+                label: t.t("auth.resetPassword.submit"),
+                onClick: Message.SubmittedResetConfirm(),
+                variant: "primary",
+                busy: model.submitting,
+                disabled: model.submitting,
+              }),
+            ]);
+        }
+        return h.div
+          .class(authFormClass)
+          .attr("data-slot", "auth-form")
+          .children([
+            h.div
+              .class(authHeaderClass)
+              .children([
+                h.h1.children([t.t("auth.resetPassword.title")]),
+                h.p.class(ui.muted).children([t.t("auth.resetPassword.requestBody")]),
+              ]),
+            ...(errorText !== null ? [banner(h, { text: errorText, tone: "error" })] : []),
+            textField(h, {
+              id: "auth-reset-email",
+              label: t.t("common.field.email"),
+              type: "email",
+              value: model.email,
+              onInput: (value) => Message.ChangedEmail({ value }),
+              autocomplete: "email",
+              required: true,
+            }),
+            botProofBar(model, ctx, h),
+            button(h, {
+              label: t.t("auth.resetPassword.send"),
+              onClick: Message.SubmittedResetRequest(),
+              variant: "primary",
+              busy: model.submitting,
+              disabled: model.submitting || !isBotProofReady(model.botProof),
+            }),
+            h.div
+              .class(authFooterClass)
+              .children([
+                h.a
+                  .attr("href", href({ _tag: "SignIn" }))
+                  .children([local(ctx.locale, "backToSignIn")]),
+              ]),
+          ]);
       }
 
       default:
@@ -1255,12 +1310,14 @@ const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   })();
 
   return h.div
-    .class("kb-auth-shell")
+    .class("grid flex-1 place-items-center px-4 pt-8 pb-14")
     .children([
       card(
         h,
-        [h.div.class("kb-row").children([lockup(h, "horizontal", 22)]), body],
-        [attribute("class", "kb-card kb-auth-card")],
+        [h.div.class(ui.row).children([lockup(h, "horizontal", 22)]), body],
+        [],
+        false,
+        "flex w-[min(440px,100%)] flex-col gap-4.5 p-6",
       ),
     ]);
 };
