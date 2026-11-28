@@ -1469,7 +1469,7 @@
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "1be89df326331d49c3c2bd1b7d90ce0bd3c8458a2d9a7719aa0defc75467b6ef"
+          "sha256": "8044baf0c0b90fb92f3efdb7b29b19b9fa3f228e8576424f33179d747653e031"
         },
         {
           "path": "infra/alchemy/src/env.ts",
@@ -1481,7 +1481,7 @@
         },
         {
           "path": "infra/alchemy/alchemy.run.ts",
-          "sha256": "81eabb519c49997aa8815abf8b1d013427498f2135f4bd998d6a0847df6a425b"
+          "sha256": "974de2e7ec8f4f5ea01cc57d17fa5a00ae9a4265a328545c89221a0bf794e158"
         },
         {
           "path": ".github/workflows/deploy.yml",
