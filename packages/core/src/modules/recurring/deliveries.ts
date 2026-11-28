@@ -5,7 +5,10 @@
  * the caller's transaction. Board seam #399.
  */
 import type { DeliveryId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Ref } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import type { StoreUnavailable } from "../../store/CoreStore";
 
 export type DeliveryStatus = "queued" | "sending" | "sent" | "failed" | "skipped";
@@ -19,7 +22,7 @@ export class DeliveryStatusLookup extends Context.Service<
       ids: ReadonlyArray<DeliveryId>,
     ) => Effect.Effect<ReadonlyMap<DeliveryId, DeliveryStatus>, StoreUnavailable>;
   }
->()("kvitbit/core/DeliveryStatusLookup") {}
+>()("@kvitbit/core/modules/recurring/deliveries/DeliveryStatusLookup") {}
 
 /** In-memory fake: `set` records a delivery's status; the lookup reads them back. Tests only. */
 export class FakeDeliveryStatuses extends Context.Service<
@@ -31,7 +34,7 @@ export class FakeDeliveryStatuses extends Context.Service<
       status: DeliveryStatus,
     ) => Effect.Effect<void>;
   }
->()("kvitbit/core/testing/FakeDeliveryStatuses") {
+>()("@kvitbit/core/modules/recurring/deliveries/FakeDeliveryStatuses") {
   static readonly layer: Layer.Layer<DeliveryStatusLookup | FakeDeliveryStatuses> =
     Layer.effectContext(
       Effect.map(Ref.make(new Map<string, DeliveryStatus>()), (ref) => {
@@ -39,13 +42,15 @@ export class FakeDeliveryStatuses extends Context.Service<
         return Context.make(
           FakeDeliveryStatuses,
           FakeDeliveryStatuses.of({
-            set: (ws, id, status) => Ref.update(ref, (m) => new Map(m).set(key(ws, id), status)),
+            set: Effect.fn("FakeDeliveryStatuses.set")((ws, id, status) =>
+              Ref.update(ref, (m) => new Map(m).set(key(ws, id), status)),
+            ),
           }),
         ).pipe(
           Context.add(
             DeliveryStatusLookup,
             DeliveryStatusLookup.of({
-              statuses: (ws, ids) =>
+              statuses: Effect.fn("DeliveryStatusLookup.statuses")((ws, ids) =>
                 Effect.map(Ref.get(ref), (m) => {
                   const out = new Map<DeliveryId, DeliveryStatus>();
                   for (const id of ids) {
@@ -54,6 +59,7 @@ export class FakeDeliveryStatuses extends Context.Service<
                   }
                   return out;
                 }),
+              ),
             }),
           ),
         );

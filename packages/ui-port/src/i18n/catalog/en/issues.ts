@@ -52,6 +52,7 @@ export const issues = {
   // UI-only form codes (spec rule F1)
   "issue.form.required": "This field is required.",
   "issue.form.invalid": "Check this value.",
+  "issue.form.validation_unavailable": "Validation is unavailable. Try again.",
   "issue.form.decimal_invalid": "Enter a number, for example 1 234,50.",
   "issue.form.integer_invalid": "Enter a whole number.",
   "issue.form.email_invalid": "Enter a valid email address.",

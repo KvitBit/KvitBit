@@ -19,13 +19,19 @@
  * - Validation issues use `request.malformed` + `params.reason`: the frozen IssueCode union has
  *   no expense codes (domain gap, same exception as core-identity, board #430).
  */
-import type { Issue, IssueCode, VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
+
+import type { Issue, IssueCode, VatBucket } from "@kvitbit/domain/contract";
 import {
   AttachmentId,
+  AttachmentView,
   ContactId,
   CurrencyCode,
   ExpenseId,
+  type ExpenseInput,
+  type ExpensePatch,
   ExpenseStatus,
+  ExpenseSummary,
+  ExpenseView,
   Invalid,
   IsoDate,
   Money,
@@ -36,13 +42,22 @@ import {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, type Result, Schema, SchemaIssue } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
 import { divideRound, HUNDRED, roundAt, sumAll, ZERO } from "../../engines/decimal";
 import type { FxRate } from "../../engines/fx";
 import { Fx } from "../../engines/fx";
 import { TREATMENTS, VAT_RATE_TABLE, VatMath } from "../../engines/vat";
 
-const CZK = "CZK" as CurrencyCode;
+const CZK = CurrencyCode.make("CZK");
 
 // Input --------------------------------------------------------------------------------------
 
@@ -53,19 +68,19 @@ export const SupplierRef = Schema.Union([
   Schema.Struct({
     manual: Schema.Struct({
       name: Schema.String,
-      ico: Schema.optional(Schema.NullOr(Schema.String)),
-      dic: Schema.optional(Schema.NullOr(Schema.String)),
+      ico: Schema.String.pipe(Schema.NullOr, Schema.optional),
+      dic: Schema.String.pipe(Schema.NullOr, Schema.optional),
     }),
   }),
 ]);
 export type SupplierRef = typeof SupplierRef.Type;
 
 /** The rate a self-assessed line (reverse charge, intra-EU acquisition) is taxed at. */
-export const SelfAssessedTreatment = Schema.Literals(["standard", "reduced"]);
-export type SelfAssessedTreatment = typeof SelfAssessedTreatment.Type;
+const SelfAssessedTreatment = Schema.Literals(["standard", "reduced"]);
+type SelfAssessedTreatment = typeof SelfAssessedTreatment.Type;
 
 /** One line of the received document's VAT breakdown, as the supplier printed it. */
-export const VatLineInput = Schema.Struct({
+const VatLineInput = Schema.Struct({
   treatment: VatTreatment,
   base: Schema.BigDecimal,
   /** Supplier VAT. Must be 0 for non-rated treatments (reverse charge included). */
@@ -73,7 +88,6 @@ export const VatLineInput = Schema.Struct({
   /** reverse_charge and exempt_intra_eu_goods only (self-assessed by the recipient); default "standard". */
   selfAssessed: Schema.optional(SelfAssessedTreatment),
 });
-export type VatLineInput = typeof VatLineInput.Type;
 
 /** Input VAT deductibility: full, none, or a partial percentage (coefficient, §76). */
 export const Deductibility = Schema.Union([
@@ -85,7 +99,7 @@ export const Deductibility = Schema.Union([
 export type Deductibility = typeof Deductibility.Type;
 
 const optionalNullable = <S extends Schema.Top>(schema: S) =>
-  Schema.optional(Schema.NullOr(schema));
+  schema.pipe(Schema.NullOr, Schema.optional);
 
 /** The concrete `ExpenseInput` / `ExpensePatch` fields. Every field is optional on the wire. */
 export const ExpenseFields = Schema.Struct({
@@ -99,10 +113,10 @@ export const ExpenseFields = Schema.Struct({
   /** Gross amount of the received document in `currency`. */
   total: optionalNullable(Schema.BigDecimal),
   /** Absent or null: a receipt with a single total and no VAT lines. */
-  vat: optionalNullable(Schema.Array(VatLineInput)),
+  vat: VatLineInput.pipe(Schema.Array, optionalNullable),
   deductibility: Schema.optional(Deductibility),
   category: optionalNullable(Schema.String),
-  tags: Schema.optional(Schema.Array(Schema.String)),
+  tags: Schema.String.pipe(Schema.Array, Schema.optional),
   note: optionalNullable(Schema.String),
 });
 export type ExpenseFields = typeof ExpenseFields.Type;
@@ -110,28 +124,43 @@ export type ExpenseFields = typeof ExpenseFields.Type;
 const ExpenseFieldsJson = Schema.toCodecJson(ExpenseFields);
 const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 
-export const invalid = (
-  code: IssueCode,
-  path: ReadonlyArray<string | number>,
-  params?: Record<string, string>,
-): Invalid => new Invalid({ issues: [issue(code, path, params)] });
+export const invalid: {
+  (
+    path: ReadonlyArray<string | number>,
+    params?: Record<string, string>,
+  ): (code: IssueCode) => Invalid;
+  (code: IssueCode, path: ReadonlyArray<string | number>, params?: Record<string, string>): Invalid;
+} = Fn.dual(
+  (args) => Predicate.isString(args[0]),
+  (
+    code: IssueCode,
+    path: ReadonlyArray<string | number>,
+    params?: Record<string, string>,
+  ): Invalid => Invalid.make({ issues: [issue(code, path, params)] }),
+);
 
 const issue = (
   code: IssueCode,
   path: ReadonlyArray<string | number>,
   params?: Record<string, string>,
-): Issue => ({ path: [...path], code, ...(params ? { params } : {}) });
+): Issue => (params === undefined ? { path: [...path], code } : { path: [...path], code, params });
 
 const toSegment = (segment: PropertyKey | { readonly key: PropertyKey }): string | number => {
-  const key = typeof segment === "object" ? segment.key : segment;
-  return typeof key === "number" ? key : String(key);
+  const key = Predicate.isObject(segment) ? segment.key : segment;
+  return Predicate.isNumber(key) ? key : String(key);
 };
+
+const encodePath = Schema.encodeOption(
+  Schema.fromJsonString(Schema.Array(Schema.Union([Schema.String, Schema.Finite]))),
+);
 
 /**
  * Decodes the open part of an `ExpenseInput` / `ExpensePatch` strictly: unknown keys and wrong
  * shapes are `request.malformed`, one issue per failing path.
  */
-export const decodeFields = (input: unknown): Effect.Effect<ExpenseFields, Invalid> =>
+export const decodeFields = (
+  input: ExpenseInput | ExpensePatch,
+): Effect.Effect<ExpenseFields, Invalid> =>
   Schema.decodeUnknownEffect(ExpenseFieldsJson)(input, {
     onExcessProperty: "error",
     errors: "all",
@@ -140,26 +169,27 @@ export const decodeFields = (input: unknown): Effect.Effect<ExpenseFields, Inval
       const seen = new Set<string>();
       const issues: Array<Issue> = [];
       for (const i of formatIssues(error.issue).issues) {
-        const path = (i.path ?? []).map(toSegment);
-        const key = JSON.stringify(path);
+        const path = EffectArray.map(i.path ?? [], toSegment);
+        const key = Option.getOrThrow(encodePath(path));
         if (seen.has(key)) continue;
         seen.add(key);
         issues.push(issue("request.malformed", path));
       }
       const [first, ...rest] = issues;
-      return new Invalid({ issues: [first ?? issue("request.malformed", []), ...rest] });
+      return Invalid.make({ issues: [first ?? issue("request.malformed", []), ...rest] });
     }),
   );
 
 /** Plain JSON data (what the wire delivers); anything else in an open field is malformed. */
-export const isJsonValue = (value: unknown): boolean => {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return true;
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  if (typeof value === "object") {
+export const isJsonValue = <A>(value: A): value is A & Schema.Json => {
+  if (value === null || Predicate.isString(value) || Predicate.isBoolean(value)) return true;
+  if (Predicate.isNumber(value)) return Number.isFinite(value);
+  if (EffectArray.isArray(value)) return EffectArray.every(value, isJsonValue);
+  if (Predicate.isObject(value)) {
     const proto = Object.getPrototypeOf(value);
     return (
-      (proto === Object.prototype || proto === null) && Object.values(value).every(isJsonValue)
+      (proto === Object.prototype || proto === null) &&
+      EffectArray.every(EffectRecord.values(value), isJsonValue)
     );
   }
   return false;
@@ -175,15 +205,15 @@ export const SupplierRecord = Schema.Struct({
 });
 export type SupplierRecord = typeof SupplierRecord.Type;
 
-export const StoredVatLine = Schema.Struct({
+const StoredVatLine = Schema.Struct({
   treatment: VatTreatment,
   base: Schema.BigDecimal,
   vat: Schema.BigDecimal,
   selfAssessed: Schema.NullOr(SelfAssessedTreatment),
 });
-export type StoredVatLine = typeof StoredVatLine.Type;
+type StoredVatLine = typeof StoredVatLine.Type;
 
-export const StoredFx = Schema.Struct({
+const StoredFx = Schema.Struct({
   rate: Schema.BigDecimal,
   quantity: Schema.Int,
   fixingDate: Schema.NullOr(IsoDate),
@@ -207,7 +237,7 @@ export type ExpenseFigures = typeof ExpenseFigures.Type;
 export const ExpenseRow = Schema.Struct({
   id: ExpenseId,
   workspaceId: WorkspaceId,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   status: ExpenseStatus,
   supplier: Schema.NullOr(SupplierRecord),
   supplierDocumentNumber: Schema.NullOr(Schema.String),
@@ -216,7 +246,7 @@ export const ExpenseRow = Schema.Struct({
   dueOn: Schema.NullOr(IsoDate),
   currency: Schema.NullOr(CurrencyCode),
   total: Schema.NullOr(Schema.BigDecimal),
-  vatLines: Schema.NullOr(Schema.Array(StoredVatLine)),
+  vatLines: StoredVatLine.pipe(Schema.Array, Schema.NullOr),
   deductiblePercent: Schema.Int,
   category: Schema.NullOr(Schema.String),
   tags: Schema.Array(Schema.String),
@@ -235,12 +265,12 @@ export type ExpenseRow = typeof ExpenseRow.Type;
 export const AttachmentRow = Schema.Struct({
   id: AttachmentId,
   workspaceId: WorkspaceId,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   expenseId: ExpenseId,
   blobKey: Schema.String,
   name: Schema.String,
   contentType: Schema.String,
-  bytes: Schema.Number,
+  bytes: Schema.Finite,
   sha256: Schema.String,
   createdAt: Schema.String,
 });
@@ -251,7 +281,7 @@ export type AttachmentRow = typeof AttachmentRow.Type;
 export const percentOf = (d: Deductibility): number =>
   d === "full" ? 100 : d === "none" ? 0 : d.partial;
 
-export const deductibilityOf = (percent: number): Deductibility =>
+const deductibilityOf = (percent: number): Deductibility =>
   percent === 100 ? "full" : percent === 0 ? "none" : { partial: percent };
 
 /** The Expense's tax point: taxable supply date, else issue date. */
@@ -278,7 +308,7 @@ export const validateComplete = (row: ExpenseRow): ReadonlyArray<Issue> => {
     issues.push(issue("request.malformed", path, { reason: "precision", scale: String(scale) }));
   if (scaleOf(row.total) > scale) tooPrecise(["total"]);
 
-  const taxPoint = taxPointOf(row) as IsoDate;
+  const taxPoint = row.taxableSupplyOn ?? row.issuedOn;
   const lines = row.vatLines ?? [];
   if (lines.length > 0 && taxPoint < (VAT_RATE_TABLE[0]?.from ?? taxPoint)) {
     issues.push(
@@ -288,11 +318,11 @@ export const validateComplete = (row: ExpenseRow): ReadonlyArray<Issue> => {
     );
     return issues;
   }
-  lines.forEach((line, i) => {
+  EffectArray.forEach(lines, (line, i) => {
     if (scaleOf(line.base) > scale) tooPrecise(["vat", i, "base"]);
     if (scaleOf(line.vat) > scale) tooPrecise(["vat", i, "vat"]);
     const rated = BigDecimal.isPositive(VatMath.rateFor(line.treatment, taxPoint));
-    if (!rated && !BigDecimal.isZero(line.vat)) {
+    if (!(rated || BigDecimal.isZero(line.vat))) {
       issues.push(issue("request.malformed", ["vat", i, "vat"], { reason: "vat_not_allowed" }));
     }
     if (line.selfAssessed !== null && !SELF_ASSESSED.has(line.treatment)) {
@@ -304,13 +334,13 @@ export const validateComplete = (row: ExpenseRow): ReadonlyArray<Issue> => {
     }
   });
   if (lines.length > 0) {
-    const gross = sumAll(lines.map((l) => BigDecimal.sum(l.base, l.vat)));
+    const gross = sumAll(EffectArray.map(lines, (l) => BigDecimal.sum(l.base, l.vat)));
     if (!BigDecimal.equals(gross, row.total)) {
       issues.push(
         issue("request.malformed", ["vat"], {
           reason: "vat_total_mismatch",
-          expected: BigDecimal.format(BigDecimal.normalize(row.total)),
-          actual: BigDecimal.format(BigDecimal.normalize(gross)),
+          expected: row.total.pipe(BigDecimal.normalize, BigDecimal.format),
+          actual: gross.pipe(BigDecimal.normalize, BigDecimal.format),
         }),
       );
     }
@@ -361,7 +391,7 @@ const supplierBuckets = (
       vat: BigDecimal.sum(g.vat, line.vat),
     });
   }
-  return byTreatment([...groups]).map(([treatment, g]) => ({
+  return EffectArray.map(byTreatment([...groups]), ([treatment, g]) => ({
     treatment,
     ratePercent: VatMath.rateFor(treatment, taxPoint),
     base: BigDecimal.normalize(g.base),
@@ -393,7 +423,7 @@ const selfAssessedBuckets = (
       TREATMENTS.indexOf(a.treatment) - TREATMENTS.indexOf(b.treatment) ||
       (a.as === b.as ? 0 : a.as === "standard" ? -1 : 1),
   );
-  return ordered.map(({ treatment, as, base }) => {
+  return EffectArray.map(ordered, ({ treatment, as, base }) => {
     const ratePercent = VatMath.rateFor(as, taxPoint);
     const vat = divideRound(BigDecimal.multiply(base, ratePercent), HUNDRED, 2);
     return {
@@ -412,27 +442,40 @@ const selfAssessedBuckets = (
  * `ExchangeRates.fixing(taxPoint)`); a currency CNB does not quote is `Invalid{fx.rate_missing}`.
  * Manual rates are not offered for Expenses (core-ports 4.7 stores the CNB fixing).
  */
-export const resolveFx = (
-  row: ExpenseRow,
-  fixing: CnbFixing | null,
-): Result.Result<FxRate | null, Invalid> =>
-  Fx.resolve({ currency: row.currency as CurrencyCode, override: null, fixing });
+export const resolveFx: {
+  (fixing: CnbFixing | null): (row: ExpenseRow) => Result.Result<FxRate | null, Invalid>;
+  (row: ExpenseRow, fixing: CnbFixing | null): Result.Result<FxRate | null, Invalid>;
+} = Fn.dual(
+  2,
+  (row: ExpenseRow, fixing: CnbFixing | null): Result.Result<FxRate | null, Invalid> =>
+    Fx.resolve({
+      currency: Option.getOrThrow(Option.fromNullOr(row.currency)),
+      override: null,
+      fixing,
+    }),
+);
 
 /** Derived figures of a valid complete Expense at rate `fx` (null for CZK). */
-export const computeFigures = (row: ExpenseRow, fx: FxRate | null): ExpenseFigures => {
-  const currency = row.currency as CurrencyCode;
-  const total = row.total as BigDecimal.BigDecimal;
-  const taxPoint = taxPointOf(row) as IsoDate;
+export const computeFigures: {
+  (fx: FxRate | null): (row: ExpenseRow) => ExpenseFigures;
+  (row: ExpenseRow, fx: FxRate | null): ExpenseFigures;
+} = Fn.dual(2, (row: ExpenseRow, fx: FxRate | null): ExpenseFigures => {
+  const currency = Option.getOrThrow(Option.fromNullOr(row.currency));
+  const total = Option.getOrThrow(Option.fromNullOr(row.total));
+  const taxPoint = Option.getOrThrow(Option.fromNullOr(taxPointOf(row)));
   const lines = row.vatLines ?? [];
   const totals = VatMath.fromBuckets(supplierBuckets(lines, total, taxPoint, fx), currency);
   const selfAssessed = selfAssessedBuckets(lines, taxPoint, fx);
-  const claimable = BigDecimal.sum(totals.vat.amount, sumAll(selfAssessed.map((b) => b.vat)));
+  const claimable = BigDecimal.sum(
+    totals.vat.amount,
+    sumAll(EffectArray.map(selfAssessed, (b) => b.vat)),
+  );
   const claimableCzk =
     fx === null
       ? claimable
       : BigDecimal.sum(
-          sumAll(totals.buckets.map((b) => b.vatCzk ?? ZERO)),
-          sumAll(selfAssessed.map((b) => b.vatCzk ?? ZERO)),
+          sumAll(EffectArray.map(totals.buckets, (b) => b.vatCzk ?? ZERO)),
+          sumAll(EffectArray.map(selfAssessed, (b) => b.vatCzk ?? ZERO)),
         );
   const share = (amount: BigDecimal.BigDecimal) =>
     divideRound(
@@ -449,7 +492,7 @@ export const computeFigures = (row: ExpenseRow, fx: FxRate | null): ExpenseFigur
     deductibleVat: share(claimable),
     deductibleVatCzk: share(claimableCzk),
   };
-};
+});
 
 /** Whether `computeFigures` needs a CNB fixing. */
 export const needsFixing = (row: ExpenseRow) => row.currency !== null && row.currency !== CZK;
@@ -471,7 +514,7 @@ export const AttachmentViewFields = Schema.Struct({
   expenseId: ExpenseId,
   name: Schema.String,
   contentType: Schema.String,
-  bytes: Schema.Number,
+  bytes: Schema.Finite,
   sha256: Schema.String,
   createdAt: Schema.String,
 });
@@ -492,7 +535,7 @@ export const ExpenseViewFields = Schema.Struct({
   currency: Schema.NullOr(CurrencyCode),
   /** As entered; shown even before a currency is chosen (incomplete). */
   total: Schema.NullOr(Schema.BigDecimal),
-  vat: Schema.NullOr(Schema.Array(StoredVatLine)),
+  vat: StoredVatLine.pipe(Schema.Array, Schema.NullOr),
   totals: Schema.NullOr(VatBreakdownSchema),
   selfAssessed: Schema.Array(VatBucketSchema),
   fx: Schema.NullOr(StoredFx),
@@ -537,7 +580,7 @@ const money = (amount: BigDecimal.BigDecimal | null, currency: CurrencyCode | nu
     ? null
     : MoneyMath.make(BigDecimal.normalize(amount), currency);
 
-export const attachmentFields = (a: AttachmentRow): AttachmentViewFields => ({
+const attachmentFields = (a: AttachmentRow): AttachmentViewFields => ({
   id: a.id,
   expenseId: a.expenseId,
   name: a.name,
@@ -547,68 +590,86 @@ export const attachmentFields = (a: AttachmentRow): AttachmentViewFields => ({
   createdAt: a.createdAt,
 });
 
-export const viewFields = (
-  row: ExpenseRow,
-  attachments: ReadonlyArray<AttachmentRow>,
-): ExpenseViewFields => ({
-  id: row.id,
-  revision: row.revision,
-  status: row.status,
-  supplier: row.supplier,
-  supplierDocumentNumber: row.supplierDocumentNumber,
-  issuedOn: row.issuedOn,
-  taxableSupplyOn: row.taxableSupplyOn,
-  dueOn: row.dueOn,
-  currency: row.currency,
-  total: row.total,
-  vat: row.vatLines,
-  totals: row.figures?.totals ?? null,
-  selfAssessed: row.figures?.selfAssessed ?? [],
-  fx: row.figures?.fx ?? null,
-  totalCzk: row.figures?.totalCzk ?? null,
-  deductibility: deductibilityOf(row.deductiblePercent),
-  deductibleVat: money(row.figures?.deductibleVat ?? null, row.currency),
-  deductibleVatCzk: row.figures?.deductibleVatCzk ?? null,
-  category: row.category,
-  tags: row.tags,
-  note: row.note,
-  attachments: attachments.map(attachmentFields),
-  payment: {
-    settlement: settlementOf(row),
-    paid: row.payments === 0 ? null : money(row.paid, row.currency),
-    payments: row.payments,
-  },
-  createdAt: row.createdAt,
-  updatedAt: row.updatedAt,
-});
+export const viewFields: {
+  (attachments: ReadonlyArray<AttachmentRow>): (row: ExpenseRow) => ExpenseViewFields;
+  (row: ExpenseRow, attachments: ReadonlyArray<AttachmentRow>): ExpenseViewFields;
+} = Fn.dual(
+  2,
+  (row: ExpenseRow, attachments: ReadonlyArray<AttachmentRow>): ExpenseViewFields => ({
+    id: row.id,
+    revision: row.revision,
+    status: row.status,
+    supplier: row.supplier,
+    supplierDocumentNumber: row.supplierDocumentNumber,
+    issuedOn: row.issuedOn,
+    taxableSupplyOn: row.taxableSupplyOn,
+    dueOn: row.dueOn,
+    currency: row.currency,
+    total: row.total,
+    vat: row.vatLines,
+    totals: row.figures?.totals ?? null,
+    selfAssessed: row.figures?.selfAssessed ?? [],
+    fx: row.figures?.fx ?? null,
+    totalCzk: row.figures?.totalCzk ?? null,
+    deductibility: deductibilityOf(row.deductiblePercent),
+    deductibleVat: money(row.figures?.deductibleVat ?? null, row.currency),
+    deductibleVatCzk: row.figures?.deductibleVatCzk ?? null,
+    category: row.category,
+    tags: row.tags,
+    note: row.note,
+    attachments: EffectArray.map(attachments, attachmentFields),
+    payment: {
+      settlement: settlementOf(row),
+      paid: row.payments === 0 ? null : money(row.paid, row.currency),
+      payments: row.payments,
+    },
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  }),
+);
 
-export const summaryFields = (row: ExpenseRow, attachments: number): ExpenseSummaryFields => ({
-  id: row.id,
-  revision: row.revision,
-  status: row.status,
-  supplierName: row.supplier?.name ?? null,
-  supplierDocumentNumber: row.supplierDocumentNumber,
-  issuedOn: row.issuedOn,
-  total: row.total,
-  currency: row.currency,
-  category: row.category,
-  tags: row.tags,
-  attachments,
-  settlement: settlementOf(row),
-});
+export const summaryFields: {
+  (attachments: number): (row: ExpenseRow) => ExpenseSummaryFields;
+  (row: ExpenseRow, attachments: number): ExpenseSummaryFields;
+} = Fn.dual(
+  2,
+  (row: ExpenseRow, attachments: number): ExpenseSummaryFields => ({
+    id: row.id,
+    revision: row.revision,
+    status: row.status,
+    supplierName: row.supplier?.name ?? null,
+    supplierDocumentNumber: row.supplierDocumentNumber,
+    issuedOn: row.issuedOn,
+    total: row.total,
+    currency: row.currency,
+    category: row.category,
+    tags: row.tags,
+    attachments,
+    settlement: settlementOf(row),
+  }),
+);
 
 /** JSON encoders for the open domain views (the domain schemas carry these fields as Unknown). */
-export const encodeView = Schema.encodeSync(Schema.toCodecJson(ExpenseViewFields));
-export const encodeSummary = Schema.encodeSync(Schema.toCodecJson(ExpenseSummaryFields));
+const encodeViewJson = Schema.encodeOption(Schema.toCodecJson(ExpenseViewFields));
+const encodeSummaryJson = Schema.encodeOption(Schema.toCodecJson(ExpenseSummaryFields));
+export const encodeView = (input: ExpenseViewFields): ExpenseView =>
+  Option.getOrThrow(encodeViewJson(input).pipe(Option.filter(Schema.is(ExpenseView))));
+export const encodeSummary = (input: ExpenseSummaryFields): ExpenseSummary =>
+  Option.getOrThrow(encodeSummaryJson(input).pipe(Option.filter(Schema.is(ExpenseSummary))));
 /** `attach`'s result: the attachment plus the Expense revision after it (attach bumps it). */
 export const AttachResultFields = Schema.Struct({
   ...AttachmentViewFields.fields,
   expenseRevision: Schema.Int,
 });
 export type AttachResultFields = typeof AttachResultFields.Type;
-export const encodeAttachment = Schema.encodeSync(Schema.toCodecJson(AttachResultFields));
+const encodeAttachmentJson = Schema.encodeOption(Schema.toCodecJson(AttachResultFields));
+export const encodeAttachment = (input: AttachResultFields): AttachmentView =>
+  AttachmentView.make(Option.getOrThrow(encodeAttachmentJson(input)));
 /** Decoders for tests and in-process callers that read the open views back. */
-export const decodeView = Schema.decodeUnknownSync(Schema.toCodecJson(ExpenseViewFields));
-export const decodeSummary = Schema.decodeUnknownSync(Schema.toCodecJson(ExpenseSummaryFields));
-
-export type { VatBreakdown };
+const decodeViewJson = Schema.decodeUnknownResult(Schema.toCodecJson(ExpenseViewFields));
+const decodeSummaryJson = Schema.decodeUnknownResult(Schema.toCodecJson(ExpenseSummaryFields));
+export const decodeView = (...args: Parameters<typeof decodeViewJson>): ExpenseViewFields =>
+  Result.getOrThrowWith(decodeViewJson(...args), (error) => error);
+export const decodeSummary = (
+  ...args: Parameters<typeof decodeSummaryJson>
+): ExpenseSummaryFields => Result.getOrThrowWith(decodeSummaryJson(...args), (error) => error);

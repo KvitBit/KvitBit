@@ -5,7 +5,8 @@
  * current one is stale (superseded by a newer load, a route change or a refresh) and is dropped, so
  * an out-of-order response can never overwrite newer data.
  */
-import { Schema } from "effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import { Failure } from "./api";
 
 export const Seq = Schema.Int;
@@ -43,12 +44,22 @@ const isCurrent = (r: Remote<unknown>, seq: Seq): boolean =>
   (r._tag === "Loading" || r._tag === "Refreshing") && r.seq === seq;
 
 /** Applies a success reply only when it answers the in-flight load. */
-export const succeed = <A>(r: Remote<A>, seq: Seq, data: A): Remote<A> =>
+const succeedImpl = <A>(r: Remote<A>, seq: Seq, data: A): Remote<A> =>
   isCurrent(r, seq) ? { _tag: "Loaded", seq, data } : r;
 
+export const succeed: {
+  <A>(seq: Seq, data: A): (r: Remote<A>) => Remote<A>;
+  <A>(r: Remote<A>, seq: Seq, data: A): Remote<A>;
+} = Fn.dual(3, succeedImpl);
+
 /** Applies a failure reply only when it answers the in-flight load. */
-export const fail = <A>(r: Remote<A>, seq: Seq, failure: Failure): Remote<A> =>
+const failImpl = <A>(r: Remote<A>, seq: Seq, failure: Failure): Remote<A> =>
   isCurrent(r, seq) ? { _tag: "Failed", seq, failure } : r;
+
+export const fail: {
+  <A>(seq: Seq, failure: Failure): (r: Remote<A>) => Remote<A>;
+  <A>(r: Remote<A>, seq: Seq, failure: Failure): Remote<A>;
+} = Fn.dual(3, failImpl);
 
 export const dataOf = <A>(r: Remote<A>): A | undefined =>
   r._tag === "Loaded" || r._tag === "Refreshing" ? r.data : undefined;

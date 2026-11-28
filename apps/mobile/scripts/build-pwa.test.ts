@@ -1,17 +1,30 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
+import * as EffectString from "effect/String";
+import appJson from "../app.json" with { type: "json" };
 import { decorateExport, exportVersion, pwaEntryFiles } from "./build-pwa";
 import { assetUrls, injectPwaHead, staticAssetUrls, urlsOutsideBase } from "./pwa/html";
 import { appleTouchIcon, pwaColors, pwaIcons, pwaManifest } from "./pwa/manifest";
 import { CACHE_PREFIX, serviceWorkerSource } from "./pwa/service-worker";
 
+const { fs, path } = Effect.runSync(
+  Effect.all({ fs: FileSystem.FileSystem, path: Path.Path }, { concurrency: 1 }).pipe(
+    Effect.provide(BunServices.layer),
+  ),
+);
+const { join, resolve } = path;
+
 const brandWebAssets = resolve(import.meta.dir, "../../../assets/brand/web");
 
 /** Width and height from a PNG's IHDR chunk. */
-const pngSize = async (path: string) => {
-  const view = new DataView(await Bun.file(path).arrayBuffer());
+const pngSize = async (pngPath: string) => {
+  const view = new DataView(await Bun.file(pngPath).arrayBuffer());
   return `${view.getUint32(16)}x${view.getUint32(20)}`;
 };
 
@@ -42,25 +55,25 @@ describe("manifest", () => {
     });
   });
 
-  test("uses the app.json web colours from the brand tokens", async () => {
-    const { expo } = (await Bun.file(resolve(import.meta.dir, "../app.json")).json()) as {
-      expo: { web: { themeColor: string; backgroundColor: string } };
-    };
-    expect<string>(pwaManifest().theme_color).toBe(expo.web.themeColor);
-    expect<string>(pwaManifest().background_color).toBe(expo.web.backgroundColor);
+  test("uses the app.json web colours from the brand tokens", () => {
+    expect<string>(pwaManifest().theme_color).toBe(appJson.expo.web.themeColor);
+    expect<string>(pwaManifest().background_color).toBe(appJson.expo.web.backgroundColor);
   });
 
   test("declares 192 and 512 px icons plus a maskable 512 that match the brand PNGs", async () => {
     const { icons } = pwaManifest();
-    expect(icons.map((icon) => [icon.sizes, icon.purpose])).toEqual([
+    expect(EffectArray.map(icons, (icon) => [icon.sizes, icon.purpose])).toEqual([
       ["192x192", "any"],
       ["512x512", "any"],
       ["512x512", "maskable"],
     ]);
-    for (const [index, icon] of icons.entries()) {
-      expect(icon.src).toBe(`/app/icons/${pwaIcons[index]?.file}`);
-      expect(await pngSize(join(brandWebAssets, pwaIcons[index]?.file ?? ""))).toBe(icon.sizes);
-    }
+    const pngSizes = await Promise.all(
+      EffectArray.map(pwaIcons, (icon) => pngSize(join(brandWebAssets, icon.file))),
+    );
+    expect(EffectArray.map(icons, (icon) => icon.src)).toEqual(
+      EffectArray.map(pwaIcons, (icon) => `/app/icons/${icon.file}`),
+    );
+    expect(EffectArray.map(icons, (icon) => icon.sizes)).toEqual(pngSizes);
   });
 });
 
@@ -73,18 +86,25 @@ describe("index.html injection", () => {
   });
 
   test("replaces Expo's theme-color with exactly one brand theme-color", () => {
-    expect(injected.match(/name="theme-color"/g)).toHaveLength(1);
+    expect(EffectString.match(/name="theme-color"/g)(injected).pipe(Option.getOrNull)).toHaveLength(
+      1,
+    );
     expect(injected).toContain(`<meta name="theme-color" content="${pwaColors.theme}">`);
   });
 
   test("registers the worker with scope /app/ inside the head", () => {
-    const head = injected.slice(0, injected.indexOf("</head>"));
+    const head = EffectString.slice(
+      0,
+      Option.getOrThrow(EffectString.indexOf("</head>")(injected)),
+    )(injected);
     expect(head).toContain('navigator.serviceWorker.register("/app/sw.js", { scope: "/app/" })');
   });
 
   test("keeps the body and its bundles untouched", () => {
-    expect(injected.slice(injected.indexOf("</head>"))).toBe(
-      expoShell.slice(expoShell.indexOf("</head>")),
+    expect(
+      EffectString.slice(Option.getOrThrow(EffectString.indexOf("</head>")(injected)))(injected),
+    ).toBe(
+      EffectString.slice(Option.getOrThrow(EffectString.indexOf("</head>")(expoShell)))(expoShell),
     );
   });
 
@@ -148,8 +168,14 @@ describe("service worker", () => {
   });
 
   /** Runs the generated worker against stand-in globals and returns how it answers fetches. */
+  interface WorkerEvent {
+    readonly request?: Request;
+    readonly waitUntil?: (pending: Promise<unknown>) => void;
+    readonly respondWith?: (response: Promise<Response>) => void;
+  }
+
   const loadWorker = (respond?: (pathname: string, request: Request) => Response) => {
-    const listeners = new Map<string, (event: unknown) => void>();
+    const listeners = new Map<string, (event: WorkerEvent) => void>();
     const store = new Map<string, Response>();
     const network: string[] = [];
     const requests: RequestInit[] = [];
@@ -160,34 +186,40 @@ describe("service worker", () => {
       }
     }
     let online = true;
+    const cachePath = (request: string | Request) =>
+      Predicate.isString(request) ? request : new URL(request.url).pathname;
     const cache = {
-      match: async (request: Request | string) =>
-        store.get(typeof request === "string" ? request : new URL(request.url).pathname)?.clone(),
-      put: async (request: Request | string, response: Response) => {
-        store.set(typeof request === "string" ? request : new URL(request.url).pathname, response);
+      match: (request: Request | string) => Promise.resolve(store.get(cachePath(request))?.clone()),
+      put: (request: Request | string, response: Response) => {
+        store.set(cachePath(request), response);
+        return Promise.resolve();
       },
-      addAll: async () => {},
+      addAll: () => Promise.resolve(),
     };
     const self = {
       location: { origin: "https://kvitbit.cz" },
-      addEventListener: (type: string, listener: (event: unknown) => void) =>
+      addEventListener: (type: string, listener: (event: WorkerEvent) => void) =>
         listeners.set(type, listener),
-      skipWaiting: () => {},
-      clients: { claim: () => {} },
+      skipWaiting: () => undefined,
+      clients: { claim: () => undefined },
     };
-    const fetchStub = async (request: Request) => {
+    const fetchStub = (request: Request) => {
       const pathname = new URL(request.url).pathname;
       network.push(pathname);
-      if (!online) throw new TypeError("offline");
-      if (respond) return respond(pathname, request);
+      if (!online) return Promise.reject(new TypeError("offline"));
+      if (respond !== undefined) return Promise.resolve(respond(pathname, request));
       const response = new Response(`net ${pathname}`, {
         status: 200,
         headers: { "content-type": "text/html" },
       });
       Object.defineProperty(response, "url", { value: request.url });
-      return response;
+      return Promise.resolve(response);
     };
-    const caches = { open: async () => cache, keys: async () => [], delete: async () => true };
+    const caches = {
+      open: () => Promise.resolve(cache),
+      keys: () => Promise.resolve([]),
+      delete: () => Promise.resolve(true),
+    };
     new Function("self", "caches", "fetch", "Request", source)(
       self,
       caches,
@@ -202,7 +234,7 @@ describe("service worker", () => {
           pending = promise;
         },
       });
-      if (pending) await pending;
+      if (pending !== undefined) await pending;
     };
 
     const dispatch = async (url: string, init: { mode?: string; method?: string } = {}) => {
@@ -211,11 +243,22 @@ describe("service worker", () => {
       Object.defineProperty(request, "mode", { value: init.mode ?? "cors" });
       listeners.get("fetch")?.({
         request,
-        respondWith: (response: Promise<Response>) => (answer = response),
+        respondWith: (response: Promise<Response>) => {
+          answer = response;
+        },
       });
-      return answer ? await (await answer).text() : undefined;
+      return answer === undefined ? undefined : (await answer).text();
     };
-    return { install, dispatch, network, requests, store, goOffline: () => (online = false) };
+    return {
+      install,
+      dispatch,
+      network,
+      requests,
+      store,
+      goOffline: () => {
+        online = false;
+      },
+    };
   };
 
   test("leaves /api/**, /mcp/**, cross-origin, non-GET and non-/app/ requests to the network", async () => {
@@ -343,42 +386,57 @@ describe("service worker", () => {
 
 describe("decorateExport", () => {
   let dist: string;
+  const decorate = (iconSource: string) =>
+    decorateExport({ dist, iconSource }).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
 
-  beforeEach(async () => {
-    dist = await mkdtemp(join(tmpdir(), "kvitbit-pwa-"));
-    await writeFile(join(dist, "index.html"), expoShell);
-    for (const url of staticAssetUrls(expoShell)) {
-      const file = join(dist, url.slice("/app/".length));
-      await mkdir(join(file, ".."), { recursive: true });
-      await writeFile(file, "exported bundle");
-    }
-  });
+  beforeEach(() =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        dist = yield* fs.makeTempDirectory({ prefix: "kvitbit-pwa-" });
+        yield* fs.writeFileString(join(dist, "index.html"), expoShell);
+        yield* Effect.forEach(
+          staticAssetUrls(expoShell),
+          (url) => {
+            const file = join(dist, EffectString.slice("/app/".length)(url));
+            return fs
+              .makeDirectory(path.dirname(file), { recursive: true })
+              .pipe(Effect.andThen(fs.writeFileString(file, "exported bundle")));
+          },
+          { concurrency: "unbounded", discard: true },
+        );
+      }),
+    ),
+  );
 
-  afterEach(async () => {
-    await rm(dist, { recursive: true, force: true });
-  });
+  afterEach(() => Effect.runPromise(fs.remove(dist, { recursive: true, force: true })));
 
   test("writes the manifest, worker, icons and injected shell", async () => {
-    await decorateExport({ dist, iconSource: brandWebAssets });
+    await decorate(brandWebAssets);
 
-    for (const file of pwaEntryFiles) expect(await Bun.file(join(dist, file)).exists()).toBe(true);
+    const entries = await Effect.runPromise(
+      Effect.forEach(pwaEntryFiles, (file) => fs.exists(join(dist, file)), {
+        concurrency: "unbounded",
+      }),
+    );
+    expect(entries).toEqual(EffectArray.map(pwaEntryFiles, () => true));
     expect(await Bun.file(join(dist, "manifest.webmanifest")).json()).toEqual(pwaManifest());
-    const worker = await readFile(join(dist, "sw.js"), "utf8");
+    const worker = await Bun.file(join(dist, "sw.js")).text();
     expect(worker).toContain(`${CACHE_PREFIX}${exportVersion(expoShell)}`);
     expect(worker).toContain("/app/_expo/static/js/web/index-fc40.js");
-    expect(await readFile(join(dist, "index.html"), "utf8")).toContain('rel="manifest"');
+    expect(await Bun.file(join(dist, "index.html")).text()).toContain('rel="manifest"');
   });
 
   test("fails when the export loads a URL outside /app/", async () => {
-    await writeFile(join(dist, "index.html"), expoShell.replace("/app/_expo", "/_expo"));
-    await expect(decorateExport({ dist, iconSource: brandWebAssets })).rejects.toThrow(
-      "outside /app/",
+    await Bun.write(
+      join(dist, "index.html"),
+      EffectString.replace("/app/_expo", "/_expo")(expoShell),
     );
+    await expect(decorate(brandWebAssets)).rejects.toThrow("outside /app/");
   });
 
   test("fails when a brand icon is missing", async () => {
     const empty = join(dist, "no-icons");
-    await mkdir(empty);
-    await expect(decorateExport({ dist, iconSource: empty })).rejects.toThrow();
+    await Effect.runPromise(fs.makeDirectory(empty));
+    await expect(decorate(empty)).rejects.toThrow();
   });
 });

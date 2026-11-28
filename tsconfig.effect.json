@@ -1,0 +1,338 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "namespaceImportPackages": ["@effect/platform-node", "effect"],
+        "effectFn": ["span", "inferred-span", "suggested-span"],
+        "diagnosticSeverity": {
+          "anyUnknownInErrorContext": "error",
+          "classSelfMismatch": "error",
+          "duplicatePackage": "error",
+          "effectFnImplicitAny": "error",
+          "errorPayloadShadowsName": "error",
+          // Some Effect 4 HTTP and SQL APIs are still marked experimental.
+          "experimentalApiUsage": "off",
+          "floatingEffect": "error",
+          "floatingEffectInVitest": "error",
+          "genericEffectServices": "error",
+          "missingEffectContext": "error",
+          "missingEffectError": "error",
+          "missingLayerContext": "error",
+          "missingReturnYieldStar": "error",
+          "missingStarInYieldEffectGen": "error",
+          "nonObjectEffectServiceType": "error",
+          "obsoleteMatchImport": "error",
+          "obsoleteSchemaImport": "error",
+          "outdatedApi": "error",
+          "overriddenSchemaConstructor": "error",
+          "promiseInEffectSuccess": "error",
+          "schemaClassMissingBrand": "error",
+          "schemaClassObjectLiteral": "error",
+          "schemaLiteralNonFinite": "error",
+          "schemaOpaqueInstanceMember": "error",
+          "unsafeEffectTypeAssertion": "error",
+          // Effect 4 HTTP and SQL are intentionally used through effect/unstable.
+          "unstableApiUsage": "off",
+          "catchUnfailableEffect": "error",
+          "effectFnIife": "error",
+          "effectGenUsesAdapter": "error",
+          "effectInFailure": "error",
+          "effectInVoidSuccess": "error",
+          "effectTryWithoutCatch": "error",
+          "globalErrorInEffectCatch": "error",
+          "globalErrorInEffectFailure": "error",
+          "layerMergeAllWithDependencies": "error",
+          "lazyEffect": "error",
+          "lazyPromiseInEffectSync": "error",
+          "leakingRequirements": "error",
+          "multipleEffectProvide": "error",
+          "preferUnsafeConstructor": "error",
+          "returnEffectInGen": "error",
+          "runEffectInsideEffect": "error",
+          "schemaSyncInEffect": "error",
+          "scopeInLayerEffect": "error",
+          "strictEffectProvide": "error",
+          "tryCatchInEffectGen": "error",
+          "unknownInEffectCatch": "error",
+          "abortControllerInEffect": "error",
+          "asyncFunction": "error",
+          "cryptoRandomUUID": "error",
+          "cryptoRandomUUIDInEffect": "error",
+          "extendsNativeError": "error",
+          "globalConsole": "error",
+          "globalConsoleInEffect": "error",
+          "globalDate": "error",
+          "globalDateInEffect": "error",
+          "globalFetch": "error",
+          "globalFetchInEffect": "error",
+          // These two rules replace the deprecated preferSchemaOverJson diagnostic.
+          "globalJson": "error",
+          "globalJsonInEffect": "error",
+          "globalRandom": "error",
+          "globalRandomInEffect": "error",
+          "globalTimers": "error",
+          "globalTimersInEffect": "error",
+          "instanceOfSchema": "error",
+          "newPromise": "error",
+          "nodeBuiltinImport": "error",
+          "preferEffectArray": "error",
+          "preferEffectRecord": "error",
+          "preferEffectString": "error",
+          "processEnv": "error",
+          "processEnvInEffect": "error",
+          "promiseAllInEffect": "error",
+          "promiseRaceInEffect": "error",
+          "schemaSync": "error",
+          "acquireReleaseDisposable": "error",
+          "allOfMapToForEach": "error",
+          "catchAllTagDispatchToCatchTag": "error",
+          "catchAllToMapError": "error",
+          "catchChainToFirstSuccessOf": "error",
+          "catchConditionalRefailToCatchIf": "error",
+          "catchDieToOrDie": "error",
+          "catchIfTagToCatchTag": "error",
+          "catchRefailToTapError": "error",
+          "catchTagToCatchReason": "error",
+          "catchToIgnore": "error",
+          "catchToOrElseSucceed": "error",
+          "deterministicKeys": "error",
+          "effectDoNotation": "error",
+          "effectFnOpportunity": "error",
+          "effectMapFlatten": "error",
+          "effectMapVoid": "error",
+          "effectSleepZeroToYieldNow": "error",
+          "effectSucceedWithUndefined": "error",
+          "effectSucceedWithVoid": "error",
+          "failCauseToConstructor": "error",
+          "flatMapConditionalToFilterOrFail": "error",
+          "flatMapIdentityToFlatten": "error",
+          "flatMapIgnoredParamToAndThen": "error",
+          "flatMapMapToZipWith": "error",
+          "flatMapProvideServiceToProvideServiceEffect": "error",
+          "flatMapToMap": "error",
+          "flatMapToTap": "error",
+          "forLoopPushToForEach": "error",
+          "manualMetricTapToTrack": "error",
+          "mapConstToAs": "error",
+          "mapMapErrorToMapBoth": "error",
+          "mapSomeCatchNoSuchElement": "error",
+          "mapSomeToAsSome": "error",
+          "matchBooleanToIsSuccess": "error",
+          "matchEffectToMapBoth": "error",
+          "matchEffectToMatch": "error",
+          "matchToResultOrOption": "error",
+          "missedPipeableOpportunity": "error",
+          "missingConcurrencyOption": "error",
+          "missingEffectServiceDependency": "error",
+          "missingPipeableSignature": "error",
+          "multipleCatchTag": "error",
+          "nestedEffectGenYield": "error",
+          "newSchemaClass": "error",
+          "onExitFailureToOnError": "error",
+          "optionMatchToFromOption": "error",
+          "preferBarrelImport": "error",
+          "preferNamespaceImport": "error",
+          "preferSchemaTaggedError": "error",
+          "preferSchemaTypeProperty": "error",
+          "preferSucceedSomeOrNone": "error",
+          "preferTypedSchemaDecoder": "error",
+          "provideLayerSucceedToProvideService": "error",
+          "provideMergeAllToArray": "error",
+          "raceFirstWithSleepToTimeout": "error",
+          "redundantMapError": "error",
+          "redundantOrDie": "error",
+          "redundantSchemaTagIdentifier": "error",
+          "resultMatchToFromResult": "error",
+          "runOfExitToRunExit": "error",
+          "schemaNumber": "error",
+          "schemaStructWithTag": "error",
+          "schemaUnionOfLiterals": "error",
+          "serviceNotAsClass": "error",
+          "strictBooleanExpressions": "error",
+          "suspendFailToFailSync": "error",
+          "syncToSucceed": "error",
+          "timeoutCatchTagToTimeoutOrElse": "error",
+          "typeUnionToSchemaUnion": "error",
+          "unnecessaryArrowBlock": "error",
+          "unnecessaryEffectGen": "error",
+          "unnecessaryFailYieldableError": "error",
+          "unnecessaryPipe": "error",
+          "unnecessaryPipeChain": "error",
+          "unnecessaryTypeofType": "error",
+          "yieldInCallArgument": "error",
+          // HTTP/SQL contract types intentionally expose Effect 4 unstable types (TS2790).
+          "apiStabilityLeak": "off"
+        },
+        "ignoreEffectSuggestionsInTscExitCode": false,
+        "ignoreEffectWarningsInTscExitCode": false,
+        "ignoreEffectErrorsInTscExitCode": false,
+        "overrides": [
+          // Test and fixture programs use anonymous Effect pipelines and inline JSON payloads.
+          {
+            "include": [
+              "**/*.test.ts",
+              "**/*.test.tsx",
+              "**/*.spec.ts",
+              "**/*.spec.tsx",
+              "**/*.integration.ts",
+              "**/*.testkit.ts",
+              "**/*.testkit.tsx",
+              "**/test/**/*",
+              "**/tests/**/*",
+              "**/fixtures/**/*",
+              "**/*fixture*.ts"
+            ],
+            "options": {
+              "diagnosticSeverity": {
+                "effectFnOpportunity": "off",
+                "globalJsonInEffect": "off",
+                "strictEffectProvide": "off"
+              }
+            }
+          },
+          // Bun and Playwright await native Promise callbacks.
+          {
+            "include": [
+              "**/*.test.ts",
+              "**/*.test.tsx",
+              "**/*.spec.ts",
+              "**/*.spec.tsx",
+              "**/*.integration.ts",
+              "apps/web/e2e/**/*"
+            ],
+            "options": {
+              "diagnosticSeverity": {
+                "asyncFunction": "off"
+              }
+            }
+          },
+          {
+            "include": [
+              // Expo loads its configuration synchronously using Node's host filesystem and paths.
+              "apps/mobile/app.config.ts",
+              // Expo's manifest protocol uses Node RSA signing and certificate verification.
+              "apps/mobile/release/manifest-response.ts",
+              // Generate RSA keys independently to exercise the Expo wire signature.
+              "apps/mobile/release/manifest-response.test.ts",
+              // Node's Argon2 and PBKDF2 implementations are independent KDF oracles.
+              "apps/mobile/src/platform/altcha/bot-proof.test.ts",
+              // The Node HTTP adapter requires a Node server factory.
+              "apps/server/src/main.ts",
+              // Node-hosted Playwright starts a Bun process to render server markup.
+              "apps/web/e2e/smoke.spec.ts",
+              // Vite reads middleware assets on its Node host and resolves native paths.
+              "apps/web/vite.config.ts",
+              // Alchemy derives DNS resource names from a synchronous SHA-256 digest.
+              "infra/alchemy/src/resources/dns.ts",
+              // Alchemy computes rollout and bundle fingerprints while declaring resources.
+              "infra/alchemy/src/env.ts",
+              "infra/alchemy/src/resources/mail.ts",
+              // Archive and relay identifiers use synchronous SHA-256 digests.
+              "infra/alchemy/src/mail-forwarder/relay.ts",
+              // The HTTP adapter fixture uses the same native server factory as production.
+              "apps/server/test/runtime/logging.test.ts",
+              // DKIM uses Node's raw public-key import, RSA and Ed25519 verification.
+              "scripts/alert-inbox/dkim.ts",
+              // Stable IDs are generated synchronously at the CLI's serialization boundary.
+              "scripts/alert-inbox/service.ts",
+              // SQLite resolves real files and checks hard links before opening a database.
+              "scripts/alert-inbox/store.ts",
+              // Independent signing and POSIX inode/lock fixtures exercise the inbox boundary.
+              "scripts/alert-inbox/alert-inbox.test.ts",
+              // The public key verifier uses constant-time comparison and secure bytes synchronously.
+              "packages/adapters/src/auth/api-key.ts",
+              // GCS signing uses a Node RSA private key.
+              "packages/adapters/src/blob/gcs-signed-url.ts",
+              // Node rmdir fails atomically on nonempty directories.
+              "packages/adapters/src/blob/local-disk.ts",
+              // Node SHA-256 independently checks stored content hashes.
+              "packages/adapters/test/blob/contract.ts",
+              // Node RSA verification independently checks GCS signatures.
+              "packages/adapters/test/blob/gcs-signed-url.test.ts",
+              // The CLI checks X.509 certificates and creates ephemeral verification keys.
+              "scripts/release/mobile-release.ts"
+            ],
+            "options": { "diagnosticSeverity": { "nodeBuiltinImport": "off" } }
+          },
+          {
+            // These executables supply the layer for their root program.
+            "include": [
+              "apps/server/src/main.ts",
+              "apps/server/src/migrate.ts",
+              "apps/server/src/worker.ts",
+              "infra/alchemy/src/preflight-cli.ts",
+              "infra/alchemy/alchemy.run.ts",
+              "scripts/alert-inbox/service.ts"
+            ],
+            "options": { "diagnosticSeverity": { "strictEffectProvide": "off" } }
+          },
+          {
+            // The Node runtime's teardown callback drains stdout after the root Effect has exited.
+            "include": ["apps/server/src/logging/logger.ts"],
+            "options": { "diagnosticSeverity": { "globalTimers": "off" } }
+          },
+          {
+            // Native SMTP sessions own cancellable idle and lifetime timers across STARTTLS.
+            "include": ["infra/alchemy/src/mail-forwarder/smtp.ts"],
+            "options": { "diagnosticSeverity": { "globalTimers": "off" } }
+          },
+          {
+            // Alchemy Resource defines a callable declaration with provider metadata.
+            "include": ["infra/alchemy/src/resources/monitoring-provider.ts"],
+            "options": { "diagnosticSeverity": { "missingPipeableSignature": "off" } }
+          },
+          {
+            // Effect UI defines App's callable signature and attaches runtime properties.
+            "include": ["apps/web/src/main.ts"],
+            "options": { "diagnosticSeverity": { "missingPipeableSignature": "off" } }
+          },
+          {
+            // Playwright emits real browser console events to probe feedback redaction.
+            "include": ["apps/web/e2e/feedback.spec.ts"],
+            "options": { "diagnosticSeverity": { "globalConsole": "off" } }
+          },
+          {
+            // Validate arrays from the Bun lockfile parser before Effect is installed.
+            "include": ["scripts/bun-lock-boundary.ts"],
+            "options": { "diagnosticSeverity": { "preferEffectArray": "off" } }
+          },
+          {
+            // Encode Nix and read its Bun lockfile inputs before Effect is installed.
+            "include": ["scripts/generate-bun-nix.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "globalJson": "off",
+                "preferEffectArray": "off",
+                "preferEffectRecord": "off",
+                "preferEffectString": "off"
+              }
+            }
+          },
+          {
+            // Populate Nix's tarball cache before Effect is installed.
+            "include": ["scripts/prepare-bun-tarball-cache.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "nodeBuiltinImport": "off",
+                "preferEffectArray": "off",
+                "preferEffectRecord": "off",
+                "preferEffectString": "off"
+              }
+            }
+          },
+          // Metro inlines EXPO_PUBLIC values from direct process.env references.
+          {
+            "include": ["apps/mobile/src/config/env.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "processEnv": "off"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

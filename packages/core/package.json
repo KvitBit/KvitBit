@@ -12,7 +12,7 @@
   },
   "scripts": {
     "lint": "biome check --error-on-warnings .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "test:suite": ":",
     "test:policy": "bun test test/policy test/policy.test.ts",

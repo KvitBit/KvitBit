@@ -1,4 +1,8 @@
-import type { AltchaChallenge } from "@kvitbit/api-contract";
+import { AltchaChallenge } from "@kvitbit/api-contract";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   bytesToHex,
   createArgon2id,
@@ -8,13 +12,17 @@ import {
   utf8ToBase64,
 } from "./_altcha_kdf";
 
-export type AltchaWorkerMessage =
-  | { readonly _tag: "Ready" }
-  | { readonly _tag: "Solved"; readonly header: string }
-  | { readonly _tag: "Failed"; readonly reason: string };
+const isRecord = Schema.is(Schema.JsonObject);
+const isString = Schema.is(Schema.String);
+const isNumber = Schema.is(Schema.Finite);
+const isAlgorithm = Schema.is(Schema.Literals(["ARGON2ID", "PBKDF2/SHA-256", "SHA-256"]));
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+export class AltchaSolveError extends Schema.TaggedError<
+  AltchaSolveError,
+  { readonly brand: unique symbol }
+>()("AltchaSolveError", {
+  reason: Schema.String,
+}) {}
 
 interface ParsedParameters {
   readonly algorithm: "ARGON2ID" | "PBKDF2/SHA-256" | "SHA-256";
@@ -30,34 +38,33 @@ interface ParsedParameters {
 const toBytesOrUtf8 = (value: string): Uint8Array =>
   hexToBytes(value) ?? new TextEncoder().encode(value);
 
-const parseParameters = (challenge: AltchaChallenge): ParsedParameters => {
-  const obj = challenge as Record<string, unknown>;
-  const nested = isRecord(obj.parameters) ? obj.parameters : obj;
-  const rawAlgo = typeof nested.algorithm === "string" ? nested.algorithm : "ARGON2ID";
-  if (rawAlgo !== "ARGON2ID" && rawAlgo !== "PBKDF2/SHA-256" && rawAlgo !== "SHA-256") {
-    throw new Error(`Unsupported ALTCHA algorithm: ${rawAlgo}`);
+const parseParameters = (challenge: AltchaChallenge): ParsedParameters | AltchaSolveError => {
+  const nested = isRecord(challenge["parameters"]) ? challenge["parameters"] : challenge;
+  const rawAlgo = isString(nested["algorithm"]) ? nested["algorithm"] : "ARGON2ID";
+  if (!isAlgorithm(rawAlgo)) {
+    return AltchaSolveError.make({ reason: `Unsupported ALTCHA algorithm: ${rawAlgo}` });
   }
-  const nonceStr = typeof nested.nonce === "string" ? nested.nonce : "";
-  const saltStr = typeof nested.salt === "string" ? nested.salt : nonceStr;
+  const nonceStr = isString(nested["nonce"]) ? nested["nonce"] : "";
+  const saltStr = isString(nested["salt"]) ? nested["salt"] : nonceStr;
   if (nonceStr === "" || saltStr === "") {
-    throw new Error("Malformed ALTCHA challenge: missing nonce or salt");
+    return AltchaSolveError.make({ reason: "Malformed ALTCHA challenge: missing nonce or salt" });
   }
   const nonce = toBytesOrUtf8(nonceStr);
   const salt = toBytesOrUtf8(saltStr);
-  const cost = typeof nested.cost === "number" && nested.cost >= 1 ? Math.trunc(nested.cost) : 1;
+  const cost = isNumber(nested["cost"]) && nested["cost"] >= 1 ? Math.trunc(nested["cost"]) : 1;
   const keyLength =
-    typeof nested.keyLength === "number" && nested.keyLength >= 1
-      ? Math.trunc(nested.keyLength)
+    isNumber(nested["keyLength"]) && nested["keyLength"] >= 1
+      ? Math.trunc(nested["keyLength"])
       : 32;
   const memoryCost =
-    typeof nested.memoryCost === "number" && nested.memoryCost >= 8
-      ? Math.trunc(nested.memoryCost)
+    isNumber(nested["memoryCost"]) && nested["memoryCost"] >= 8
+      ? Math.trunc(nested["memoryCost"])
       : 19_456;
   const parallelism =
-    typeof nested.parallelism === "number" && nested.parallelism >= 1
-      ? Math.trunc(nested.parallelism)
+    isNumber(nested["parallelism"]) && nested["parallelism"] >= 1
+      ? Math.trunc(nested["parallelism"])
       : 1;
-  const keyPrefix = (typeof nested.keyPrefix === "string" ? nested.keyPrefix : "0").toLowerCase();
+  const keyPrefix = Str.toLowerCase(isString(nested["keyPrefix"]) ? nested["keyPrefix"] : "0");
   return {
     algorithm: rawAlgo,
     nonce,
@@ -84,75 +91,92 @@ const deriveSha256 = (
   return digest.subarray(0, keyLength);
 };
 
-const yieldToEventLoop = (): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, 0);
-  });
+const ProofJson = Schema.fromJsonString(
+  Schema.Struct({
+    challenge: AltchaChallenge,
+    solution: Schema.Struct({ counter: Schema.Int, derivedKey: Schema.String, time: Schema.Int }),
+  }),
+);
 
-const makeArgon2id = async (params: ParsedParameters, signal?: AbortSignal) => {
-  // Keep the Wasm implementation out of the initial auth bundle.
-  let wasm = await import("./_altcha-wasm").catch(() => undefined);
+const makeArgon2id = Effect.fnUntraced(function* (params: ParsedParameters) {
+  let wasm = yield* Effect.tryPromise({
+    try: () => import("./_altcha-wasm"),
+    catch: () => "WasmImportFailed" as const,
+  }).pipe(Effect.orElseSucceed(() => undefined));
   let fallback: ReturnType<typeof createArgon2id> | undefined;
-  return async (password: Uint8Array) => {
-    signal?.throwIfAborted();
-    if (wasm !== undefined) {
-      try {
-        return await wasm.deriveArgon2id(password, params.salt, params);
-      } catch {
-        wasm = undefined;
-        signal?.throwIfAborted();
-      }
-    }
-    fallback ??= createArgon2id(params);
-    return fallback(password, params.salt);
-  };
-};
+  return (password: Uint8Array) =>
+    Effect.suspend(() => {
+      const module = wasm;
+      const deriveFallback = () =>
+        Effect.sync(() => {
+          fallback ??= createArgon2id(params);
+          return fallback(password, params.salt);
+        });
+      if (module === undefined) return deriveFallback();
+      return Effect.tryPromise({
+        try: () => module.deriveArgon2id({ password, salt: params.salt, params }),
+        catch: () => "WasmDerivationFailed" as const,
+      }).pipe(
+        Effect.catch(() => {
+          wasm = undefined;
+          return deriveFallback();
+        }),
+      );
+    });
+});
 
 /**
  * Solves an ALTCHA PoW v2 challenge on-device and returns the base64 `X-Altcha` header value.
  * Matches `altcha-lib` for ARGON2ID, PBKDF2/SHA-256, and SHA-256.
  */
-export const solveAltchaChallenge = async (
-  challenge: AltchaChallenge,
-  signal?: AbortSignal,
-): Promise<string> => {
-  const params = parseParameters(challenge);
-  const deriveArgon2id =
-    params.algorithm === "ARGON2ID" ? await makeArgon2id(params, signal) : undefined;
-  const password = new Uint8Array(params.nonce.length + 4);
-  password.set(params.nonce, 0);
-  const passwordView = new DataView(password.buffer);
-  const chunkSize = params.algorithm === "ARGON2ID" ? 1 : 8;
-  const maxAttempts = 50_000;
-  const started = Date.now();
+export const solveAltchaChallenge = Effect.fn("solveAltchaChallenge")(
+  function* (challenge: AltchaChallenge) {
+    const params = parseParameters(challenge);
+    if ("reason" in params) return yield* params;
+    const deriveArgon2id =
+      params.algorithm === "ARGON2ID" ? yield* makeArgon2id(params) : undefined;
+    const password = new Uint8Array(params.nonce.length + 4);
+    password.set(params.nonce, 0);
+    const passwordView = new DataView(password.buffer);
+    const chunkSize = params.algorithm === "ARGON2ID" ? 1 : 8;
+    const maxAttempts = 50_000;
+    const started = yield* Clock.currentTimeMillis;
 
-  for (let counter = 0; counter < maxAttempts; counter++) {
-    signal?.throwIfAborted();
-    passwordView.setUint32(params.nonce.length, counter, false);
-    const derived =
-      deriveArgon2id !== undefined
-        ? await deriveArgon2id(password)
-        : params.algorithm === "PBKDF2/SHA-256"
-          ? await pbkdf2Sha256(password, params.salt, params.cost, params.keyLength)
-          : deriveSha256(params.salt, password, params.cost, params.keyLength);
-    signal?.throwIfAborted();
+    for (let counter = 0; counter < maxAttempts; counter++) {
+      passwordView.setUint32(params.nonce.length, counter, false);
+      const derived =
+        deriveArgon2id !== undefined
+          ? yield* deriveArgon2id(password)
+          : params.algorithm === "PBKDF2/SHA-256"
+            ? yield* pbkdf2Sha256({
+                password,
+                salt: params.salt,
+                iterations: params.cost,
+                keyLength: params.keyLength,
+              })
+            : deriveSha256(params.salt, password, params.cost, params.keyLength);
 
-    const derivedKey = bytesToHex(derived);
-    if (derivedKey.startsWith(params.keyPrefix)) {
-      const payload = {
-        challenge,
-        solution: {
-          counter,
-          derivedKey,
-          time: Math.max(0, Date.now() - started),
-        },
-      };
-      return utf8ToBase64(JSON.stringify(payload));
+      const derivedKey = bytesToHex(derived);
+      if (Str.startsWith(params.keyPrefix)(derivedKey)) {
+        const elapsed = (yield* Clock.currentTimeMillis) - started;
+        const payload = {
+          challenge,
+          solution: {
+            counter,
+            derivedKey,
+            time: Math.max(0, elapsed),
+          },
+        };
+        return yield* Schema.encodeEffect(ProofJson)(payload).pipe(Effect.map(utf8ToBase64));
+      }
+
+      if ((counter + 1) % chunkSize === 0) {
+        yield* Effect.sleep(1);
+      }
     }
-
-    if ((counter + 1) % chunkSize === 0) {
-      await yieldToEventLoop();
-    }
-  }
-  throw new Error("Unable to complete verification challenge");
-};
+    return yield* AltchaSolveError.make({ reason: "Unable to complete verification challenge" });
+  },
+  Effect.catchDefect(() =>
+    AltchaSolveError.make({ reason: "Unable to complete verification challenge" }),
+  ),
+);

@@ -4,7 +4,17 @@ import { createHash, generateKeyPairSync, type KeyObject, sign } from "node:cryp
 import { linkSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Effect, Layer } from "effect";
+import * as Arr from "effect/Array";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   canonicalizeBody,
   canonicalizeHeaderField,
@@ -23,6 +33,12 @@ import {
   runAlertInboxPass,
 } from "./service";
 import { openAlertInboxStore } from "./store";
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const hardLinkedPattern = /hard-linked/i;
+const unknownOptionLabelPattern = /Unknown option '--label'/;
 
 interface SignedEmailFixture {
   readonly raw: Uint8Array;
@@ -52,7 +68,7 @@ const buildDkimSignedMessage = (params: {
   readonly tamperBodyAfterSign?: string;
 }): SignedEmailFixture => {
   const canon = params.canon ?? "relaxed/relaxed";
-  const [headerCanon, bodyCanon] = canon.split("/") as ["relaxed" | "simple", "relaxed" | "simple"];
+  const headerCanon = canon === "simple/simple" ? "simple" : "relaxed";
 
   let privateKey: KeyObject;
   let pubKeyBase64: string;
@@ -61,14 +77,14 @@ const buildDkimSignedMessage = (params: {
   if (params.algorithm === "rsa-sha256") {
     const pair = generateKeyPairSync("rsa", { modulusLength: params.rsaModulusLength ?? 2048 });
     privateKey = pair.privateKey;
-    pubKeyBase64 = (pair.publicKey.export({ type: "spki", format: "der" }) as Buffer).toString(
+    pubKeyBase64 = Buffer.from(pair.publicKey.export({ type: "spki", format: "der" })).toString(
       "base64",
     );
     keyType = "rsa";
   } else {
     const pair = generateKeyPairSync("ed25519");
     privateKey = pair.privateKey;
-    const spki = pair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
+    const spki = Buffer.from(pair.publicKey.export({ type: "spki", format: "der" }));
     // RFC 8463 Ed25519 DNS `p=` holds the raw 32-byte public key.
     pubKeyBase64 = spki.subarray(spki.length - 32).toString("base64");
     keyType = "ed25519";
@@ -79,10 +95,14 @@ const buildDkimSignedMessage = (params: {
     "To: alerts@kvitbit.com",
     ...(params.subject !== undefined ? [`Subject: ${params.subject}`] : []),
     "Date: Fri, 27 Nov 2026 21:00:00 +0000",
-    ...(params.messageId ? [`Message-ID: ${params.messageId}`] : []),
+    ...(params.messageId !== undefined && params.messageId !== ""
+      ? [`Message-ID: ${params.messageId}`]
+      : []),
     `Content-Type: ${params.contentType ?? 'text/plain; charset="utf-8"'}`,
-    ...(params.contentDisposition ? [`Content-Disposition: ${params.contentDisposition}`] : []),
-    ...(params.contentTransferEncoding
+    ...(params.contentDisposition !== undefined && params.contentDisposition !== ""
+      ? [`Content-Disposition: ${params.contentDisposition}`]
+      : []),
+    ...(params.contentTransferEncoding !== undefined && params.contentTransferEncoding !== ""
       ? [`Content-Transfer-Encoding: ${params.contentTransferEncoding}`]
       : []),
     ...(params.extraHeaders ?? []),
@@ -93,27 +113,31 @@ const buildDkimSignedMessage = (params: {
     "to",
     ...(params.subject !== undefined ? ["subject"] : []),
     "date",
-    ...(params.messageId ? ["message-id"] : []),
+    ...(params.messageId !== undefined && params.messageId !== "" ? ["message-id"] : []),
     "content-type",
-    ...(params.contentDisposition ? ["content-disposition"] : []),
-    ...(params.contentTransferEncoding ? ["content-transfer-encoding"] : []),
+    ...(params.contentDisposition !== undefined && params.contentDisposition !== ""
+      ? ["content-disposition"]
+      : []),
+    ...(params.contentTransferEncoding !== undefined && params.contentTransferEncoding !== ""
+      ? ["content-transfer-encoding"]
+      : []),
   ];
   const bodyBuf = Buffer.from(params.body, "utf8");
-  const bh = createHash("sha256").update(canonicalizeBody(bodyBuf, bodyCanon)).digest("base64");
+  const bh = createHash("sha256").update(canonicalizeBody(bodyBuf, headerCanon)).digest("base64");
 
   const dkimHeaderPrefix =
     `DKIM-Signature: v=1; a=${params.algorithm}; c=${canon}; d=${params.signingDomain}; ` +
-    `s=${params.selector}; h=${signedNames.join(":")}; bh=${bh}; ` +
-    `${params.extraDkimTags ? `${params.extraDkimTags}; ` : ""}b=`;
+    `s=${params.selector}; h=${Arr.join(signedNames, ":")}; bh=${bh}; ` +
+    `${params.extraDkimTags !== undefined && params.extraDkimTags !== "" ? `${params.extraDkimTags}; ` : ""}b=`;
 
-  const parsedFields = baseHeaders.map((raw) => {
-    const colon = raw.indexOf(":");
-    const name = raw.slice(0, colon);
+  const parsedFields = Arr.map(baseHeaders, (raw) => {
+    const colon = Option.getOrElse(Str.indexOf(":")(raw), () => -1);
+    const name = Str.slice(0, colon)(raw);
     return {
       raw,
       name,
-      nameLower: name.trim().toLowerCase(),
-      rawValue: raw.slice(colon + 1),
+      nameLower: Str.toLowerCase(Str.trim(name)),
+      rawValue: Str.slice(colon + 1)(raw),
     };
   });
 
@@ -123,7 +147,7 @@ const buildDkimSignedMessage = (params: {
     for (let idx = parsedFields.length - 1; idx >= 0; idx -= 1) {
       if (used.has(idx)) continue;
       const f = parsedFields[idx];
-      if (f && f.nameLower === targetName.toLowerCase()) {
+      if (f !== undefined && f.nameLower === Str.toLowerCase(targetName)) {
         used.add(idx);
         signedLines.push(`${canonicalizeHeaderField(f, headerCanon)}\r\n`);
         break;
@@ -131,17 +155,17 @@ const buildDkimSignedMessage = (params: {
     }
   }
 
-  const dkimColon = dkimHeaderPrefix.indexOf(":");
+  const dkimColon = Option.getOrElse(Str.indexOf(":")(dkimHeaderPrefix), () => -1);
   const canonicalDkim = canonicalizeHeaderField(
     {
       raw: dkimHeaderPrefix,
-      name: dkimHeaderPrefix.slice(0, dkimColon),
+      name: Str.slice(0, dkimColon)(dkimHeaderPrefix),
       nameLower: "dkim-signature",
-      rawValue: dkimHeaderPrefix.slice(dkimColon + 1),
+      rawValue: Str.slice(dkimColon + 1)(dkimHeaderPrefix),
     },
     headerCanon,
   );
-  const signingInput = Buffer.from(signedLines.join("") + canonicalDkim, "latin1");
+  const signingInput = Buffer.from(Arr.join(signedLines, "") + canonicalDkim, "latin1");
   // RFC 8463 §3.3: Ed25519-SHA256 signs the SHA-256 digest of the canonicalized signing input.
   const sig =
     params.algorithm === "ed25519-sha256"
@@ -151,13 +175,13 @@ const buildDkimSignedMessage = (params: {
   const dkimHeader = `${dkimHeaderPrefix}${sig.toString("base64")}`;
   const finalBody = params.tamperBodyAfterSign ?? params.body;
   const allHeaders = [...(params.prependHeaders ?? []), dkimHeader, ...baseHeaders];
-  const rawMessage = `${allHeaders.join("\r\n")}\r\n\r\n${finalBody}`;
+  const rawMessage = `${Arr.join(allHeaders, "\r\n")}\r\n\r\n${finalBody}`;
 
   const dnsTxt =
     `v=DKIM1; k=${keyType}; ` +
-    `${params.keyService ? `s=${params.keyService}; ` : ""}` +
-    `${params.keyFlags ? `t=${params.keyFlags}; ` : ""}` +
-    `p=${params.keyRevoked ? "" : pubKeyBase64}`;
+    `${params.keyService !== undefined && params.keyService !== "" ? `s=${params.keyService}; ` : ""}` +
+    `${params.keyFlags !== undefined && params.keyFlags !== "" ? `t=${params.keyFlags}; ` : ""}` +
+    `p=${params.keyRevoked !== undefined ? "" : pubKeyBase64}`;
 
   return {
     raw: Buffer.from(rawMessage, "utf8"),
@@ -174,10 +198,10 @@ const mockDnsLayer = (
     resolveTxt: (hostname) => {
       const entry = records[hostname];
       if (entry === undefined) {
-        return Effect.fail(new DnsLookupError({ hostname, reason: "ENOTFOUND" }));
+        return Effect.fail(DnsLookupError.make({ hostname, reason: "ENOTFOUND" }));
       }
-      if (typeof entry === "string") {
-        return Effect.fail(new DnsLookupError({ hostname, reason: entry }));
+      if (Predicate.isString(entry)) {
+        return Effect.fail(DnsLookupError.make({ hostname, reason: entry }));
       }
       return Effect.succeed(entry);
     },
@@ -185,35 +209,38 @@ const mockDnsLayer = (
 
 // Published RFC 8463 Appendix A test vector (both RSA-SHA256 and Ed25519-SHA256 signatures).
 const RFC_8463_APPENDIX_A_MESSAGE = Buffer.from(
-  [
-    "DKIM-Signature: v=1; a=ed25519-sha256; c=relaxed/relaxed;",
-    " d=football.example.com; i=@football.example.com;",
-    " q=dns/txt; s=brisbane; t=1528637909; h=from : to :",
-    " subject : date : message-id : from : subject : date;",
-    " bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=;",
-    " b=/gCrinpcQOoIfuHNQIbq4pgh9kyIK3AQUdt9OdqQehSwhEIug4D11Bus",
-    " Fa3bT3FY5OsU7ZbnKELq+eXdp1Q1Dw==",
-    "DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;",
-    " d=football.example.com; i=@football.example.com;",
-    " q=dns/txt; s=test; t=1528637909; h=from : to : subject :",
-    " date : message-id : from : subject : date;",
-    " bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=;",
-    " b=F45dVWDfMbQDGHJFlXUNB2HKfbCeLRyhDXgFpEL8GwpsRe0IeIixNTe3",
-    " DhCVlUrSjV4BwcVcOF6+FF3Zo9Rpo1tFOeS9mPYQTnGdaSGsgeefOsk2Jz",
-    " dA+L10TeYt9BgDfQNZtKdN1WO//KgIqXP7OdEFE4LjFYNcUxZQ4FADY+8=",
-    "From: Joe SixPack <joe@football.example.com>",
-    "To: Suzie Q <suzie@shopping.example.net>",
-    "Subject: Is dinner ready?",
-    "Date: Fri, 11 Jul 2003 21:00:37 -0700 (PDT)",
-    "Message-ID: <20030712040037.46341.5F8J@football.example.com>",
-    "",
-    "Hi.",
-    "",
-    "We lost the game.  Are you hungry yet?",
-    "",
-    "Joe.",
-    "",
-  ].join("\r\n"),
+  Arr.join(
+    [
+      "DKIM-Signature: v=1; a=ed25519-sha256; c=relaxed/relaxed;",
+      " d=football.example.com; i=@football.example.com;",
+      " q=dns/txt; s=brisbane; t=1528637909; h=from : to :",
+      " subject : date : message-id : from : subject : date;",
+      " bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=;",
+      " b=/gCrinpcQOoIfuHNQIbq4pgh9kyIK3AQUdt9OdqQehSwhEIug4D11Bus",
+      " Fa3bT3FY5OsU7ZbnKELq+eXdp1Q1Dw==",
+      "DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;",
+      " d=football.example.com; i=@football.example.com;",
+      " q=dns/txt; s=test; t=1528637909; h=from : to : subject :",
+      " date : message-id : from : subject : date;",
+      " bh=2jUSOH9NhtVGCQWNr9BrIAPreKQjO6Sn7XIkfJVOzv8=;",
+      " b=F45dVWDfMbQDGHJFlXUNB2HKfbCeLRyhDXgFpEL8GwpsRe0IeIixNTe3",
+      " DhCVlUrSjV4BwcVcOF6+FF3Zo9Rpo1tFOeS9mPYQTnGdaSGsgeefOsk2Jz",
+      " dA+L10TeYt9BgDfQNZtKdN1WO//KgIqXP7OdEFE4LjFYNcUxZQ4FADY+8=",
+      "From: Joe SixPack <joe@football.example.com>",
+      "To: Suzie Q <suzie@shopping.example.net>",
+      "Subject: Is dinner ready?",
+      "Date: Fri, 11 Jul 2003 21:00:37 -0700 (PDT)",
+      "Message-ID: <20030712040037.46341.5F8J@football.example.com>",
+      "",
+      "Hi.",
+      "",
+      "We lost the game.  Are you hungry yet?",
+      "",
+      "Joe.",
+      "",
+    ],
+    "\r\n",
+  ),
   "utf8",
 );
 
@@ -268,7 +295,7 @@ describe("RFC 6376 / RFC 8301 / RFC 8463 DKIM verifier", () => {
         Effect.provide(
           mockDnsLayer({
             "test._domainkey.football.example.com": [
-              RFC_8463_RSA_TXT.replace("v=DKIM1;", "v=DKIM1; V=custom;"),
+              Str.replace("v=DKIM1;", "v=DKIM1; V=custom;")(RFC_8463_RSA_TXT),
             ],
           }),
         ),
@@ -595,8 +622,9 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       // 1. Corrupt file surfaces AlertStoreError
       const corruptPath = join(tmpDir, "corrupt.sqlite");
       writeFileSync(corruptPath, "not a sqlite database");
-      const corruptErr = await Effect.runPromise(
-        Effect.flip(Effect.scoped(openAlertInboxStore(corruptPath, true))),
+      const corruptErr = await Fn.pipe(
+        Effect.flip(openAlertInboxStore(corruptPath, true).pipe(Effect.scoped)),
+        Effect.runPromise,
       );
       expect(corruptErr._tag).toBe("AlertStoreError");
 
@@ -605,8 +633,9 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       const unrelatedDb = new Database(unrelatedPath);
       unrelatedDb.exec("CREATE TABLE unrelated (id INTEGER PRIMARY KEY, name TEXT);");
       unrelatedDb.close();
-      const wrongSchemaErr = await Effect.runPromise(
-        Effect.flip(Effect.scoped(openAlertInboxStore(unrelatedPath, true))),
+      const wrongSchemaErr = await Fn.pipe(
+        Effect.flip(openAlertInboxStore(unrelatedPath, true).pipe(Effect.scoped)),
+        Effect.runPromise,
       );
       expect(wrongSchemaErr._tag).toBe("AlertStoreError");
 
@@ -626,8 +655,8 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         INSERT INTO processed_alert (
           object_key, delivery_hash, message_id, status, issue_number, reason, processed_at
         ) VALUES (
-          'inbound/alerts/by-hash/${"a".repeat(32)}/1000-old.eml',
-          '${"a".repeat(32)}',
+          'inbound/alerts/by-hash/${Str.repeat(32)("a")}/1000-old.eml',
+          '${Str.repeat(32)("a")}',
           '<unsigned-legacy@google.com>',
           'created',
           42,
@@ -637,20 +666,20 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       `);
       legacyDb.close();
 
-      await Effect.runPromise(
+      await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const store = yield* openAlertInboxStore(legacyPath, false);
-            const rows = yield* store.listAll();
+            const rows = yield* store.listAll;
             expect(rows).toHaveLength(1);
             expect(rows[0]?.issueNumber).toBe(42);
-            expect(rows[0]?.deliveryHash).toBe("a".repeat(32));
+            expect(rows[0]?.deliveryHash).toBe(Str.repeat(32)("a"));
             // Historical Round 1 message_id was unverified -> cleared on migration.
             expect(rows[0]?.messageId).toBeNull();
             expect(rows[0]?.dedupKey).toBeNull();
 
             // Delivery-hash lookup still preserves #42.
-            const byHash = yield* store.findByDeliveryHash("a".repeat(32));
+            const byHash = yield* store.findByDeliveryHash(Str.repeat(32)("a"));
             expect(byHash?.issueNumber).toBe(42);
 
             // Historical unverified Message-ID does NOT falsely match.
@@ -661,16 +690,18 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
             expect(byLegacyMsg).toBeNull();
           }),
         ),
+        Effect.runPromise,
       );
 
       // Migrated DB now opens cleanly in readonly mode too.
-      const roRows = await Effect.runPromise(
+      const roRows = await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const roStore = yield* openAlertInboxStore(legacyPath, true);
-            return yield* roStore.listAll();
+            return yield* roStore.listAll;
           }),
         ),
+        Effect.runPromise,
       );
       expect(roRows[0]?.issueNumber).toBe(42);
     } finally {
@@ -691,7 +722,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         messageId: "<concurrent-1@google.com>",
         body: "Alert body\r\n",
       });
-      const objKey = `inbound/alerts/by-hash/${"e".repeat(32)}/1000-race.eml`;
+      const objKey = `inbound/alerts/by-hash/${Str.repeat(32)("e")}/1000-race.eml`;
       const posted: Array<number> = [];
 
       const sharedLayer = Layer.mergeAll(
@@ -715,37 +746,36 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       );
 
       // Initialize schema once, then run two independent passes concurrently against the same DB file.
-      await Effect.runPromise(Effect.scoped(openAlertInboxStore(dbPath, false)));
+      await openAlertInboxStore(dbPath, false).pipe(Effect.scoped, Effect.runPromise);
 
       const runOnePass = () =>
-        Effect.runPromise(
-          Effect.scoped(
-            Effect.gen(function* () {
-              const store = yield* openAlertInboxStore(dbPath, false);
-              return yield* runAlertInboxPass({
-                apply: true,
-                bucket: "kvitbit-prod-mail-archive-prod",
-                prefix: "inbound/alerts/",
-                repo: "KvitBit/KvitBit",
-                allowedDomains: ["google.com"],
-                maxPerPass: 5,
-                store,
-              });
-            }),
-          ).pipe(Effect.provide(sharedLayer)),
-        );
+        Effect.scoped(
+          Effect.gen(function* () {
+            const store = yield* openAlertInboxStore(dbPath, false);
+            return yield* runAlertInboxPass({
+              apply: true,
+              bucket: "kvitbit-prod-mail-archive-prod",
+              prefix: "inbound/alerts/",
+              repo: "KvitBit/KvitBit",
+              allowedDomains: ["google.com"],
+              maxPerPass: 5,
+              store,
+            });
+          }),
+        ).pipe(Effect.provide(sharedLayer), Effect.runPromise);
 
       const [r1, r2] = await Promise.all([runOnePass(), runOnePass()]);
       expect(posted).toEqual([801]);
       expect(r1.created.length + r2.created.length).toBe(1);
 
-      const persisted = await Effect.runPromise(
+      const persisted = await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const store = yield* openAlertInboxStore(dbPath, true);
             return yield* store.getObject(objKey);
           }),
         ),
+        Effect.runPromise,
       );
       expect(persisted?.status).toBe("created");
       expect(persisted?.issueNumber).toBe(801);
@@ -777,19 +807,13 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         messageId: sharedMsgId,
         body: "Redelivered copy\r\n",
       });
-      const objKey1 = `inbound/alerts/by-hash/${"f".repeat(32)}/1000-first.eml`;
-      const objKey2 = `inbound/alerts/by-hash/${"9".repeat(32)}/2000-second.eml`;
+      const objKey1 = `inbound/alerts/by-hash/${Str.repeat(32)("f")}/1000-first.eml`;
+      const objKey2 = `inbound/alerts/by-hash/${Str.repeat(32)("9")}/2000-second.eml`;
 
       // 1. Expired-lease overlap schedule: Pass 1 pauses during ensureLabel; lease is backdated in
       // SQLite; Pass 2 runs concurrently; Pass 1 resumes -> ONLY ONE issue (#801) is posted and recorded.
-      let releaseEnsureLabel!: () => void;
-      const ensureLabelGate = new Promise<void>((resolve) => {
-        releaseEnsureLabel = resolve;
-      });
-      let notifyInEnsureLabel!: () => void;
-      const inEnsureLabel = new Promise<void>((resolve) => {
-        notifyInEnsureLabel = resolve;
-      });
+      const ensureLabelGate = await Effect.runPromise(Deferred.make<void>());
+      const inEnsureLabel = await Effect.runPromise(Deferred.make<void>());
       let ensureCalls = 0;
       const postedNumbers: Array<number> = [];
 
@@ -800,11 +824,11 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         }),
         Layer.succeed(AlertIssueTracker, {
           ensureLabel: () =>
-            Effect.promise(async () => {
+            Effect.gen(function* () {
               ensureCalls += 1;
               if (ensureCalls === 1) {
-                notifyInEnsureLabel();
-                await ensureLabelGate;
+                yield* Deferred.succeed(inEnsureLabel, undefined);
+                yield* Deferred.await(ensureLabelGate);
               }
             }),
           findExistingIssueByMarker: () => Effect.succeed(null),
@@ -818,26 +842,24 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         mockDnsLayer(alert1.dnsRecords),
       );
 
-      await Effect.runPromise(Effect.scoped(openAlertInboxStore(dbPath, false)));
+      await openAlertInboxStore(dbPath, false).pipe(Effect.scoped, Effect.runPromise);
 
-      const pass1Promise = Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const store = yield* openAlertInboxStore(dbPath, false);
-            return yield* runAlertInboxPass({
-              apply: true,
-              bucket: "kvitbit-prod-mail-archive-prod",
-              prefix: "inbound/alerts/",
-              repo: "KvitBit/KvitBit",
-              allowedDomains: ["google.com"],
-              maxPerPass: 5,
-              store,
-            });
-          }),
-        ).pipe(Effect.provide(leaseLayer)),
-      );
+      const pass1Promise = Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* openAlertInboxStore(dbPath, false);
+          return yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 5,
+            store,
+          });
+        }),
+      ).pipe(Effect.provide(leaseLayer), Effect.runPromise);
 
-      await inEnsureLabel;
+      await inEnsureLabel.pipe(Deferred.await, Effect.runPromise);
       // Expire the SQLite lease directly while Pass 1 is paused in ensureLabel.
       const expireDb = new Database(dbPath);
       expireDb.exec(
@@ -846,23 +868,21 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       expireDb.close();
 
       // Run Pass 2 concurrently while Pass 1 is still alive.
-      const pass2Res = await Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const store = yield* openAlertInboxStore(dbPath, false);
-            return yield* runAlertInboxPass({
-              apply: true,
-              bucket: "kvitbit-prod-mail-archive-prod",
-              prefix: "inbound/alerts/",
-              repo: "KvitBit/KvitBit",
-              allowedDomains: ["google.com"],
-              maxPerPass: 5,
-              store,
-            });
-          }),
-        ).pipe(Effect.provide(leaseLayer)),
-      );
-      releaseEnsureLabel();
+      const pass2Res = await Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* openAlertInboxStore(dbPath, false);
+          return yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 5,
+            store,
+          });
+        }),
+      ).pipe(Effect.provide(leaseLayer), Effect.runPromise);
+      await Effect.runPromise(Deferred.succeed(ensureLabelGate, undefined));
       const pass1Res = await pass1Promise;
 
       expect(postedNumbers).toEqual([801]);
@@ -871,7 +891,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       // 2. Direct fencing-token & immutable-created-row invariant (even without file lock):
       // Verify a stale claimGeneration cannot renew or overwrite, and markDuplicate/markRejected/
       // markRetry cannot downgrade `created` or wipe its dedup_key/message_id.
-      await Effect.runPromise(
+      await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const store = yield* openAlertInboxStore(dbPath, false);
@@ -899,7 +919,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
             // Delayed pass attempting markDuplicate on the same objectKey MUST NOT downgrade `created`.
             yield* store.markDuplicate({
               objectKey: objKey1,
-              deliveryHash: "f".repeat(32),
+              deliveryHash: Str.repeat(32)("f"),
               dedupKey: null,
               messageId: null,
               issueNumber: 801,
@@ -913,6 +933,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
             expect(rowAfter?.dedupKey).not.toBeNull();
           }),
         ),
+        Effect.runPromise,
       );
 
       // 3. Subsequent redelivery with same signed Message-ID deduplicates cleanly against #801!
@@ -935,22 +956,20 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         mockDnsLayer({ ...alert1.dnsRecords, ...alert2.dnsRecords }),
       );
 
-      const redeliveryRes = await Effect.runPromise(
-        Effect.scoped(
-          Effect.gen(function* () {
-            const store = yield* openAlertInboxStore(dbPath, false);
-            return yield* runAlertInboxPass({
-              apply: true,
-              bucket: "kvitbit-prod-mail-archive-prod",
-              prefix: "inbound/alerts/",
-              repo: "KvitBit/KvitBit",
-              allowedDomains: ["google.com"],
-              maxPerPass: 5,
-              store,
-            });
-          }),
-        ).pipe(Effect.provide(redeliveryLayer)),
-      );
+      const redeliveryRes = await Effect.scoped(
+        Effect.gen(function* () {
+          const store = yield* openAlertInboxStore(dbPath, false);
+          return yield* runAlertInboxPass({
+            apply: true,
+            bucket: "kvitbit-prod-mail-archive-prod",
+            prefix: "inbound/alerts/",
+            repo: "KvitBit/KvitBit",
+            allowedDomains: ["google.com"],
+            maxPerPass: 5,
+            store,
+          });
+        }),
+      ).pipe(Effect.provide(redeliveryLayer), Effect.runPromise);
       expect(postedNumbers).toEqual([801]);
       expect(redeliveryRes.created).toHaveLength(0);
       expect(redeliveryRes.duplicates).toEqual([
@@ -969,7 +988,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       const storeModulePath = join(import.meta.dir, "store.ts");
 
       // Initialize database and create a symlink alias to the same backing file.
-      await Effect.runPromise(Effect.scoped(openAlertInboxStore(dbPath, false)));
+      await openAlertInboxStore(dbPath, false).pipe(Effect.scoped, Effect.runPromise);
       symlinkSync(dbPath, symPath);
 
       // 1. Cross-process SIGKILL crash recovery + competing process race:
@@ -979,11 +998,11 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       // winner exits a fresh caller succeeds cleanly.
       const holderScript = `
         import { Effect } from "effect";
-        import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
+        import { openAlertInboxStore } from ${encodeJson(storeModulePath)};
         await Effect.runPromise(
           Effect.scoped(
             Effect.gen(function* () {
-              const store = yield* openAlertInboxStore(${JSON.stringify(dbPath)}, false);
+              const store = yield* openAlertInboxStore(${encodeJson(dbPath)}, false);
               yield* store.withExclusiveApplyLock(
                 Effect.promise(async () => {
                   process.stdout.write("READY\\n");
@@ -1001,13 +1020,14 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       expect(Buffer.from(firstChunk.value ?? new Uint8Array()).toString("utf8")).toContain("READY");
 
       // While holder is alive, opening via the SYMLINK alias MUST fail to acquire the lock!
-      const busyViaSymlink = await Effect.runPromise(
+      const busyViaSymlink = await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const symStore = yield* openAlertInboxStore(symPath, false);
             return yield* symStore.withExclusiveApplyLock(Effect.succeed("should-not-run"));
           }),
         ),
+        Effect.runPromise,
       );
       expect(busyViaSymlink).toEqual({ acquired: false });
 
@@ -1020,11 +1040,11 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       // observe the held lock regardless of process startup jitter (no sleep-based race!).
       const racerScript = (targetPath: string) => `
         import { Effect } from "effect";
-        import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
+        import { openAlertInboxStore } from ${encodeJson(storeModulePath)};
         const res = await Effect.runPromise(
           Effect.scoped(
             Effect.gen(function* () {
-              const store = yield* openAlertInboxStore(${JSON.stringify(targetPath)}, false);
+              const store = yield* openAlertInboxStore(${encodeJson(targetPath)}, false);
               return yield* store.withExclusiveApplyLock(
                 Effect.promise(async () => {
                   process.stdout.write("ACQUIRED\\n");
@@ -1044,12 +1064,12 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         const streamReader = stream.getReader();
         let acc = "";
         try {
-          while (!acc.includes("\n")) {
+          while (!Str.includes("\n")(acc)) {
             const { value, done } = await streamReader.read();
             if (done) break;
             acc += Buffer.from(value).toString("utf8");
           }
-          return acc.split("\n")[0]?.trim() ?? "";
+          return Str.trim(Str.split(acc, "\n")[0]);
         } finally {
           streamReader.releaseLock();
         }
@@ -1070,7 +1090,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         readFirstLine(racer1.stdout),
         readFirstLine(racer2.stdout),
       ]);
-      expect([line1, line2].sort()).toEqual(["ACQUIRED", "BUSY"]);
+      expect([line1, line2].sort(Order.String)).toEqual(["ACQUIRED", "BUSY"]);
 
       // Release the winner's stdin barrier so it exits cleanly and releases the kernel lock.
       racer1.stdin.end();
@@ -1080,13 +1100,14 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       expect(code2).toBe(0);
 
       // After the winner releases, a fresh caller acquires the lock cleanly.
-      const afterRelease = await Effect.runPromise(
+      const afterRelease = await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const freshStore = yield* openAlertInboxStore(symPath, false);
             return yield* freshStore.withExclusiveApplyLock(Effect.succeed("fresh-ok"));
           }),
         ),
+        Effect.runPromise,
       );
       expect(afterRelease).toEqual({ acquired: true, value: "fresh-ok" });
 
@@ -1095,26 +1116,26 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       const walDbPath = join(tmpDir, "wal.sqlite");
       const walSymPath = join(tmpDir, "wal-sym.sqlite");
       const walHardPath = join(tmpDir, "wal-hard.sqlite");
-      await Effect.runPromise(Effect.scoped(openAlertInboxStore(walDbPath, false)));
+      await openAlertInboxStore(walDbPath, false).pipe(Effect.scoped, Effect.runPromise);
       symlinkSync(walDbPath, walSymPath);
 
       const walWriterScript = `
         import { Database } from "bun:sqlite";
         import { Effect } from "effect";
-        import { openAlertInboxStore } from ${JSON.stringify(storeModulePath)};
-        const rawDb = new Database(${JSON.stringify(walDbPath)});
+        import { openAlertInboxStore } from ${encodeJson(storeModulePath)};
+        const rawDb = new Database(${encodeJson(walDbPath)});
         rawDb.exec("PRAGMA journal_mode = WAL;");
         rawDb.close();
         await Effect.runPromise(
           Effect.scoped(
             Effect.gen(function* () {
-              const store = yield* openAlertInboxStore(${JSON.stringify(walDbPath)}, false);
+              const store = yield* openAlertInboxStore(${encodeJson(walDbPath)}, false);
               yield* store.withExclusiveApplyLock(
                 Effect.gen(function* () {
                   const c = yield* store.tryClaimForCreation({
-                    objectKey: "inbound/alerts/by-hash/${"5".repeat(32)}/1000-wal.eml",
-                    deliveryHash: "${"5".repeat(32)}",
-                    dedupKey: "${"5".repeat(32)}",
+                    objectKey: "inbound/alerts/by-hash/${Str.repeat(32)("5")}/1000-wal.eml",
+                    deliveryHash: "${Str.repeat(32)("5")}",
+                    dedupKey: "${Str.repeat(32)("5")}",
                     messageId: "<wal-42@google.com>",
                     nowIso: "2026-11-27T21:00:00.000Z",
                     leaseUntilIso: "2026-11-27T21:05:00.000Z",
@@ -1146,38 +1167,41 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       await walWriter.exited;
 
       // Opening via symlink after SIGKILL MUST see #42 from the canonical WAL file.
-      const seenViaSym = await Effect.runPromise(
+      const seenViaSym = await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const symStore = yield* openAlertInboxStore(walSymPath, false);
             return yield* symStore.getObject(
-              `inbound/alerts/by-hash/${"5".repeat(32)}/1000-wal.eml`,
+              `inbound/alerts/by-hash/${Str.repeat(32)("5")}/1000-wal.eml`,
             );
           }),
         ),
+        Effect.runPromise,
       );
       expect(seenViaSym?.status).toBe("created");
       expect(seenViaSym?.issueNumber).toBe(42);
 
       // Creating a hard link makes nlink=2 -> opening either path MUST fail with AlertStoreError!
       linkSync(walDbPath, walHardPath);
-      const hardLinkErr = await Effect.runPromise(
-        Effect.flip(Effect.scoped(openAlertInboxStore(walHardPath, false))),
+      const hardLinkErr = await Fn.pipe(
+        Effect.flip(openAlertInboxStore(walHardPath, false).pipe(Effect.scoped)),
+        Effect.runPromise,
       );
       expect(hardLinkErr._tag).toBe("AlertStoreError");
-      expect(hardLinkErr.reason).toMatch(/hard-linked/i);
-      const hardLinkReadonlyErr = await Effect.runPromise(
-        Effect.flip(Effect.scoped(openAlertInboxStore(walDbPath, true))),
+      expect(hardLinkErr.reason).toMatch(hardLinkedPattern);
+      const hardLinkReadonlyErr = await Fn.pipe(
+        Effect.flip(openAlertInboxStore(walDbPath, true).pipe(Effect.scoped)),
+        Effect.runPromise,
       );
       expect(hardLinkReadonlyErr._tag).toBe("AlertStoreError");
 
       // 3. Superseded generation fencing while the row is STILL `claiming` (not yet `created`):
-      await Effect.runPromise(
+      await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const store = yield* openAlertInboxStore(dbPath, false);
-            const objKey = `inbound/alerts/by-hash/${"7".repeat(32)}/1000-gen.eml`;
-            const dedupKey = "7".repeat(32);
+            const objKey = `inbound/alerts/by-hash/${Str.repeat(32)("7")}/1000-gen.eml`;
+            const dedupKey = Str.repeat(32)("7");
 
             const c1 = yield* store.tryClaimForCreation({
               objectKey: objKey,
@@ -1255,6 +1279,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
             expect(finalRow?.issueNumber).toBe(888);
           }),
         ),
+        Effect.runPromise,
       );
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -1266,10 +1291,10 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
     const seenUrls: Array<string> = [];
     const marker = alertIssueMarker("cafebabe");
     const ghTracker = makeGhAlertIssueTracker((cmd) => {
-      seenUrls.push(cmd.join(" "));
+      seenUrls.push(Arr.join(cmd, " "));
       return Effect.succeed(
         Buffer.from(
-          JSON.stringify([
+          encodeJson([
             [
               {
                 number: 901,
@@ -1301,7 +1326,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       messageId: "<key-rot-1@google.com>",
       body: "Incident before key rotation\r\n",
     });
-    const key1 = `inbound/alerts/by-hash/${"d".repeat(32)}/1000-rot.eml`;
+    const key1 = `inbound/alerts/by-hash/${Str.repeat(32)("d")}/1000-rot.eml`;
     const committedIssues: Array<{ number: number; body: string; labels: Array<string> }> = [];
     let dnsActive = true;
     let dropReply = true;
@@ -1316,8 +1341,10 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         findExistingIssueByMarker: (_repo, m) =>
           Effect.sync(() => {
             // Search across all issues regardless of labels (matches live ghTracker behavior).
-            const hit = committedIssues.find((i) => i.body.includes(m));
-            return hit
+            const hit = Option.getOrUndefined(
+              Arr.findFirst(committedIssues, (i) => Str.includes(m)(i.body)),
+            );
+            return hit !== undefined
               ? {
                   number: hit.number,
                   url: `https://github.com/KvitBit/KvitBit/issues/${hit.number}`,
@@ -1330,7 +1357,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
             committedIssues.push({ number, body: issue.body, labels: [...issue.labels] });
             if (dropReply) {
               dropReply = false;
-              return yield* new AlertInboxError({ reason: "connection reset after commit" });
+              return yield* AlertInboxError.make({ reason: "connection reset after commit" });
             }
             return { number, url: `https://github.com/KvitBit/KvitBit/issues/${number}` };
           }),
@@ -1338,77 +1365,75 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       Layer.succeed(DnsTxtResolver, {
         resolveTxt: (hostname) => {
           if (!dnsActive) {
-            return Effect.fail(new DnsLookupError({ hostname, reason: "ENOTFOUND" }));
+            return Effect.fail(DnsLookupError.make({ hostname, reason: "ENOTFOUND" }));
           }
           const rec = alert.dnsRecords[hostname];
-          return rec
+          return rec !== undefined
             ? Effect.succeed(rec)
-            : Effect.fail(new DnsLookupError({ hostname, reason: "ENOTFOUND" }));
+            : Effect.fail(DnsLookupError.make({ hostname, reason: "ENOTFOUND" }));
         },
       }),
     );
 
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const store = yield* openAlertInboxStore(":memory:", false);
+    await Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* openAlertInboxStore(":memory:", false);
 
-          // Pass 1: commits #902 on GitHub, then drops reply -> row stays `claiming` with dedupKey.
-          const pass1 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 5,
-            store,
-          });
-          expect(pass1.failures).toHaveLength(1);
-          expect(committedIssues).toHaveLength(1);
+        // Pass 1: commits #902 on GitHub, then drops reply -> row stays `claiming` with dedupKey.
+        const pass1 = yield* runAlertInboxPass({
+          apply: true,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 5,
+          store,
+        });
+        expect(pass1.failures).toHaveLength(1);
+        expect(committedIssues).toHaveLength(1);
 
-          // Replace the issue's `alert` label with `triaged` AND retire the DKIM DNS key!
-          if (committedIssues[0]) {
-            committedIssues[0].labels = ["triaged"];
-          }
-          dnsActive = false;
+        // Replace the issue's `alert` label with `triaged` AND retire the DKIM DNS key!
+        if (committedIssues[0] !== undefined) {
+          committedIssues[0].labels = ["triaged"];
+        }
+        dnsActive = false;
 
-          // Make the retry due immediately.
-          const row = yield* store.getObject(key1);
-          expect(row?.status).toBe("claiming");
-          expect(row?.dedupKey).not.toBeNull();
-          yield* store.markRetry({
-            objectKey: key1,
-            deliveryHash: row?.deliveryHash ?? "d".repeat(32),
-            dedupKey: row?.dedupKey ?? null,
-            messageId: row?.messageId ?? null,
-            keepClaiming: true,
-            reason: "retry ready",
-            nextRetryAt: "2000-01-01T00:00:00.000Z",
-            nowIso: "2026-11-27T21:00:00.000Z",
-          });
+        // Make the retry due immediately.
+        const row = yield* store.getObject(key1);
+        expect(row?.status).toBe("claiming");
+        expect(row?.dedupKey).not.toBeNull();
+        yield* store.markRetry({
+          objectKey: key1,
+          deliveryHash: row?.deliveryHash ?? Str.repeat(32)("d"),
+          dedupKey: row?.dedupKey ?? null,
+          messageId: row?.messageId ?? null,
+          keepClaiming: true,
+          reason: "retry ready",
+          nextRetryAt: "2000-01-01T00:00:00.000Z",
+          nowIso: "2026-11-27T21:00:00.000Z",
+        });
 
-          // Pass 2: reconciles #902 BEFORE re-verifying DKIM -> marked created (#902), NOT rejected!
-          const pass2 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 5,
-            store,
-          });
-          expect(pass2.rejected).toHaveLength(0);
-          expect(pass2.created).toHaveLength(1);
-          expect(pass2.created[0]?.issueNumber).toBe(902);
-          expect(pass2.created[0]?.reconciled).toBe(true);
-          expect(committedIssues).toHaveLength(1);
+        // Pass 2: reconciles #902 BEFORE re-verifying DKIM -> marked created (#902), NOT rejected!
+        const pass2 = yield* runAlertInboxPass({
+          apply: true,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 5,
+          store,
+        });
+        expect(pass2.rejected).toHaveLength(0);
+        expect(pass2.created).toHaveLength(1);
+        expect(pass2.created[0]?.issueNumber).toBe(902);
+        expect(pass2.created[0]?.reconciled).toBe(true);
+        expect(committedIssues).toHaveLength(1);
 
-          const finalRow = yield* store.getObject(key1);
-          expect(finalRow?.status).toBe("created");
-          expect(finalRow?.issueNumber).toBe(902);
-        }),
-      ).pipe(Effect.provide(layer)),
-    );
+        const finalRow = yield* store.getObject(key1);
+        expect(finalRow?.status).toBe("created");
+        expect(finalRow?.issueNumber).toBe(902);
+      }),
+    ).pipe(Effect.provide(layer), Effect.runPromise);
   });
 
   test("schedules fresh arrivals and overdue retries fairly without starving either queue even at maxPerPass=1", async () => {
@@ -1426,17 +1451,17 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
     const retryAlert = mkAlert("s0", 0);
     const fresh1 = mkAlert("s1", 1);
     const fresh2 = mkAlert("s2", 2);
-    const retryKey = `inbound/alerts/by-hash/${"0".repeat(32)}/0001-retry.eml`;
-    const freshKey1 = `inbound/alerts/by-hash/${"1".repeat(32)}/0002-fresh1.eml`;
-    const freshKey2 = `inbound/alerts/by-hash/${"2".repeat(32)}/0003-fresh2.eml`;
+    const retryKey = `inbound/alerts/by-hash/${Str.repeat(32)("0")}/0001-retry.eml`;
+    const freshKey1 = `inbound/alerts/by-hash/${Str.repeat(32)("1")}/0002-fresh1.eml`;
+    const freshKey2 = `inbound/alerts/by-hash/${Str.repeat(32)("2")}/0003-fresh2.eml`;
 
     let availableKeys: Array<string> = [retryKey];
     let failRetryDownload = true;
-    const rawMap: Record<string, Uint8Array> = {
+    const rawMap = {
       [retryKey]: retryAlert.raw,
       [freshKey1]: fresh1.raw,
       [freshKey2]: fresh2.raw,
-    };
+    } satisfies Record<string, Uint8Array>;
     const createdKeys: Array<string> = [];
 
     const layer = Layer.mergeAll(
@@ -1444,12 +1469,12 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
         listObjects: () => Effect.succeed([...availableKeys]),
         downloadObject: (_bucket, key) => {
           if (key === retryKey && failRetryDownload) {
-            return Effect.fail(new AlertInboxError({ reason: "transient read error" }));
+            return Effect.fail(AlertInboxError.make({ reason: "transient read error" }));
           }
           const raw = rawMap[key];
-          return raw
+          return raw !== undefined
             ? Effect.succeed(raw)
-            : Effect.fail(new AlertInboxError({ reason: "not found" }));
+            : Effect.fail(AlertInboxError.make({ reason: "not found" }));
         },
       }),
       Layer.succeed(AlertIssueTracker, {
@@ -1471,92 +1496,92 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       }),
     );
 
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const store = yield* openAlertInboxStore(":memory:", false);
+    await Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* openAlertInboxStore(":memory:", false);
 
-          // Pass 1: retryKey fails download and enters retry queue.
-          const p1 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(p1.failures.map((f) => f.objectKey)).toEqual([retryKey]);
+        // Pass 1: retryKey fails download and enters retry queue.
+        const p1 = yield* runAlertInboxPass({
+          apply: true,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 1,
+          store,
+        });
+        expect(Arr.map(p1.failures, (f) => f.objectKey)).toEqual([retryKey]);
 
-          // Now retryKey becomes overdue AND freshKey1 arrives.
-          failRetryDownload = false;
-          yield* store.markRetry({
-            objectKey: retryKey,
-            deliveryHash: "0".repeat(32),
-            dedupKey: null,
-            messageId: null,
-            keepClaiming: false,
-            reason: "overdue",
-            nextRetryAt: "2000-01-01T00:00:00.000Z",
-            nowIso: "2026-11-27T21:00:00.000Z",
-          });
-          availableKeys = [retryKey, freshKey1];
+        // Now retryKey becomes overdue AND freshKey1 arrives.
+        failRetryDownload = false;
+        yield* store.markRetry({
+          objectKey: retryKey,
+          deliveryHash: Str.repeat(32)("0"),
+          dedupKey: null,
+          messageId: null,
+          keepClaiming: false,
+          reason: "overdue",
+          nextRetryAt: "2000-01-01T00:00:00.000Z",
+          nowIso: "2026-11-27T21:00:00.000Z",
+        });
+        availableKeys = [retryKey, freshKey1];
 
-          // Pass 2 (maxPerPass=1): lastScheduledQueue was "fresh" -> picks due retryKey (NO starvation!).
-          const p2 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(p2.created.map((c) => c.objectKey)).toEqual([retryKey]);
+        // Pass 2 (maxPerPass=1): lastScheduledQueue was "fresh" -> picks due retryKey (NO starvation!).
+        const p2 = yield* runAlertInboxPass({
+          apply: true,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 1,
+          store,
+        });
+        expect(Arr.map(p2.created, (c) => c.objectKey)).toEqual([retryKey]);
 
-          // Pass 3 (maxPerPass=1): freshKey2 also arrives -> freshKey1 progresses immediately.
-          availableKeys = [retryKey, freshKey1, freshKey2];
-          const p3 = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 1,
-            store,
-          });
-          expect(p3.created.map((c) => c.objectKey)).toEqual([freshKey1]);
-        }),
-      ).pipe(Effect.provide(layer)),
-    );
+        // Pass 3 (maxPerPass=1): freshKey2 also arrives -> freshKey1 progresses immediately.
+        availableKeys = [retryKey, freshKey1, freshKey2];
+        const p3 = yield* runAlertInboxPass({
+          apply: true,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 1,
+          store,
+        });
+        expect(Arr.map(p3.created, (c) => c.objectKey)).toEqual([freshKey1]);
+      }),
+    ).pipe(Effect.provide(layer), Effect.runPromise);
   });
 
   test("propagates missing gcloud or unavailable bucket errors while returning empty only for confirmed empty prefix", async () => {
     const missingGcloud = makeGcloudAlertBucket(() =>
-      Effect.fail(new AlertInboxError({ reason: "Executable not found in $PATH: gcloud" })),
+      Effect.fail(AlertInboxError.make({ reason: "Executable not found in $PATH: gcloud" })),
     );
-    const missingGcloudErr = await Effect.runPromise(
+    const missingGcloudErr = await Fn.pipe(
       Effect.flip(missingGcloud.listObjects("kvitbit-prod-mail-archive-prod", "inbound/alerts/")),
+      Effect.runPromise,
     );
     expect(missingGcloudErr._tag).toBe("AlertInboxError");
 
     const missingBucket = makeGcloudAlertBucket((cmd) => {
       if (cmd[2] === "ls") {
         return Effect.fail(
-          new AlertInboxError({ reason: "ERROR: One or more URLs matched no objects." }),
+          AlertInboxError.make({ reason: "ERROR: One or more URLs matched no objects." }),
         );
       }
-      return Effect.fail(new AlertInboxError({ reason: "ERROR: Bucket not found (404)" }));
+      return Effect.fail(AlertInboxError.make({ reason: "ERROR: Bucket not found (404)" }));
     });
-    const missingBucketErr = await Effect.runPromise(
+    const missingBucketErr = await Fn.pipe(
       Effect.flip(missingBucket.listObjects("missing-bucket", "inbound/alerts/")),
+      Effect.runPromise,
     );
     expect(missingBucketErr._tag).toBe("AlertInboxError");
 
     const confirmedEmpty = makeGcloudAlertBucket((cmd) => {
       if (cmd[2] === "ls") {
         return Effect.fail(
-          new AlertInboxError({ reason: "ERROR: One or more URLs matched no objects." }),
+          AlertInboxError.make({ reason: "ERROR: One or more URLs matched no objects." }),
         );
       }
       return Effect.succeed(Buffer.from("kvitbit-prod-mail-archive-prod\n", "utf8"));
@@ -1570,14 +1595,17 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
   test("dry-run mutates neither GitHub nor SQLite, unverified Message-ID does not poison dedup, and CLI rejects --label override", async () => {
     const sharedMessageId = "<shared-incident-99@google.com>";
     const spoofedSameMsgId = Buffer.from(
-      [
-        "From: Cloud Monitoring <alerts-noreply@google.com>",
-        "To: alerts@kvitbit.com",
-        "Subject: Spoofed",
-        `Message-ID: ${sharedMessageId}`,
-        "",
-        "Unsigned spoof trying to poison dedup.",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          "From: Cloud Monitoring <alerts-noreply@google.com>",
+          "To: alerts@kvitbit.com",
+          "Subject: Spoofed",
+          `Message-ID: ${sharedMessageId}`,
+          "",
+          "Unsigned spoof trying to poison dedup.",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const legitFirst = buildDkimSignedMessage({
@@ -1599,9 +1627,9 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       body: "Authentic alert body (redelivered).\r\n",
     });
 
-    const spoofKey = `inbound/alerts/by-hash/${"a".repeat(32)}/1000-spoof.eml`;
-    const legitKey1 = `inbound/alerts/by-hash/${"b".repeat(32)}/2000-legit1.eml`;
-    const legitKey2 = `inbound/alerts/by-hash/${"c".repeat(32)}/3000-legit2.eml`;
+    const spoofKey = `inbound/alerts/by-hash/${Str.repeat(32)("a")}/1000-spoof.eml`;
+    const legitKey1 = `inbound/alerts/by-hash/${Str.repeat(32)("b")}/2000-legit1.eml`;
+    const legitKey2 = `inbound/alerts/by-hash/${Str.repeat(32)("c")}/3000-legit2.eml`;
     const createdIssues: Array<{ title: string; labels: ReadonlyArray<string> }> = [];
 
     const testLayer = Layer.mergeAll(
@@ -1611,7 +1639,7 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
           if (key === spoofKey) return Effect.succeed(spoofedSameMsgId);
           if (key === legitKey1) return Effect.succeed(legitFirst.raw);
           if (key === legitKey2) return Effect.succeed(legitRedelivery.raw);
-          return Effect.fail(new AlertInboxError({ reason: "not found" }));
+          return Effect.fail(AlertInboxError.make({ reason: "not found" }));
         },
       }),
       Layer.succeed(AlertIssueTracker, {
@@ -1629,45 +1657,44 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       mockDnsLayer({ ...legitFirst.dnsRecords, ...legitRedelivery.dnsRecords }),
     );
 
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const store = yield* openAlertInboxStore(":memory:", false);
+    await Effect.scoped(
+      Effect.gen(function* () {
+        const store = yield* openAlertInboxStore(":memory:", false);
 
-          const dry = yield* runAlertInboxPass({
-            apply: false,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 20,
-            store,
-          });
-          expect(dry.rejected).toHaveLength(1);
-          expect(dry.created).toHaveLength(2);
-          expect(createdIssues).toHaveLength(0);
-          expect(yield* store.listAll()).toHaveLength(0);
+        const dry = yield* runAlertInboxPass({
+          apply: false,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 20,
+          store,
+        });
+        expect(dry.rejected).toHaveLength(1);
+        expect(dry.created).toHaveLength(2);
+        expect(createdIssues).toHaveLength(0);
+        const rows = yield* store.listAll;
+        expect(rows).toHaveLength(0);
 
-          const applied = yield* runAlertInboxPass({
-            apply: true,
-            bucket: "kvitbit-prod-mail-archive-prod",
-            prefix: "inbound/alerts/",
-            repo: "KvitBit/KvitBit",
-            allowedDomains: ["google.com"],
-            maxPerPass: 20,
-            store,
-          });
-          expect(applied.rejected.map((r) => r.objectKey)).toEqual([spoofKey]);
-          expect(applied.created.map((c) => c.objectKey)).toEqual([legitKey1]);
-          expect(applied.duplicates).toEqual([
-            { objectKey: legitKey2, matchedBy: "dedup_key", existingIssueNumber: 701 },
-          ]);
-          expect(createdIssues).toEqual([
-            { title: "Alert (google.com): Real incident 99", labels: [ALERT_ISSUE_LABEL] },
-          ]);
-        }),
-      ).pipe(Effect.provide(testLayer)),
-    );
+        const applied = yield* runAlertInboxPass({
+          apply: true,
+          bucket: "kvitbit-prod-mail-archive-prod",
+          prefix: "inbound/alerts/",
+          repo: "KvitBit/KvitBit",
+          allowedDomains: ["google.com"],
+          maxPerPass: 20,
+          store,
+        });
+        expect(Arr.map(applied.rejected, (r) => r.objectKey)).toEqual([spoofKey]);
+        expect(Arr.map(applied.created, (c) => c.objectKey)).toEqual([legitKey1]);
+        expect(applied.duplicates).toEqual([
+          { objectKey: legitKey2, matchedBy: "dedup_key", existingIssueNumber: 701 },
+        ]);
+        expect(createdIssues).toEqual([
+          { title: "Alert (google.com): Real incident 99", labels: [ALERT_ISSUE_LABEL] },
+        ]);
+      }),
+    ).pipe(Effect.provide(testLayer), Effect.runPromise);
 
     const proc = Bun.spawn(
       ["bun", "scripts/alert-inbox/service.ts", "--label", "visual-feedback"],
@@ -1678,6 +1705,6 @@ describe("Alert inbox operational invariants (migration, concurrency, recovery, 
       proc.exited,
     ]);
     expect(exitCode).toBe(1);
-    expect(stderrText).toMatch(/Unknown option '--label'/);
+    expect(stderrText).toMatch(unknownOptionLabelPattern);
   });
 });

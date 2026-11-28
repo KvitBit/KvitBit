@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import { layerFromPglite } from "@kvitbit/adapters/testing";
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { runMigrations } from "../../src/migrate";
 
 describe("migrate: Drizzle + Effect Cluster SQL migrations", () => {
@@ -21,7 +22,7 @@ describe("migrate: Drizzle + Effect Cluster SQL migrations", () => {
             WHERE table_schema = 'public'
             ORDER BY table_name
           `;
-          return { res, names: tables.map((t) => t.table_name) };
+          return { res, names: Arr.map(tables, (t) => t.table_name) };
         }).pipe(Effect.provide(sqlLayer)),
       );
 

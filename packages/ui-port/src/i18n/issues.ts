@@ -11,6 +11,7 @@ import type { MessageKey } from "./catalog";
 /** UI-only field issue codes (spec rule F1 `form.*`) and auth adapter codes (`auth.*`). */
 export const UI_ISSUE_CODES = [
   "form.required",
+  "form.validation_unavailable",
   "form.invalid",
   "form.decimal_invalid",
   "form.integer_invalid",
@@ -57,22 +58,17 @@ export type UiIssueCode = (typeof UI_ISSUE_CODES)[number];
 /** Every code a field issue can carry: core's closed `IssueCode` plus the UI-only codes. */
 export type AnyIssueCode = IssueCode | UiIssueCode;
 
-export type IssueKey<C extends AnyIssueCode = AnyIssueCode> = `issue.${C}`;
-
-// Compile-time seam: a new core IssueCode without catalog copy fails type checking here.
-type Covered<K extends string> = [Exclude<K, MessageKey>] extends [never]
-  ? true
-  : Exclude<K, MessageKey>;
-const issueKeysCovered: Covered<IssueKey> = true;
-const errorKeysCovered: Covered<
+// A new issue or error literal without catalog copy fails the constraint here.
+type Covered<_Keys extends MessageKey, Key> = Key;
+export type IssueKey<C extends AnyIssueCode = AnyIssueCode> = Covered<
+  | `issue.${AnyIssueCode}`
   | `error.conflict.${ConflictReason}`
   | `error.unavailable.${UnavailableDependency}`
   | `enum.entity.${EntityKind}`
   | `error.unauthorized.${UnauthorizedReason}`
-  | `issue.${ThemeWarning}`
-> = true;
-void issueKeysCovered;
-void errorKeysCovered;
+  | `issue.${ThemeWarning}`,
+  `issue.${C}`
+>;
 
 export const issueKey = <C extends AnyIssueCode>(code: C): IssueKey<C> => `issue.${code}`;
 

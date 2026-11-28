@@ -1,7 +1,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from "bun:test";
-import { createHash } from "node:crypto";
-import type { CurrencyCode, WorkspaceId, WorkspaceSlug } from "@kvitbit/domain/contract";
+import {
+  CurrencyCode,
+  WorkspaceId,
+  WorkspaceSlug,
+  type WorkspaceSummary,
+} from "@kvitbit/domain/contract";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { act, createElement, type ReactElement } from "react";
 import { ApiProvider } from "../../runtime/api-runtime";
 import { requestIntentReconciliationCopy } from "../../runtime/request-intent";
@@ -12,17 +20,20 @@ import { allText, findAll, hostTree } from "../../testing/element-tree";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
 import { TestProviders } from "../../testing/providers";
 import { uiShim } from "../documents/test-ui-shim";
+import { jsonText, requestIntentSlot, sha256 } from "./onboarding.testkit";
 import { onboardingOwner, onboardingStore } from "./onboarding-persistence";
 
 const replacements: string[] = [];
-const TestRedirect = ({ href }: { readonly href: string }) =>
-  createElement("div", { "data-redirect": href }, `REDIRECT:${href}`);
+
+function renderRedirect({ href }: { readonly href: string }) {
+  return createElement("div", { "data-redirect": href }, `REDIRECT:${href}`);
+}
 
 mock.module("expo-router", () => {
   const standIn = expoRouterStandIn();
   return {
     ...standIn,
-    Redirect: TestRedirect,
+    Redirect: renderRedirect,
     router: {
       ...standIn.router,
       replace: (href: string) => {
@@ -47,15 +58,21 @@ const within = (node: ReactElement) => (
 
 const root = clientRoot({ keepFetch: true });
 
-const waitFor = async (check: () => boolean, label = "condition"): Promise<void> => {
-  for (let i = 0; i < 200; i += 1) {
-    if (check()) return;
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    });
-  }
-  throw new Error(`Timed out waiting for ${label}`);
-};
+const waitFor = (check: () => boolean, label: string) =>
+  Effect.runPromise(
+    Effect.promise(() => act(() => Effect.runPromise(Effect.sleep("10 millis")))).pipe(
+      Effect.repeat({ until: check, times: 200 }),
+      Effect.flatMap(() =>
+        check() ? Effect.void : Effect.die(new Error(`Timed out waiting for ${label}`)),
+      ),
+    ),
+  );
+
+const inputValue = (element: Element | null) =>
+  element instanceof HTMLInputElement ? element.value : null;
+const submitButton = () => root.container().querySelector('[data-testid="onboarding-submit"]');
+const ibanValue = () =>
+  inputValue(root.container().querySelector('[data-testid="onboarding-iban"]'));
 
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
 afterEach(async () => {
@@ -73,7 +90,7 @@ const startFakeServer = (
     readonly onBank?: (req: Request) => Response;
     readonly onCreate?: () => Response;
     readonly onIssuer?: () => Response;
-    readonly workspaces?: ReadonlyArray<Record<string, unknown>>;
+    readonly workspaces?: ReadonlyArray<WorkspaceSummary>;
   },
 ) => {
   const calls: string[] = [];
@@ -100,11 +117,11 @@ const startFakeServer = (
         calls.push("create");
         return handlers.onCreate?.() ?? Response.json({}, { status: 500 });
       }
-      if (req.method === "PATCH" && url.pathname.endsWith("/issuing-entity")) {
+      if (req.method === "PATCH" && Str.endsWith("/issuing-entity")(url.pathname)) {
         calls.push("issuer");
         return handlers.onIssuer?.() ?? Response.json({}, { status: 500 });
       }
-      if (req.method === "POST" && url.pathname.endsWith("/bank-accounts")) {
+      if (req.method === "POST" && Str.endsWith("/bank-accounts")(url.pathname)) {
         calls.push(`bank:${url.pathname}`);
         return handlers.onBank?.(req) ?? Response.json({}, { status: 500 });
       }
@@ -124,8 +141,8 @@ const signedInTree = (origin: string, node: ReactElement) => (
   </TestProviders>
 );
 
-const RESUME_WS_ID = "01950000-0000-7000-8000-000000000001" as WorkspaceId;
-const RESUME_WS_SLUG = "acme" as WorkspaceSlug;
+const RESUME_WS_ID = WorkspaceId.make("01950000-0000-7000-8000-000000000001");
+const RESUME_WS_SLUG = WorkspaceSlug.make("acme");
 
 const persistedBankResume = (origin: string, userId: string) => ({
   version: 1 as const,
@@ -147,7 +164,7 @@ const persistedBankResume = (origin: string, userId: string) => ({
     country: "CZ",
     registerEntry: "",
     taxRegime: "non_vat_payer" as const,
-    currency: "CZK" as CurrencyCode,
+    currency: CurrencyCode.make("CZK"),
     docLocale: "en" as const,
     iban: "CZ6508000000192000145399",
     bic: "GIBACZPX",
@@ -161,7 +178,7 @@ describe("OnboardingScreen", () => {
     expect(text).toContain("Set up your workspace");
     expect(text).toContain("Step 1 of 3");
     expect(text).toContain("Load from ARES");
-    expect(findAll(tree, "TextInput").some((el) => el.props.testID === "onboarding-ico")).toBe(
+    expect(Arr.some(findAll(tree, "TextInput"), (el) => el.props.testID === "onboarding-ico")).toBe(
       true,
     );
   });
@@ -201,12 +218,12 @@ describe("OnboardingScreen resume and root launcher", () => {
     await root.render(signedInTree(origin, <OnboardingScreen initialStep={1} />));
 
     const input = (id: string) =>
-      root.container().querySelector(`[data-testid="${id}"]`) as HTMLInputElement | null;
+      root.container().querySelector<HTMLInputElement>(`[data-testid="${id}"]`);
     await waitFor(() => input("onboarding-street") !== null, "onboarding street input");
 
     const setValue = async (el: HTMLInputElement, value: string) => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-      await act(async () => {
+      await act(() => {
         setter?.call(el, value);
         el.dispatchEvent(new Event("input", { bubbles: true }));
       });
@@ -246,24 +263,14 @@ describe("OnboardingScreen resume and root launcher", () => {
     await onboardingStore.write(persistedBankResume(origin, userId));
 
     await root.render(signedInTree(origin, <OnboardingScreen />));
-    await waitFor(
-      () =>
-        (
-          root
-            .container()
-            .querySelector('[data-testid="onboarding-iban"]') as HTMLInputElement | null
-        )?.value === "CZ6508000000192000145399",
-      "hydrated step 3 IBAN",
-    );
+    await waitFor(() => ibanValue() === "CZ6508000000192000145399", "hydrated step 3 IBAN");
 
     expect(root.container().textContent).toContain("Step 3 of 3");
-    const submit = root
-      .container()
-      .querySelector('[data-testid="onboarding-submit"]') as HTMLButtonElement | null;
+    const submit = submitButton();
     expect(submit).not.toBeNull();
     const dashboardHref = hrefOf({ _tag: "Dashboard", ws: RESUME_WS_SLUG });
-    await act(async () => {
-      submit?.click();
+    await act(() => {
+      if (submit instanceof HTMLButtonElement) submit.click();
     });
     await waitFor(() => replacements.includes(dashboardHref), "dashboard navigation");
 
@@ -279,47 +286,35 @@ describe("OnboardingScreen resume and root launcher", () => {
     await tokenStore.write("test-bearer");
     await onboardingStore.write(persistedBankResume(origin, userId));
 
-    const owner = onboardingOwner(origin, userId);
+    const owner = onboardingOwner({ origin, userId });
     const bankPayload = {
       bic: "GIBACZPX",
       currency: "CZK",
       iban: "CZ6508000000192000145399",
       isDefault: true,
     };
-    const fingerprint = createHash("sha256").update(JSON.stringify(bankPayload)).digest("hex");
-    const slot = `kvitbit.request-intent.v1.${createHash("sha256")
-      .update(JSON.stringify([owner, `onboard/bank/${RESUME_WS_ID}`]))
-      .digest("hex")}`;
+    const fingerprint = await sha256(jsonText(bankPayload));
+    const slot = await requestIntentSlot([owner, `onboard/bank/${RESUME_WS_ID}`]);
     await AsyncStorage.setItem(
       slot,
-      JSON.stringify({
+      jsonText({
         [fingerprint]: {
           key: "01900000-0000-7000-8000-000000000002",
-          firstAttemptAt: Date.now() - 25 * 60 * 60 * 1000,
+          firstAttemptAt: DateTime.toEpochMillis(DateTime.nowUnsafe()) - 25 * 60 * 60 * 1000,
         },
       }),
     );
 
     try {
       await root.render(signedInTree(origin, <OnboardingScreen />));
-      await waitFor(
-        () =>
-          (
-            root
-              .container()
-              .querySelector('[data-testid="onboarding-iban"]') as HTMLInputElement | null
-          )?.value === "CZ6508000000192000145399",
-        "hydrated expired screen",
-      );
+      await waitFor(() => ibanValue() === "CZ6508000000192000145399", "hydrated expired screen");
 
-      const submit = root
-        .container()
-        .querySelector('[data-testid="onboarding-submit"]') as HTMLButtonElement | null;
-      await act(async () => {
-        submit?.click();
+      const submit = submitButton();
+      await act(() => {
+        if (submit instanceof HTMLButtonElement) submit.click();
       });
       await waitFor(
-        () => root.container().textContent?.includes(requestIntentReconciliationCopy.en) === true,
+        () => Str.includes(requestIntentReconciliationCopy.en)(root.container().textContent ?? ""),
         "expiry reconciliation copy",
       );
 
@@ -337,7 +332,7 @@ describe("OnboardingScreen resume and root launcher", () => {
       workspaces: [
         {
           id: RESUME_WS_ID,
-          slug: "acme",
+          slug: RESUME_WS_SLUG,
           name: "Acme s.r.o.",
           role: "owner",
           memberCount: 1,
@@ -368,6 +363,9 @@ describe("OnboardingScreen resume and root launcher", () => {
           root.container().querySelector("[data-redirect]")?.getAttribute("data-redirect") ===
           dashboardHref,
         `redirect to ${dashboardHref}`,
+      );
+      expect(root.container().querySelector("[data-redirect]")?.getAttribute("data-redirect")).toBe(
+        dashboardHref,
       );
     } finally {
       await onboardingStore.clear(origin, userId);

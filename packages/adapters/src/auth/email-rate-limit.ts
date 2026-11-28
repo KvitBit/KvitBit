@@ -10,8 +10,11 @@
  * counting and inserting are atomic; the address's expired rows are deleted in the same
  * transaction, and a refused request writes nothing.
  */
-import { Clock, Data, Effect } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import { generateId } from "./ids";
 
 export interface EmailRateLimitRule {
@@ -21,9 +24,10 @@ export interface EmailRateLimitRule {
 
 export const EMAIL_RATE_LIMIT: EmailRateLimitRule = { windowSeconds: 60, max: 5 };
 
-export class EmailRateLimitUnavailable extends Data.TaggedError("EmailRateLimitUnavailable")<{
-  readonly cause?: unknown;
-}> {}
+export class EmailRateLimitUnavailable extends Schema.TaggedError<
+  EmailRateLimitUnavailable,
+  { readonly brand: unique symbol }
+>()("EmailRateLimitUnavailable", { cause: Schema.optionalKey(Schema.Unknown) }) {}
 
 export type EmailRateLimitDecision =
   | { readonly allowed: true }
@@ -37,7 +41,8 @@ export interface EmailRateLimiter {
 }
 
 /** Address key: the trimmed, lowercased address; admission rows extend it with `#<id>`. */
-export const emailRateLimitKey = (email: string): string => `email:${email.trim().toLowerCase()}`;
+export const emailRateLimitKey = (email: string): string =>
+  `email:${Str.toLowerCase(Str.trim(email))}`;
 
 /** Rolling per-email limiter over `auth.rate_limit` of the given `SqlClient`. */
 export const makeEmailRateLimiter = (
@@ -46,7 +51,7 @@ export const makeEmailRateLimiter = (
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     const windowMs = rule.windowSeconds * 1000;
-    const consume = (email: string) =>
+    const consume = Effect.fn("EmailRateLimiter.consume")((email: string) =>
       sql
         .withTransaction(
           Effect.gen(function* () {
@@ -70,13 +75,14 @@ export const makeEmailRateLimiter = (
               return { allowed: true } as const;
             }
             // Free again when the oldest admission still in the window leaves it.
-            const oldest = Number(live[live.length - rule.max]?.last_request ?? now);
+            const oldest = Number(live.at(live.length - rule.max)?.last_request ?? now);
             return {
               allowed: false,
               retryAfterSeconds: Math.max(1, Math.ceil((oldest + windowMs - now) / 1000)),
             } as const;
           }),
         )
-        .pipe(Effect.mapError((cause) => new EmailRateLimitUnavailable({ cause })));
+        .pipe(Effect.mapError((cause) => EmailRateLimitUnavailable.make({ cause }))),
+    );
     return { consume };
   });

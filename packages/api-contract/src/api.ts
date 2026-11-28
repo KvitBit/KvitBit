@@ -1,5 +1,6 @@
 /** The one `HttpApi` (http-mcp-contracts section 3.1). */
-import { HttpApi, OpenApi } from "effect/http-api";
+import * as HttpApi from "effect/http-api/HttpApi";
+import * as OpenApi from "effect/http-api/OpenApi";
 import {
   MeGroup,
   MyWorkspacesGroup,

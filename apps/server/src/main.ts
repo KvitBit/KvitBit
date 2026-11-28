@@ -9,11 +9,15 @@
  * - `KVITBIT_RUNNER_MODE=cluster`: runs `ClusterClientRuntimeLive` (client-only sharding over
  *   `SqlMessageStorage`) and serves HTTP only; workflows and crons execute on `worker.ts`.
  */
+
 import { createServer } from "node:http";
-import { NodeHttpServer } from "@effect/platform-node";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
-import { Effect, Layer } from "effect";
-import { HttpMiddleware, HttpRouter } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as HttpMiddleware from "effect/http/HttpMiddleware";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Layer from "effect/Layer";
+import * as Str from "effect/String";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
 import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
@@ -39,7 +43,7 @@ const ServerRuntimeLive = Layer.unwrap(
     const httpLayer = HttpRouter.serve(AllRoutesLive, {
       routerConfig: { maxParamLength: 2048 },
       disableLogger: true,
-      middleware: (handle) => withRequestLogging(HttpMiddleware.logger(handle)),
+      middleware: (handle) => handle.pipe(HttpMiddleware.logger, withRequestLogging),
     }).pipe(
       Layer.provide(EdgeServicesLive),
       Layer.provide(
@@ -88,10 +92,10 @@ export const serverProgram = Effect.gen(function* () {
   return yield* Layer.launch(ServerRuntimeLive);
 });
 
+// Older Node versions lack import.meta.main.
+const entryPath = process.argv[1] ?? "";
 const isMain =
-  typeof import.meta.main === "boolean"
-    ? import.meta.main
-    : process.argv[1]?.endsWith("main.ts") || process.argv[1]?.endsWith("main.js");
+  import.meta.main ?? (Str.endsWith("main.ts")(entryPath) || Str.endsWith("main.js")(entryPath));
 
 if (isMain) {
   runServerMain(serverProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));

@@ -5,9 +5,14 @@
  * - "property": seeded generated patterns, dates and counters. Sampled, so it is not a proof.
  *   A failure prints the seed.
  */
+
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
-import { Result } from "effect";
+import { IsoDate } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Formatter from "effect/Formatter";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as EffectString from "effect/String";
 import {
   checkNextCounter,
   fitsLength,
@@ -33,40 +38,50 @@ type OracleResult =
   | { readonly ok: false; readonly reason: string };
 
 const isLetter = (ch: string) => (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
-const isControl = (ch: string) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f;
-const isSpace = (ch: string) => /\s/.test(ch);
+const isControl = (ch: string) =>
+  Option.getOrElse(EffectString.charCodeAt(ch, 0), () => Number.NaN) < 0x20 ||
+  Option.getOrElse(EffectString.charCodeAt(ch, 0), () => Number.NaN) === 0x7f;
+const WHITESPACE = /\s/;
+const isSpace = (ch: string) => WHITESPACE.test(ch);
 
 const oracleParse = (p: string): OracleResult => {
   if (p.length === 0) return { ok: false, reason: "empty" };
   for (const ch of p) if (isControl(ch)) return { ok: false, reason: "control_character" };
-  if (isSpace(p.charAt(0)) || isSpace(p.charAt(p.length - 1))) {
+  if (
+    isSpace(Option.getOrElse(EffectString.charAt(p, 0), () => "")) ||
+    isSpace(Option.getOrElse(EffectString.charAt(p, p.length - 1), () => ""))
+  ) {
     return { ok: false, reason: "whitespace_edge" };
   }
   const tokens: Array<PatternToken> = [];
   const literal = (text: string) => {
-    const last = tokens[tokens.length - 1];
+    const last = tokens.at(-1);
     if (last?._tag === "Literal")
       tokens[tokens.length - 1] = { _tag: "Literal", text: last.text + text };
     else tokens.push({ _tag: "Literal", text });
   };
   let i = 0;
   while (i < p.length) {
-    if (!isLetter(p.charAt(i))) {
-      literal(p.charAt(i));
+    if (!isLetter(Option.getOrElse(EffectString.charAt(p, i), () => ""))) {
+      literal(Option.getOrElse(EffectString.charAt(p, i), () => ""));
       i++;
       continue;
     }
     let j = i;
-    while (j < p.length && isLetter(p.charAt(j))) j++;
-    const word = p.slice(i, j);
-    if ([...word].some((c) => c !== "Y" && c !== "M" && c !== "N")) {
+    while (j < p.length && isLetter(Option.getOrElse(EffectString.charAt(p, j), () => ""))) j++;
+    const word = EffectString.slice(i, j)(p);
+    if (EffectArray.some(Array.from(word), (c) => c !== "Y" && c !== "M" && c !== "N")) {
       literal(word);
     } else {
       let k = 0;
       while (k < word.length) {
         let run = 1;
-        while (word.charAt(k + run) === word.charAt(k)) run++;
-        const c = word.charAt(k);
+        while (
+          Option.getOrElse(EffectString.charAt(word, k + run), () => "") ===
+          Option.getOrElse(EffectString.charAt(word, k), () => "")
+        )
+          run++;
+        const c = Option.getOrElse(EffectString.charAt(word, k), () => "");
         if (c === "N") tokens.push({ _tag: "Counter", width: run });
         else if (c === "M") {
           if (run !== 2) return { ok: false, reason: "month_run" };
@@ -78,11 +93,11 @@ const oracleParse = (p: string): OracleResult => {
     }
     i = j;
   }
-  const counters = tokens.filter((t) => t._tag === "Counter").length;
+  const counters = EffectArray.filter(tokens, (t) => t._tag === "Counter").length;
   if (counters === 0) return { ok: false, reason: "counter_missing" };
   if (counters > 1) return { ok: false, reason: "counter_repeated" };
-  const year = tokens.some((t) => t._tag === "Year2" || t._tag === "Year4");
-  const month = tokens.some((t) => t._tag === "Month");
+  const year = EffectArray.some(tokens, (t) => t._tag === "Year2" || t._tag === "Year4");
+  const month = EffectArray.some(tokens, (t) => t._tag === "Month");
   if (month && !year) return { ok: false, reason: "month_without_year" };
   if (oracleRender(tokens, 2026, 1, 1).length > SPEC_MAX_LENGTH)
     return { ok: false, reason: "too_long" };
@@ -119,25 +134,30 @@ const oracleRender = (
 const decode = (tokens: ReadonlyArray<PatternToken>, number: string) => {
   const width = (t: PatternToken) =>
     t._tag === "Year4" ? 4 : t._tag === "Literal" ? t.text.length : t._tag === "Counter" ? 0 : 2;
-  const at = tokens.findIndex((t) => t._tag === "Counter");
-  const prefix = tokens.slice(0, at).reduce((n, t) => n + width(t), 0);
-  const suffix = tokens.slice(at + 1).reduce((n, t) => n + width(t), 0);
+  const at = Option.getOrElse(
+    EffectArray.findFirstIndex(tokens, (t) => t._tag === "Counter"),
+    () => -1,
+  );
+  const prefix = EffectArray.reduce(tokens.slice(0, at), 0, (n, t) => n + width(t));
+  const suffix = EffectArray.reduce(tokens.slice(at + 1), 0, (n, t) => n + width(t));
   const fields: Array<string> = [];
   let pos = 0;
   for (const t of tokens.slice(0, at)) {
-    if (t._tag !== "Literal") fields.push(number.slice(pos, pos + width(t)));
+    if (t._tag !== "Literal") fields.push(EffectString.slice(pos, pos + width(t))(number));
     pos += width(t);
   }
   pos = number.length - suffix;
   for (const t of tokens.slice(at + 1)) {
-    if (t._tag !== "Literal") fields.push(number.slice(pos, pos + width(t)));
+    if (t._tag !== "Literal") fields.push(EffectString.slice(pos, pos + width(t))(number));
     pos += width(t);
   }
-  return { counter: Number(number.slice(prefix, number.length - suffix)), fields };
+  return { counter: Number(EffectString.slice(prefix, number.length - suffix)(number)), fields };
 };
 
 const iso = (y: number, m: number, d: number) =>
-  `${String(y).padStart(4, "0")}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` as IsoDate;
+  IsoDate.make(
+    `${EffectString.padStart(4, "0")(String(y))}-${EffectString.padStart(2, "0")(String(m))}-${EffectString.padStart(2, "0")(String(d))}`,
+  );
 
 const forSeeds = (count: number, base: number, body: (seed: number) => void) => {
   for (let i = 0; i < count; i++) {
@@ -145,16 +165,17 @@ const forSeeds = (count: number, base: number, body: (seed: number) => void) => 
     try {
       body(seed);
     } catch (e) {
-      throw new Error(`seed=${seed}: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(`seed=${seed}: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
     }
   }
+  return count;
 };
 
 const engineParse = (p: string): OracleResult => {
   const r = parsePattern(p);
   if (Result.isSuccess(r)) return { ok: true, tokens: r.success.tokens, reset: r.success.reset };
   const issue = r.failure.issues[0];
-  return { ok: false, reason: String(issue?.params?.reason) };
+  return { ok: false, reason: String(issue?.params?.["reason"]) };
 };
 
 const PIECES = [
@@ -188,7 +209,10 @@ const PIECES = [
   "\u007f",
 ];
 const genPattern = (r: ReturnType<typeof rng>) =>
-  Array.from({ length: r.int(1, 6) }, () => r.pick(PIECES)).join("");
+  EffectArray.join(
+    Array.from({ length: r.int(1, 6) }, () => r.pick(PIECES)),
+    "",
+  );
 /**
  * A pattern the oracle accepts (bounded retries, never judged by the engine), then parsed by the
  * engine: an engine rejection fails at once with the pattern.
@@ -200,7 +224,7 @@ const genValid = (r: ReturnType<typeof rng>): { source: string; pattern: NumberP
     const parsed = parsePattern(source);
     if (Result.isFailure(parsed)) {
       throw new Error(
-        `engine rejects ${JSON.stringify(source)}: ${JSON.stringify(engineParse(source))}`,
+        `engine rejects ${Formatter.format(source)}: ${Formatter.format(engineParse(source))}`,
       );
     }
     return { source, pattern: parsed.success };
@@ -227,14 +251,19 @@ describe("Numbering grammar (verification: every pattern up to 6 chars over Y M 
     const alphabet = ["Y", "M", "N", "a", "1", "-", " "];
     let checked = 0;
     let valid = 0;
+    const date = IsoDate.make("2026-03-15");
     const visit = (p: string) => {
       const got = engineParse(p);
       const want = oracleParse(p);
-      expect([p, got]).toEqual([p, want]);
-      if (got.ok && Result.isSuccess(parsePattern(p))) {
-        const pattern = (parsePattern(p) as Result.Success<NumberPattern, never>).success;
+      if (!Bun.deepEquals(got, want)) {
+        throw new Error(
+          `${Formatter.format(p)}: engine ${Formatter.format(got)}, oracle ${Formatter.format(want)}`,
+        );
+      }
+      if (got.ok) {
+        const pattern = Result.getOrThrow(parsePattern(p));
         for (const c of [1, 10, 12_345]) {
-          const n = format(pattern, "2026-03-15" as IsoDate, c);
+          const n = format(pattern, date, c);
           if (n !== oracleRender(got.tokens, 2026, 3, c))
             throw new Error(`format(${p}, ${c}) = ${n}`);
         }
@@ -256,16 +285,17 @@ describe("Numbering grammar (verification: every pattern up to 6 chars over Y M 
 
 describe("Numbering patterns (property: seeded)", () => {
   test("generated patterns parse like the oracle, including rejections (2,000 patterns)", () => {
-    forSeeds(2000, 0x4e4e, (seed) => {
+    const checked = forSeeds(2000, 0x4e4e, (seed) => {
       const p = genPattern(rng(seed));
       const got = engineParse(p);
       const want = oracleParse(p);
-      if (JSON.stringify(got) !== JSON.stringify(want)) {
+      if (Formatter.format(got) !== Formatter.format(want)) {
         throw new Error(
-          `${JSON.stringify(p)}: engine ${JSON.stringify(got)}, oracle ${JSON.stringify(want)}`,
+          `${Formatter.format(p)}: engine ${Formatter.format(got)}, oracle ${Formatter.format(want)}`,
         );
       }
     });
+    expect(checked).toBe(2_000);
   });
 
   test("format round-trips: the counter and date fields read back; never truncated; limits (500 x 20)", () => {
@@ -285,23 +315,23 @@ describe("Numbering patterns (property: seeded)", () => {
         const back = decode(pattern.tokens, n);
         if (back.counter !== c)
           throw new Error(`${source}: ${n} reads back counter ${back.counter}, not ${c}`);
-        const fields = pattern.tokens.flatMap((t) =>
+        const fields = EffectArray.flatMap(pattern.tokens, (t) =>
           t._tag === "Year4"
-            ? [String(y).padStart(4, "0")]
+            ? [EffectString.padStart(4, "0")(String(y))]
             : t._tag === "Year2"
-              ? [String(y % 100).padStart(2, "0")]
+              ? [EffectString.padStart(2, "0")(String(y % 100))]
               : t._tag === "Month"
-                ? [String(m).padStart(2, "0")]
+                ? [EffectString.padStart(2, "0")(String(m))]
                 : [],
         );
-        if (back.fields.join("|") !== fields.join("|"))
+        if (EffectArray.join(back.fields, "|") !== EffectArray.join(fields, "|"))
           throw new Error(`${source}: ${n} reads back date fields ${back.fields}, not ${fields}`);
         if (fitsLength(pattern, iso(y, m, d), c) !== n.length <= SPEC_MAX_LENGTH) {
           throw new Error(`${source}: fitsLength(${c}) disagrees with length ${n.length}`);
         }
       }
       for (const bad of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
-        expect(() => format(pattern, "2026-01-01" as IsoDate, bad)).toThrow();
+        expect(() => format(pattern, IsoDate.make("2026-01-01"), bad)).toThrow();
       }
     });
   });
@@ -329,8 +359,8 @@ describe("Numbering patterns (property: seeded)", () => {
           pattern.reset === "never"
             ? "all"
             : pattern.reset === "yearly"
-              ? String(a.y).padStart(4, "0")
-              : `${String(a.y).padStart(4, "0")}-${String(a.m).padStart(2, "0")}`;
+              ? EffectString.padStart(4, "0")(String(a.y))
+              : `${EffectString.padStart(4, "0")(String(a.y))}-${EffectString.padStart(2, "0")(String(a.m))}`;
         expect([source, periodKey(pattern, da)]).toEqual([source, key]);
         expect([source, periodKey(pattern, db)]).toEqual([source, key]);
         const c1 = genCounter(r);
@@ -344,10 +374,10 @@ describe("Numbering patterns (property: seeded)", () => {
   });
 
   test("across periods numbers collide only for YY-only patterns 100 years apart (500 x 30)", () => {
-    forSeeds(500, 0x7b7b, (seed) => {
+    const checked = forSeeds(500, 0x7b7b, (seed) => {
       const r = rng(seed);
       const { source, pattern } = genValid(r);
-      const year4 = pattern.tokens.some((t) => t._tag === "Year4");
+      const year4 = EffectArray.some(pattern.tokens, (t) => t._tag === "Year4");
       for (let k = 0; k < 30; k++) {
         const a = genDate(r);
         // Bias toward the colliding case: same month, 100 years apart.
@@ -369,14 +399,15 @@ describe("Numbering patterns (property: seeded)", () => {
           throw new Error(`${source}: ${ka}/${c} -> ${n1}, ${kb}/${c2} -> ${n2}`);
       }
     });
+    expect(checked).toBe(500);
   });
 
   test("the documented cross-period collision: YY-NNN in 2026 and 2126", () => {
-    const pattern = (parsePattern("YY-NNN") as Result.Success<NumberPattern, never>).success;
-    expect(format(pattern, "2026-01-05" as IsoDate, 1)).toBe("26-001");
-    expect(format(pattern, "2126-01-05" as IsoDate, 1)).toBe("26-001");
-    expect(periodKey(pattern, "2026-01-05" as IsoDate)).not.toBe(
-      periodKey(pattern, "2126-01-05" as IsoDate),
+    const pattern = Result.getOrThrow(parsePattern("YY-NNN"));
+    expect(format(pattern, IsoDate.make("2026-01-05"), 1)).toBe("26-001");
+    expect(format(pattern, IsoDate.make("2126-01-05"), 1)).toBe("26-001");
+    expect(periodKey(pattern, IsoDate.make("2026-01-05"))).not.toBe(
+      periodKey(pattern, IsoDate.make("2126-01-05")),
     );
   });
 
@@ -386,14 +417,18 @@ describe("Numbering patterns (property: seeded)", () => {
     for (const length of [19, 20, 21]) {
       for (let width = 1; width <= 10; width++) {
         // Digits are literal text, so "1111NNN" is a literal and a 3-wide counter.
-        const source = `${"1".repeat(length - width)}${"N".repeat(width)}`;
+        const source = `${EffectString.repeat(length - width)("1")}${EffectString.repeat(width)("N")}`;
         const parsed = parsePattern(source);
         expect([source, Result.isSuccess(parsed)]).toEqual([source, length <= SPEC_MAX_LENGTH]);
         if (Result.isFailure(parsed)) {
-          expect([source, parsed.failure.issues[0]?.params?.reason]).toEqual([source, "too_long"]);
+          if (parsed.failure.issues[0]?.params?.["reason"] !== "too_long") {
+            throw new Error(`${source}: expected the too_long rejection`, {
+              cause: parsed.failure,
+            });
+          }
           continue;
         }
-        const date = "2026-05-01" as IsoDate;
+        const date = IsoDate.make("2026-05-01");
         const atWidth = 10 ** width - 1;
         expect([source, fitsLength(parsed.success, date, atWidth)]).toEqual([source, true]);
         // One more digit than the run: the number grows by one character, never truncated.
@@ -405,7 +440,9 @@ describe("Numbering patterns (property: seeded)", () => {
         ]);
       }
     }
-    expect(Result.isSuccess(checkNextCounter(1, SPEC_MAX_COUNTER))).toBe(true);
-    expect(Result.isFailure(checkNextCounter(1, SPEC_MAX_COUNTER + 1))).toBe(true);
+    const largest = checkNextCounter(1, SPEC_MAX_COUNTER).pipe(Result.isSuccess);
+    const overflow = checkNextCounter(1, SPEC_MAX_COUNTER + 1).pipe(Result.isFailure);
+    expect(largest).toBe(true);
+    expect(overflow).toBe(true);
   });
 });

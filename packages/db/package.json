@@ -9,7 +9,7 @@
   },
   "scripts": {
     "lint": "biome check --error-on-warnings .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "test:suite": ":",
     "test:domain-parity": "bun test test/domain-parity.test.ts",
@@ -26,6 +26,7 @@
     "pg": "8.23.1"
   },
   "devDependencies": {
+    "@effect/platform-bun": "4.1.4",
     "@electric-sql/pglite": "0.6.0",
     "@types/pg": "8.23.1",
     "drizzle-kit": "1.0.0-rc.4"

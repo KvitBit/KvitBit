@@ -1,19 +1,22 @@
-/**
- * AuthClient implementation over Better Auth REST (`/api/auth/*`), `Session`, and `PasskeyBridge`.
- * Every method resolves to an `AuthResult`, never rejects.
- */
 import { InvalidBotProof, RateLimited, Unauthorized } from "@kvitbit/api-contract";
 import { Conflict, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { type AuthInvalid, type AuthIssueCode, UiError } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { safeReturnTo } from "../../navigation/return-to";
-import type { JsonObject, PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
+import type { PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
 import type { AuthFetch, AuthResponse } from "../../session/auth-http";
 import { readSessionUser, type SessionUser } from "../../session/session-user";
+import { runFeatureEffect } from "../ui-effect";
 import { inviteReturnTo, verifiedSignInHref } from "./auth-links";
 import type {
   AuthClient,
   AuthResult,
-  AuthSession,
   BotProofPayload,
   PasskeyView,
   SessionView,
@@ -27,9 +30,9 @@ export interface AuthClientDeps {
   readonly passkeyBridge: PasskeyBridge;
 }
 
-const ok = <A>(value: A): AuthResult<A> => ({ _tag: "Ok", value });
-const err = <A>(error: UiError): AuthResult<A> => ({ _tag: "Err", error });
-const cancelled = <A>(): AuthResult<A> => ({ _tag: "Cancelled" });
+const ok = <A>(value: A) => ({ _tag: "Ok", value }) as const;
+const err = (error: UiError) => ({ _tag: "Err", error }) as const;
+const cancelled = () => ({ _tag: "Cancelled" }) as const;
 
 const authInvalid = (
   code: AuthIssueCode,
@@ -39,51 +42,38 @@ const authInvalid = (
   issues: [{ path, code }],
 });
 
-const isRecord = (u: unknown): u is Record<string, unknown> =>
-  typeof u === "object" && u !== null && !Array.isArray(u);
+const jsonObject = Fn.flow(Schema.decodeUnknownOption(Schema.JsonObject), Option.getOrNull);
+const jsonString = Fn.flow(Schema.decodeUnknownOption(Schema.String), Option.getOrNull);
+const jsonArray = Fn.flow(Schema.decodeUnknownOption(Schema.Array(Schema.Json)), Option.getOrNull);
+const jsonNumber = Fn.flow(Schema.decodeUnknownOption(Schema.Finite), Option.getOrNull);
 
-const altchaHeaders = (proof: BotProofPayload, extra?: Record<string, string>) => {
-  const headers: Record<string, string> = { ...extra };
-  if (proof !== null) headers["x-altcha"] = proof;
-  return Object.keys(headers).length > 0 ? headers : undefined;
-};
-
-const readCode = (body: unknown): string => {
-  if (!isRecord(body)) return "";
-  if (typeof body._tag === "string") return body._tag;
-  if (typeof body.code === "string") return body.code;
-  if (typeof body.error === "string") return body.error;
-  return "";
-};
-
-const readMessage = (body: unknown): string =>
-  isRecord(body) && typeof body.message === "string" ? body.message : "";
+const altchaHeaders = (proof: BotProofPayload, extra?: Record<string, string>) =>
+  proof === null ? { ...extra } : { ...extra, "x-altcha": proof };
 
 /** Maps a non-OK Better Auth response into a `UiError`. */
-export const mapAuthError = (
+const mapAuthError = (
   response: AuthResponse,
   context: { readonly notFoundOn400?: boolean } = {},
 ): UiError => {
-  const code = readCode(response.body);
-  const upper = code.toUpperCase();
-  const msg = readMessage(response.body).toLowerCase();
+  const body = jsonObject(response.body);
+  const code =
+    jsonString(body?.["_tag"]) ?? jsonString(body?.["code"]) ?? jsonString(body?.["error"]) ?? "";
+  const upper = Str.toUpperCase(code);
+  const msg = Str.toLowerCase(jsonString(body?.["message"]) ?? "");
 
   if (code === "InvalidBotProof" || upper === "INVALID_BOT_PROOF") {
-    return new InvalidBotProof({});
+    return InvalidBotProof.make({});
   }
   if (response.status === 429 || code === "RateLimited" || upper === "TOO_MANY_REQUESTS") {
-    const retryAfter =
-      isRecord(response.body) && typeof response.body.retryAfterSeconds === "number"
-        ? response.body.retryAfterSeconds
-        : 60;
-    return new RateLimited({ retryAfterSeconds: retryAfter });
+    const retryAfter = jsonNumber(body?.["retryAfterSeconds"]) ?? 60;
+    return RateLimited.make({ retryAfterSeconds: retryAfter });
   }
   if (response.status === 503 || code === "Unavailable") {
-    return new Unavailable({ dependency: "database", retryAfterSeconds: 5 });
+    return Unavailable.make({ dependency: "database", retryAfterSeconds: 5 });
   }
 
   // Better Auth semantic codes
-  if (upper === "EMAIL_NOT_VERIFIED" || msg.includes("email not verified")) {
+  if (upper === "EMAIL_NOT_VERIFIED" || Str.includes("email not verified")(msg)) {
     return authInvalid("auth.email_not_verified", ["email"]);
   }
   if (
@@ -111,16 +101,16 @@ export const mapAuthError = (
   if (
     upper === "LAST_SIGN_IN_METHOD" ||
     code === "last_sign_in_method" ||
-    msg.includes("last sign-in method") ||
-    msg.includes("last sign in method")
+    Str.includes("last sign-in method")(msg) ||
+    Str.includes("last sign in method")(msg)
   ) {
-    return new Conflict({ reason: "illegal_transition" });
+    return Conflict.make({ reason: "illegal_transition" });
   }
   if (
     upper === "SOLE_OWNER" ||
     code === "sole_owner" ||
-    msg.includes("owns a workspace") ||
-    msg.includes("transfer ownership")
+    Str.includes("owns a workspace")(msg) ||
+    Str.includes("transfer ownership")(msg)
   ) {
     return authInvalid("auth.sole_owner");
   }
@@ -128,337 +118,422 @@ export const mapAuthError = (
     upper === "INVALID_TOKEN" ||
     upper === "TOKEN_EXPIRED" ||
     upper === "EXPIRED_TOKEN" ||
-    msg.includes("expired") ||
+    Str.includes("expired")(msg) ||
     (context.notFoundOn400 === true && (response.status === 400 || response.status === 404))
   ) {
-    return new NotFound({ entity: "Workspace", id: "token" });
+    return NotFound.make({ entity: "Workspace", id: "token" });
   }
   if (response.status === 401) {
-    return new Unauthorized({ reason: "invalid" });
+    return Unauthorized.make({ reason: "invalid" });
   }
   if (response.status === 404) {
-    return new NotFound({ entity: "Workspace", id: "resource" });
+    return NotFound.make({ entity: "Workspace", id: "resource" });
   }
   if (response.status === 409) {
-    return new Conflict({ reason: "duplicate" });
+    return Conflict.make({ reason: "duplicate" });
   }
   return UiError.unexpected(response.status, null);
 };
 
-const toIso = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  if (typeof value === "number" && Number.isFinite(value)) return new Date(value).toISOString();
-  return new Date(0).toISOString();
-};
+const unixEpoch = DateTime.makeUnsafe(0);
+const parseDate = Fn.flow(
+  Schema.decodeUnknownOption(Schema.Union([Schema.String, Schema.Finite])),
+  Option.match({
+    onNone: () => DateTime.formatIso(unixEpoch),
+    onSome: (value) =>
+      jsonString(value) ??
+      DateTime.formatIso(Option.getOrElse(DateTime.make(value), () => unixEpoch)),
+  }),
+);
 
-const parsePasskey = (raw: unknown): PasskeyView | null => {
-  if (!isRecord(raw) || typeof raw.id !== "string") return null;
-  return {
-    id: raw.id,
-    name: typeof raw.name === "string" && raw.name.length > 0 ? raw.name : raw.id,
-    createdAt: toIso(raw.createdAt),
-    deviceType: typeof raw.deviceType === "string" ? raw.deviceType : null,
-    backedUp: raw.backedUp === true,
-  };
-};
-
-const parseSession = (raw: unknown, currentSessionId: string): SessionView | null => {
-  if (!isRecord(raw)) return null;
-  const token = typeof raw.token === "string" ? raw.token : null;
-  const id = token ?? (typeof raw.id === "string" ? raw.id : null);
-  if (id === null) return null;
-  return {
+const parsePasskey = Fn.flow(jsonObject, (row) => {
+  const id = jsonString(row?.["id"]);
+  if (id === null) return Option.none<PasskeyView>();
+  const name = jsonString(row?.["name"]);
+  return Option.some<PasskeyView>({
     id,
-    current: raw.id === currentSessionId,
-    userAgent: typeof raw.userAgent === "string" ? raw.userAgent : null,
-    ipAddress: typeof raw.ipAddress === "string" ? raw.ipAddress : null,
-    createdAt: toIso(raw.createdAt),
-    expiresAt: toIso(raw.expiresAt),
-  };
-};
+    name: name === null || name.length === 0 ? id : name,
+    createdAt: parseDate(row?.["createdAt"]),
+    deviceType: jsonString(row?.["deviceType"]),
+    backedUp: row?.["backedUp"] === true,
+  });
+});
 
-const guard = async <A>(fn: () => Promise<AuthResult<A>>): Promise<AuthResult<A>> => {
-  try {
-    return await fn();
-  } catch {
-    return err(UiError.offline);
-  }
-};
+const parseSession = (currentSessionId: string) =>
+  Fn.flow(jsonObject, (row): SessionView | null => {
+    const rowId = jsonString(row?.["id"]);
+    const id = jsonString(row?.["token"]) ?? rowId;
+    if (id === null) return null;
+    return {
+      id,
+      current: rowId === currentSessionId,
+      userAgent: jsonString(row?.["userAgent"]),
+      ipAddress: jsonString(row?.["ipAddress"]),
+      createdAt: parseDate(row?.["createdAt"]),
+      expiresAt: parseDate(row?.["expiresAt"]),
+    };
+  });
+
+const guard = <A>(workflow: Effect.Effect<AuthResult<A>>): Promise<AuthResult<A>> =>
+  runFeatureEffect(Effect.catchCause(workflow, () => Effect.succeed(err(UiError.offline))));
 
 export const makeAuthClient = (deps: AuthClientDeps): AuthClient => {
-  const establishSession = async (response: AuthResponse): Promise<AuthResult<AuthSession>> => {
+  const establishSession = Effect.fn("establishSession")(function* (response: AuthResponse) {
     const token = response.token;
     let user: SessionUser | null = readSessionUser(response.body);
-    if (!(await deps.signedIn(token))) return err(UiError.unexpected(response.status, null));
+    if (!(yield* Effect.promise(() => deps.signedIn(token))))
+      return err(UiError.unexpected(response.status, null));
     if (user === null) {
-      const sessionRes = await deps.auth("/get-session");
+      const sessionRes = yield* Effect.promise(() => deps.auth("/get-session"));
       user = sessionRes.ok ? readSessionUser(sessionRes.body) : null;
     }
     if (user === null) return err(UiError.unexpected(response.status, null));
     return ok({ user, token });
-  };
+  });
 
   return {
     signUpEmail: (input, proof) =>
-      guard(async () => {
-        const headers = altchaHeaders(proof, { "accept-language": input.locale });
-        const res = await deps.auth("/sign-up/email", {
-          method: "POST",
-          ...(headers !== undefined ? { headers } : {}),
-          body: {
-            email: input.email,
-            password: input.password,
-            name: input.name,
-            callbackURL: `/app${verifiedSignInHref(inviteReturnTo(input.invitation))}`,
-            ...(input.invitation !== undefined ? { invitation: input.invitation } : {}),
-          },
-        });
-        if (!res.ok) return err(mapAuthError(res));
-        if (input.invitation === undefined) return ok(null);
-        const invited = readSessionUser(res.body);
-        if (
-          invited === null ||
-          !invited.emailVerified ||
-          invited.email.toLowerCase() !== input.email.toLowerCase()
-        )
-          return err(UiError.unexpected(res.status, null));
-        return establishSession(res);
-      }),
+      guard(
+        Effect.gen(function* () {
+          const headers = altchaHeaders(proof, { "accept-language": input.locale });
+          const res = yield* Effect.promise(() =>
+            deps.auth("/sign-up/email", {
+              method: "POST",
+              headers,
+              body: {
+                email: input.email,
+                password: input.password,
+                name: input.name,
+                callbackURL: `/app${verifiedSignInHref(inviteReturnTo(input.invitation))}`,
+                invitation: input.invitation,
+              },
+            }),
+          );
+          if (!res.ok) return err(mapAuthError(res));
+          if (input.invitation === undefined) return ok(null);
+          const invited = readSessionUser(res.body);
+          if (
+            invited === null ||
+            !invited.emailVerified ||
+            Str.toLowerCase(invited.email) !== Str.toLowerCase(input.email)
+          )
+            return err(UiError.unexpected(res.status, null));
+          return yield* establishSession(res);
+        }),
+      ),
 
     signInEmail: (input, proof) =>
-      guard(async () => {
-        const headers = altchaHeaders(proof);
-        const res = await deps.auth("/sign-in/email", {
-          method: "POST",
-          ...(headers !== undefined ? { headers } : {}),
-          body: { email: input.email, password: input.password },
-        });
-        return res.ok ? establishSession(res) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const headers = altchaHeaders(proof);
+          const res = yield* Effect.promise(() =>
+            deps.auth("/sign-in/email", {
+              method: "POST",
+              headers,
+              body: { email: input.email, password: input.password },
+            }),
+          );
+          return res.ok ? yield* establishSession(res) : err(mapAuthError(res));
+        }),
+      ),
 
     sendMagicLink: (email, proof, returnTo, signUp) =>
-      guard(async () => {
-        const headers = altchaHeaders(
-          proof,
-          signUp === undefined ? undefined : { "accept-language": signUp.locale },
-        );
-        const destination = safeReturnTo(returnTo ?? undefined);
-        const res = await deps.auth("/sign-in/magic-link", {
-          method: "POST",
-          ...(headers !== undefined ? { headers } : {}),
-          body: {
-            email,
-            callbackURL: `/app${destination ?? "/"}`,
-            ...(signUp === undefined ? {} : { name: signUp.name }),
-          },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const headers = altchaHeaders(
+            proof,
+            signUp === undefined ? undefined : { "accept-language": signUp.locale },
+          );
+          const destination = safeReturnTo(returnTo ?? undefined);
+          const res = yield* Effect.promise(() =>
+            deps.auth("/sign-in/magic-link", {
+              method: "POST",
+              headers,
+              body: {
+                email,
+                callbackURL: `/app${destination ?? "/"}`,
+                name: signUp?.name,
+              },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     verifyLink: (kind, token) =>
-      guard(async () => {
-        const path = kind === "verify" ? "/verify-email" : "/magic-link/verify";
-        const res = await deps.auth(path, { method: "GET", query: { token } });
-        if (!res.ok) return err(mapAuthError(res, { notFoundOn400: true }));
-        if (
-          kind === "verify" &&
-          isRecord(res.body) &&
-          res.body.status === true &&
-          res.body.user === null &&
-          res.token === null
-        ) {
-          return ok(null);
-        }
-        return establishSession(res);
-      }),
+      guard(
+        Effect.gen(function* () {
+          const path = kind === "verify" ? "/verify-email" : "/magic-link/verify";
+          const res = yield* Effect.promise(() =>
+            deps.auth(path, { method: "GET", query: { token } }),
+          );
+          if (!res.ok) return err(mapAuthError(res, { notFoundOn400: true }));
+          const body = jsonObject(res.body);
+          if (
+            kind === "verify" &&
+            body?.["status"] === true &&
+            body["user"] === null &&
+            res.token === null
+          ) {
+            return ok(null);
+          }
+          return yield* establishSession(res);
+        }),
+      ),
 
     resendVerification: (email, returnTo = null) =>
-      guard(async () => {
-        const res = await deps.auth("/send-verification-email", {
-          method: "POST",
-          body: { email, callbackURL: `/app${verifiedSignInHref(returnTo)}` },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/send-verification-email", {
+              method: "POST",
+              body: { email, callbackURL: `/app${verifiedSignInHref(returnTo)}` },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     requestPasswordReset: (email, proof) =>
-      guard(async () => {
-        const headers = altchaHeaders(proof);
-        const res = await deps.auth("/request-password-reset", {
-          method: "POST",
-          ...(headers !== undefined ? { headers } : {}),
-          body: { email },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const headers = altchaHeaders(proof);
+          const res = yield* Effect.promise(() =>
+            deps.auth("/request-password-reset", {
+              method: "POST",
+              headers,
+              body: { email },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     resetPassword: (token, password) =>
-      guard(async () => {
-        const res = await deps.auth("/reset-password", {
-          method: "POST",
-          body: { token, newPassword: password },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res, { notFoundOn400: true }));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/reset-password", {
+              method: "POST",
+              body: { token, newPassword: password },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res, { notFoundOn400: true }));
+        }),
+      ),
 
     changePassword: (current, next, revokeOthers) =>
-      guard(async () => {
-        const res = await deps.auth("/change-password", {
-          method: "POST",
-          body: {
-            currentPassword: current,
-            newPassword: next,
-            revokeOtherSessions: revokeOthers,
-          },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/change-password", {
+              method: "POST",
+              body: {
+                currentPassword: current,
+                newPassword: next,
+                revokeOtherSessions: revokeOthers,
+              },
+            }),
+          );
+          if (!res.ok) return err(mapAuthError(res));
+          if (res.token !== null) {
+            const token = res.token;
+            yield* Effect.promise(() => deps.signedIn(token));
+          }
+          return ok(undefined);
+        }),
+      ),
 
     changeEmail: (email) =>
-      guard(async () => {
-        const res = await deps.auth("/change-email", {
-          method: "POST",
-          body: { newEmail: email },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/change-email", {
+              method: "POST",
+              body: { newEmail: email },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     updateUser: (patch) =>
-      guard(async () => {
-        const res = await deps.auth("/update-user", { method: "POST", body: patch });
-        if (!res.ok) return err(mapAuthError(res));
-        await deps.refresh();
-        return ok(undefined);
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/update-user", { method: "POST", body: patch }),
+          );
+          if (!res.ok) return err(mapAuthError(res));
+          yield* Effect.promise(() => deps.refresh());
+          return ok(undefined);
+        }),
+      ),
 
     passkeySignIn: () =>
-      guard(async () => {
-        const avail = await deps.passkeyBridge.availability();
-        if (avail === "unavailable") return err(authInvalid("auth.passkey_unsupported"));
+      guard(
+        Effect.gen(function* () {
+          const avail = yield* Effect.promise(() => deps.passkeyBridge.availability());
+          if (avail === "unavailable") return err(authInvalid("auth.passkey_unsupported"));
 
-        const optRes = await deps.auth("/passkey/generate-authenticate-options", { method: "GET" });
-        if (!optRes.ok) return err(mapAuthError(optRes));
-        if (!isRecord(optRes.body)) return err(UiError.unexpected(optRes.status, null));
+          const optRes = yield* Effect.promise(() =>
+            deps.auth("/passkey/generate-authenticate-options", { method: "GET" }),
+          );
+          if (!optRes.ok) return err(mapAuthError(optRes));
+          const options = jsonObject(optRes.body);
+          if (options === null) return err(UiError.unexpected(optRes.status, null));
 
-        const assertion = await deps.passkeyBridge.get(optRes.body as JsonObject);
-        if (assertion._tag === "Cancelled") return cancelled();
-        if (assertion._tag === "Failed") return err(authInvalid("auth.passkey_failed"));
+          const assertion = yield* Effect.promise(() => deps.passkeyBridge.get(options));
+          if (assertion._tag === "Cancelled") return cancelled();
+          if (assertion._tag === "Failed") return err(authInvalid("auth.passkey_failed"));
 
-        const verifyRes = await deps.auth("/passkey/verify-authentication", {
-          method: "POST",
-          body: { response: assertion.value },
-        });
-        return verifyRes.ok ? establishSession(verifyRes) : err(mapAuthError(verifyRes));
-      }),
+          const verifyRes = yield* Effect.promise(() =>
+            deps.auth("/passkey/verify-authentication", {
+              method: "POST",
+              body: { response: assertion.value },
+            }),
+          );
+          return verifyRes.ok ? yield* establishSession(verifyRes) : err(mapAuthError(verifyRes));
+        }),
+      ),
 
     passkeyAdd: (name) =>
-      guard(async () => {
-        const avail = await deps.passkeyBridge.availability();
-        if (avail === "unavailable") return err(authInvalid("auth.passkey_unsupported"));
+      guard(
+        Effect.gen(function* () {
+          const avail = yield* Effect.promise(() => deps.passkeyBridge.availability());
+          if (avail === "unavailable") return err(authInvalid("auth.passkey_unsupported"));
 
-        const optRes = await deps.auth("/passkey/generate-register-options", {
-          method: "GET",
-          ...(name.length > 0 ? { query: { name } } : {}),
-        });
-        if (!optRes.ok) return err(mapAuthError(optRes));
-        if (!isRecord(optRes.body)) return err(UiError.unexpected(optRes.status, null));
+          const optRes = yield* Effect.promise(() =>
+            deps.auth("/passkey/generate-register-options", {
+              method: "GET",
+              query: name.length > 0 ? { name } : {},
+            }),
+          );
+          if (!optRes.ok) return err(mapAuthError(optRes));
+          const options = jsonObject(optRes.body);
+          if (options === null) return err(UiError.unexpected(optRes.status, null));
 
-        const registration = await deps.passkeyBridge.create(optRes.body as JsonObject);
-        if (registration._tag === "Cancelled") return cancelled();
-        if (registration._tag === "Failed") return err(authInvalid("auth.passkey_failed"));
+          const registration = yield* Effect.promise(() => deps.passkeyBridge.create(options));
+          if (registration._tag === "Cancelled") return cancelled();
+          if (registration._tag === "Failed") return err(authInvalid("auth.passkey_failed"));
 
-        const verifyRes = await deps.auth("/passkey/verify-registration", {
-          method: "POST",
-          body: { name, response: registration.value },
-        });
-        if (!verifyRes.ok) return err(mapAuthError(verifyRes));
-        const parsed = parsePasskey(
-          isRecord(verifyRes.body) && isRecord(verifyRes.body.passkey)
-            ? verifyRes.body.passkey
-            : verifyRes.body,
-        );
-        return parsed === null ? err(UiError.unexpected(verifyRes.status, null)) : ok(parsed);
-      }),
+          const verifyRes = yield* Effect.promise(() =>
+            deps.auth("/passkey/verify-registration", {
+              method: "POST",
+              body: { name, response: registration.value },
+            }),
+          );
+          if (!verifyRes.ok) return err(mapAuthError(verifyRes));
+          const body = jsonObject(verifyRes.body);
+          const parsed = parsePasskey(jsonObject(body?.["passkey"]) ?? body);
+          return Option.match(parsed, {
+            onNone: () => err(UiError.unexpected(verifyRes.status, null)),
+            onSome: ok,
+          });
+        }),
+      ),
 
     passkeys: () =>
-      guard(async () => {
-        const res = await deps.auth("/passkey/list-user-passkeys", { method: "GET" });
-        if (!res.ok) return err(mapAuthError(res));
-        const list = Array.isArray(res.body)
-          ? res.body
-          : isRecord(res.body) && Array.isArray(res.body.passkeys)
-            ? res.body.passkeys
-            : [];
-        return ok(list.map(parsePasskey).filter((p): p is PasskeyView => p !== null));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/passkey/list-user-passkeys", { method: "GET" }),
+          );
+          if (!res.ok) return err(mapAuthError(res));
+          const list = jsonArray(res.body) ?? jsonArray(jsonObject(res.body)?.["passkeys"]) ?? [];
+          return ok(Arr.getSomes(Arr.map(list, (row) => parsePasskey(row))));
+        }),
+      ),
 
     renamePasskey: (id, name) =>
-      guard(async () => {
-        const res = await deps.auth("/passkey/update-passkey", {
-          method: "POST",
-          body: { id, name },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/passkey/update-passkey", {
+              method: "POST",
+              body: { id, name },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     removePasskey: (id) =>
-      guard(async () => {
-        const res = await deps.auth("/passkey/delete-passkey", {
-          method: "POST",
-          body: { id },
-        });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/passkey/delete-passkey", {
+              method: "POST",
+              body: { id },
+            }),
+          );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     sessions: () =>
-      guard(async () => {
-        const [res, current] = await Promise.all([
-          deps.auth("/list-sessions", { method: "GET" }),
-          deps.auth("/get-session", { method: "GET" }),
-        ]);
-        if (!res.ok) return err(mapAuthError(res));
-        if (!current.ok) return err(mapAuthError(current));
-        const session = isRecord(current.body) ? current.body.session : null;
-        if (!isRecord(session) || typeof session.id !== "string")
-          return err(UiError.unexpected(current.status, null));
-        const currentSessionId = session.id;
-        const list = Array.isArray(res.body)
-          ? res.body
-          : isRecord(res.body) && Array.isArray(res.body.sessions)
-            ? res.body.sessions
-            : [];
-        return ok(
-          list
-            .map((row) => parseSession(row, currentSessionId))
-            .filter((s): s is SessionView => s !== null),
-        );
-      }),
+      guard(
+        Effect.gen(function* () {
+          const [res, current] = yield* Effect.all(
+            [
+              Effect.promise(() => deps.auth("/list-sessions", { method: "GET" })),
+              Effect.promise(() => deps.auth("/get-session", { method: "GET" })),
+            ],
+            { concurrency: 2 },
+          );
+          if (!res.ok) return err(mapAuthError(res));
+          if (!current.ok) return err(mapAuthError(current));
+          const session = jsonObject(jsonObject(current.body)?.["session"]);
+          const currentSessionId = jsonString(session?.["id"]);
+          if (currentSessionId === null) return err(UiError.unexpected(current.status, null));
+          const list = jsonArray(res.body) ?? jsonArray(jsonObject(res.body)?.["sessions"]) ?? [];
+          return ok(
+            Arr.filter(
+              Arr.map(list, (row) => parseSession(currentSessionId)(row)),
+              (s): s is SessionView => s !== null,
+            ),
+          );
+        }),
+      ),
 
     revokeSession: (id) =>
-      guard(async () => {
-        const res =
-          id === "others"
-            ? await deps.auth("/revoke-other-sessions", { method: "POST", body: {} })
-            : await deps.auth("/revoke-session", { method: "POST", body: { token: id } });
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res =
+            id === "others"
+              ? yield* Effect.promise(() =>
+                  deps.auth("/revoke-other-sessions", { method: "POST", body: {} }),
+                )
+              : yield* Effect.promise(() =>
+                  deps.auth("/revoke-session", { method: "POST", body: { token: id } }),
+                );
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     signOut: () =>
-      guard(async () => {
-        const res = await deps.auth("/sign-out", { method: "POST", body: {} });
-        await deps.clear();
-        return res.ok ? ok(undefined) : err(mapAuthError(res));
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/sign-out", { method: "POST", body: {} }),
+          );
+          yield* Effect.promise(() => deps.clear());
+          return res.ok ? ok(undefined) : err(mapAuthError(res));
+        }),
+      ),
 
     deleteAccount: (confirm) =>
-      guard(async () => {
-        const res = await deps.auth("/delete-user", {
-          method: "POST",
-          body: confirm.password !== undefined ? { password: confirm.password } : {},
-        });
-        if (!res.ok) return err(mapAuthError(res));
-        await deps.clear();
-        return ok(undefined);
-      }),
+      guard(
+        Effect.gen(function* () {
+          const res = yield* Effect.promise(() =>
+            deps.auth("/delete-user", {
+              method: "POST",
+              body: confirm.password !== undefined ? { password: confirm.password } : {},
+            }),
+          );
+          if (!res.ok) return err(mapAuthError(res));
+          yield* Effect.promise(() => deps.clear());
+          return ok(undefined);
+        }),
+      ),
   };
 };

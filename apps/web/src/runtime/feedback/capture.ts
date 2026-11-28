@@ -4,6 +4,11 @@ import {
   redactFeedbackApiKeys,
   redactFeedbackUrls,
 } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as EffectRecord from "effect/Record";
+import * as Str from "effect/String";
 import { elementPaths } from "./selector";
 
 type Pin = FeedbackSubmission["pins"][number];
@@ -18,19 +23,21 @@ const containsPrivateContent = (element: Element) =>
   element.closest(privateContent) !== null || element.querySelector(privateContent) !== null;
 
 const excerpt = (value: string, limit: number) =>
-  redactFeedbackUrls(redactFeedbackApiKeys(value)).replace(/\s+/gu, " ").trim().slice(0, limit);
+  Str.slice(
+    0,
+    limit,
+  )(Str.trim(Str.replace(/\s+/gu, " ")(redactFeedbackUrls(redactFeedbackApiKeys(value)))));
 
 const visibleText = (element: Element, limit: number): string => {
   if (
-    !(element instanceof HTMLElement || element instanceof SVGElement) ||
+    !(element instanceof HTMLElement) ||
     element.closest(`${editable}, ${nonContent}`) !== null ||
     element.querySelector(editable) !== null ||
     containsPrivateContent(element)
   ) {
     return "";
   }
-  // biome-ignore lint/performance/useDomNodeTextContent: Capture rendered text while excluding hidden nodes.
-  return excerpt(element instanceof HTMLElement ? element.innerText : "", limit);
+  return excerpt(element.innerText, limit);
 };
 
 const implicitRole = (element: Element) => {
@@ -58,7 +65,7 @@ const implicitRole = (element: Element) => {
         return "";
     }
   }
-  if (/^h[1-6]$/.test(element.localName)) return "heading";
+  if (headingTag.test(element.localName)) return "heading";
   if (element.localName === "a" && element.hasAttribute("href")) return "link";
   if (element instanceof HTMLSelectElement) {
     return element.multiple || element.size > 1 ? "listbox" : "combobox";
@@ -78,18 +85,19 @@ const implicitRole = (element: Element) => {
     ol: "list",
     li: "listitem",
   };
-  return Object.hasOwn(roles, element.localName) ? (roles[element.localName] ?? "") : "";
+  return EffectRecord.has(roles, element.localName) ? (roles[element.localName] ?? "") : "";
 };
 
 const accessibleName = (element: Element, role: string): string => {
   const limit = FEEDBACK_LIMITS.accessibleName;
-  const ids = element.getAttribute("aria-labelledby")?.trim().split(/\s+/u) ?? [];
-  const referenced = ids.flatMap((id) => {
-    const label = element.ownerDocument.getElementById(id);
+  const labels = element.getAttribute("aria-labelledby");
+  const ids = labels === null ? [] : Str.split(Str.trim(labels), wordSeparator);
+  const referenced = Arr.flatMap(ids, (id) => {
+    const label = element.ownerDocument.querySelector(`#${globalThis.CSS.escape(id)}`);
     return label === null ? [] : [visibleText(label, limit)];
   });
   const explicit =
-    excerpt(referenced.join(" "), limit) ||
+    excerpt(Arr.join(referenced, " "), limit) ||
     excerpt(element.getAttribute("aria-label") ?? "", limit);
   if (explicit !== "") return explicit;
 
@@ -100,7 +108,10 @@ const accessibleName = (element: Element, role: string): string => {
     element instanceof HTMLSelectElement
   ) {
     return excerpt(
-      Array.from(element.labels ?? [], (label) => visibleText(label, limit)).join(" "),
+      Arr.join(
+        Array.from(element.labels ?? [], (label) => visibleText(label, limit)),
+        " ",
+      ),
       limit,
     );
   }
@@ -109,7 +120,7 @@ const accessibleName = (element: Element, role: string): string => {
     : "";
 };
 
-export const capturePin = (element: Element, sensitive: boolean): Pin | undefined => {
+const capturePinImpl = (element: Element, sensitive: boolean): Pin | undefined => {
   const omitMetadata = sensitive || containsPrivateContent(element);
   const paths = elementPaths(element, !omitMetadata, FEEDBACK_LIMITS.selector);
   if (paths === undefined) return undefined;
@@ -120,7 +131,7 @@ export const capturePin = (element: Element, sensitive: boolean): Pin | undefine
     : excerpt(element.getAttribute("role") ?? implicitRole(element), FEEDBACK_LIMITS.role);
   return {
     ...paths,
-    tag: element.localName.slice(0, FEEDBACK_LIMITS.tag),
+    tag: Str.slice(0, FEEDBACK_LIMITS.tag)(element.localName),
     accessibleName: omitMetadata ? "" : accessibleName(element, role),
     role,
     rect: { x, y, width, height },
@@ -136,15 +147,20 @@ export const capturePin = (element: Element, sensitive: boolean): Pin | undefine
   };
 };
 
+export const capturePin: {
+  (sensitive: boolean): (element: Element) => Pin | undefined;
+  (element: Element, sensitive: boolean): Pin | undefined;
+} = Fn.dual(2, capturePinImpl);
+
 export const captureDiagnostics = (signal: AbortSignal): (() => ReadonlyArray<Diagnostic>) => {
   const recent: Diagnostic[] = [];
   const record = (kind: Diagnostic["kind"]) => {
-    recent.push({ kind, timestamp: Date.now() });
+    recent.push({ kind, timestamp: DateTime.toEpochMillis(DateTime.nowUnsafe()) });
     if (recent.length > FEEDBACK_LIMITS.diagnostics) recent.shift();
   };
 
   // Console arguments and error details can carry credentials or user input. Keep only occurrence data.
-  const browserConsole = window.console;
+  const browserConsole = globalThis.console;
   for (const kind of ["warn", "error"] as const) {
     const original = browserConsole[kind];
     const wrapped = (...args: unknown[]) => {
@@ -156,7 +172,10 @@ export const captureDiagnostics = (signal: AbortSignal): (() => ReadonlyArray<Di
       if (browserConsole[kind] === wrapped) browserConsole[kind] = original;
     });
   }
-  window.addEventListener("error", () => record("onerror"), { signal });
-  window.addEventListener("unhandledrejection", () => record("unhandledrejection"), { signal });
+  globalThis.addEventListener("error", () => record("onerror"), { signal });
+  globalThis.addEventListener("unhandledrejection", () => record("unhandledrejection"), { signal });
   return () => recent.slice();
 };
+
+const wordSeparator = /\s+/u;
+const headingTag = /^h[1-6]$/;

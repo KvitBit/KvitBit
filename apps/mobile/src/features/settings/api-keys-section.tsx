@@ -1,5 +1,6 @@
 import type { AccessMode, ApiKeyCreate, ApiKeyCreated, ApiKeyView } from "@kvitbit/api-contract";
-import type { IsoDate } from "@kvitbit/domain/contract";
+import { IsoDate } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { inWorkspace } from "@kvitbit/ui-port/api";
 import {
   type AreaLevel,
@@ -9,9 +10,12 @@ import {
   type ScopePickerState,
   toAccessRequest,
 } from "@kvitbit/ui-port/view-models";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { Copy, KeyRound, Plus, Trash2 } from "lucide-react-native";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -29,6 +33,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import { canManageApiKeys } from "./permissions";
 import { copyToClipboard } from "./platform-helpers";
 import {
@@ -50,8 +55,14 @@ export function ApiKeysSection() {
 
   const editable = canManageApiKeys(workspace.role, workspace.closed);
   const remote = useRemote(
-    editable ? (client) => client.apiKeys.listApiKeys({ params: inWorkspace(workspace.id) }) : null,
-    [workspace.id, editable],
+    useMemo(
+      () =>
+        editable
+          ? (client: KvitbitApiClient) =>
+              client.apiKeys.listApiKeys({ params: inWorkspace(workspace.id) })
+          : null,
+      [workspace.id, editable],
+    ),
   );
 
   const [creatingOpen, setCreatingOpen] = useState(false);
@@ -89,32 +100,35 @@ export function ApiKeysSection() {
     else setPicker(ScopePicker.choosePreset(picker, mode));
   };
 
-  const handleCreate = async () => {
-    const trimmedName = name.trim();
+  const handleCreate = Effect.fn("api-keys-section.handleCreate")(function* () {
+    const trimmedName = Str.trim(name);
     if (trimmedName === "" || Option.isNone(accessOption)) return;
     const accessReq = accessOption.value;
-    const expiry = expiresOn.trim();
+    const expiry = Str.trim(expiresOn);
+    const base = { name: trimmedName };
+    const names =
+      expiry === "" ? base : { ...base, expiresOn: IsoDate.make(expiry, { disableChecks: true }) };
     const payload: ApiKeyCreate =
       accessReq.access === "custom"
         ? {
-            name: trimmedName,
-            ...(expiry === "" ? {} : { expiresOn: expiry as IsoDate }),
+            ...names,
             access: "custom",
             scopes: accessReq.scopes,
           }
         : {
-            name: trimmedName,
-            ...(expiry === "" ? {} : { expiresOn: expiry as IsoDate }),
+            ...names,
             access: accessReq.access,
           };
 
     setSaving(true);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.apiKeys.createApiKey({
-        params: inWorkspace(workspace.id),
-        payload,
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.apiKeys.createApiKey({
+          params: inWorkspace(workspace.id),
+          payload,
+        }),
+      ),
     );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -129,28 +143,34 @@ export function ApiKeysSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleCopySecret = async (secret: string) => {
-    const copied = await copyToClipboard(secret);
+  const handleCopySecret = Effect.fn("api-keys-section.handleCopySecret")(function* (
+    secret: string,
+  ) {
+    const copied = yield* copyToClipboard(secret);
     if (copied) overlay.toast(t("common.toast.copied"));
-  };
+  });
 
-  const handleRevoke = async (key: ApiKeyView) => {
-    const confirmed = await overlay.confirm({
-      title: t("settings.apiKeys.revokeTitle", { name: key.name }),
-      body: t("settings.apiKeys.revokeBody"),
-      confirmLabel: t("common.action.revoke"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+  const handleRevoke = Effect.fn("api-keys-section.handleRevoke")(function* (key: ApiKeyView) {
+    const confirmed = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.apiKeys.revokeTitle", { name: key.name }),
+        body: t("settings.apiKeys.revokeBody"),
+        confirmLabel: t("common.action.revoke"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setRevokingId(key.id);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.apiKeys.revokeApiKey({
-        params: inWorkspace(workspace.id, { keyId: key.id }),
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.apiKeys.revokeApiKey({
+          params: inWorkspace(workspace.id, { keyId: key.id }),
+        }),
+      ),
     );
     setRevokingId(null);
     if (result._tag === "Ok") {
@@ -159,7 +179,7 @@ export function ApiKeysSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <View className="gap-4">
@@ -184,7 +204,7 @@ export function ApiKeysSection() {
               kind="filled"
               icon={Copy}
               label={t("common.action.copy")}
-              onPress={() => void handleCopySecret(createdSecret.secret)}
+              onPress={() => forkFeatureEffect(handleCopySecret(createdSecret.secret))}
             />
             <Button
               testID="api-key-dismiss-secret"
@@ -196,7 +216,7 @@ export function ApiKeysSection() {
         </Card>
       )}
 
-      {creatingOpen ? (
+      {creatingOpen === true ? (
         <Section title={t("settings.apiKeys.create")}>
           <Card>
             <TextField
@@ -228,20 +248,24 @@ export function ApiKeysSection() {
                 <Text variant="meta" color="onSurfaceVariant">
                   {t("scopePicker.writeImpliesRead")}
                 </Text>
-                {ScopePicker.rows(picker).map((row) => (
+                {Arr.map(ScopePicker.rows(picker), (row) => (
                   <View key={row.area} className="py-0.5">
                     <SegmentedChoice<AreaLevel>
                       label={t(`enum.scopeArea.${row.area}`)}
                       value={row.level}
-                      choices={AREA_LEVELS.filter(
-                        (lvl) =>
-                          lvl === "none" ||
-                          (lvl === "read" && row.readEnabled) ||
-                          (lvl === "write" && row.writeEnabled),
-                      ).map((lvl) => ({
-                        value: lvl,
-                        label: t(`enum.accessLevel.${lvl}`),
-                      }))}
+                      choices={Arr.map(
+                        Arr.filter(
+                          AREA_LEVELS,
+                          (lvl) =>
+                            lvl === "none" ||
+                            (lvl === "read" && row.readEnabled) ||
+                            (lvl === "write" && row.writeEnabled),
+                        ),
+                        (lvl) => ({
+                          value: lvl,
+                          label: t(`enum.accessLevel.${lvl}`),
+                        }),
+                      )}
                       onChange={(level) => setPicker(ScopePicker.setArea(picker, row.area, level))}
                     />
                   </View>
@@ -261,8 +285,8 @@ export function ApiKeysSection() {
                 icon={KeyRound}
                 label={t("settings.apiKeys.create")}
                 busy={saving}
-                disabled={name.trim() === "" || Option.isNone(accessOption)}
-                onPress={() => void handleCreate()}
+                disabled={Str.trim(name) === "" || Option.isNone(accessOption)}
+                onPress={() => forkFeatureEffect(handleCreate())}
               />
               <Button
                 kind="text"
@@ -289,7 +313,7 @@ export function ApiKeysSection() {
             <Section
               title={t("settings.apiKeys.title")}
               action={
-                creatingOpen ? undefined : (
+                creatingOpen === true ? undefined : (
                   <Button
                     testID="api-key-open-create"
                     kind="tonal"
@@ -300,7 +324,7 @@ export function ApiKeysSection() {
                 )
               }
             >
-              {keys.map((key) => (
+              {Arr.map(keys, (key) => (
                 <Card key={key.id}>
                   <View className="flex-row items-center gap-2">
                     <View className="flex-1">
@@ -312,12 +336,14 @@ export function ApiKeysSection() {
                     <Badge label={t(`enum.accessMode.${key.access}`)} tone="info" />
                   </View>
                   <Text variant="meta" color="onSurfaceVariant">
-                    {t("common.field.created")}: {key.createdAt.slice(0, 10)} ·{" "}
+                    {t("common.field.created")}: {Str.slice(0, 10)(key.createdAt)} ·{" "}
                     {t("common.field.lastUsed")}:{" "}
-                    {key.lastUsedAt === null ? t("common.time.never") : key.lastUsedAt.slice(0, 10)}
+                    {key.lastUsedAt === null
+                      ? t("common.time.never")
+                      : Str.slice(0, 10)(key.lastUsedAt)}
                     {key.expiresAt === null
                       ? ""
-                      : ` · ${t("common.field.expires")}: ${key.expiresAt.slice(0, 10)}`}
+                      : ` · ${t("common.field.expires")}: ${Str.slice(0, 10)(key.expiresAt)}`}
                   </Text>
                   <View className="flex-row flex-wrap items-center gap-2">
                     <Button
@@ -325,7 +351,7 @@ export function ApiKeysSection() {
                       icon={Trash2}
                       label={t("common.action.revoke")}
                       busy={revokingId === key.id}
-                      onPress={() => void handleRevoke(key)}
+                      onPress={() => forkFeatureEffect(handleRevoke(key))}
                     />
                   </View>
                 </Card>

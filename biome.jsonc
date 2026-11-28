@@ -1,0 +1,399 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.6.8/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true,
+    "defaultBranch": "main"
+  },
+  "css": { "parser": { "tailwindDirectives": true } },
+  "files": {
+    "ignoreUnknown": true,
+    "includes": ["**", "!**/drizzle/meta", "!assets", "!**/*.md"]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
+  "plugins": [
+    {
+      "path": "./lint/no-chained-type-assertions.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-conditional-empty-object-spread.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-known-value-widening.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-object-parameters.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-repeated-computed-conditional-operand.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-runtime-typeof.grit",
+      "resolutionKind": "config",
+      // Nix checks decoded lockfile values before dependencies exist.
+      "includes": ["**", "!**/generated/**", "!scripts/bun-lock-boundary.ts"]
+    },
+    {
+      "path": "./lint/no-unknown-parameters.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "**",
+        "!**/generated/**",
+        // Bun's bootstrap JSONC parser supplies an untyped value.
+        "!scripts/bun-lock-boundary.ts",
+        // The logger must redact arbitrary data and defects before any serialization.
+        "!apps/server/src/logging/redact.ts"
+      ]
+    },
+    {
+      "path": "./lint/no-unknown-type-aliases.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-unsafe-dictionary-type.grit",
+      "resolutionKind": "config",
+      // Bootstrap validates individual lockfile fields before using them.
+      "includes": ["**", "!**/generated/**", "!scripts/bun-lock-boundary.ts"]
+    },
+    {
+      "path": "./lint/no-useless-alias.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-widen-then-assert.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-synchronous-subprocess.grit",
+      "resolutionKind": "config",
+      "includes": ["**", "!**/generated/**"]
+    },
+    {
+      "path": "./lint/no-bare-promises.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/no-direct-effect-runs.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        "!apps/server/src/{main,migrate,worker}.ts",
+        // The worker runs its own Effect runtime for each message.
+        "!apps/web/src/runtime/altcha.worker.ts",
+        // Better Auth and Drizzle expect Promise callbacks and original rejection values.
+        "!apps/server/src/auth/drizzleBridge.ts",
+        // Better Auth's middleware callbacks return native Promises.
+        "!packages/adapters/src/auth/better-auth.ts",
+        // The public API key verifier accepts a Promise lookup and returns a Promise.
+        "!packages/adapters/src/auth/api-key.ts",
+        // Native PostHog and SMTP callbacks use the program's captured Effect context.
+        "!apps/server/src/runtime/analytics.ts",
+        "!infra/alchemy/src/mail-forwarder/smtp.ts",
+        "!apps/web/src/entry.ts",
+        "!apps/mobile/src/runtime/request-intent.ts"
+      ]
+    },
+    {
+      "path": "./lint/no-direct-process-env.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        // Deployment validation needs exact raw keys, including empty and unknown opt-outs.
+        "!apps/server/src/{main,worker}.ts",
+        "!infra/alchemy/src/preflight-cli.ts",
+        "!apps/mobile/src/config/env.ts"
+      ]
+    },
+    {
+      "path": "./lint/no-throw-in-effect-modules.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
+        "!packages/brand/src/{mark,pattern,svg}.ts"
+      ]
+    },
+    {
+      "path": "./lint/no-try-catch.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/prefer-effect-fn.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "scripts/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/prefer-effect-value.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "scripts/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    },
+    {
+      "path": "./lint/prefer-effect-when.grit",
+      "resolutionKind": "config",
+      "includes": [
+        "{apps,packages,infra}/*/src/**",
+        "apps/mobile/app/**",
+        "src/**",
+        "scripts/**",
+        "!**/{test,tests,testing,__tests__,__fixtures__,generated}/**",
+        "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}"
+      ]
+    }
+  ],
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "all",
+      "security": { "noSecrets": "off" },
+      "style": {
+        "noNonNullAssertion": "error",
+        "useImportType": "error",
+        "useExportType": "error",
+        "useConsistentTestIt": {
+          "level": "error",
+          "options": {
+            "function": "test",
+            "withinDescribe": "test"
+          }
+        },
+        "noContinue": "off",
+        "noDefaultExport": "off",
+        "noExcessiveClassesPerFile": "off",
+        "noExcessiveLinesPerFile": "off",
+        "noHexColors": "off",
+        "noImplicitBoolean": "off",
+        "noIncrementDecrement": "off",
+        "noJsxLiterals": "off",
+        "noMagicNumbers": "off",
+        "noNegationElse": "off",
+        "noNestedTernary": "off",
+        "noTernary": "off",
+        "useBlockStatements": "off",
+        "useConsistentArrayType": "off",
+        "useDefaultSwitchClause": "off",
+        "useDestructuring": "off",
+        "useExportsLast": "off",
+        "useFilenamingConvention": "off",
+        "useNamedCaptureGroup": "off",
+        "useNamingConvention": "off",
+        "useNumericSeparators": "off",
+        "useUnicodeRegex": "off"
+      },
+      "suspicious": {
+        "noExplicitAny": "error",
+        "noConsole": "error",
+        "noBitwiseOperators": "off"
+      },
+      "nursery": {
+        "noUnsafeTypeAssertion": "error",
+        "noUselessTypeAssertion": "error",
+        "noMisusedPromises": "error",
+        "noUnsafeReturn": "error",
+        "noUnsafePlusOperands": "error",
+        "useStrictBooleanExpressions": "error",
+        "noFloatingPromises": "error",
+        "noUnsafeUnaryMinus": "error",
+        "noMisusedSpread": "error",
+        "noUselessAwait": "error",
+        "usePromiseRejectErrors": "error",
+        "noJsonUnsafeValues": "error"
+      },
+      "complexity": {
+        "noExcessiveCognitiveComplexity": "off",
+        "noExcessiveLinesPerFunction": "off",
+        "noExcessiveNestedCallbacks": "off",
+        "useMaxParams": "off"
+      },
+      "performance": {
+        "noJsxPropsBind": "off",
+        "noNamespaceImport": "off",
+        "noBarrelFile": "off",
+        "noReExportAll": "off"
+      },
+      "correctness": {
+        "useImportExtensions": "off"
+      }
+    },
+    "domains": {
+      "types": "all",
+      "project": "all",
+      "drizzle": "all",
+      "test": "all",
+      "turborepo": "all",
+      "playwright": "none",
+      "react": "none",
+      "reactNative": "none",
+      "qwik": "none",
+      "solid": "none"
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["apps/web/e2e/**"],
+      "linter": {
+        "domains": {
+          "playwright": "all"
+        }
+      }
+    },
+    {
+      "includes": ["apps/mobile/**"],
+      "linter": {
+        "domains": {
+          "react": "all",
+          "reactNative": "all"
+        }
+      },
+      "javascript": {
+        "globals": ["Bun", "__DEV__"]
+      }
+    },
+    {
+      "includes": [
+        "apps/server/**",
+        "apps/mobile/app.config.ts",
+        "apps/mobile/plugins/**",
+        "apps/mobile/scripts/**",
+        "apps/mobile/release/**",
+        "apps/web/e2e/**",
+        "apps/web/*.config.*",
+        "infra/alchemy/**",
+        "packages/adapters/**",
+        "packages/db/**",
+        "**/test/**",
+        "formal/**",
+        "scripts/**"
+      ],
+      "linter": {
+        "rules": {
+          "correctness": {
+            "noNodejsModules": "off",
+            "noProcessGlobal": "off"
+          }
+        }
+      }
+    },
+    // Metro loads the configuration in its Node host.
+    {
+      "includes": ["apps/mobile/metro.config.cjs"],
+      "linter": { "rules": { "correctness": { "noNodejsModules": "off" } } }
+    },
+    // Bun uses Node crypto as an independent KDF oracle for the mobile implementation.
+    {
+      "includes": ["apps/mobile/src/platform/altcha/bot-proof.test.ts"],
+      "linter": { "rules": { "correctness": { "noNodejsModules": "off" } } }
+    },
+    // Keep the cookie mirror synchronous for browsers without Cookie Store.
+    {
+      "includes": ["apps/web/src/app/prefs.ts"],
+      "linter": { "rules": { "suspicious": { "noDocumentCookie": "off" } } }
+    },
+    // Feedback captures rendered text, including CSS transforms and layout-dependent whitespace.
+    {
+      "includes": ["apps/web/src/runtime/feedback/capture.ts"],
+      "linter": { "rules": { "performance": { "useDomNodeTextContent": "off" } } }
+    },
+    {
+      "includes": [
+        // Vite resolves ?inline and embeds the CSS in the feedback shadow root.
+        "apps/web/src/runtime/feedback/view.ts",
+        // The test exercises Bun and TypeScript self-resolution through package exports.
+        "packages/brand/test/package-exports.test.ts"
+      ],
+      "linter": { "rules": { "correctness": { "noUnresolvedImports": "off" } } }
+    },
+    // HtmlScene exposes its own assertions for hydration input events.
+    {
+      "includes": [
+        "apps/web/test/public/consent-invite-onboarding.test.ts",
+        "apps/web/test/records/contacts.test.ts"
+      ],
+      "linter": { "rules": { "suspicious": { "useExpect": "off" } } }
+    },
+    // Reduced motion overrides transitions. The fixed background has a scroll fallback.
+    {
+      "includes": ["apps/web/src/styles/index.css"],
+      "linter": {
+        "rules": {
+          "complexity": { "noImportantStyles": "off" },
+          "suspicious": { "useBaseline": "off" }
+        }
+      }
+    },
+    {
+      "includes": ["apps/mobile/src/config/env.ts"],
+      "linter": {
+        "rules": { "correctness": { "noProcessGlobal": "off" }, "style": { "noProcessEnv": "off" } }
+      }
+    }
+  ],
+  "javascript": {
+    "globals": ["Bun"]
+  }
+}

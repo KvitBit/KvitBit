@@ -1,6 +1,7 @@
 import { spyOn } from "bun:test";
-import { Effect } from "effect";
-import { FetchHttpClient } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+
 import { type PageCommand, RunApi } from "../../src/app/commands";
 
 export const run = <M>(command: PageCommand<M> | undefined): Promise<M> => {
@@ -20,8 +21,8 @@ export const mockWire = (
   ) => Response | Promise<Response>,
 ) => {
   const implementation = Object.assign(
-    async (...[input, init]: Parameters<typeof fetch>) =>
-      handle(new Request(input, init), init?.credentials),
+    (...[input, init]: Parameters<typeof fetch>) =>
+      Promise.resolve().then(() => handle(new Request(input, init), init?.credentials)),
     { preconnect: () => undefined },
   );
   return spyOn(globalThis, "fetch").mockImplementation(implementation);

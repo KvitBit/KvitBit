@@ -1,13 +1,14 @@
 import { describe, expect, mock, test } from "bun:test";
-import type {
+import {
   ContactId,
   CurrencyCode,
   ExpenseId,
   IsoDate,
-  RegistryResult,
+  type RegistryResult,
+  ReportView,
   WorkspaceId,
   WorkspaceSlug,
-  WorkspaceSummary,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import { text as uiText } from "@kvitbit/ui-port";
 import {
@@ -19,7 +20,13 @@ import {
   sessionCookie,
 } from "@kvitbit/ui-port/api";
 import { OverrideForm, type Route } from "@kvitbit/ui-port/view-models";
-import { BigDecimal, Effect, Exit, Option } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Str from "effect/String";
 import type { ReactElement } from "react";
 import { ApiProvider, makeApiRunner } from "../../runtime/api-runtime";
 import { SessionProvider } from "../../session/session-provider";
@@ -40,6 +47,7 @@ import {
   filterVisibleContacts,
   findActiveContactByIco,
   isValidEmail,
+  loadContactsQuery,
   parseContactView,
   parseReminderOffsets,
   summarizeContactReceivables,
@@ -49,16 +57,15 @@ import {
 mock.module("expo-router", () => expoRouterStandIn());
 
 const { allText, findAll, hostTree } = await import("../../testing/element-tree");
-type HostProps = import("../../testing/element-tree").HostProps;
 const { TestProviders } = await import("../../testing/providers");
 const { ContactDetailScreen, ContactDetailView, ContactEditorView } = await import(
   "./contact-detail-screen"
 );
-const { ContactsListContent, loadContactsQuery } = await import("./contacts-list-screen");
+const { ContactsListContent } = await import("./contacts-list-screen");
 
 const workspace: WorkspaceSummary = {
-  id: "01937c7a-0000-7000-8000-000000000001" as WorkspaceId,
-  slug: "acme" as WorkspaceSlug,
+  id: WorkspaceId.make("01937c7a-0000-7000-8000-000000000001"),
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 1,
@@ -66,15 +73,17 @@ const workspace: WorkspaceSummary = {
   closed: false,
 };
 
+const sampleStreet = "Budějovická 778/3a";
+
 const sampleContact: ContactRecord = {
-  id: "01937c7a-0000-7000-8000-000000000002" as ContactId,
+  id: ContactId.make("01937c7a-0000-7000-8000-000000000002"),
   roles: ["customer", "supplier"],
   name: "Asseco Central Europe, a.s.",
   ico: "27074358",
   dic: "CZ27074358",
   legalForm: "Akciová společnost",
   address: {
-    street: "Budějovická 778/3a",
+    street: sampleStreet,
     city: "Praha 4",
     postalCode: "140 00",
     country: "CZ",
@@ -83,7 +92,7 @@ const sampleContact: ContactRecord = {
   phone: "+420 222 111 000",
   note: "VIP",
   defaults: {
-    currency: "EUR" as CurrencyCode,
+    currency: CurrencyCode.make("EUR"),
     dueDays: 30,
     reminderPolicy: { mode: "custom", offsetsDays: [3, 10] },
   },
@@ -110,11 +119,11 @@ const sampleRegistry: RegistryResult = {
 const within = (node: ReactElement) => <TestProviders>{node}</TestProviders>;
 
 const expenseId = (n: number) =>
-  `01937c7a-0000-7000-8000-${String(n).padStart(12, "0")}` as ExpenseId;
+  ExpenseId.make(`01937c7a-0000-7000-8000-${Str.padStart(12, "0")(String(n))}`);
 const linkedExpense = (id: ExpenseId, supplierDocumentNumber: string) => ({
   id,
   revision: 1,
-  status: "complete",
+  status: "complete" as const,
   supplier: { contactId: sampleContact.id, name: "Old supplier name" },
   supplierDocumentNumber,
   issuedOn: "2026-11-26",
@@ -137,19 +146,19 @@ describe("supplier expense history", () => {
       port: 0,
       fetch: async (request) => {
         const url = new URL(request.url);
-        if (url.pathname.endsWith("/expenses")) {
+        if (Str.endsWith("/expenses")(url.pathname)) {
           queries.push(url.search);
           const second = url.searchParams.has("cursor");
           return Response.json({
-            items: (second ? [first, last] : ids.slice(0, -1)).map((id) => ({
-              id,
+            items: Arr.map(second ? [first, last] : ids.slice(0, -1), (listedId) => ({
+              id: listedId,
               status: "complete",
               supplierName: sampleContact.name,
             })),
             nextCursor: second ? null : "expense-next",
           });
         }
-        const id = url.pathname.split("/").at(-1) as ExpenseId;
+        const id = ExpenseId.make(Str.split("/")(url.pathname).at(-1) ?? "");
         reads.push(id);
         peak = Math.max(peak, ++active);
         await Bun.sleep(id === first ? 30 : 5);
@@ -177,19 +186,27 @@ describe("supplier expense history", () => {
     try {
       const client = await runner.run(Effect.succeed);
       if (client._tag === "Err") throw new Error("Could not get the API client");
-      const load = loadSupplierExpenses(client.value, workspace.id, sampleContact.id);
+      const load = loadSupplierExpenses({
+        api: client.value,
+        workspaceId: workspace.id,
+        contactId: sampleContact.id,
+      });
       const expenses = await Effect.runPromise(load);
-      expect(expenses.map((expense) => expense.supplierDocumentNumber)).toEqual(["FIRST", "LATER"]);
-      expect(queries.map((query) => new URLSearchParams(query).get("cursor"))).toEqual([
+      expect(Arr.map(expenses, (expense) => expense.supplierDocumentNumber)).toEqual([
+        "FIRST",
+        "LATER",
+      ]);
+      expect(Arr.map(queries, (query) => new URLSearchParams(query).get("cursor"))).toEqual([
         null,
         "expense-next",
       ]);
-      expect(queries.map((query) => [...new URLSearchParams(query).keys()].sort())).toEqual([
-        ["limit"],
-        ["cursor", "limit"],
-      ]);
-      expect(new Set(queries.map((query) => new URLSearchParams(query).get("limit"))).size).toBe(1);
-      expect(reads.toSorted()).toEqual(ids.toSorted());
+      expect(
+        Arr.map(queries, (query) => Arr.sort(new URLSearchParams(query).keys(), Order.String)),
+      ).toEqual([["limit"], ["cursor", "limit"]]);
+      expect(
+        new Set(Arr.map(queries, (query) => new URLSearchParams(query).get("limit"))).size,
+      ).toBe(1);
+      expect(Arr.sort(reads, Order.String)).toEqual(Arr.sort(ids, Order.String));
       expect(peak).toBeGreaterThan(1);
       expect(peak).toBeLessThanOrEqual(4);
 
@@ -222,31 +239,45 @@ describe("contacts model", () => {
   });
 
   test("ignores pages and cursors from a superseded contact query", () => {
-    const first = loadContactsQuery(Paged.init<ContactRecord, { text?: string }>({}).paged, {});
-    const next = loadContactsQuery(first.paged, { text: "Asseco", role: "supplier" });
+    const first = loadContactsQuery({
+      current: Paged.init<ContactRecord, { text?: string }>({}).paged,
+      query: {},
+    });
+    const next = loadContactsQuery({
+      current: first.paged,
+      query: { text: "Asseco", role: "supplier" },
+    });
     expect(next.paged.seq).toBeGreaterThan(first.paged.seq);
     const stale = Paged.receive(
       next.paged,
       first.paged.seq,
-      ok({ items: [sampleContact], nextCursor: "staleCursor" }),
+      ok({ value: { items: [sampleContact], nextCursor: "staleCursor" } }),
     );
     expect(stale.paged).toBe(next.paged);
     expect(stale.paged.nextCursor).toBeNull();
   });
 
   test("duplicate resolution checks the exact active IČO past partial matches and the edited row", async () => {
-    const match = { ...sampleContact, id: "cnt_existing" as ContactId };
+    const match = { ...sampleContact, id: ContactId.make("01937c7a-0000-7000-8000-0717103dff71") };
     const cursors: Array<string | null> = [];
     const found = await Effect.runPromise(
-      findActiveContactByIco(sampleContact.ico ?? "", sampleContact.id, (cursor) => {
-        cursors.push(cursor);
-        return Effect.succeed({
-          items:
-            cursor === null
-              ? [{ ...sampleContact }, { ...match, ico: "127074358" }, { ...match, archived: true }]
-              : [match],
-          nextCursor: cursor === null ? "another-page" : null,
-        });
+      findActiveContactByIco({
+        ico: sampleContact.ico ?? "",
+        excludedId: sampleContact.id,
+        loadPage: (cursor) => {
+          cursors.push(cursor);
+          return Effect.succeed({
+            items:
+              cursor === null
+                ? [
+                    { ...sampleContact },
+                    { ...match, ico: "127074358" },
+                    { ...match, archived: true },
+                  ]
+                : [match],
+            nextCursor: cursor === null ? "another-page" : null,
+          });
+        },
       }),
     );
     expect(cursors).toEqual([null, "another-page"]);
@@ -275,11 +306,15 @@ describe("contacts model", () => {
     const api = makeApiRunner(server.url.origin, sessionCookie, () => "en");
     try {
       const saved = await api.run((client) =>
-        applyRegistryPreview(client.contacts, workspace.id, {
-          result,
-          items: diffContactWithRegistry(sampleContact, result),
-          contactId: sampleContact.id,
-          revision: sampleContact.revision,
+        applyRegistryPreview({
+          contacts: client.contacts,
+          workspaceId: workspace.id,
+          preview: {
+            result,
+            items: diffContactWithRegistry(sampleContact, result),
+            contactId: sampleContact.id,
+            revision: sampleContact.revision,
+          },
         }),
       );
       expect(saved._tag).toBe("Ok");
@@ -302,24 +337,25 @@ describe("contacts model", () => {
 
   test("contact balance totals every matching receivable and counts only overdue rows", () => {
     const row = (id: string, amount: string, daysOverdue: number) => ({
+      id: "01937c7a-0000-7000-8000-000000000092",
       contact: { id, name: sampleContact.name },
       outstandingCzk: { amount, currency: "CZK" },
       daysOverdue,
     });
     const report = decodeReportView(
-      {
+      ReportView.make({
         report: "receivables",
         buckets: [
           { documents: [row(sampleContact.id, "100.1", 0)] },
           { documents: [row(sampleContact.id, "5.45", 92), row("cnt_other", "99999", 50)] },
         ],
-      },
+      }),
       "receivables",
     );
     if (report.report !== "receivables") throw new Error("Expected a receivables report");
-    const result = summarizeContactReceivables(report, sampleContact.id);
+    const result = summarizeContactReceivables({ report, contactId: sampleContact.id });
     expect(result.overdueCount).toBe(1);
-    expect(BigDecimal.format(result.outstanding.amount)).toBe("105.55");
+    expect(result.outstanding.amount.pipe(BigDecimal.format)).toBe("105.55");
   });
 
   test("parses ContactView and filters archived contacts", () => {
@@ -331,7 +367,14 @@ describe("contacts model", () => {
     expect(parsed?.archived).toBe(true);
     expect(parseContactView({ bad: true })).toBeNull();
 
-    const list = [sampleContact, { ...sampleContact, id: "cnt_2" as ContactId, archived: true }];
+    const list = [
+      sampleContact,
+      {
+        ...sampleContact,
+        id: ContactId.make("01937c7a-0000-7000-8000-1c8e94b928ff"),
+        archived: true,
+      },
+    ];
     expect(filterVisibleContacts(list, false)).toHaveLength(1);
     expect(filterVisibleContacts(list, true)).toHaveLength(2);
   });
@@ -342,7 +385,7 @@ describe("contacts model", () => {
       roles: ["supplier"] as const,
       billingEmails: ["ap@example.cz"],
       phone: "+420 123",
-      overrides: OverrideForm.set(OverrideForm.init({}), "currency", "EUR" as CurrencyCode),
+      overrides: OverrideForm.set(OverrideForm.init({}), "currency", CurrencyCode.make("EUR")),
     };
     const next = applyRegistryToForm(form, sampleRegistry);
     expect(next.name).toBe("Asseco Central Europe, a.s.");
@@ -350,19 +393,17 @@ describe("contacts model", () => {
     expect(next.street).toBe("Nová ulice 12");
     expect(next.roles).toEqual(["supplier"]);
     expect(next.billingEmails).toEqual(["ap@example.cz"]);
-    expect(next.overrides.current.currency).toBe("EUR" as CurrencyCode);
+    expect(next.overrides.current.currency).toBe(CurrencyCode.make("EUR"));
   });
 
   test("diffs contact against ARES lookup to show only changed fields", () => {
     const diff = diffContactWithRegistry(sampleContact, sampleRegistry);
-    expect(diff).toEqual([
-      { field: "street", before: "Budějovická 778/3a", after: "Nová ulice 12" },
-    ]);
+    expect(diff).toEqual([{ field: "street", before: sampleStreet, after: "Nová ulice 12" }]);
   });
 
   test("validates contact form (name, CZ ICO checksum, dueDays, custom reminder offsets)", () => {
     const emptyErrors = validateContactForm(emptyContactForm());
-    expect(emptyErrors.name).toBe("name_required");
+    expect(emptyErrors["name"]).toBe("name_required");
 
     const badIco = validateContactForm({
       ...emptyContactForm(),
@@ -370,7 +411,7 @@ describe("contacts model", () => {
       ico: "27074359", // wrong check digit
       country: "CZ",
     });
-    expect(badIco.ico).toBe("ico_checksum");
+    expect(badIco["ico"]).toBe("ico_checksum");
 
     const foreign = {
       ...emptyContactForm(),
@@ -385,7 +426,7 @@ describe("contacts model", () => {
       dic: "DE123456789",
       address: { country: "DE", street: "Musterstraße 12\n10115 Berlin" },
     });
-    expect(validateContactForm({ ...foreign, ico: "HRB12345" }).ico).toBe("ico_format");
+    expect(validateContactForm({ ...foreign, ico: "HRB12345" })["ico"]).toBe("ico_format");
 
     const badReminders = validateContactForm({
       ...emptyContactForm(),
@@ -406,10 +447,10 @@ describe("contacts model", () => {
       dic: "cz 270 743 58",
       dueDaysText: "21",
       reminderOffsetsText: "5, 15",
-    }) as Record<string, unknown>;
-    expect(input.dic).toBe("CZ27074358");
-    expect((input.defaults as Record<string, unknown>).dueDays).toBe(21);
-    expect((input.defaults as Record<string, unknown>).reminderPolicy).toEqual({
+    });
+    expect(input["dic"]).toBe("CZ27074358");
+    expect(input.defaults?.dueDays).toBe(21);
+    expect(input.defaults?.reminderPolicy).toEqual({
       mode: "custom",
       offsetsDays: [5, 15],
     });
@@ -425,7 +466,7 @@ describe("ContactsListContent", () => {
     const visited: Route[] = [];
     const archivedContact: ContactRecord = {
       ...sampleContact,
-      id: "cnt_2" as ContactId,
+      id: ContactId.make("01937c7a-0000-7000-8000-1c8e94b928ff"),
       name: "Archived Corp",
       archived: true,
     };
@@ -453,7 +494,7 @@ describe("ContactsListContent", () => {
         onNavigate={(r) => visited.push(r)}
       />,
       within,
-    ) as ReactElement<HostProps>;
+    );
 
     const text = allText(tree);
     expect(text).toContain("Asseco Central Europe, a.s.");
@@ -461,7 +502,9 @@ describe("ContactsListContent", () => {
     expect(text).toContain("Load more");
 
     const pressables = findAll<{ testID?: string; onPress?: () => void }>(tree, "Pressable");
-    pressables.find((p) => p.props.testID === `contact-row-${sampleContact.id}`)?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.testID === `contact-row-${sampleContact.id}`),
+    )?.props.onPress?.();
     expect(visited[0]).toEqual({
       _tag: "Contact",
       ws: workspace.slug,
@@ -469,7 +512,9 @@ describe("ContactsListContent", () => {
       mode: "view",
     });
 
-    pressables.find((p) => allText(p).includes("Load more"))?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => Str.includes("Load more")(allText(p))),
+    )?.props.onPress?.();
     expect(loadedMore).toBe(1);
   });
 });
@@ -507,9 +552,12 @@ describe("ContactDetailView & ContactEditorView", () => {
         onRetryDocuments={() => undefined}
         receivables={RemoteOps.ready(null)}
         onRetryReceivables={() => undefined}
-        expenses={RemoteOps.ready([
-          decodeExpenseDetail(linkedExpense(expenseId(10), "SUP-2026-10")),
-        ])}
+        expenses={RemoteOps.ready(
+          Arr.filter(
+            [decodeExpenseDetail(linkedExpense(expenseId(10), "SUP-2026-10"))],
+            (expense) => expense !== null,
+          ),
+        )}
         onRetryExpenses={() => undefined}
         onEdit={() => undefined}
         onArchive={() => undefined}
@@ -517,8 +565,8 @@ describe("ContactDetailView & ContactEditorView", () => {
         onRefreshAres={() => undefined}
         refreshingAres={false}
         aresDiff={{
-          result: { ...sampleRegistry, terminatedOn: "2026-05-01" as IsoDate },
-          items: [{ field: "street", before: "Budějovická 778/3a", after: "Nová ulice 12" }],
+          result: { ...sampleRegistry, terminatedOn: IsoDate.make("2026-05-01") },
+          items: [{ field: "street", before: sampleStreet, after: "Nová ulice 12" }],
         }}
         onApplyAresDiff={() => applied++}
         onDismissAresDiff={() => undefined}
@@ -526,7 +574,7 @@ describe("ContactDetailView & ContactEditorView", () => {
         onNavigate={(route) => routes.push(route)}
       />,
       within,
-    ) as ReactElement<HostProps>;
+    );
 
     const text = allText(tree);
     expect(text).toContain("Asseco Central Europe, a.s.");
@@ -535,16 +583,20 @@ describe("ContactDetailView & ContactEditorView", () => {
     expect(text).toContain("Nová ulice 12");
     expect(text).toContain("terminated");
     expect(text).toContain("Expenses");
-    const expenseRow = findAll<{ onPress?: () => void }>(tree, "Pressable").find((node) =>
-      allText(node).includes("SUP-2026-10"),
+    const expenseRow = Option.getOrUndefined(
+      Arr.findFirst(findAll<{ onPress?: () => void }>(tree, "Pressable"), (node) =>
+        Str.includes("SUP-2026-10")(allText(node)),
+      ),
     );
     expenseRow?.props.onPress?.();
     expect(routes).toEqual([
       { _tag: "Expense", ws: workspace.slug, id: expenseId(10), mode: "view" },
     ]);
 
-    const applyBtn = findAll<{ onPress?: () => void }>(tree, "Pressable").find((p) =>
-      allText(p).includes("Apply"),
+    const applyBtn = Option.getOrUndefined(
+      Arr.findFirst(findAll<{ onPress?: () => void }>(tree, "Pressable"), (p) =>
+        Str.includes("Apply")(allText(p)),
+      ),
     );
     applyBtn?.props.onPress?.();
     expect(applied).toBe(1);
@@ -572,14 +624,16 @@ describe("ContactDetailView & ContactEditorView", () => {
         saving={false}
       />,
       within,
-    ) as ReactElement<HostProps>;
+    );
 
     const text = allText(tree);
     expect(text).toContain("Reload");
     expect(text).toContain("Editing a contact does not change already issued documents.");
 
-    const reloadBtn = findAll<{ onPress?: () => void }>(tree, "Pressable").find((p) =>
-      allText(p).includes("Reload"),
+    const reloadBtn = Option.getOrUndefined(
+      Arr.findFirst(findAll<{ onPress?: () => void }>(tree, "Pressable"), (p) =>
+        Str.includes("Reload")(allText(p)),
+      ),
     );
     reloadBtn?.props.onPress?.();
     expect(reloaded).toBe(1);

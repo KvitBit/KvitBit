@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { Option, Schema } from "effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   ApiKeyId,
   ApiKeyToken,
@@ -40,14 +42,14 @@ describe("kvb_ API key format", () => {
     for (const bad of [
       `kva_01JDX3K7M9_${secret}`,
       `kvb_short_${secret}`,
-      `kvb_${"a".repeat(65)}_${secret}`,
-      `kvb_01JDX3K7M9_${"a".repeat(129)}`,
+      `kvb_${Str.repeat(65)("a")}_${secret}`,
+      `kvb_01JDX3K7M9_${Str.repeat(129)("a")}`,
       "kvb_01JDX3K7M9_tooShort",
       `kvb_01JDX3K7M9_${secret}!`,
       "kvb_",
       "",
     ]) {
-      expect(Option.isNone(parseApiKey(bad))).toBe(true);
+      expect(parseApiKey(bad).pipe(Option.isNone)).toBe(true);
       expect(Schema.is(ApiKeyToken)(bad)).toBe(false);
     }
   });

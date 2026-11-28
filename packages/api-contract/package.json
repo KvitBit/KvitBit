@@ -8,7 +8,7 @@
   },
   "scripts": {
     "lint": "biome check --error-on-warnings .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "test:suite": ":",
     "test:access": "bun test test/access.test.ts test/access.property.test.ts",

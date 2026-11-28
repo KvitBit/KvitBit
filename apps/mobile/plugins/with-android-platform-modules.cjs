@@ -1,3 +1,4 @@
+"use strict";
 // Expo config plugin: installs Kvitbit's Android native modules for:
 // 1. Material You (Monet) dynamic color resolution on API 31+ (reads real ARGB ints via ContextCompat.getColor)
 // 2. Android Share Sheet (ACTION_SEND / ACTION_SEND_MULTIPLE) receipt intake for image/* and application/pdf.
@@ -265,10 +266,14 @@ class KvitbitPlatformPackage : ReactPackage {
 }
 `;
 
+const packageListBlock = /PackageList\(this\)\.packages\.apply\s*\{/;
+const superOnCreate = /super\.onCreate\(([^)]*)\)/;
+const trailingActivityBrace = /(\n\}\s*)$/;
+
 function registerPlatformPackageInMainApplication(contents) {
   if (contents.includes("KvitbitPlatformPackage()")) return contents;
   return contents.replace(
-    /PackageList\(this\)\.packages\.apply\s*\{/,
+    packageListBlock,
     "PackageList(this).packages.apply {\n              add(KvitbitPlatformPackage())",
   );
 }
@@ -277,12 +282,12 @@ function wireShareIntentInMainActivity(contents) {
   let updated = contents;
   if (!updated.includes("KvitbitShareInbox.handleIntent")) {
     updated = updated.replace(
-      /super\.onCreate\(([^)]*)\)/,
+      superOnCreate,
       "super.onCreate($1)\n    KvitbitShareInbox.handleIntent(this, intent)",
     );
     if (!updated.includes("override fun onNewIntent")) {
       updated = updated.replace(
-        /(\n\}\s*)$/,
+        trailingActivityBrace,
         "\n  override fun onNewIntent(intent: android.content.Intent) {\n    super.onNewIntent(intent)\n    setIntent(intent)\n    KvitbitShareInbox.handleIntent(this, intent)\n  }\n$1",
       );
     }
@@ -291,7 +296,7 @@ function wireShareIntentInMainActivity(contents) {
 }
 
 const withAndroidPlatformModules = (config) => {
-  config = withDangerousMod(config, [
+  const withGeneratedSources = withDangerousMod(config, [
     "android",
     (mod) => {
       const pkgDir = path.join(
@@ -305,15 +310,14 @@ const withAndroidPlatformModules = (config) => {
       return mod;
     },
   ]);
-  config = withMainApplication(config, (mod) => {
+  const withRegisteredPackage = withMainApplication(withGeneratedSources, (mod) => {
     mod.modResults.contents = registerPlatformPackageInMainApplication(mod.modResults.contents);
     return mod;
   });
-  config = withMainActivity(config, (mod) => {
+  return withMainActivity(withRegisteredPackage, (mod) => {
     mod.modResults.contents = wireShareIntentInMainActivity(mod.modResults.contents);
     return mod;
   });
-  return config;
 };
 
 module.exports = withAndroidPlatformModules;

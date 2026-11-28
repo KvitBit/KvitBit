@@ -1,17 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import { Html, HtmlServer } from "@effect/ui/html";
 import type { DocumentView } from "@kvitbit/domain";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+
 import * as Detail from "../../src/page/documents/detail";
 import { ctxFor, renderPath, WS } from "../support";
 import { DOC_ID, runCommand, sampleProforma, sessionWithRole } from "./fixtures";
 
+const requestKeyPattern = /^[0-9a-f-]{36}$/;
+
 describe("DocumentDetail page (Screen 11)", () => {
   const route: Detail.Route = { _tag: "Document", ws: WS, id: DOC_ID, tab: "preview" };
 
-  const loadedDetail = (doc: DocumentView, ctx = ctxFor(route, { locale: "en" })) => {
-    const update = (model: Detail.Model, message: Detail.Message) =>
-      Detail.update(model, message, ctx);
+  const loadedDetail = (doc: DocumentView, ctx = ctxFor({ route, locale: "en" })) => {
+    const update = (current: Detail.Model, message: Detail.Message) =>
+      Detail.update(current, message, ctx);
     const initial = Detail.init(route, ctx).model;
     const { model } = update(
       initial,
@@ -31,13 +34,13 @@ describe("DocumentDetail page (Screen 11)", () => {
     }).make({
       init: () => model,
       update: ($) => $.model,
-      view: (h, model) => Detail.view(model, ctx, h),
+      view: (h, current) => Detail.view(current, ctx, h),
     });
     return Effect.runPromise(HtmlServer.renderToHtml(component, {}));
   };
 
   test("init loads detail and honors route dialog param", () => {
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     const res = Detail.init(route, ctx);
     expect(res.model.detail._tag).toBe("Loading");
     expect(res.model.activeDialog).toBeNull();
@@ -48,7 +51,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   });
 
   test("stale-seq safety and prefill of send/payment dialogs on load", () => {
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Detail.init(route, ctx);
     const stale = Detail.update(
       model,
@@ -75,7 +78,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   });
 
   test("a settled proforma can issue a Final Invoice and an invoice can issue a Credit Note", () => {
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const { model } = Detail.init(route, ctx);
     const loaded = Detail.update(
       model,
@@ -135,7 +138,7 @@ describe("DocumentDetail page (Screen 11)", () => {
     const opened = update(model, Detail.Message.OpenedDialog({ dialog: "payment" }));
     const typed = update(opened.model, Detail.Message.ChangedPayAmount({ value: "300" }));
     const mint = update(typed.model, Detail.Message.SubmittedPayment());
-    const payment = update(mint.model, await runCommand(mint.commands));
+    const payment = update(mint.model, await runCommand({ commands: mint.commands }));
     const requests: Array<{ path: string; key: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -146,20 +149,20 @@ describe("DocumentDetail page (Screen 11)", () => {
       if (requests.length === 1) throw new TypeError("lost payment reply");
       return Response.json({ payment: {}, settlement: "paid", issued: [] }, { status: 201 });
     };
-    const failed = update(payment.model, await runCommand(payment.commands, fetch));
+    const failed = update(payment.model, await runCommand({ commands: payment.commands, fetch }));
     expect(failed.model.dialogError).not.toBeNull();
     const close = update(failed.model, Detail.Message.ClosedDialog());
     const reopen = update(close.model, Detail.Message.OpenedDialog({ dialog: "payment" }));
     const changed = update(reopen.model, Detail.Message.ChangedPayAmount({ value: "400" }));
     const retry = update(changed.model, Detail.Message.SubmittedPayment());
-    const done = update(retry.model, await runCommand(retry.commands, fetch));
+    const done = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
 
     expect(requests[0]?.path).toEndWith("/payments");
     expect(requests[0]?.body).toMatchObject({
       target: { document: DOC_ID },
       amount: { amount: "300" },
     });
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[1]).toEqual(requests[0]);
     expect(done.model.pendingRequestKey).toBeNull();
     expect(done.model.activeDialog).toBeNull();
@@ -169,7 +172,7 @@ describe("DocumentDetail page (Screen 11)", () => {
   test("detail renders role and lifecycle permissions and enforces them in update", async () => {
     const accountant = loadedDetail(
       sampleProforma,
-      ctxFor(route, { locale: "en", session: sessionWithRole("accountant") }),
+      ctxFor({ route, locale: "en", session: sessionWithRole("accountant") }),
     );
     const accountantHtml = (await renderDetail(accountant.model, accountant.ctx)).html;
     expect(accountantHtml).toContain("Download PDF");
@@ -200,11 +203,11 @@ describe("DocumentDetail page (Screen 11)", () => {
     const locked = { ...sampleProforma, locked: true };
     const member = loadedDetail(
       locked,
-      ctxFor(route, { locale: "en", session: sessionWithRole("member") }),
+      ctxFor({ route, locale: "en", session: sessionWithRole("member") }),
     );
     const admin = loadedDetail(
       locked,
-      ctxFor(route, { locale: "en", session: sessionWithRole("admin") }),
+      ctxFor({ route, locale: "en", session: sessionWithRole("admin") }),
     );
     expect((await renderDetail(member.model, member.ctx)).html).not.toContain(">Unlock<");
     expect((await renderDetail(admin.model, admin.ctx)).html).toContain(">Unlock<");

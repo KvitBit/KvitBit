@@ -3,13 +3,24 @@
  * playwright-core (loaded lazily, so composition roots that never render PDFs don't load it), and
  * `FakePdfEngine` returns a fixed one-page PDF for tests.
  */
-import { Config, Context, Data, Effect, Layer, Option } from "effect";
-import type { Browser } from "playwright-core";
 
-export class PdfEngineError extends Data.TaggedError("PdfEngineError")<{
-  readonly stage: "launch" | "render";
-  readonly cause: unknown;
-}> {}
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import type { LaunchOptions } from "playwright-core";
+
+export class PdfEngineError extends Schema.TaggedError<
+  PdfEngineError,
+  { readonly brand: unique symbol }
+>()("PdfEngineError", {
+  stage: Schema.Literals(["launch", "render"]),
+  cause: Schema.Unknown,
+}) {}
 
 export class PdfEngine extends Context.Service<
   PdfEngine,
@@ -17,7 +28,7 @@ export class PdfEngine extends Context.Service<
     /** Prints a self-contained HTML page to A4 PDF bytes, honouring its `@page` rules. */
     readonly htmlToPdf: (html: string) => Effect.Effect<Uint8Array, PdfEngineError>;
   }
->()("kvitbit/adapters/PdfEngine") {}
+>()("@kvitbit/adapters/pdf/engine/PdfEngine") {}
 
 export interface ChromiumOptions {
   /** Chromium or Chrome binary. Omitted uses playwright's own browser cache. */
@@ -30,51 +41,54 @@ export interface ChromiumOptions {
  * Launches one headless browser for the scope's lifetime; each render gets a fresh context
  * with JavaScript disabled and every network request blocked (templates are self-contained).
  */
-export const makeChromiumPdfEngine = (options: ChromiumOptions = {}) =>
-  Effect.gen(function* () {
-    const timeout = options.timeoutMs ?? 30_000;
-    const browser: Browser = yield* Effect.acquireRelease(
-      Effect.tryPromise({
-        try: async () => {
-          const { chromium } = await import("playwright-core");
-          return chromium.launch({
-            headless: true,
-            ...(options.executablePath === undefined
-              ? {}
-              : { executablePath: options.executablePath }),
-          });
-        },
-        catch: (cause) => new PdfEngineError({ stage: "launch", cause }),
+export const makeChromiumPdfEngine = Effect.fn("makeChromiumPdfEngine")(function* (
+  options: ChromiumOptions = {},
+) {
+  const timeout = options.timeoutMs ?? 30_000;
+  const { chromium } = yield* Effect.tryPromise({
+    try: () => import("playwright-core"),
+    catch: (cause) => PdfEngineError.make({ stage: "launch", cause }),
+  });
+  const launchOptions: LaunchOptions = { headless: true };
+  if (options.executablePath !== undefined) launchOptions.executablePath = options.executablePath;
+  const browser = yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => chromium.launch(launchOptions),
+      catch: (cause) => PdfEngineError.make({ stage: "launch", cause }),
+    }),
+    (b) => Effect.promise(() => b.close()).pipe(Effect.ignore),
+  );
+
+  const renderPromise = <A>(run: () => PromiseLike<A>) =>
+    Effect.tryPromise({
+      try: run,
+      catch: (cause) => PdfEngineError.make({ stage: "render", cause }),
+    });
+  const htmlToPdf = (html: string) =>
+    Effect.acquireUseRelease(
+      renderPromise(() => browser.newContext({ javaScriptEnabled: false, offline: true })),
+      Effect.fnUntraced(function* (context) {
+        const page = yield* renderPromise(() => context.newPage());
+        yield* Effect.try({
+          try: () => page.setDefaultTimeout(timeout),
+          catch: (cause) => PdfEngineError.make({ stage: "render", cause }),
+        });
+        yield* renderPromise(() =>
+          page.route("**/*", (route) =>
+            Str.startsWith("data:")(route.request().url()) ? route.continue() : route.abort(),
+          ),
+        );
+        yield* renderPromise(() => page.setContent(html, { waitUntil: "load", timeout }));
+        const pdf = yield* renderPromise(() =>
+          page.pdf({ format: "A4", printBackground: true, preferCSSPageSize: true }),
+        );
+        return new Uint8Array(pdf);
       }),
-      (b) => Effect.promise(() => b.close()).pipe(Effect.ignore),
+      (context) => renderPromise(() => context.close()),
     );
 
-    const htmlToPdf = (html: string) =>
-      Effect.tryPromise({
-        try: async () => {
-          const context = await browser.newContext({ javaScriptEnabled: false, offline: true });
-          try {
-            const page = await context.newPage();
-            page.setDefaultTimeout(timeout);
-            await page.route("**/*", (route) =>
-              route.request().url().startsWith("data:") ? route.continue() : route.abort(),
-            );
-            await page.setContent(html, { waitUntil: "load", timeout });
-            const pdf = await page.pdf({
-              format: "A4",
-              printBackground: true,
-              preferCSSPageSize: true,
-            });
-            return new Uint8Array(pdf);
-          } finally {
-            await context.close();
-          }
-        },
-        catch: (cause) => new PdfEngineError({ stage: "render", cause }),
-      });
-
-    return PdfEngine.of({ htmlToPdf });
-  });
+  return PdfEngine.of({ htmlToPdf });
+});
 
 /** `CHROMIUM_PATH` (optional) selects the browser binary. */
 export const ChromiumPdfEngine = Layer.effect(
@@ -94,28 +108,32 @@ const fakePdf = (): Uint8Array => {
   ];
   let out = "%PDF-1.4\n";
   const offsets: Array<number> = [];
-  objects.forEach((body, i) => {
+  Arr.forEach(objects, (body, i) => {
     offsets.push(out.length);
     out += `${i + 1} 0 obj\n${body}\nendobj\n`;
   });
   const xref = out.length;
   out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
-  for (const o of offsets) out += `${String(o).padStart(10, "0")} 00000 n \n`;
+  for (const o of offsets) out += `${Str.padStart(10, "0")(String(o))} 00000 n \n`;
   out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   return new TextEncoder().encode(out);
 };
 
 /** Test engine: records every HTML it is given and returns the same one-page PDF. */
-export const makeFakePdfEngine = () => {
+export const makeFakePdfEngine = (): {
+  service: typeof PdfEngine.Service;
+  rendered: ReadonlyArray<string>;
+} => {
   const rendered: Array<string> = [];
   const service = PdfEngine.of({
-    htmlToPdf: (html) =>
+    htmlToPdf: Effect.fn("PdfEngine.htmlToPdf")((html) =>
       Effect.sync(() => {
         rendered.push(html);
         return fakePdf();
       }),
+    ),
   });
-  return { service, rendered: rendered as ReadonlyArray<string> };
+  return { service, rendered };
 };
 
 export const FakePdfEngine = Layer.sync(PdfEngine, () => makeFakePdfEngine().service);

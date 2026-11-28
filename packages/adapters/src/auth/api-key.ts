@@ -6,16 +6,20 @@
  * key id, and `key` holds the same digest the plugin's `defaultKeyHasher` computes (SHA-256 of
  * the whole token, base64url without padding), so a key stays verifiable by either side.
  */
+// The synchronous key API uses Node's cryptographic random bytes and constant-time comparison.
+
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
   API_KEY_PREFIX,
-  type ApiKeyId,
+  ApiKeyId,
   type ApiKeyToken,
   apiKeyDisplayPrefix,
   formatApiKey,
   parseApiKey,
 } from "@kvitbit/api-contract";
-import { Option } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
 import { generateId } from "./ids";
 
 export type { ApiKeyId, ApiKeyParts, ApiKeyToken } from "@kvitbit/api-contract";
@@ -44,11 +48,10 @@ export const hashApiKey = (token: string): string =>
 
 /** Issues a new key with a UUIDv7 key id and a 256-bit random secret. */
 export const generateApiKey = (): IssuedApiKey => {
-  const parts = Option.getOrThrow(
-    parseApiKey(
-      `${API_KEY_PREFIX}${generateId()}_${randomBytes(API_KEY_SECRET_BYTES).toString("base64url")}`,
-    ),
-  );
+  const parts = {
+    keyId: ApiKeyId.make(generateId()),
+    secret: randomBytes(API_KEY_SECRET_BYTES).toString("base64url"),
+  };
   const token = formatApiKey(parts);
   return {
     keyId: parts.keyId,
@@ -63,32 +66,45 @@ export const generateApiKey = (): IssuedApiKey => {
  * Does `token` hash to `storedHash`? Compares the digests in constant time; a stored value of
  * another length (corrupt row) is a mismatch, not an error.
  */
-export const apiKeyMatches = (token: string, storedHash: string): boolean => {
+export const apiKeyMatches: {
+  (storedHash: string): (token: string) => boolean;
+  (token: string, storedHash: string): boolean;
+} = Fn.dual(2, (token: string, storedHash: string) => {
   const presented = createHash("sha256").update(token, "utf8").digest();
   const stored = Buffer.from(storedHash, "base64url");
   return stored.length === presented.length && timingSafeEqual(presented, stored);
-};
+});
 
 /** Why a bearer value was not accepted as an API Key. */
 export type ApiKeyRejection = "malformed" | "unknown_key" | "wrong_secret";
+
+type FindHash = (keyId: ApiKeyId) => Promise<string | undefined>;
+type ApiKeyVerification =
+  | { readonly ok: true; readonly keyId: ApiKeyId }
+  | { readonly ok: false; readonly reason: ApiKeyRejection };
+
+const checkApiKey = Effect.fn("checkApiKey")(function* (bearer: string, findHash: FindHash) {
+  const parts = parseApiKey(bearer);
+  if (Option.isNone(parts)) return { ok: false, reason: "malformed" } as const;
+  const { keyId } = parts.value;
+  const stored = yield* Effect.tryPromise({
+    try: () => findHash(keyId),
+    catch: (cause) => ({ cause }),
+  }).pipe(Effect.catch(({ cause }) => Effect.die(cause)));
+  if (stored === undefined) return { ok: false, reason: "unknown_key" } as const;
+  return apiKeyMatches(bearer, stored)
+    ? ({ ok: true, keyId } as const)
+    : ({ ok: false, reason: "wrong_secret" } as const);
+});
 
 /**
  * Checks a bearer value against the stored row: parses it, looks up the key id with
  * `findHash` (the `apikey.key` of row `id`, or undefined), and compares in constant time.
  * Expiry, `enabled` and Workspace binding are the caller's checks on the same row.
  */
-export const verifyApiKey = async (
-  bearer: string,
-  findHash: (keyId: ApiKeyId) => Promise<string | undefined>,
-): Promise<
-  | { readonly ok: true; readonly keyId: ApiKeyId }
-  | { readonly ok: false; readonly reason: ApiKeyRejection }
-> => {
-  const parts = parseApiKey(bearer);
-  if (Option.isNone(parts)) return { ok: false, reason: "malformed" };
-  const stored = await findHash(parts.value.keyId);
-  if (stored === undefined) return { ok: false, reason: "unknown_key" };
-  return apiKeyMatches(bearer, stored)
-    ? { ok: true, keyId: parts.value.keyId }
-    : { ok: false, reason: "wrong_secret" };
-};
+export const verifyApiKey: {
+  (findHash: FindHash): (bearer: string) => Promise<ApiKeyVerification>;
+  (bearer: string, findHash: FindHash): Promise<ApiKeyVerification>;
+} = Fn.dual(2, (bearer: string, findHash: FindHash) =>
+  Effect.runPromise(checkApiKey(bearer, findHash)),
+);

@@ -1,5 +1,5 @@
 import type { ExportFormat, ReportGroupBy } from "@kvitbit/api-contract";
-import type {
+import {
   ContactId,
   CurrencyCode,
   DocumentId,
@@ -7,18 +7,30 @@ import type {
   ExpenseId,
   IsoDate,
   ReportKind,
+  type ReportView,
   VatTreatment,
 } from "@kvitbit/domain/contract";
-import type { Period } from "@kvitbit/ui-port/view-models";
+import { Period } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { DownloadRequest } from "../../platform/transfer";
 import { safeFileName } from "../../platform/transfer/http";
 
-export interface ReportMoney {
+interface ReportPeriod {
+  readonly from: IsoDate | null;
+  readonly to: IsoDate | null;
+}
+
+interface ReportMoney {
   readonly amount: string;
   readonly currency: CurrencyCode;
 }
 
-export interface ReportAmountRow {
+interface ReportAmountRow {
   readonly key: string;
   readonly label: string | null;
   readonly count: number;
@@ -28,40 +40,40 @@ export interface ReportAmountRow {
   readonly original: ReportMoney | null;
 }
 
-export interface ReportAmountTotals {
+interface ReportAmountTotals {
   readonly count: number;
   readonly net: ReportMoney;
   readonly vat: ReportMoney;
   readonly gross: ReportMoney;
 }
 
-export interface RevenueReportData {
+interface RevenueReportData {
   readonly report: "revenue";
-  readonly period: { readonly from: IsoDate; readonly to: IsoDate };
+  readonly period: ReportPeriod;
   readonly groupBy: "month" | "contact" | "currency";
   readonly rows: ReadonlyArray<ReportAmountRow>;
   readonly totals: ReportAmountTotals;
 }
 
-export interface ExpensesReportData {
+interface ExpensesReportData {
   readonly report: "expenses";
-  readonly period: { readonly from: IsoDate; readonly to: IsoDate };
+  readonly period: ReportPeriod;
   readonly groupBy: "month" | "contact" | "currency" | "category";
   readonly rows: ReadonlyArray<ReportAmountRow>;
   readonly totals: ReportAmountTotals;
   readonly incomplete: number;
 }
 
-export interface ProfitReportRow {
+interface ProfitReportRow {
   readonly month: string;
   readonly revenue: ReportMoney;
   readonly expenses: ReportMoney;
   readonly profit: ReportMoney;
 }
 
-export interface ProfitReportData {
+interface ProfitReportData {
   readonly report: "profit";
-  readonly period: { readonly from: IsoDate; readonly to: IsoDate };
+  readonly period: ReportPeriod;
   readonly rows: ReadonlyArray<ProfitReportRow>;
   readonly totals: {
     readonly revenue: ReportMoney;
@@ -70,16 +82,16 @@ export interface ProfitReportData {
   };
 }
 
-export interface CashflowReportPoint {
+interface CashflowReportPoint {
   readonly month: string;
   readonly in: ReportMoney;
   readonly out: ReportMoney;
   readonly net: ReportMoney;
 }
 
-export interface CashflowReportData {
+interface CashflowReportData {
   readonly report: "cashflow";
-  readonly period: { readonly from: IsoDate; readonly to: IsoDate };
+  readonly period: ReportPeriod;
   readonly points: ReadonlyArray<CashflowReportPoint>;
   readonly totals: {
     readonly in: ReportMoney;
@@ -104,8 +116,8 @@ export interface ReceivableDocumentRow {
 
 export interface ReceivablesReportData {
   readonly report: "receivables";
-  readonly period: { readonly from: IsoDate; readonly to: IsoDate };
-  readonly asOf: IsoDate;
+  readonly period: ReportPeriod;
+  readonly asOf: IsoDate | null;
   readonly buckets: ReadonlyArray<{
     readonly bucket: AgingBucketKey;
     readonly count: number;
@@ -116,11 +128,11 @@ export interface ReceivablesReportData {
   readonly overdue: { readonly total: ReportMoney; readonly count: number };
 }
 
-export type VatSourceRef =
+type VatSourceRef =
   | { readonly _tag: "Document"; readonly id: DocumentId }
   | { readonly _tag: "Expense"; readonly id: ExpenseId };
 
-export interface VatLineData {
+interface VatLineData {
   readonly month: string;
   readonly treatment: VatTreatment;
   readonly ratePercent: string;
@@ -129,9 +141,9 @@ export interface VatLineData {
   readonly documents: ReadonlyArray<VatSourceRef>;
 }
 
-export interface VatSummaryReportData {
+interface VatSummaryReportData {
   readonly report: "vat_summary";
-  readonly period: { readonly from: IsoDate; readonly to: IsoDate };
+  readonly period: ReportPeriod;
   readonly output: ReadonlyArray<VatLineData>;
   readonly input: ReadonlyArray<VatLineData>;
   readonly totals: {
@@ -173,18 +185,20 @@ const REPORT_BY_SEGMENT: Readonly<Record<string, ReportKind>> = {
 export const parseReportKind = (segment: string | undefined): ReportKind =>
   (segment !== undefined ? REPORT_BY_SEGMENT[segment] : undefined) ?? "vat_summary";
 
-const pad2 = (n: number): string => String(n).padStart(2, "0");
+const pad2 = (n: number): string => Str.padStart(2, "0")(String(n));
+const yearText = (year: number): string => Str.padStart(4, "0")(String(year));
 
-const daysInMonth = (year: number, month1: number): number => new Date(year, month1, 0).getDate();
+const daysInMonth = (year: number, month1: number): number =>
+  DateTime.toPartsUtc(DateTime.endOf(DateTime.makeUnsafe({ year, month: month1, day: 1 }), "month"))
+    .day;
 
-export const isValidPeriod = (raw: string | undefined): raw is Period =>
-  raw !== undefined && /^\d{4}(?:-Q[1-4]|-(?:0[1-9]|1[0-2]))?$/.test(raw);
+export const isValidPeriod = Schema.is(Period);
 
-export const currentMonthPeriod = (now: Date = new Date()): Period =>
-  `${now.getUTCFullYear()}-${pad2(now.getUTCMonth() + 1)}` as Period;
+export const currentMonthPeriod = (now: Date = DateTime.toDateUtc(DateTime.nowUnsafe())): Period =>
+  Period.make(`${yearText(now.getUTCFullYear())}-${pad2(now.getUTCMonth() + 1)}`);
 
 export const periodPresets = (
-  now: Date = new Date(),
+  now: Date = DateTime.toDateUtc(DateTime.nowUnsafe()),
 ): {
   readonly thisMonth: Period;
   readonly lastMonth: Period;
@@ -194,57 +208,64 @@ export const periodPresets = (
 } => {
   const y = now.getUTCFullYear();
   const m = now.getUTCMonth() + 1;
-  const prevY = m === 1 ? y - 1 : y;
-  const prevM = m === 1 ? 12 : m - 1;
+  const firstSupportedMonth = y === 0 && m === 1;
+  const prevY = m === 1 && !firstSupportedMonth ? y - 1 : y;
+  const prevM = firstSupportedMonth ? m : m === 1 ? 12 : m - 1;
   const q = Math.floor((m - 1) / 3) + 1;
   return {
-    thisMonth: `${y}-${pad2(m)}` as Period,
-    lastMonth: `${prevY}-${pad2(prevM)}` as Period,
-    thisQuarter: `${y}-Q${q}` as Period,
-    thisYear: `${y}` as Period,
-    lastYear: `${y - 1}` as Period,
+    thisMonth: Period.make(`${yearText(y)}-${pad2(m)}`),
+    lastMonth: Period.make(`${yearText(prevY)}-${pad2(prevM)}`),
+    thisQuarter: Period.make(`${yearText(y)}-Q${q}`),
+    thisYear: Period.make(yearText(y)),
+    lastYear: Period.make(yearText(Math.max(0, y - 1))),
   };
 };
 
 /** Converts a Period (`2026`, `2026-Q4`, `2026-11`) into inclusive `{ from, to }` IsoDates. */
 export const periodToRange = (period: Period): { readonly from: IsoDate; readonly to: IsoDate } => {
-  const year = Number.parseInt(period.slice(0, 4), 10);
+  const yearPart = Str.slice(0, 4)(period);
+  const year = Number.parseInt(yearPart, 10);
   if (period.length === 4) {
-    return { from: `${year}-01-01` as IsoDate, to: `${year}-12-31` as IsoDate };
+    return { from: IsoDate.make(`${yearPart}-01-01`), to: IsoDate.make(`${yearPart}-12-31`) };
   }
-  if (period.includes("-Q")) {
-    const q = Number.parseInt(period.slice(6), 10);
+  if (Str.includes("-Q")(period)) {
+    const q = Number.parseInt(Str.slice(6)(period), 10);
     const startMonth = (q - 1) * 3 + 1;
     const endMonth = startMonth + 2;
     return {
-      from: `${year}-${pad2(startMonth)}-01` as IsoDate,
-      to: `${year}-${pad2(endMonth)}-${pad2(daysInMonth(year, endMonth))}` as IsoDate,
+      from: IsoDate.make(`${yearPart}-${pad2(startMonth)}-01`),
+      to: IsoDate.make(`${yearPart}-${pad2(endMonth)}-${pad2(daysInMonth(year, endMonth))}`),
     };
   }
-  const month = Number.parseInt(period.slice(5, 7), 10);
+  const month = Number.parseInt(Str.slice(5, 7)(period), 10);
   return {
-    from: `${year}-${pad2(month)}-01` as IsoDate,
-    to: `${year}-${pad2(month)}-${pad2(daysInMonth(year, month))}` as IsoDate,
+    from: IsoDate.make(`${yearPart}-${pad2(month)}-01`),
+    to: IsoDate.make(`${yearPart}-${pad2(month)}-${pad2(daysInMonth(year, month))}`),
   };
 };
 
 /** Steps a Period backwards (`delta = -1`) or forwards (`delta = 1`) in its own granularity. */
-export const shiftPeriod = (period: Period, delta: -1 | 1): Period => {
-  const year = Number.parseInt(period.slice(0, 4), 10);
-  if (period.length === 4) return `${year + delta}` as Period;
-  if (period.includes("-Q")) {
-    const q = Number.parseInt(period.slice(6), 10);
+export const shiftPeriod: {
+  (delta: -1 | 1): (period: Period) => Period;
+  (period: Period, delta: -1 | 1): Period;
+} = Fn.dual(2, (period: Period, delta: -1 | 1): Period => {
+  const year = Number.parseInt(Str.slice(0, 4)(period), 10);
+  const inRange = (nextYear: number, suffix = "") =>
+    nextYear < 0 || nextYear > 9999 ? period : Period.make(`${yearText(nextYear)}${suffix}`);
+  if (period.length === 4) return inRange(year + delta);
+  if (Str.includes("-Q")(period)) {
+    const q = Number.parseInt(Str.slice(6)(period), 10);
     const total = year * 4 + (q - 1) + delta;
     const ny = Math.floor(total / 4);
     const nq = (total % 4) + 1;
-    return `${ny}-Q${nq}` as Period;
+    return inRange(ny, `-Q${nq}`);
   }
-  const month = Number.parseInt(period.slice(5, 7), 10);
+  const month = Number.parseInt(Str.slice(5, 7)(period), 10);
   const total = year * 12 + (month - 1) + delta;
   const ny = Math.floor(total / 12);
   const nm = (total % 12) + 1;
-  return `${ny}-${pad2(nm)}` as Period;
-};
+  return inRange(ny, `-${pad2(nm)}`);
+});
 
 // --- Export request builder -----------------------------------------------------------------------
 
@@ -253,7 +274,7 @@ export const buildReportExportRequest = (params: {
   readonly report: ReportKind;
   readonly period: Period;
   readonly format: ExportFormat;
-  readonly groupBy?: ReportGroupBy;
+  readonly groupBy?: ReportGroupBy | undefined;
 }): DownloadRequest => {
   const range = periodToRange(params.period);
   const ext = params.format === "csv" ? "csv" : "pdf";
@@ -273,208 +294,239 @@ export const buildReportExportRequest = (params: {
 
 // --- Safe ReportView decoder ----------------------------------------------------------------------
 
-const CZK = "CZK" as CurrencyCode;
+const CZK = CurrencyCode.make("CZK");
 const ZERO_CZK: ReportMoney = { amount: "0", currency: CZK };
 
-const asRecord = (u: unknown): Record<string, unknown> =>
-  typeof u === "object" && u !== null && !Array.isArray(u) ? (u as Record<string, unknown>) : {};
+const ReportRecord = Schema.Record(Schema.String, Schema.Unknown);
+const emptyReportRecord = (): typeof ReportRecord.Type => ({});
+const asRecord = Fn.flow(
+  Schema.decodeUnknownOption(ReportRecord),
+  Option.getOrElse(emptyReportRecord),
+);
+const asString = Fn.flow(Schema.decodeUnknownOption(Schema.String), Option.getOrNull);
+const asNumber = Fn.flow(
+  Schema.decodeUnknownOption(Schema.Finite),
+  Option.getOrElse(() => 0),
+);
+const asDate = Fn.flow(Schema.decodeUnknownOption(IsoDate), Option.getOrNull);
+const asCurrency = Fn.flow(
+  Schema.decodeUnknownOption(CurrencyCode),
+  Option.getOrElse(() => CZK),
+);
+const asContactId = Fn.flow(Schema.decodeUnknownOption(ContactId), Option.getOrNull);
+const asDocumentId = Fn.flow(Schema.decodeUnknownOption(DocumentId), Option.getOrNull);
+const asDocumentKind = Fn.flow(
+  Schema.decodeUnknownOption(DocumentKind),
+  Option.getOrElse(() => "invoice" as const),
+);
+const asDecimal = Fn.flow(
+  Schema.decodeUnknownOption(Schema.Union([Schema.String, Schema.Finite])),
+  Option.map((value) => Str.trim(String(value))),
+  Option.filter((value) => value !== ""),
+  Option.getOrElse(() => "0"),
+);
+const asVat = Fn.flow(
+  Schema.decodeUnknownOption(VatTreatment),
+  Option.getOrElse(() => "standard" as const),
+);
+const decodeReportKind = Schema.decodeUnknownOption(ReportKind);
+const decodeAgingBucket = Schema.decodeUnknownOption(
+  Schema.Literals(["not_due", "1_30", "31_60", "61_90", "over_90"]),
+);
+const decodeVatSource = Schema.decodeUnknownOption(
+  Schema.Union([
+    Schema.TaggedStruct("Document", { id: DocumentId }),
+    Schema.TaggedStruct("Expense", { id: ExpenseId }),
+  ]),
+);
 
-const asString = (u: unknown): string | null => (typeof u === "string" ? u : null);
+const decodeMoney = Fn.flow(
+  asRecord,
+  (row): ReportMoney => ({
+    amount: asDecimal(row["amount"]),
+    currency: asCurrency(row["currency"]),
+  }),
+);
 
-const asNumber = (u: unknown): number => (typeof u === "number" && Number.isFinite(u) ? u : 0);
+const decodePeriod = Fn.flow(
+  asRecord,
+  (row): ReportPeriod => ({
+    from: asDate(row["from"]),
+    to: asDate(row["to"]),
+  }),
+);
 
-const asDecimal = (u: unknown): string => {
-  if (typeof u === "string" && u.trim() !== "") return u.trim();
-  if (typeof u === "number" && Number.isFinite(u)) return String(u);
-  return "0";
-};
+const decodeAmountRow = Fn.flow(
+  asRecord,
+  (row): ReportAmountRow => ({
+    key: asString(row["key"]) ?? "",
+    label: asString(row["label"]),
+    count: asNumber(row["count"]),
+    net: decodeMoney(row["net"]),
+    vat: decodeMoney(row["vat"]),
+    gross: decodeMoney(row["gross"]),
+    original:
+      row["original"] === null || row["original"] === undefined
+        ? null
+        : decodeMoney(row["original"]),
+  }),
+);
 
-const decodeMoney = (u: unknown): ReportMoney => {
-  const r = asRecord(u);
-  const amount = asDecimal(r.amount);
-  const currency = (asString(r.currency) ?? "CZK") as CurrencyCode;
-  return { amount, currency };
-};
+const decodeAmountTotals = Fn.flow(
+  asRecord,
+  (row): ReportAmountTotals => ({
+    count: asNumber(row["count"]),
+    net: decodeMoney(row["net"]),
+    vat: decodeMoney(row["vat"]),
+    gross: decodeMoney(row["gross"]),
+  }),
+);
 
-const decodeOptionalMoney = (u: unknown): ReportMoney | null =>
-  u === null || u === undefined ? null : decodeMoney(u);
-
-const decodePeriod = (u: unknown): { readonly from: IsoDate; readonly to: IsoDate } => {
-  const r = asRecord(u);
+const decodeVatLine = Fn.flow(asRecord, (row): VatLineData => {
+  const docs = Arr.isArray(row["documents"]) ? row["documents"] : [];
   return {
-    from: (asString(r.from) ?? "") as IsoDate,
-    to: (asString(r.to) ?? "") as IsoDate,
+    month: asString(row["month"]) ?? "",
+    treatment: asVat(row["treatment"]),
+    ratePercent: asDecimal(row["ratePercent"]),
+    base: decodeMoney(row["base"]),
+    vat: decodeMoney(row["vat"]),
+    documents: Arr.flatMap(docs, (value) => {
+      const decoded = decodeVatSource(value);
+      return decoded._tag === "Some" ? [decoded.value] : [];
+    }),
   };
-};
+});
 
-const decodeAmountRow = (u: unknown): ReportAmountRow => {
-  const r = asRecord(u);
-  return {
-    key: asString(r.key) ?? "",
-    label: asString(r.label),
-    count: asNumber(r.count),
-    net: decodeMoney(r.net),
-    vat: decodeMoney(r.vat),
-    gross: decodeMoney(r.gross),
-    original: decodeOptionalMoney(r.original),
-  };
-};
-
-const decodeAmountTotals = (u: unknown): ReportAmountTotals => {
-  const r = asRecord(u);
-  return {
-    count: asNumber(r.count),
-    net: decodeMoney(r.net),
-    vat: decodeMoney(r.vat),
-    gross: decodeMoney(r.gross),
-  };
-};
-
-const decodeVatLine = (u: unknown): VatLineData => {
-  const r = asRecord(u);
-  const docs = Array.isArray(r.documents) ? r.documents : [];
-  return {
-    month: asString(r.month) ?? "",
-    treatment: (asString(r.treatment) ?? "standard") as VatTreatment,
-    ratePercent: asDecimal(r.ratePercent),
-    base: decodeMoney(r.base),
-    vat: decodeMoney(r.vat),
-    documents: docs
-      .map((d): VatSourceRef | null => {
-        const rec = asRecord(d);
-        const id = asString(rec.id);
-        if (id === null) return null;
-        if (rec._tag === "Expense") return { _tag: "Expense", id: id as ExpenseId };
-        return { _tag: "Document", id: id as DocumentId };
-      })
-      .filter((x): x is VatSourceRef => x !== null),
-  };
-};
-
-export const decodeReportView = (u: unknown, fallbackReport: ReportKind): DecodedReport => {
-  const r = asRecord(u);
-  const kind = (asString(r.report) ?? fallbackReport) as ReportKind;
-  const period = decodePeriod(r.period);
-
+export const decodeReportView: {
+  (fallbackReport: ReportKind): (value: ReportView) => DecodedReport;
+  (value: ReportView, fallbackReport: ReportKind): DecodedReport;
+} = Fn.dual(2, (value: ReportView, fallbackReport: ReportKind): DecodedReport => {
+  const r = asRecord(value);
+  const kind = Option.getOrElse(decodeReportKind(r["report"]), () => fallbackReport);
+  const period = decodePeriod(r["period"]);
   switch (kind) {
     case "revenue":
       return {
         report: "revenue",
         period,
-        groupBy: r.groupBy === "contact" || r.groupBy === "currency" ? r.groupBy : "month",
-        rows: Array.isArray(r.rows) ? r.rows.map(decodeAmountRow) : [],
-        totals: decodeAmountTotals(r.totals),
+        groupBy: r["groupBy"] === "contact" || r["groupBy"] === "currency" ? r["groupBy"] : "month",
+        rows: Arr.isArray(r["rows"]) ? Arr.map(r["rows"], (row) => decodeAmountRow(row)) : [],
+        totals: decodeAmountTotals(r["totals"]),
       };
     case "expenses":
       return {
         report: "expenses",
         period,
         groupBy:
-          r.groupBy === "contact" || r.groupBy === "currency" || r.groupBy === "category"
-            ? r.groupBy
+          r["groupBy"] === "contact" || r["groupBy"] === "currency" || r["groupBy"] === "category"
+            ? r["groupBy"]
             : "month",
-        rows: Array.isArray(r.rows) ? r.rows.map(decodeAmountRow) : [],
-        totals: decodeAmountTotals(r.totals),
-        incomplete: asNumber(r.incomplete),
+        rows: Arr.isArray(r["rows"]) ? Arr.map(r["rows"], (row) => decodeAmountRow(row)) : [],
+        totals: decodeAmountTotals(r["totals"]),
+        incomplete: asNumber(r["incomplete"]),
       };
     case "profit": {
-      const totals = asRecord(r.totals);
-      const rows = Array.isArray(r.rows) ? r.rows : [];
+      const totals = asRecord(r["totals"]);
+      const rows = Arr.isArray(r["rows"]) ? r["rows"] : [];
       return {
         report: "profit",
         period,
-        rows: rows.map((entry) => {
+        rows: Arr.map(rows, (entry) => {
           const row = asRecord(entry);
           return {
-            month: asString(row.month) ?? "",
-            revenue: decodeMoney(row.revenue),
-            expenses: decodeMoney(row.expenses),
-            profit: decodeMoney(row.profit),
+            month: asString(row["month"]) ?? "",
+            revenue: decodeMoney(row["revenue"]),
+            expenses: decodeMoney(row["expenses"]),
+            profit: decodeMoney(row["profit"]),
           };
         }),
         totals: {
-          revenue: decodeMoney(totals.revenue),
-          expenses: decodeMoney(totals.expenses),
-          profit: decodeMoney(totals.profit),
+          revenue: decodeMoney(totals["revenue"]),
+          expenses: decodeMoney(totals["expenses"]),
+          profit: decodeMoney(totals["profit"]),
         },
       };
     }
     case "cashflow": {
-      const totals = asRecord(r.totals);
-      const points = Array.isArray(r.points) ? r.points : [];
+      const totals = asRecord(r["totals"]);
+      const points = Arr.isArray(r["points"]) ? r["points"] : [];
       return {
         report: "cashflow",
         period,
-        points: points.map((entry) => {
+        points: Arr.map(points, (entry) => {
           const pt = asRecord(entry);
           return {
-            month: asString(pt.month) ?? "",
-            in: decodeMoney(pt.in),
-            out: decodeMoney(pt.out),
-            net: decodeMoney(pt.net),
+            month: asString(pt["month"]) ?? "",
+            in: decodeMoney(pt["in"]),
+            out: decodeMoney(pt["out"]),
+            net: decodeMoney(pt["net"]),
           };
         }),
         totals: {
-          in: decodeMoney(totals.in),
-          out: decodeMoney(totals.out),
-          net: decodeMoney(totals.net),
+          in: decodeMoney(totals["in"]),
+          out: decodeMoney(totals["out"]),
+          net: decodeMoney(totals["net"]),
         },
       };
     }
     case "receivables": {
-      const overdue = asRecord(r.overdue);
-      const buckets = Array.isArray(r.buckets) ? r.buckets : [];
+      const overdue = asRecord(r["overdue"]);
+      const buckets = Arr.isArray(r["buckets"]) ? r["buckets"] : [];
       return {
         report: "receivables",
         period,
-        asOf: (asString(r.asOf) ?? period.to) as IsoDate,
-        buckets: buckets.map((entry) => {
+        asOf: asDate(r["asOf"]) ?? period.to,
+        buckets: Arr.map(buckets, (entry) => {
           const b = asRecord(entry);
-          const docs = Array.isArray(b.documents) ? b.documents : [];
+          const docs = Arr.isArray(b["documents"]) ? b["documents"] : [];
           return {
-            bucket: (asString(b.bucket) ?? "not_due") as AgingBucketKey,
-            count: asNumber(b.count),
-            total: decodeMoney(b.total),
-            documents: docs.map((d) => {
+            bucket: Option.getOrElse(decodeAgingBucket(b["bucket"]), () => "not_due" as const),
+            count: asNumber(b["count"]),
+            total: decodeMoney(b["total"]),
+            documents: Arr.flatMap(docs, (d) => {
               const doc = asRecord(d);
-              const contact = asRecord(doc.contact);
-              return {
-                id: (asString(doc.id) ?? "") as DocumentId,
-                kind: (asString(doc.kind) ?? "invoice") as DocumentKind,
-                number: asString(doc.number),
-                contact: {
-                  id: asString(contact.id) as ContactId | null,
-                  name: asString(contact.name) ?? "",
+              const id = asDocumentId(doc["id"]);
+              if (id === null) return [];
+              const contact = asRecord(doc["contact"]);
+              return [
+                {
+                  id,
+                  kind: asDocumentKind(doc["kind"]),
+                  number: asString(doc["number"]),
+                  contact: {
+                    id: asContactId(contact["id"]),
+                    name: asString(contact["name"]) ?? "",
+                  },
+                  currency: asCurrency(doc["currency"]),
+                  dueOn: asDate(doc["dueOn"]),
+                  daysOverdue: asNumber(doc["daysOverdue"]),
+                  outstanding: decodeMoney(doc["outstanding"]),
+                  outstandingCzk: decodeMoney(doc["outstandingCzk"]),
                 },
-                currency: (asString(doc.currency) ?? "CZK") as CurrencyCode,
-                dueOn: asString(doc.dueOn) as IsoDate | null,
-                daysOverdue: asNumber(doc.daysOverdue),
-                outstanding: decodeMoney(doc.outstanding),
-                outstandingCzk: decodeMoney(doc.outstandingCzk),
-              };
+              ];
             }),
           };
         }),
-        total: r.total !== undefined ? decodeMoney(r.total) : ZERO_CZK,
+        total: r["total"] !== undefined ? decodeMoney(r["total"]) : ZERO_CZK,
         overdue: {
-          total: overdue.total !== undefined ? decodeMoney(overdue.total) : ZERO_CZK,
-          count: asNumber(overdue.count),
+          total: overdue["total"] !== undefined ? decodeMoney(overdue["total"]) : ZERO_CZK,
+          count: asNumber(overdue["count"]),
         },
       };
     }
     case "vat_summary": {
-      const totals = asRecord(r.totals);
+      const totals = asRecord(r["totals"]);
       return {
         report: "vat_summary",
         period,
-        output: Array.isArray(r.output) ? r.output.map(decodeVatLine) : [],
-        input: Array.isArray(r.input) ? r.input.map(decodeVatLine) : [],
+        output: Arr.isArray(r["output"]) ? Arr.map(r["output"], (row) => decodeVatLine(row)) : [],
+        input: Arr.isArray(r["input"]) ? Arr.map(r["input"], (row) => decodeVatLine(row)) : [],
         totals: {
-          output: decodeMoney(totals.output),
-          input: decodeMoney(totals.input),
-          payable: decodeMoney(totals.payable),
+          output: decodeMoney(totals["output"]),
+          input: decodeMoney(totals["input"]),
+          payable: decodeMoney(totals["payable"]),
         },
       };
     }
   }
-};
+});

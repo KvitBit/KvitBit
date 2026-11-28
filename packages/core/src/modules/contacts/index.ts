@@ -1,5 +1,5 @@
 /** Contacts module (core-ports 4.2). The parent wires `ContactsLive` into the core composition. */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { RegistryLookup } from "../workspaces/registry";
 import { ContactsLive } from "./live";
 import { ContactsRepoMemory } from "./repo";

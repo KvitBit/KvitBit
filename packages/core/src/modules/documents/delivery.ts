@@ -8,7 +8,6 @@
  */
 import type {
   ContactId,
-  CurrentCaller,
   DocumentId,
   DocumentSettlement,
   DocumentView,
@@ -16,7 +15,9 @@ import type {
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { RenderOptions } from "./ports";
 import { DocumentRenderer } from "./ports";
@@ -45,30 +46,33 @@ export class DocumentDeliveryReads extends Context.Service<
       workspaceId: WorkspaceId,
       id: DocumentId,
       context?: Pick<ViewContext, "language">,
-    ) => Effect.Effect<DeliveryDocument, NotFound | StoreUnavailable, CurrentCaller>;
+    ) => Effect.Effect<DeliveryDocument, NotFound | StoreUnavailable>;
     /** `DocumentRenderer` passthrough (PDF attachment, share page download). */
-    readonly render: (view: DocumentView, options: RenderOptions) => Effect.Effect<Uint8Array>;
+    readonly render: (
+      view: DocumentView,
+      options: RenderOptions,
+      workspaceId?: WorkspaceId,
+    ) => Effect.Effect<Uint8Array>;
   }
->()("kvitbit/core/documents/DocumentDeliveryReads") {}
+>()("@kvitbit/core/modules/documents/delivery/DocumentDeliveryReads") {}
 
-const load = (
+const load = Effect.fn("load")(function* (
   workspaceId: WorkspaceId,
   id: DocumentId,
   context: Pick<ViewContext, "language"> = {},
-) =>
-  Effect.gen(function* () {
-    const record = yield* (yield* DocumentsRepo).get(workspaceId, id);
-    const { today } = yield* now;
-    return {
-      record,
-      view: yield* viewOf(record, context),
-      contactId: record.contactId,
-      dueOn: record.dueOn,
-      reminders: { choice: record.remindersChoice, on: record.remindersOn },
-      settlement: record.settlement,
-      overdue: isOverdue(record, today),
-    } satisfies DeliveryDocument;
-  });
+) {
+  const record = yield* (yield* DocumentsRepo).get(workspaceId, id);
+  const { today } = yield* now;
+  return {
+    record,
+    view: yield* viewOf(record, context),
+    contactId: record.contactId,
+    dueOn: record.dueOn,
+    reminders: { choice: record.remindersChoice, on: record.remindersOn },
+    settlement: record.settlement,
+    overdue: isOverdue(record, today),
+  } satisfies DeliveryDocument;
+});
 
 export const DocumentDeliveryReadsLive: Layer.Layer<
   DocumentDeliveryReads,
@@ -77,17 +81,21 @@ export const DocumentDeliveryReadsLive: Layer.Layer<
 > = Layer.effect(
   DocumentDeliveryReads,
   Effect.gen(function* () {
-    // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+    // Only the build dependencies: the build-time context may hold a RequestOutcome
     // or transaction frame, and providing them per call would override the caller's own.
-    const context = Context.pick(DocumentsRepo)(yield* Effect.context<DocumentsRepo>());
+    const buildContext = yield* Effect.context<DocumentsRepo>();
+    const context = Context.pick(DocumentsRepo)(buildContext);
     const renderer = yield* DocumentRenderer;
     return DocumentDeliveryReads.of({
       // The call site's context wins (its transaction frame).
-      load: (ws, id, ctx) =>
-        Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+      load: Effect.fn("DocumentDeliveryReads.load")((ws, id, ctx) =>
+        Effect.flatMap(Effect.context<never>(), (callSite) =>
           Effect.provideContext(load(ws, id, ctx), Context.merge(context, callSite)),
         ),
-      render: (view, options) => renderer.render(view, options),
+      ),
+      render: Effect.fn("DocumentDeliveryReads.render")((view, options, workspaceId) =>
+        renderer.render(view, options, workspaceId),
+      ),
     });
   }),
 );

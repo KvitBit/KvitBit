@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { brandAssets } from "@kvitbit/brand";
 import type { Locale, PdfTemplate } from "@kvitbit/domain";
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { type DocumentRenderModel, renderDocumentHtml, renderReportHtml } from "../../src/pdf";
 import { HORIZONTAL_LOCKUP_LIGHT_SVG } from "../../src/pdf/lockup";
 import { SHEET_ZOOM } from "../../src/pdf/shell";
@@ -18,29 +20,62 @@ import {
   VARIANTS,
 } from "./fixtures";
 
-const TEMPLATES: ReadonlyArray<PdfTemplate> = ["classic", "modern_minimal"];
+const VAT_COLUMN = /<th class="r">DPH<\/th>/;
+const DRAFT_WATERMARK = /<div class="watermark" data-watermark="draft"><span>Návrh<\/span>/;
+const PAYMENT_QR = /data-section="qr"[\s\S]*?<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/;
+const TINT_COLOR = /--p-tint: #[0-9A-F]{6};/;
+const EXTERNAL_MARKUP = /<script|<link|(?:src|href)=["']https?:|url\(/;
+const GENERATED_CS = /Podklad pro účetní a daňové přiznání · Vygenerováno 23\. 11\. 2026 14:20/;
+const GENERATED_EN = /Generated 23 Nov 2026 14:20/;
+const BRAND_LOCKUP = /data-section="brand"><svg [^>]*viewBox="0.00 0.00 366.01 75.04"/;
+
+const TEMPLATES = ["classic", "modern_minimal"] as const satisfies ReadonlyArray<PdfTemplate>;
 const LANGS: ReadonlyArray<Locale> = ["cs", "en"];
 
 /** Visible text: tags dropped, entities decoded, non-breaking spaces as spaces. */
 const text = (html: string): string =>
-  html
-    .replace(/<style>[\s\S]*?<\/style>/g, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, "&")
-    .replace(/ /g, " ")
-    .replace(/\s+/g, " ");
+  Str.replace(
+    /\s+/g,
+    " ",
+  )(
+    Str.replace(
+      / /g,
+      " ",
+    )(
+      Str.replace(
+        /&amp;/g,
+        "&",
+      )(
+        Str.replace(
+          /&#39;/g,
+          "'",
+        )(
+          Str.replace(
+            /&quot;/g,
+            '"',
+          )(
+            Str.replace(
+              /&gt;/g,
+              ">",
+            )(
+              Str.replace(
+                /&lt;/g,
+                "<",
+              )(Str.replace(/<[^>]+>/g, " ")(Str.replace(/<style>[\s\S]*?<\/style>/g, " ")(html))),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
 
 const section = (html: string, name: string): string | null => {
   const m = new RegExp(`data-section="${name}"[^>]*>([\\s\\S]*?)</(div|table|span)>`).exec(html);
-  return m?.[1] === undefined ? null : text(m[1]).trim();
+  return m?.[1] === undefined ? null : Str.trim(text(m[1]));
 };
 
 const both = (model: DocumentRenderModel, lang: Locale = "cs") =>
-  TEMPLATES.map((tpl) => [tpl, renderDocumentHtml(model, tpl, lang)] as const);
+  Arr.map(TEMPLATES, (tpl) => [tpl, renderDocumentHtml(model, tpl, lang)] as const);
 
 describe("every template, document kind and language renders a self-contained A4 page", () => {
   for (const tpl of TEMPLATES)
@@ -48,11 +83,11 @@ describe("every template, document kind and language renders a self-contained A4
       for (const lang of LANGS)
         test(`${tpl} ${variant} ${lang}`, () => {
           const html = renderDocumentHtml(czkModel(variant), tpl, lang);
-          expect(html.startsWith("<!DOCTYPE html>")).toBe(true);
+          expect(Str.startsWith("<!DOCTYPE html>")(html)).toBe(true);
           expect(html).toContain(`<html lang="${lang}">`);
           expect(html).toContain("@page { size: A4;");
           expect(html).toContain(`data-template="${tpl}"`);
-          expect(html).not.toMatch(/<script|<link|(?:src|href)=["']https?:|url\(/);
+          expect(html).not.toMatch(EXTERNAL_MARKUP);
           expect(html).not.toContain("undefined");
           expect(html).not.toContain("NaN");
           expect(text(html)).toContain(czkModel(variant).number ?? "");
@@ -92,7 +127,7 @@ describe("statutory text per Tax Regime", () => {
     for (const [tpl, html] of both(nonVatModel())) {
       expect(section(html, "statutory")).toBe("Dodavatel není plátcem DPH.");
       expect(html).not.toContain('data-section="vat-recap"');
-      expect(html).not.toMatch(/<th class="r">DPH<\/th>/);
+      expect(html).not.toMatch(VAT_COLUMN);
       expect(text(html)).not.toContain("CZ09482711");
       expect(text(html), tpl).toContain("48 500,00 Kč");
     }
@@ -135,7 +170,7 @@ describe("Draft watermark", () => {
     const draft = { ...czkModel(), status: "draft" as const, number: null };
     for (const [, html] of both(draft)) {
       expect(html).toContain('data-watermark="draft"');
-      expect(html).toMatch(/<div class="watermark" data-watermark="draft"><span>Návrh<\/span>/);
+      expect(html).toMatch(DRAFT_WATERMARK);
     }
     for (const [, html] of both(draft, "en")) expect(html).toContain("<span>Draft</span>");
     for (const status of ["issued", "cancelled"] as const)
@@ -194,9 +229,7 @@ describe("payment QR", () => {
   test("SPAYD QR on invoice, proforma and final invoice; none on PTD and Credit Note", () => {
     for (const variant of ["invoice", "proforma", "final"] as const)
       for (const [, html] of both(czkModel(variant))) {
-        expect(html).toMatch(
-          /data-section="qr"[\s\S]*?<svg xmlns="http:\/\/www.w3.org\/2000\/svg"/,
-        );
+        expect(html).toMatch(PAYMENT_QR);
         expect(text(html)).toContain("QR Platba");
       }
     for (const variant of ["ptd", "credit"] as const)
@@ -205,10 +238,9 @@ describe("payment QR", () => {
   });
 
   test("EPC caption for EUR", () => {
-    const [[, classic], [, modern]] = both(eurModel(), "en") as [
-      readonly [PdfTemplate, string],
-      readonly [PdfTemplate, string],
-    ];
+    const model = eurModel();
+    const classic = renderDocumentHtml(model, "classic", "en");
+    const modern = renderDocumentHtml(model, "modern_minimal", "en");
     expect(text(classic)).toContain("EPC QR (SEPA)");
     expect(text(modern)).toContain("EPC QR (SEPA) · Bank transfer");
   });
@@ -249,8 +281,9 @@ describe("amounts, references and totals", () => {
         "Vystaveno k přijaté platbě ze dne 02. 11. 2026 podle zálohové faktury č. Z2026-014.",
       );
       expect(text(html)).toContain("Uhrazená záloha");
-      if (tpl === "classic") expect(text(html)).not.toContain("Datum splatnosti");
-      else expect(text(html)).toContain("Uhrazeno");
+      const expected = tpl === "modern_minimal";
+      const heading = tpl === "classic" ? "Datum splatnosti" : "Uhrazeno";
+      expect(Str.includes(heading)(text(html))).toBe(expected);
     }
   });
 
@@ -277,12 +310,16 @@ describe("escaping and branding safety", () => {
       name: `<script>alert("x")</script> & Co`,
       addressLines: ["<img src=x onerror=alert(1)>"],
     },
-    lines: czkModel().lines.map((l) => ({ ...l, description: `${l.description} </td><b>` })),
+    lines: Arr.map(czkModel().lines, (l) => ({ ...l, description: `${l.description} </td><b>` })),
     note: "Line 1\n<i>Line 2</i>",
     branding: {
       accentColor: "red; } body { display:none",
       footerText: `Footer "quoted" <b>`,
-      logo: { mediaType: "text/html" as "image/png", bytes: new TextEncoder().encode("<script>") },
+      logo: {
+        // @ts-expect-error Exercise the runtime media type guard with an unsupported input.
+        mediaType: "text/html",
+        bytes: new TextEncoder().encode("<script>"),
+      },
       stamp: null,
     },
   };
@@ -319,7 +356,7 @@ describe("escaping and branding safety", () => {
     };
     for (const [, html] of both(model)) {
       expect(html).toContain("--p-accent: #0F5D42;");
-      expect(html).toMatch(/--p-tint: #[0-9A-F]{6};/);
+      expect(html).toMatch(TINT_COLOR);
       expect(html).toContain(
         '<img class="logo-img" alt="Ateliér Kalný s.r.o." src="data:image/png;base64,iVBORw==">',
       );
@@ -343,9 +380,9 @@ describe("report export (D11)", () => {
   test("KPIs, table rows, deduction tone, net total and footer", () => {
     const html = renderReportHtml(reportModel(), "cs");
     const t = text(html);
-    expect(html.startsWith("<!DOCTYPE html>")).toBe(true);
+    expect(Str.startsWith("<!DOCTYPE html>")(html)).toBe(true);
     expect(html).toContain('data-template="report"');
-    expect(html).not.toMatch(/<script|<link|(?:src|href)=["']https?:|url\(/);
+    expect(html).not.toMatch(EXTERNAL_MARKUP);
     expect(t).toContain("Export přehledu · Q4 2026");
     expect(t).toContain("Souhrn DPH a cashflow");
     expect(t).toContain("Tržby bez DPH 412 800,00 Kč");
@@ -354,7 +391,7 @@ describe("report export (D11)", () => {
     expect(html).toContain('<tr class="deduct">');
     expect(t).toContain("−20 248,00 Kč");
     expect(section(html, "grand-total")).toBe("57 892,00 Kč");
-    expect(t).toMatch(/Podklad pro účetní a daňové přiznání · Vygenerováno 23\. 11\. 2026 14:20/);
+    expect(t).toMatch(GENERATED_CS);
     expect(html).toContain("--p-accent: #0F5D42;");
   });
 
@@ -363,7 +400,7 @@ describe("report export (D11)", () => {
     const html = renderReportHtml(model, "en");
     expect(html).toContain("&lt;b&gt;VAT&lt;/b&gt; &amp; Cashflow");
     expect(text(html)).toContain("412,800.00 CZK");
-    expect(text(html)).toMatch(/Generated 23 Nov 2026 14:20/);
+    expect(text(html)).toMatch(GENERATED_EN);
   });
 });
 
@@ -383,7 +420,9 @@ describe("council regressions", () => {
       for (const [, html] of both(model)) {
         const t = text(html);
         expect(t).toContain("Celkem za plnění 58 100,00 Kč");
-        expect(t.match(/Zaokrouhlení/g)).toHaveLength(1);
+        Str.match(/Zaokrouhlení/g)(t)
+          .pipe(Option.getOrNull, expect)
+          .toHaveLength(1);
         expect(t).toContain(adj === "0.4" ? "Zaokrouhlení 0,40 Kč" : "Zaokrouhlení −0,40 Kč");
       }
     }
@@ -426,10 +465,9 @@ describe("review regressions", () => {
       fx: { rate: bd("0.0004"), quantity: 1, fixingDate: null, source: "manual" as const },
     };
     for (const [, html] of both(model)) expect(section(html, "fx")).toContain("1 EUR = 0,0004 Kč");
-    const cnb = {
-      ...eurModel(),
-      fx: { ...eurModel().fx, rate: bd("25.2") },
-    } as DocumentRenderModel;
+    const source = eurModel();
+    if (source.fx === null) throw new Error("EUR fixture requires FX metadata");
+    const cnb = { ...source, fx: { ...source.fx, rate: bd("25.2") } };
     for (const [, html] of both(cnb)) expect(section(html, "fx")).toContain("1 EUR = 25,200 Kč");
   });
 
@@ -451,16 +489,18 @@ describe("review regressions", () => {
     ).toBe("Bank transfer");
   });
 
-  test("footers carry the committed horizontal lockup at the 5 mm print minimum with clear space", () => {
-    const committed = readFileSync(
+  test("footers carry the committed horizontal lockup at the 5 mm print minimum with clear space", async () => {
+    const committed = await Bun.file(
       fileURLToPath(new URL(`../../../../${brandAssets.lockup.horizontalLight}`, import.meta.url)),
-      "utf8",
-    );
+    ).text();
     expect(HORIZONTAL_LOCKUP_LIGHT_SVG).toBe(committed);
     const zoomed = (mm: number) => `${(mm / SHEET_ZOOM).toFixed(3)}mm`;
-    const pages = [...both(czkModel()).map(([, h]) => h), renderReportHtml(reportModel(), "cs")];
+    const pages = [
+      ...Arr.map(both(czkModel()), ([, h]) => h),
+      renderReportHtml(reportModel(), "cs"),
+    ];
     for (const html of pages) {
-      expect(html).toMatch(/data-section="brand"><svg [^>]*viewBox="0.00 0.00 366.01 75.04"/);
+      expect(html).toMatch(BRAND_LOCKUP);
       expect(html).toContain(`.brand-lockup svg { display: block; height: ${zoomed(5)};`);
       expect(html).toContain(`.brand-lockup { display: inline-block; padding: ${zoomed(2.5)};`);
     }

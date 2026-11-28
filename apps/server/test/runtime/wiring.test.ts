@@ -1,32 +1,47 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import { PgliteClient } from "@effect/sql-pglite";
+import { BotProtection } from "@kvitbit/adapters/altcha";
 import { FakePdfEngine } from "@kvitbit/adapters/pdf";
 import {
   BrandingPreview,
+  DeliveryJobs,
   DocumentRenderer,
   InvitationTokens,
   ReportPdfRenderer,
   type ReportsModule,
   ShareLinkKeys,
 } from "@kvitbit/core";
-import type {
+import {
   ContactId,
+  ContactSnapshot,
   CurrencyCode,
+  DeliveryId,
   DocumentId,
-  DocumentView,
+  type DocumentView,
   InvitationId,
   IsoDate,
+  IssuerSnapshot,
   LineId,
-  Money,
+  LineView,
+  type Money,
   ShareToken,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { BlobStorage, EmailSender } from "@kvitbit/domain/ports";
-import { BigDecimal, ConfigProvider, Effect, Layer, Option, Redacted, Stream } from "effect";
+import { BlobKey, BlobStorage, EmailSender } from "@kvitbit/domain/ports";
+import * as BigDecimal from "effect/BigDecimal";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as Workflow from "effect/workflow/Workflow";
+import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { BotProtectionLive } from "../../src/app";
-import { BotProtection } from "../../src/auth";
 import {
   composeRuntimeEnvLayers,
   loadBootRuntimeConfig,
@@ -50,14 +65,20 @@ import {
   makeShareLinkKeysLayer,
   parseSmtpUrl,
 } from "../../src/wiring";
+import {
+  AttachmentInventory,
+  localAttachmentInventory,
+} from "../../src/wiring/attachmentInventory";
+import { DeliveryJobsLive } from "../../src/wiring/workflows";
+import { NoQueriesSqlLive } from "./no-queries-sql";
 
 const money = (amount: string, currency = "CZK"): Money => ({
   amount: BigDecimal.fromStringUnsafe(amount),
-  currency: currency as CurrencyCode,
+  currency: CurrencyCode.make(currency),
 });
 
 const sampleDocumentView = (currency: "CZK" | "EUR" = "CZK"): DocumentView => ({
-  id: "01950000-0000-7000-8000-000000000001" as DocumentId,
+  id: DocumentId.make("01950000-0000-7000-8000-000000000001"),
   kind: "invoice",
   number: "2026-0001",
   status: "issued",
@@ -66,17 +87,17 @@ const sampleDocumentView = (currency: "CZK" | "EUR" = "CZK"): DocumentView => ({
   overdue: false,
   revision: 1,
   taxDocument: true,
-  contact: {
-    contactId: "01950000-0000-7000-8000-000000000002" as ContactId,
+  contact: ContactSnapshot.make({
+    contactId: ContactId.make("01950000-0000-7000-8000-000000000002"),
     name: "Odběratel s.r.o.",
     ico: "12345678",
     dic: "CZ12345678",
     legalForm: "s.r.o.",
     address: { street: "Křižíkova 1", city: "Praha", postalCode: "186 00", country: "CZ" },
     billingEmails: ["billing@example.cz"],
-  } as unknown as DocumentView["contact"],
-  issuer: {
-    workspaceId: "01950000-0000-7000-8000-000000000003" as WorkspaceId,
+  }),
+  issuer: IssuerSnapshot.make({
+    workspaceId: WorkspaceId.make("01950000-0000-7000-8000-000000000003"),
     name: "Dodavatel s.r.o.",
     ico: "87654321",
     dic: "CZ87654321",
@@ -89,21 +110,21 @@ const sampleDocumentView = (currency: "CZK" | "EUR" = "CZK"): DocumentView => ({
     bankAccount: {
       id: "01950000-0000-7000-8000-000000000004",
       name: "Hlavní",
-      currency: currency as CurrencyCode,
+      currency: CurrencyCode.make(currency),
       accountNumber: "19-2000145399/0800",
       iban: "CZ6508000000192000145399",
       bic: "GIBACZPX",
     },
-  } as unknown as DocumentView["issuer"],
+  }),
   dates: {
-    issuedOn: "2026-01-15" as IsoDate,
-    taxableSupplyOn: "2026-01-15" as IsoDate,
-    dueOn: "2026-01-29" as IsoDate,
+    issuedOn: IsoDate.make("2026-01-15"),
+    taxableSupplyOn: IsoDate.make("2026-01-15"),
+    dueOn: IsoDate.make("2026-01-29"),
   },
   paymentMethod: "bank_transfer",
   lines: [
-    {
-      id: "01950000-0000-7000-8000-000000000005" as LineId,
+    LineView.make({
+      id: LineId.make("01950000-0000-7000-8000-000000000005"),
       item: null,
       description: "Vývoj software",
       quantity: BigDecimal.fromStringUnsafe("1"),
@@ -113,8 +134,8 @@ const sampleDocumentView = (currency: "CZK" | "EUR" = "CZK"): DocumentView => ({
       ratePercent: BigDecimal.fromStringUnsafe("21"),
       amount: BigDecimal.fromStringUnsafe("1210"),
       deducts: null,
-    },
-  ] as unknown as DocumentView["lines"],
+    }),
+  ],
   totals: {
     buckets: [
       {
@@ -143,12 +164,24 @@ const sampleDocumentView = (currency: "CZK" | "EUR" = "CZK"): DocumentView => ({
 describe("wiring: secrets (HKDF ShareLinkKeys & InvitationTokens)", () => {
   test("derives distinct deterministic keys per version and builds normalized URLs", async () => {
     const secret = Redacted.make("super-secret-better-auth-key-for-tests");
-    const k1 = deriveShareLinkKey("super-secret-better-auth-key-for-tests", 1);
-    const k1Again = deriveShareLinkKey("super-secret-better-auth-key-for-tests", 1);
-    const k2 = deriveShareLinkKey("super-secret-better-auth-key-for-tests", 2);
-    const invKey = deriveInvitationTokenKey("super-secret-better-auth-key-for-tests");
+    const authSecret = Redacted.value(secret);
+    const [k1, k1Again, k2, invKey] = await Effect.runPromise(
+      Effect.all(
+        [
+          deriveShareLinkKey(authSecret, 1),
+          deriveShareLinkKey(authSecret, 1),
+          deriveShareLinkKey(authSecret, 2),
+          deriveInvitationTokenKey(authSecret),
+        ],
+        { concurrency: 1 },
+      ),
+    );
 
-    expect(k1.length).toBe(32);
+    // These bytes were produced by the original Node HKDF implementation.
+    expect([...k1]).toEqual([
+      130, 54, 186, 217, 90, 29, 193, 3, 62, 20, 79, 104, 41, 111, 202, 186, 173, 251, 160, 225, 39,
+      211, 138, 188, 162, 224, 246, 48, 231, 109, 37, 202,
+    ]);
     expect(Buffer.from(k1).equals(Buffer.from(k1Again))).toBe(true);
     expect(Buffer.from(k1).equals(Buffer.from(k2))).toBe(false);
     expect(Buffer.from(k1).equals(Buffer.from(invKey))).toBe(false);
@@ -156,7 +189,7 @@ describe("wiring: secrets (HKDF ShareLinkKeys & InvitationTokens)", () => {
     const urls = await Effect.runPromise(
       Effect.gen(function* () {
         const keys = yield* ShareLinkKeys;
-        const tok = "tok_abc123" as ShareToken;
+        const tok = ShareToken.make("tok_abc123");
         return {
           version: keys.version,
           page: keys.pageUrl(tok),
@@ -180,7 +213,7 @@ describe("wiring: secrets (HKDF ShareLinkKeys & InvitationTokens)", () => {
 
   test("InvitationTokens produces deterministic distinct tokens per (invitationId, epoch)", async () => {
     const secret = Redacted.make("another-secret");
-    const invId = "01950000-0000-7000-8000-000000000099" as InvitationId;
+    const invId = InvitationId.make("01950000-0000-7000-8000-000000000099");
 
     const result = await Effect.runPromise(
       Effect.gen(function* () {
@@ -194,17 +227,22 @@ describe("wiring: secrets (HKDF ShareLinkKeys & InvitationTokens)", () => {
 
     expect(result.t0a).toBe(result.t0b);
     expect(result.t0a).not.toBe(result.t1);
-    expect(result.t0a.length).toBeGreaterThan(20);
+    // Preserve existing invitation tokens across changes to the HMAC implementation.
+    expect([...Buffer.from(result.t0a, "base64url")]).toEqual([
+      218, 205, 9, 3, 189, 15, 128, 237, 14, 32, 88, 182, 43, 170, 251, 45, 33, 1, 86, 220, 77, 248,
+      187, 68, 22, 237, 29, 92, 151, 75, 247, 184,
+    ]);
   });
 });
 
 describe("wiring: email & SMTP URL parsing", () => {
   test("parses smtp:// and smtps:// URLs with credentials and default ports", () => {
-    const plain = parseSmtpUrl("smtp://user%40mail.cz:s3cr3t@smtp.example.cz");
+    const password = "s3cr3t";
+    const plain = parseSmtpUrl(`smtp://user%40mail.cz:${password}@smtp.example.cz`);
     expect(plain.transport.host).toBe("smtp.example.cz");
     expect(plain.transport.port).toBe(587);
     expect(plain.transport.secure).toBe(false);
-    expect(plain.transport.auth).toEqual({ user: "user@mail.cz", pass: "s3cr3t" });
+    expect(plain.transport.auth).toEqual({ user: "user@mail.cz", pass: password });
 
     const tls = parseSmtpUrl("smtps://mail.example.cz:2465");
     expect(tls.transport.port).toBe(2465);
@@ -253,25 +291,25 @@ describe("wiring: email & SMTP URL parsing", () => {
     });
 
     // Production without a provider fails fast at layer construction (no runtime reject-stub).
-    const prodMissing = await Effect.runPromiseExit(
-      Layer.build(makeEmailSenderLayer(emptyConfig, "production")).pipe(Effect.scoped),
+    const prodMissing = await Layer.build(makeEmailSenderLayer(emptyConfig, "production")).pipe(
+      Effect.scoped,
+      Effect.runPromiseExit,
     );
     expect(prodMissing._tag).toBe("Failure");
 
     // Production rejects explicit non-prod modes ('capture', 'console', 'disabled').
     for (const mode of ["capture", "console", "disabled"] as const) {
-      const prodOptOut = await Effect.runPromiseExit(
-        Layer.build(makeEmailSenderLayer({ ...emptyConfig, mode }, "production")).pipe(
-          Effect.scoped,
-        ),
-      );
+      const prodOptOut = await Layer.build(
+        makeEmailSenderLayer({ ...emptyConfig, mode }, "production"),
+      ).pipe(Effect.scoped, Effect.runPromiseExit);
       expect(prodOptOut._tag).toBe("Failure");
     }
 
     // Preview/staging without explicit mode or provider fails fast, catching secret typos.
     for (const env of ["preview", "staging"] as const) {
-      const implicitMissing = await Effect.runPromiseExit(
-        Layer.build(makeEmailSenderLayer(emptyConfig, env)).pipe(Effect.scoped),
+      const implicitMissing = await Layer.build(makeEmailSenderLayer(emptyConfig, env)).pipe(
+        Effect.scoped,
+        Effect.runPromiseExit,
       );
       expect(implicitMissing._tag).toBe("Failure");
     }
@@ -288,7 +326,7 @@ describe("wiring: email & SMTP URL parsing", () => {
   });
 
   test("loadBootRuntimeConfig rejects arbitrary disable flags, trailing-dot localhost, malformed senders, and preserves production on upgrade", async () => {
-    const validProdEnv: Record<string, string> = {
+    const validProdEnv = {
       NODE_ENV: "production",
       KVITBIT_ENV: "",
       DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
@@ -299,7 +337,7 @@ describe("wiring: email & SMTP URL parsing", () => {
       RESEND_API_KEY: "re_synthetic_key",
       KVITBIT_BLOB_DRIVER: "gcs",
       KVITBIT_BLOB_BUCKET: "kvitbit-prod-blobs",
-    };
+    } satisfies Record<string, string>;
 
     const loadWithLayer = <A>(workload: "server" | "worker", layer: Layer.Layer<A>) =>
       Effect.runPromise(loadBootRuntimeConfig(workload).pipe(Effect.provide(layer), Effect.result));
@@ -309,35 +347,32 @@ describe("wiring: email & SMTP URL parsing", () => {
     // Upgrade fixture (NODE_ENV=production, KVITBIT_ENV empty, Resend configured) stays in production with Resend (never capture).
     const upgraded = await loadWith(validProdEnv);
     expect(upgraded._tag).toBe("Success");
-    if (upgraded._tag === "Success") {
-      expect(upgraded.success.env).toBe("production");
-      expect(upgraded.success.email.mode).toBe("resend");
-      expect(upgraded.success.blob.driver).toBe("gcs");
-      expect(upgraded.success.botProtection).toEqual({
-        mode: "altcha",
-        hmacKey: "synthetic-altcha-hmac-key",
-      });
-    }
+    if (upgraded._tag !== "Success") throw new Error("Expected the asserted result");
+    expect(upgraded.success.env).toBe("production");
+    expect(upgraded.success.email.mode).toBe("resend");
+    expect(upgraded.success.blob.driver).toBe("gcs");
+    expect(upgraded.success.botProtection).toEqual({
+      mode: "altcha",
+      hmacKey: "synthetic-altcha-hmac-key",
+    });
 
     // Worker does not serve HTTP/bot-protection routes and boots in production without ALTCHA_HMAC_KEY,
     // while server fails fast when ALTCHA_HMAC_KEY is missing or whitespace-only.
     const { ALTCHA_HMAC_KEY: _omittedAltcha, ...prodWithoutAltcha } = validProdEnv;
     const workerNoAltcha = await loadWith(prodWithoutAltcha, "worker");
     expect(workerNoAltcha._tag).toBe("Success");
-    if (workerNoAltcha._tag === "Success") {
-      expect(workerNoAltcha.success.botProtection).toBeUndefined();
-    }
+    if (workerNoAltcha._tag !== "Success") throw new Error("Expected the asserted result");
+    expect(workerNoAltcha.success.botProtection).toBeUndefined();
     for (const [label, overrides] of [
       ["missing ALTCHA_HMAC_KEY", prodWithoutAltcha],
       ["whitespace-only ALTCHA_HMAC_KEY", { ...validProdEnv, ALTCHA_HMAC_KEY: "   " }],
     ] as const) {
       const serverMissingAltcha = await loadWith(overrides, "server");
       expect(serverMissingAltcha._tag, label).toBe("Failure");
-      if (serverMissingAltcha._tag === "Failure") {
-        expect(String(serverMissingAltcha.failure)).toContain(
-          "Invalid runtime config (ALTCHA_HMAC_KEY):",
-        );
-      }
+      if (serverMissingAltcha._tag !== "Failure") throw new Error("Expected the asserted result");
+      expect(String(serverMissingAltcha.failure)).toContain(
+        "Invalid runtime config (ALTCHA_HMAC_KEY):",
+      );
     }
     for (const workload of ["server", "worker"] as const) {
       for (const badMode of ["none", "disabled", "bogus"] as const) {
@@ -346,19 +381,18 @@ describe("wiring: email & SMTP URL parsing", () => {
           workload,
         );
         expect(res._tag, `${workload} mode=${badMode}`).toBe("Failure");
-        if (res._tag === "Failure") {
-          expect(String(res.failure)).toContain(
-            "Invalid runtime config (KVITBIT_BOT_PROTECTION_MODE):",
-          );
-        }
+        if (res._tag !== "Failure") throw new Error("Expected the asserted result");
+        expect(String(res.failure)).toContain(
+          "Invalid runtime config (KVITBIT_BOT_PROTECTION_MODE):",
+        );
       }
     }
 
     // Valid RFC 1035 63-octet label boundary, public IPv4-mapped IPv6 origin, permitted scalar KVITBIT_DISABLE,
     // and permitted longer exact-key neighbors are accepted across both makeRuntimeEnvLayer and bare ConfigProvider.
-    expect((await loadWith({ ...validProdEnv, EMAIL_FROM: `a@${"b".repeat(63)}.org` }))._tag).toBe(
-      "Success",
-    );
+    expect(
+      (await loadWith({ ...validProdEnv, EMAIL_FROM: `a@${Str.repeat(63)("b")}.org` }))._tag,
+    ).toBe("Success");
     expect(
       (await loadWith({ ...validProdEnv, APP_ORIGIN: "https://[::ffff:192.0.2.1]" }))._tag,
     ).toBe("Success");
@@ -444,23 +478,22 @@ describe("wiring: email & SMTP URL parsing", () => {
         ["trailing dot in EMAIL_FROM", { EMAIL_FROM: "a.@example.org" }, "EMAIL_FROM"],
         [
           "64-char domain label in EMAIL_FROM",
-          { EMAIL_FROM: `a@${"b".repeat(64)}.org` },
+          { EMAIL_FROM: `a@${Str.repeat(64)("b")}.org` },
           "EMAIL_FROM",
         ],
         [
           "64-char TLD label in EMAIL_FROM",
-          { EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+          { EMAIL_FROM: `a@example.${Str.repeat(64)("c")}` },
           "EMAIL_FROM",
         ],
       ] as const) {
         const res = await loadWith({ ...validProdEnv, ...overrides }, workload);
         expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
-        if (res._tag === "Failure") {
-          expect(
-            String(res.failure),
-            `expected exact marker Invalid runtime config (${expectedKey}): for ${label}`,
-          ).toContain(`Invalid runtime config (${expectedKey}):`);
-        }
+        if (res._tag !== "Failure") throw new Error("Expected the asserted result");
+        expect(
+          String(res.failure),
+          `expected exact marker Invalid runtime config (${expectedKey}): for ${label}`,
+        ).toContain(`Invalid runtime config (${expectedKey}):`);
       }
 
       // Bare ConfigProvider.fromEnv also rejects empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone.
@@ -471,11 +504,10 @@ describe("wiring: email & SMTP URL parsing", () => {
         ),
       );
       expect(bareEmptyExact._tag).toBe("Failure");
-      if (bareEmptyExact._tag === "Failure") {
-        expect(String(bareEmptyExact.failure)).toContain(
-          "Invalid runtime config (KVITBIT_ALLOW_LOCAL_BLOBS):",
-        );
-      }
+      if (bareEmptyExact._tag !== "Failure") throw new Error("Expected the asserted result");
+      expect(String(bareEmptyExact.failure)).toContain(
+        "Invalid runtime config (KVITBIT_ALLOW_LOCAL_BLOBS):",
+      );
 
       // Composed primary + fallback sources preserve key names from both sources and report the exact offending key.
       for (const [label, primaryExtra, fallbackEnv, expectedKey] of [
@@ -527,18 +559,17 @@ describe("wiring: email & SMTP URL parsing", () => {
           composeRuntimeEnvLayers({ ...validProdEnv, ...primaryExtra }, fallbackEnv),
         );
         expect(res._tag, `expected failure for ${workload} ${label}`).toBe("Failure");
-        if (res._tag === "Failure") {
-          expect(
-            String(res.failure),
-            `expected exact marker Invalid runtime config (${expectedKey}): for ${label}`,
-          ).toContain(`Invalid runtime config (${expectedKey}):`);
-        }
+        if (res._tag !== "Failure") throw new Error("Expected the asserted result");
+        expect(
+          String(res.failure),
+          `expected exact marker Invalid runtime config (${expectedKey}): for ${label}`,
+        ).toContain(`Invalid runtime config (${expectedKey}):`);
       }
     }
   });
 
   test("loadBootRuntimeConfig and EmailSenderLive resolve identical effective env and email mode under composeRuntimeEnvLayers", async () => {
-    const baseWithoutEnv: Record<string, string> = {
+    const baseWithoutEnv = {
       DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
       BETTER_AUTH_SECRET: "synthetic-auth-secret",
       ALTCHA_HMAC_KEY: "synthetic-altcha-hmac-key",
@@ -547,7 +578,7 @@ describe("wiring: email & SMTP URL parsing", () => {
       RESEND_API_KEY: "re_synthetic_key",
       KVITBIT_BLOB_DRIVER: "gcs",
       KVITBIT_BLOB_BUCKET: "kvitbit-prod-blobs",
-    };
+    } satisfies Record<string, string>;
 
     // 1. Whitespace-only primary KVITBIT_ENV=" " with fallback "production":
     // both boot and EmailSenderLive see the same primary value (" " -> trimmed undefined -> development/capture),
@@ -573,7 +604,7 @@ describe("wiring: email & SMTP URL parsing", () => {
           },
           { idempotencyKey: "parity-space-1" },
         ),
-      ).pipe(Effect.provide(EmailSenderLive), Effect.provide(spaceLayer)),
+      ).pipe(Effect.provide(EmailSenderLive.pipe(Layer.provideMerge(spaceLayer)))),
     );
     expect(spaceBoot.env).toBe("development");
     expect(spaceBoot.email.mode).toBe("capture");
@@ -604,9 +635,8 @@ describe("wiring: email & SMTP URL parsing", () => {
     expect(emptyBoot.email.mode).toBe("resend");
     expect(emptyLiveResolved.env).toBe(emptyBoot.env);
     expect(emptyLiveResolved.resolved.ok).toBe(true);
-    if (emptyLiveResolved.resolved.ok) {
-      expect(emptyLiveResolved.resolved.value.mode).toBe(emptyBoot.email.mode);
-    }
+    if (!emptyLiveResolved.resolved.ok) throw new Error("Expected the asserted result");
+    expect(emptyLiveResolved.resolved.value.mode).toBe(emptyBoot.email.mode);
 
     // 3. Whitespace-only primary KVITBIT_ENV=" " + NODE_ENV="production" resolves production/resend in both.
     const spaceWithProdNodeLayer = composeRuntimeEnvLayers(
@@ -636,8 +666,7 @@ describe("wiring: email & SMTP URL parsing", () => {
           const cfg = yield* HttpConfig;
           return cfg.botProtection;
         }).pipe(
-          Effect.provide(HttpConfigLive),
-          Effect.provide(makeRuntimeEnvLayer(env)),
+          Effect.provide(HttpConfigLive.pipe(Layer.provideMerge(makeRuntimeEnvLayer(env)))),
           Effect.result,
         ),
       );
@@ -648,8 +677,12 @@ describe("wiring: email & SMTP URL parsing", () => {
     const buildNoopCheck = (env: Record<string, string>) =>
       Effect.runPromise(
         Effect.flatMap(BotProtection, (bp) => bp.issue("sign_up")).pipe(
-          Effect.provide(BotProtectionLive as Layer.Layer<BotProtection, unknown>),
-          Effect.provide(makeRuntimeEnvLayer(env)),
+          Effect.provide(
+            BotProtectionLive.pipe(
+              Layer.provide(NoQueriesSqlLive),
+              Layer.provideMerge(makeRuntimeEnvLayer(env)),
+            ),
+          ),
           Effect.result,
         ),
       );
@@ -695,9 +728,8 @@ describe("wiring: email & SMTP URL parsing", () => {
       });
       const noopChallenge = await buildNoopCheck(explicitNone);
       expect(noopChallenge._tag).toBe("Success");
-      if (noopChallenge._tag === "Success") {
-        expect(noopChallenge.success.parameters.algorithm).toBe("NONE");
-      }
+      if (noopChallenge._tag !== "Success") throw new Error("Expected the asserted result");
+      expect(noopChallenge.success.parameters.algorithm).toBe("NONE");
     }
 
     // Development with whitespace-only ALTCHA_HMAC_KEY resolves "none" in BOTH layers (never passing whitespace to ALTCHA).
@@ -712,27 +744,27 @@ describe("wiring: email & SMTP URL parsing", () => {
     });
     const devNoop = await buildNoopCheck(devWhitespace);
     expect(devNoop._tag).toBe("Success");
-    if (devNoop._tag === "Success") {
-      expect(devNoop.success.parameters.algorithm).toBe("NONE");
-    }
+    if (devNoop._tag !== "Success") throw new Error("Expected the asserted result");
+    expect(devNoop.success.parameters.algorithm).toBe("NONE");
   });
 });
 
 describe("wiring: blob storage", () => {
   test("local driver stores, reads, and deletes blobs on disk", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "kvitbit-blob-test-"));
-    try {
-      const layer = makeBlobStorageLayer({
-        driver: "local",
-        localDir: dir,
-        gcsBucket: Option.none(),
-        gcsProject: Option.none(),
-      });
-      const bytes = new TextEncoder().encode("hello blob");
-      const key = "exports/ws-1/test.txt" as Parameters<BlobStorage["Service"]["put"]>[0];
+    const roundtrip = await Effect.runPromise(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const dir = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-blob-test-" });
+        const layer = makeBlobStorageLayer({
+          driver: "local",
+          localDir: dir,
+          gcsBucket: Option.none(),
+          gcsProject: Option.none(),
+        });
+        const bytes = new TextEncoder().encode("hello blob");
+        const key = BlobKey.make("exports/ws-1/test.txt");
 
-      const roundtrip = await Effect.runPromise(
-        Effect.gen(function* () {
+        return yield* Effect.gen(function* () {
           const store = yield* BlobStorage;
           yield* store.put(key, Stream.succeed(bytes), {
             contentType: "text/plain",
@@ -749,13 +781,10 @@ describe("wiring: blob storage", () => {
             text: new TextDecoder().decode(chunks[0]),
             deleted: afterDelete,
           };
-        }).pipe(Effect.provide(layer)),
-      );
-
-      expect(roundtrip).toEqual({ text: "hello blob", deleted: true });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+        }).pipe(Effect.provide(layer));
+      }).pipe(Effect.scoped, Effect.provide(BunFileSystem.layer)),
+    );
+    expect(roundtrip).toEqual({ text: "hello blob", deleted: true });
   });
 
   test("gcs driver fails with ConfigError when KVITBIT_BLOB_BUCKET is absent", async () => {
@@ -765,10 +794,66 @@ describe("wiring: blob storage", () => {
       gcsBucket: Option.none(),
       gcsProject: Option.none(),
     });
-    const exit = await Effect.runPromiseExit(Layer.build(layer).pipe(Effect.scoped));
+    const exit = await Effect.runPromiseExit(layer.pipe(Layer.build, Effect.scoped));
     expect(exit._tag).toBe("Failure");
   });
 });
+
+test("local attachment inventory keeps fractional milliseconds in cutoff comparisons", async () => {
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-attachment-test-" });
+      const prefix =
+        "workspaces/01950000-0000-7000-8000-000000000001/expenses/01950000-0000-7000-8000-000000000002/attachments";
+      const key = BlobKey.make(`${prefix}/01950000-0000-7000-8000-000000000003`);
+      const file = `${root}/${key}`;
+      const modifiedAtSeconds = 1_700_000_000.123866;
+      yield* fs.makeDirectory(`${root}/${prefix}`, { recursive: true });
+      yield* fs.writeFileString(file, "fixture");
+      yield* fs.utimes(file, modifiedAtSeconds, modifiedAtSeconds);
+      yield* fs.symlink(file, `${root}/${prefix}/01950000-0000-7000-8000-000000000004`);
+      yield* Effect.gen(function* () {
+        const inventory = yield* AttachmentInventory;
+        const newer = yield* Stream.runCollect(inventory.olderThan(1_700_000_000_123.5));
+        const older = yield* Stream.runCollect(inventory.olderThan(1_700_000_000_124));
+        const invalidCutoff = yield* Stream.runCollect(inventory.olderThan(Number.NaN));
+        expect(newer).toEqual([]);
+        expect(older).toEqual([key]);
+        expect(invalidCutoff).toEqual([]);
+      }).pipe(Effect.provide(localAttachmentInventory(root)));
+    }).pipe(Effect.scoped, Effect.provide(BunFileSystem.layer)),
+  );
+});
+
+test("delivery reconciliation leaves a workflow suspended when failed is false", async () => {
+  let resumeCount = 0;
+  const engine = Layer.effect(
+    WorkflowEngine.WorkflowEngine,
+    Effect.map(WorkflowEngine.WorkflowEngine, (base) => ({
+      ...base,
+      poll: () => Effect.succeedSome(Workflow.Suspended.make({ failed: false })),
+      resume: () =>
+        Effect.sync(() => {
+          resumeCount += 1;
+        }),
+    })),
+  ).pipe(Layer.provide(WorkflowEngine.layerMemory));
+  const layer = DeliveryJobsLive.pipe(Layer.provideMerge([engine, PgliteClient.layer({})]));
+  const workspaceId = WorkspaceId.make("01950000-0000-7000-8000-000000000001");
+  const deliveryId = DeliveryId.make("01950000-0000-7000-8000-000000000002");
+
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const jobs = yield* DeliveryJobs;
+      yield* sql`CREATE TABLE deliveries (id uuid, workspace_id uuid, status text, workflow_attempt integer)`;
+      yield* sql`INSERT INTO deliveries VALUES (${deliveryId}, ${workspaceId}, 'queued', 0)`;
+      yield* jobs.start(workspaceId, deliveryId);
+    }).pipe(Effect.provide(layer)),
+  );
+  expect(resumeCount).toBe(0);
+}, 30_000);
 
 describe("wiring: PDF renderers (DocumentRenderer, ReportPdfRenderer, BrandingPreview)", () => {
   const pdfLayer = makePdfRenderersLayer(FakePdfEngine);
@@ -795,8 +880,8 @@ describe("wiring: PDF renderers (DocumentRenderer, ReportPdfRenderer, BrandingPr
   });
 
   test("ReportPdfRenderer renders all 6 report kinds", async () => {
-    const period = { from: "2026-01-01" as IsoDate, to: "2026-12-31" as IsoDate };
-    const wsId = "01950000-0000-7000-8000-000000000003" as WorkspaceId;
+    const period = { from: IsoDate.make("2026-01-01"), to: IsoDate.make("2026-12-31") };
+    const wsId = WorkspaceId.make("01950000-0000-7000-8000-000000000003");
     const views: ReadonlyArray<ReportsModule.ReportViewData> = [
       {
         report: "revenue",
@@ -845,7 +930,7 @@ describe("wiring: PDF renderers (DocumentRenderer, ReportPdfRenderer, BrandingPr
       {
         report: "receivables",
         period,
-        asOf: "2026-02-01" as IsoDate,
+        asOf: IsoDate.make("2026-02-01"),
         buckets: [{ bucket: "1_30", count: 1, total: money("1210"), documents: [] }],
         total: money("1210"),
         overdue: { total: money("1210"), count: 1 },
@@ -859,13 +944,17 @@ describe("wiring: PDF renderers (DocumentRenderer, ReportPdfRenderer, BrandingPr
       },
     ];
 
-    for (const view of views) {
-      const pdf = await Effect.runPromise(
-        Effect.gen(function* () {
-          const renderer = yield* ReportPdfRenderer;
-          return yield* renderer.render({ workspaceId: wsId, locale: "cs", view });
-        }).pipe(Effect.provide(pdfLayer)),
-      );
+    const pdfs = await Effect.runPromise(
+      Effect.gen(function* () {
+        const renderer = yield* ReportPdfRenderer;
+        return yield* Effect.forEach(
+          views,
+          (view) => renderer.render({ workspaceId: wsId, locale: "cs", view }),
+          { concurrency: 1 },
+        );
+      }).pipe(Effect.provide(pdfLayer)),
+    );
+    for (const pdf of pdfs) {
       expect(new TextDecoder().decode(pdf.slice(0, 5))).toBe("%PDF-");
     }
   });
@@ -875,7 +964,7 @@ describe("wiring: PDF renderers (DocumentRenderer, ReportPdfRenderer, BrandingPr
       Effect.gen(function* () {
         const preview = yield* BrandingPreview;
         const file = yield* preview.render({
-          workspaceId: "01950000-0000-7000-8000-000000000003" as WorkspaceId,
+          workspaceId: WorkspaceId.make("01950000-0000-7000-8000-000000000003"),
           branding: {
             pdfTemplate: "modern_minimal",
             accentColor: "#0F5D42",

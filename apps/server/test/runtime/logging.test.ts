@@ -1,24 +1,47 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
-import { NodeHttpServer } from "@effect/platform-node";
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { SESSION_COOKIE } from "@kvitbit/api-contract";
 import { EmailSender } from "@kvitbit/domain/ports";
-import { Cause, Effect, Layer, Logger, Option, Redacted, References } from "effect";
-import {
-  FetchHttpClient,
-  HttpMiddleware,
-  HttpRouter,
-  HttpServer,
-  HttpServerResponse,
-} from "effect/http";
-import { SqlClient } from "effect/sql";
-import { SqlError, UniqueViolation } from "effect/sql/SqlError";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpMiddleware from "effect/http/HttpMiddleware";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServer from "effect/http/HttpServer";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Redacted from "effect/Redacted";
+import * as References from "effect/References";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 import { RequestIdsLive, withRequestLogging } from "../../src/http/edge/requestId";
 import { makeServerLogger, selectLogFormat } from "../../src/logging/logger";
 import { parseCloudTrace, RequestLogContext } from "../../src/logging/trace";
 import { makeEmailSenderLayer, parseSmtpUrl } from "../../src/wiring/email";
 import { makeHarness, ORIGIN } from "../http/harness";
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const entriesPattern = /[\r\n]/;
+const privateDxnlcjpwyxnzKvbPattern =
+  /private-|dXNlcjpwYXNz|kvb_privatecredential|should never evaluate/;
+const errorPattern = /^\[\d{4}-\d\d-\d\dT.+\] ERROR /;
+const privateExampleTestPattern = /private-|@example\.test/;
+const privateTokenResetPattern = /private-|token=|\/reset-password\/|\/magic-link\/verify/;
 
 const traceId = "105445aa7843bc8bf206b12000100000";
 const traceHeader = `${traceId}/74;o=0`;
@@ -33,20 +56,39 @@ const correlation = {
 
 const capture = (projectId?: string, format: "json" | "pretty" = "json") => {
   const lines: Array<string> = [];
-  const layer = Logger.layer([makeServerLogger(format, projectId, (line) => lines.push(line))]);
+  const layer = Logger.layer([
+    makeServerLogger({ format, projectId, write: (line) => lines.push(line) }),
+  ]);
   return { lines, layer };
 };
 
 const entries = (lines: ReadonlyArray<string>) =>
-  lines.map((line) => {
-    expect(line.endsWith("\n")).toBe(true);
-    expect(line.slice(0, -1)).not.toMatch(/[\r\n]/);
-    return JSON.parse(line) as Record<string, unknown>;
+  Arr.map(lines, (line) => {
+    if (!Str.endsWith("\n")(line) || entriesPattern.test(Str.slice(0, -1)(line))) {
+      throw new Error("Expected one complete JSON log entry per line");
+    }
+    return Schema.decodeResult(Schema.fromJsonString(Schema.JsonObject))(line).pipe(
+      Result.getOrThrow,
+    );
   });
+
+const runLoggerFixture = async (options: {
+  readonly cmd: string[];
+  readonly env: Record<string, string>;
+  readonly cwd?: string;
+}) => {
+  const child = Bun.spawn({ ...options, stdout: "pipe", stderr: "pipe" });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+  ]);
+  return { exitCode, stdout, stderr };
+};
 
 const failingProdEmail = (status = 422, body = "private-provider-payload") => {
   const send = Object.assign(async () => new Response(body, { status }), {
-    preconnect: () => {},
+    preconnect: () => undefined,
   });
   return makeEmailSenderLayer(
     {
@@ -95,7 +137,7 @@ describe("server logging", () => {
     );
 
     const logs = entries(lines);
-    expect(logs.map((line) => line.severity)).toEqual([
+    expect(Arr.map(logs, (line) => line["severity"])).toEqual([
       "DEBUG",
       "DEBUG",
       "DEBUG",
@@ -107,8 +149,10 @@ describe("server logging", () => {
     ]);
     expect(logs[0]).toMatchObject({ message: "first\nsecond", annotations: {}, spans: {} });
     for (const { timestamp } of logs) {
-      expect(typeof timestamp).toBe("string");
-      expect(new Date(String(timestamp)).toISOString()).toBe(String(timestamp));
+      expect(Predicate.isString(timestamp)).toBe(true);
+      expect(DateTime.toDateUtc(DateTime.makeUnsafe(String(timestamp))).toISOString()).toBe(
+        String(timestamp),
+      );
     }
   });
 
@@ -118,7 +162,7 @@ describe("server logging", () => {
       spanId: "000000000000004a",
       sampled: false,
     });
-    expect(parseCloudTrace(`${traceId.toUpperCase()}/18446744073709551615;o=1`)).toEqual({
+    expect(parseCloudTrace(`${Str.toUpperCase(traceId)}/18446744073709551615;o=1`)).toEqual({
       traceId,
       spanId: "ffffffffffffffff",
       sampled: true,
@@ -128,7 +172,7 @@ describe("server logging", () => {
     expect(parseCloudTrace(`${traceId}/18446744073709551616`)).toEqual({ traceId });
     expect(parseCloudTrace(`${traceId}/0`)).toEqual({ traceId });
     expect(parseCloudTrace(`${traceId}/1;o=2`)).toBeUndefined();
-    expect(parseCloudTrace(`${"0".repeat(32)}/1`)).toBeUndefined();
+    expect(parseCloudTrace(`${Str.repeat(32)("0")}/1`)).toBeUndefined();
     expect(parseCloudTrace("invalid")).toBeUndefined();
   });
 
@@ -150,7 +194,7 @@ describe("server logging", () => {
     expect(first).toMatchObject({ traceId, requestId });
     expect(first).not.toHaveProperty("logging.googleapis.com/trace");
     expect(second).toMatchObject({ requestId, annotations: { result: "ok" } });
-    expect(second?.annotations).not.toHaveProperty("requestId");
+    expect(second?.["annotations"]).not.toHaveProperty("requestId");
   });
 
   test("keeps Node HTTP handler and response logs in the same request context", async () => {
@@ -168,28 +212,33 @@ describe("server logging", () => {
     const server = HttpRouter.serve(routes, {
       disableLogger: true,
       disableListenLog: true,
-      middleware: (handle) => withRequestLogging(HttpMiddleware.logger(handle)),
+      middleware: (handle) => handle.pipe(HttpMiddleware.logger, withRequestLogging),
     }).pipe(Layer.provideMerge(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 })));
     await Effect.runPromise(
       Effect.gen(function* () {
-        const services = yield* Layer.build(server);
-        yield* HttpServer.addressFormattedWith((address) =>
-          Effect.promise(async () => {
-            await fetch(`${address}/s/private-share-token`, { headers });
-            const unmatched = await fetch(`${address}/missing/private-without-known-route`, {
-              headers,
-            });
+        const services = yield* Layer.build(Layer.merge(server, FetchHttpClient.layer));
+        yield* HttpServer.addressFormattedWith(
+          Effect.fnUntraced(function* (address) {
+            yield* HttpClient.get(`${address}/s/private-share-token`, { headers });
+            const unmatched = yield* HttpClient.get(
+              `${address}/missing/private-without-known-route`,
+              { headers },
+            );
             expect(unmatched.status).toBe(404);
           }),
         ).pipe(Effect.provideContext(services));
       }).pipe(Effect.scoped, Effect.provide(layer)),
     );
     const logs = entries(lines);
-    expect(logs.find(({ message }) => message === "Ran handler")).toMatchObject(correlation);
-    expect(logs.find(({ message }) => message === "Sent HTTP response")).toMatchObject({
-      ...correlation,
-      annotations: { "http.route": "/s/:token" },
-    });
+    Arr.findFirst(logs, ({ message }) => message === "Ran handler")
+      .pipe(Option.getOrUndefined, expect)
+      .toMatchObject(correlation);
+    Arr.findFirst(logs, ({ message }) => message === "Sent HTTP response")
+      .pipe(Option.getOrUndefined, expect)
+      .toMatchObject({
+        ...correlation,
+        annotations: { "http.route": "/s/:token" },
+      });
     expect(logs).toContainEqual(
       expect.objectContaining({
         ...correlation,
@@ -197,8 +246,8 @@ describe("server logging", () => {
         cause: [{ type: "Fail", error: { type: "HttpServerError", reason: "RouteNotFound" } }],
       }),
     );
-    expect(lines.join("")).not.toContain("private-share-token");
-    expect(lines.join("")).not.toContain("private-without-known-route");
+    expect(Arr.join(lines, "")).not.toContain("private-share-token");
+    expect(Arr.join(lines, "")).not.toContain("private-without-known-route");
   });
 
   test("redacts raw and encoded secrets in both formats, including errors and nested metadata", () => {
@@ -220,15 +269,15 @@ describe("server logging", () => {
         "api%4Bey": "private-encoded-key",
         parsedSmtp: parseSmtpUrl("smtp://user:private-smtp-pass@smtp.example.test"),
         flatSmtpDiagnostic: "transport.auth.pass=private-flat-smtp-pass",
-        serialized: JSON.stringify(JSON.stringify({ password: "private-escaped-password" })),
+        serialized: encodeJson(encodeJson({ password: "private-escaped-password" })),
         callback: "/auth/magic/private-magic-callback",
         consent: "/api/v1/oauth/consents/private-consent",
         state: "/sign-in?state=private-oauth-state",
         stdoutError: { response: "private-smtp-response" },
       },
       cause: new Error(`nested ${magicLink}`),
-      databaseError: new SqlError({
-        reason: new UniqueViolation({
+      databaseError: SqlError.SqlError.make({
+        reason: SqlError.UniqueViolation.make({
           message: "Key (token)=(private-sql) already exists",
           cause: new Error("private-driver-error"),
           constraint: "auth_unique_token",
@@ -244,7 +293,7 @@ describe("server logging", () => {
         throw new Error("should never evaluate logging getters");
       },
     });
-    const bareToken = "t".repeat(43);
+    const bareToken = Str.repeat(43)("t");
     const log = Effect.logError(
       "Bearer private-bearer:token and Basic dXNlcjpwYXNz",
       {
@@ -267,10 +316,8 @@ describe("server logging", () => {
     for (const format of ["json", "pretty"] as const) {
       const { lines, layer } = capture(undefined, format);
       Effect.runSync(log.pipe(Effect.provide(layer)));
-      const output = lines.join("");
-      expect(output).not.toMatch(
-        /private-|dXNlcjpwYXNz|kvb_privatecredential|should never evaluate/,
-      );
+      const output = Arr.join(lines, "");
+      expect(output).not.toMatch(privateDxnlcjpwyxnzKvbPattern);
       expect(output).not.toContain(bareToken);
       expect(output).toContain("[Circular]");
       expect(output).toContain("Unable to open [REDACTED]");
@@ -278,9 +325,20 @@ describe("server logging", () => {
       expect(output).toContain("statistic");
       expect(output).toContain("smtp.example.test");
       expect(output).toContain("UniqueViolation");
-      if (format === "json") expect(entries(lines)[0]).toMatchObject({ severity: "ERROR" });
-      else expect(output).toMatch(/^\[\d{4}-\d\d-\d\dT.+\] ERROR /);
+      const severity =
+        format === "json"
+          ? entries(lines)[0]?.["severity"]
+          : errorPattern.test(output)
+            ? "ERROR"
+            : undefined;
+      expect(severity).toBe("ERROR");
     }
+  });
+
+  test("keeps array headlines encoded as JSON", () => {
+    const { lines, layer } = capture();
+    Effect.runSync(Effect.logInfo(["first", "second"]).pipe(Effect.provide(layer)));
+    expect(entries(lines)[0]).toMatchObject({ message: '["first","second"]' });
   });
 
   test("escapes terminal controls and keeps oversized JSON entries valid", () => {
@@ -291,8 +349,8 @@ describe("server logging", () => {
     const json = capture();
     Effect.runSync(
       Effect.logError("Large metadata", {
-        first: "x".repeat(140000),
-        second: "y".repeat(140000),
+        first: Str.repeat(140000)("x"),
+        second: Str.repeat(140000)("y"),
       }).pipe(Effect.provide(json.layer)),
     );
     expect(entries(json.lines)).toMatchObject([
@@ -309,8 +367,11 @@ describe("server logging", () => {
         },
       },
     );
-    const logger = makeServerLogger("json", undefined, () => {
-      throw new Error("sink failure");
+    const logger = makeServerLogger({
+      format: "json",
+      write: () => {
+        throw new Error("sink failure");
+      },
     });
     expect(() =>
       Effect.runSync(
@@ -320,8 +381,9 @@ describe("server logging", () => {
   });
 
   test("fails fast for unconfigured production email, logs rejected invitation sends without envelope data, and logs console dev sends safely", async () => {
-    const unconfiguredExit = await Effect.runPromiseExit(
-      Layer.build(unconfiguredEmail).pipe(Effect.scoped),
+    const unconfiguredExit = await Layer.build(unconfiguredEmail).pipe(
+      Effect.scoped,
+      Effect.runPromiseExit,
     );
     expect(unconfiguredExit._tag).toBe("Failure");
 
@@ -341,7 +403,7 @@ describe("server logging", () => {
       ),
     );
     const result = await Effect.runPromise(
-      send.pipe(Effect.provide(failingProdEmail()), Effect.provide(layer), Effect.result),
+      send.pipe(Effect.provide(failingProdEmail().pipe(Layer.provideMerge(layer))), Effect.result),
     );
     expect(result).toMatchObject({
       _tag: "Failure",
@@ -358,33 +420,37 @@ describe("server logging", () => {
         },
       },
     ]);
-    expect(lines.join("")).not.toMatch(/private-|@example\.test/);
+    expect(Arr.join(lines, "")).not.toMatch(privateExampleTestPattern);
 
     const dev = capture();
     const developmentEmail = makeEmailSenderLayer(
       { from: "noreply@kvitbit.test", resendApiKey: Option.none(), smtpUrl: Option.none() },
       "development",
     );
-    expect(
-      Effect.runSync(send.pipe(Effect.provide(developmentEmail), Effect.provide(dev.layer))),
-    ).toMatchObject({ provider: "console" });
+    send
+      .pipe(
+        Effect.provide(developmentEmail.pipe(Layer.provideMerge(dev.layer))),
+        Effect.runSync,
+        expect,
+      )
+      .toMatchObject({ provider: "console" });
     expect(entries(dev.lines)).toMatchObject([
       { severity: "INFO", message: "Email (not sent)", annotations: { emailKind: "invitation" } },
     ]);
-    expect(dev.lines.join("")).not.toMatch(/private-|@example\.test/);
+    expect(Arr.join(dev.lines, "")).not.toMatch(privateExampleTestPattern);
   });
 
   test("logs rejected verification, reset and magic-link deliveries through actual Better Auth routes", async () => {
     const { lines, layer } = capture("example-project");
-    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    const consoleError = spyOn(console, "error").mockImplementation(() => undefined);
     const app = makeHarness({ authEmailSender: failingProdEmail(), logger: layer });
     const email = "private-identity@example.test";
     const password = "A private-strong password!";
-    const post = (path: string, body: object) =>
+    const post = (path: string, body: Schema.JsonObject) =>
       app.fetch(`/api/auth${path}`, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json", origin: ORIGIN },
-        body: JSON.stringify(body),
+        body: encodeJson(body),
       });
     try {
       expect((await post("/sign-up/email", { email, password, name: "Test Person" })).status).toBe(
@@ -399,7 +465,7 @@ describe("server logging", () => {
 
       const logs = entries(lines);
       expect(logs).toMatchObject(
-        ["verification", "password-reset", "magic-link"].map((emailKind) => ({
+        Arr.map(["verification", "password-reset", "magic-link"], (emailKind) => ({
           ...correlation,
           severity: "ERROR",
           annotations: {
@@ -409,7 +475,7 @@ describe("server logging", () => {
           },
         })),
       );
-      expect(lines.join("")).not.toMatch(/private-|token=|\/reset-password\/|\/magic-link\/verify/);
+      expect(Arr.join(lines, "")).not.toMatch(privateTokenResetPattern);
       expect(consoleError).not.toHaveBeenCalled();
     } finally {
       consoleError.mockRestore();
@@ -422,7 +488,7 @@ describe("server logging", () => {
     const send = Object.assign(
       async () => new Response("private-provider-payload", { status: 422 }),
       {
-        preconnect: () => {},
+        preconnect: () => undefined,
       },
     );
     const authEmailSender = makeEmailSenderLayer(
@@ -436,17 +502,19 @@ describe("server logging", () => {
     const app = makeHarness({ authEmailSender, logger: layer });
     const email = "private-configured-recipient@example.test";
     const password = "A private-strong password!";
-    const post = (path: string, body: object, cookie?: string) =>
-      app.fetch(`/api/auth${path}`, {
+    const post = (path: string, body: Schema.JsonObject, cookie?: string) => {
+      const cookieHeader = cookie === undefined ? {} : { cookie };
+      return app.fetch(`/api/auth${path}`, {
         method: "POST",
         headers: {
           ...headers,
           "content-type": "application/json",
           origin: ORIGIN,
-          ...(cookie === undefined ? {} : { cookie }),
+          ...cookieHeader,
         },
-        body: JSON.stringify(body),
+        body: encodeJson(body),
       });
+    };
     try {
       expect((await post("/sign-up/email", { email, password, name: "Test Person" })).status).toBe(
         200,
@@ -459,10 +527,12 @@ describe("server logging", () => {
       );
       const login = await post("/sign-in/email", { email, password });
       expect(login.status).toBe(200);
-      const cookie = login.headers
-        .getSetCookie()
-        .find((value) => value.startsWith(`${SESSION_COOKIE}=`))
-        ?.split(";")[0];
+      const cookie = Arr.findFirst(login.headers.getSetCookie(), (value) =>
+        Str.startsWith(`${SESSION_COOKIE}=`)(value),
+      ).pipe(
+        Option.map((value) => Str.split(value, ";")[0]),
+        Option.getOrUndefined,
+      );
       expect(cookie).toBeDefined();
       expect(
         (await post("/change-email", { newEmail: "private-new-email@example.test" }, cookie))
@@ -470,7 +540,7 @@ describe("server logging", () => {
       ).toBe(200);
 
       expect(entries(lines)).toMatchObject(
-        ["verification", "change-email"].map((emailKind) => ({
+        Arr.map(["verification", "change-email"], (emailKind) => ({
           ...correlation,
           severity: "ERROR",
           message: "Email delivery rejected",
@@ -481,13 +551,13 @@ describe("server logging", () => {
           },
         })),
       );
-      expect(lines.join("")).not.toContain("private-");
+      expect(Arr.join(lines, "")).not.toContain("private-");
     } finally {
       await app.dispose();
     }
   }, 30000);
 
-  test("uses the first configured Cloud project environment variable", () => {
+  test("uses the first configured Cloud project environment variable", async () => {
     const program = `
       import { Effect } from "effect";
       import { runServerMain } from "./src/logging/logger";
@@ -503,27 +573,27 @@ describe("server logging", () => {
       ["KVITBIT_GCS_PROJECT", "kvitbit-gcs-project"],
     ] as const;
     for (const [index, [, project]] of aliases.entries()) {
-      const result = Bun.spawnSync({
+      const result = await runLoggerFixture({
         cmd: [process.execPath, "-e", program],
         cwd: fileURLToPath(new URL("../..", import.meta.url)),
-        env: { NODE_ENV: "production", ...Object.fromEntries(aliases.slice(index)) },
+        env: { NODE_ENV: "production", ...EffectRecord.fromEntries(aliases.slice(index)) },
       });
       expect(result.exitCode).toBe(0);
-      expect(entries([result.stdout.toString()])).toMatchObject([
+      expect(entries([result.stdout])).toMatchObject([
         { "logging.googleapis.com/trace": `projects/${project}/traces/${traceId}` },
       ]);
     }
   }, 30000);
 
   for (const entry of ["main", "worker", "migrate"]) {
-    test(`${entry} fails invalid LOG_FORMAT with a single safe JSON diagnostic on stdout`, () => {
-      const result = Bun.spawnSync({
+    test(`${entry} fails invalid LOG_FORMAT with a single safe JSON diagnostic on stdout`, async () => {
+      const result = await runLoggerFixture({
         cmd: [process.execPath, fileURLToPath(new URL(`../../src/${entry}.ts`, import.meta.url))],
         env: { NODE_ENV: "production", LOG_FORMAT: "private-invalid-format" },
       });
       expect(result.exitCode).toBe(1);
-      expect(result.stderr.toString()).toBe("");
-      const stdout = result.stdout.toString();
+      expect(result.stderr).toBe("");
+      const stdout = result.stdout;
       expect(entries([stdout])).toMatchObject([
         { severity: "ERROR", message: "Server process failed" },
       ]);
@@ -532,7 +602,7 @@ describe("server logging", () => {
     }, 30000);
   }
 
-  test("drains large stdout entries before a failed process exits", () => {
+  test("drains large stdout entries before a failed process exits", async () => {
     const program = `
       import { Effect } from "effect";
       import { runServerMain } from "./src/logging/logger";
@@ -540,21 +610,18 @@ describe("server logging", () => {
         Effect.andThen(Effect.fail(new Error("synthetic failure"))),
       ));
     `;
-    const result = Bun.spawnSync({
+    const result = await runLoggerFixture({
       cmd: [process.execPath, "-e", program],
       cwd: fileURLToPath(new URL("../..", import.meta.url)),
       env: { NODE_ENV: "production" },
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr.toString()).toBe("");
-    const stdout = result.stdout.toString();
+    expect(result.stderr).toBe("");
+    const stdout = result.stdout;
     const [first, last] = entries(
-      stdout
-        .trimEnd()
-        .split("\n")
-        .map((line) => `${line}\n`),
+      Arr.map(Str.split(Str.trimEnd(stdout), "\n"), (line) => `${line}\n`),
     );
-    expect(first?.message).toBe("x".repeat(150000));
+    expect(first?.["message"]).toBe(Str.repeat(150000)("x"));
     expect(last).toMatchObject({ severity: "ERROR", message: "Server process failed" });
   }, 30000);
 

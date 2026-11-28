@@ -1,7 +1,9 @@
 /** PriceList module (core-ports 4.3). The parent wires `PriceListLive` into the core composition. */
 
 import type { NotFound, PriceListItemId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import { PriceListLive } from "./live";
 import type { PriceListItemViewData } from "./model";
@@ -35,7 +37,7 @@ export class PriceListItems extends Context.Service<
       id: PriceListItemId,
     ) => Effect.Effect<PriceListItemViewData, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/PriceListItems") {}
+>()("@kvitbit/core/modules/pricelist/PriceListItems") {}
 
 export const PriceListItemsLive: Layer.Layer<PriceListItems, never, PriceListRepo> = Layer.effect(
   PriceListItems,

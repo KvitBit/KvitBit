@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { EXTENDED_ROLES, M3_COLOR_ROLES } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
 import {
   cn,
   cva,
@@ -17,7 +18,7 @@ describe("@kvitbit/ui-port/style", () => {
     expect(cn("bg-surface", "bg-primary-container")).toBe("bg-primary-container");
     expect(cn("text-sm text-on-surface", "text-error")).toBe("text-sm text-error");
     expect(cn("font-body", "font-mono")).toBe("font-mono");
-    expect(cn("flex", false && "hidden", undefined, null, "gap-2")).toBe("flex gap-2");
+    expect(cn("flex", false, undefined, null, "gap-2")).toBe("flex gap-2");
   });
 
   test("cva composes typed component variants with cn overrides", () => {
@@ -36,18 +37,18 @@ describe("@kvitbit/ui-port/style", () => {
   });
 
   test("declares every M3 role, extended financial role, radius and font token", () => {
-    const names = new Set(TAILWIND_COLOR_TOKENS.map((t) => t.tailwindVar));
+    const names = new Set(Arr.map(TAILWIND_COLOR_TOKENS, (t) => t.tailwindVar));
     expect(TAILWIND_COLOR_TOKENS.length).toBe(M3_COLOR_ROLES.length + EXTENDED_ROLES.length * 4);
     expect(names.has("--color-surface")).toBe(true);
     expect(names.has("--color-surface-container-lowest")).toBe(true);
     expect(names.has("--color-paid-container")).toBe(true);
     expect(names.has("--color-on-overdue-container")).toBe(true);
-    expect(TAILWIND_RADIUS_TOKENS.map((t) => t.tailwindVar)).toEqual([
+    expect(Arr.map(TAILWIND_RADIUS_TOKENS, (t) => t.tailwindVar)).toEqual([
       "--radius-panel",
       "--radius-control",
       "--radius-badge",
     ]);
-    expect(TAILWIND_FONT_TOKENS.map((t) => t.tailwindVar)).toEqual([
+    expect(Arr.map(TAILWIND_FONT_TOKENS, (t) => t.tailwindVar)).toEqual([
       "--font-display",
       "--font-body",
       "--font-mono",

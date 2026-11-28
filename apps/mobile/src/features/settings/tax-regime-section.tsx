@@ -1,6 +1,10 @@
-import type { IssuingEntityPatch, TaxRegime } from "@kvitbit/domain/contract";
+import { IssuingEntityPatch, type TaxRegime } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
-import { useEffect, useState } from "react";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
+import { useCallback, useEffect, useState } from "react";
 import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -18,6 +22,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import { canEditWorkspaceSettings } from "./permissions";
 import {
   type FormErrorState,
@@ -29,6 +34,8 @@ import { parseWorkspaceView, todayIsoDate } from "./workspace-data";
 
 const TAX_REGIMES: ReadonlyArray<TaxRegime> = ["non_vat_payer", "vat_payer", "identified_person"];
 
+const ISO_DATE_SHAPE = /^\d{4}-\d{2}-\d{2}$/;
+
 /** Settings -> Tax regime (flow 10.2): current regime, chronological history, and regime change. */
 export function TaxRegimeSection() {
   const { workspace, reload: reloadWorkspaces } = useWorkspace();
@@ -39,8 +46,10 @@ export function TaxRegimeSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.workspace.current({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) => client.workspace.current({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
 
   const [selectedRegime, setSelectedRegime] = useState<TaxRegime>(workspace.taxRegime);
@@ -55,36 +64,42 @@ export function TaxRegimeSection() {
     setErrorState(noFormError);
   }, [remote.state]);
 
-  const handleChangeRegime = async (currentRevision: number) => {
+  const handleChangeRegime = Effect.fn("tax-regime-section.handleChangeRegime")(function* (
+    currentRevision: number,
+  ) {
     if (!editable) return;
-    const date = effectiveFrom.trim();
+    const date = Str.trim(effectiveFrom);
     const regimeLabel = t(`enum.taxRegime.${selectedRegime}`);
-    const confirmed = await overlay.confirm({
-      title: t("settings.taxRegime.confirmTitle", { regime: regimeLabel }),
-      body:
-        selectedRegime === "vat_payer"
-          ? `${t("settings.taxRegime.confirmBody", { date })} ${local({
-              cs: "Pro plátce DPH bude připravena číselná řada daňových dokladů k přijaté platbě.",
-              en: "A default Payment Tax Document numbering series will be added for VAT payers.",
-            })}`
-          : t("settings.taxRegime.confirmBody", { date }),
-      confirmLabel: t("common.action.confirm"),
-      cancelLabel: t("common.action.cancel"),
-    });
-    if (!confirmed) return;
+    const confirmed = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.taxRegime.confirmTitle", { regime: regimeLabel }),
+        body:
+          selectedRegime === "vat_payer"
+            ? `${t("settings.taxRegime.confirmBody", { date })} ${local({
+                cs: "Pro plátce DPH bude připravena číselná řada daňových dokladů k přijaté platbě.",
+                en: "A default Payment Tax Document numbering series will be added for VAT payers.",
+              })}`
+            : t("settings.taxRegime.confirmBody", { date }),
+        confirmLabel: t("common.action.confirm"),
+        cancelLabel: t("common.action.cancel"),
+      }),
+    );
+    if (confirmed !== true) return;
 
     setSaving(true);
     setErrorState(noFormError);
-    const payload = {
+    const payload = IssuingEntityPatch.make({
       taxRegime: { regime: selectedRegime, effectiveFrom: date },
-    } as unknown as IssuingEntityPatch;
+    });
 
-    const result = await api.run((client) =>
-      client.workspace.updateIssuingEntity({
-        params: inWorkspace(workspace.id),
-        headers: ifMatchHeaders(currentRevision),
-        payload,
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.updateIssuingEntity({
+          params: inWorkspace(workspace.id),
+          headers: ifMatchHeaders(currentRevision),
+          payload,
+        }),
+      ),
     );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -94,7 +109,7 @@ export function TaxRegimeSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
@@ -133,7 +148,7 @@ export function TaxRegimeSection() {
                     badge={<Badge label={t("common.state.all")} tone="info" />}
                   />
                 ) : (
-                  parsed.taxRegimeHistory.map((period, idx) => (
+                  Arr.map(parsed.taxRegimeHistory, (period, idx) => (
                     <ListRow
                       key={`${period.effectiveFrom}-${period.regime}`}
                       title={t(`enum.taxRegime.${period.regime}`)}
@@ -155,7 +170,7 @@ export function TaxRegimeSection() {
                   <SegmentedChoice<TaxRegime>
                     label={t("settings.taxRegime.title")}
                     value={selectedRegime}
-                    choices={TAX_REGIMES.map((regime) => ({
+                    choices={Arr.map(TAX_REGIMES, (regime) => ({
                       value: regime,
                       label: t(`enum.taxRegime.${regime}`),
                     }))}
@@ -177,8 +192,8 @@ export function TaxRegimeSection() {
                     kind="filled"
                     label={t("settings.taxRegime.change")}
                     busy={saving}
-                    disabled={unchanged || !/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom.trim())}
-                    onPress={() => void handleChangeRegime(parsed.revision)}
+                    disabled={unchanged || !ISO_DATE_SHAPE.test(Str.trim(effectiveFrom))}
+                    onPress={() => forkFeatureEffect(handleChangeRegime(parsed.revision))}
                   />
                 </Card>
               </Section>

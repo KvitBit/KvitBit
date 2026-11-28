@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { Caller, UserId, Workspaces } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { changeMembershipAndRevokeCredentials } from "../../../src/http/groups/workspace/revokeCredentials";
-import { asCaller, runSqlCore } from "./sqlCore";
+import { runSqlCore } from "./sqlCore";
 
 test("a credential cleanup failure rolls back membership removal and the preceding key deletion", async () => {
   const owner = {
@@ -16,12 +16,14 @@ test("a credential cleanup failure rolls back membership removal and the precedi
     name: "Member",
     email: "member@example.test",
   };
-  const exit = await runSqlCore(
-    Caller.account({ ...owner, channel: "web", locale: "cs" }),
-    Effect.gen(function* () {
+  const exit = await runSqlCore({
+    effect: Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const workspaces = yield* Workspaces;
-      const caller = yield* workspaces.create({ name: "Kvitbit fixture" });
+      const caller = yield* workspaces.create(
+        Caller.account({ ...owner, channel: "web", locale: "cs" }),
+        { name: "Kvitbit fixture" },
+      );
       const workspace = caller.workspaceId;
 
       yield* sql`INSERT INTO memberships (workspace_id, user_id, role)
@@ -40,7 +42,7 @@ test("a credential cleanup failure rolls back membership removal and the precedi
 
       const remove = changeMembershipAndRevokeCredentials(
         sql,
-        asCaller(caller, workspaces.setRole(member.userId, null)),
+        workspaces.setRole(caller, member.userId, null),
         workspace,
         member.userId,
       );
@@ -55,8 +57,8 @@ test("a credential cleanup failure rolls back membership removal and the precedi
       const [committed] = yield* state;
       return { failed, rolledBack, committed };
     }),
-    { users: [owner, member] },
-  );
+    options: { users: [owner, member] },
+  });
   expect(exit).toMatchObject({
     _tag: "Success",
     value: {

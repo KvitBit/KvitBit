@@ -3,6 +3,7 @@
  * src/store/tables.ts (Workspace-scoped, `getForUpdate` revision check, compare-and-set
  * `update`, `UniqueViolation` per index name, `StoreUnavailable`).
  */
+
 import type {
   BankAccountId,
   Conflict,
@@ -16,10 +17,15 @@ import type {
   ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as EffectRecord from "effect/Record";
+import * as EffectString from "effect/String";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { compareScalar } from "../../store/query";
-import type { Scalar } from "../../store/tables";
+import type { Query, Scalar } from "../../store/tables";
 import { MemoryTables } from "../../store/tables";
 import type { DocumentRecord } from "./record";
 import { DocumentsTable, isOverdue } from "./record";
@@ -134,7 +140,7 @@ export class DocumentsRepo extends Context.Service<
       bankAccountId: BankAccountId,
     ) => Effect.Effect<ReadonlyArray<DocumentRecord>, StoreUnavailable>;
   }
->()("kvitbit/core/DocumentsRepo") {}
+>()("@kvitbit/core/modules/documents/repo/DocumentsRepo") {}
 
 /** `DocumentsRepo.reportable` range; `from` and `to` inclusive. */
 export interface ReportableRange {
@@ -151,18 +157,16 @@ export const reportTaxPoint = (
 const matchesSearch = (row: DocumentRecord, s: DocumentSearch): boolean => {
   if (s.overdue !== undefined && isOverdue(row, s.overdue.today) !== s.overdue.value) return false;
   if (s.text !== undefined && s.text !== "") {
-    const needle = s.text.toLowerCase();
-    const hay = [row.number ?? "", row.contact.name].join("\n").toLowerCase();
-    if (!hay.includes(needle)) return false;
+    const needle = EffectString.toLowerCase(s.text);
+    const hay = EffectString.toLowerCase(
+      EffectArray.join([row.number ?? "", row.contact.name], "\n"),
+    );
+    if (!EffectString.includes(needle)(hay)) return false;
   }
   return true;
 };
 
-/** Drops `undefined` members (exactOptionalPropertyTypes query shapes). */
-const definedOnly = <A extends object>(value: A): { [K in keyof A]?: Exclude<A[K], undefined> } =>
-  Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as {
-    [K in keyof A]?: Exclude<A[K], undefined>;
-  };
+type Writable<A> = { -readonly [K in keyof A]: A[K] };
 
 /** List order: issuedOn desc, id desc. */
 const listOrder = (a: DocumentRecord, b: DocumentRecord) =>
@@ -178,17 +182,20 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
   Effect.map(MemoryTables, (tables) => {
     const table = tables.collection(DocumentsTable);
     return DocumentsRepo.of({
-      get: (workspaceId, id) => table.get(workspaceId, id),
-      getMany: (workspaceId, ids) =>
+      get: Effect.fn("DocumentsRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+      getMany: Effect.fn("DocumentsRepo.getMany")((workspaceId, ids) =>
         ids.length === 0 ? Effect.succeed([]) : table.list(workspaceId, { whereIn: { id: ids } }),
-      getForUpdate: (workspaceId, id, expectedRevision) =>
+      ),
+      getForUpdate: Effect.fn("DocumentsRepo.getForUpdate")((workspaceId, id, expectedRevision) =>
         table.getForUpdate(workspaceId, id, expectedRevision),
-      lock: (workspaceId, id) => table.lock(workspaceId, id),
+      ),
+      lock: Effect.fn("DocumentsRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
       insert: table.insert,
       update: table.update,
-      remove: (workspaceId, id, expectedRevision) =>
+      remove: Effect.fn("DocumentsRepo.remove")((workspaceId, id, expectedRevision) =>
         table.remove(workspaceId, id, expectedRevision),
-      linkSchedule: (workspaceId, id, link) =>
+      ),
+      linkSchedule: Effect.fn("DocumentsRepo.linkSchedule")((workspaceId, id, link) =>
         Effect.flatMap(table.lock(workspaceId, id), (row) =>
           table.update({ ...row, ...link }, row.revision).pipe(
             // The row is locked: its revision cannot have moved.
@@ -196,29 +203,28 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
             Effect.asVoid,
           ),
         ),
-      search: (workspaceId, s, page) =>
-        Effect.map(
-          table.list(workspaceId, {
-            where: definedOnly({
-              kind: s.kind,
-              status: s.status,
-              settlement: s.settlement,
-              contactId: s.contactId,
-            }),
-            range: { issuedOn: definedOnly({ gte: s.from, lte: s.to }) },
-          }),
-          (rows) => {
-            const after = page.after;
-            const sorted = rows
-              .filter((row) => matchesSearch(row, s))
-              .filter((row) => after === undefined || afterCursor(row, after))
-              .sort(listOrder);
-            return { rows: sorted.slice(0, page.limit), more: sorted.length > page.limit };
-          },
-        ),
+      ),
+      search: Effect.fn("DocumentsRepo.search")((workspaceId, search, page) => {
+        const where: Writable<NonNullable<Query<DocumentRecord>["where"]>> = {};
+        if (search.kind !== undefined) where.kind = search.kind;
+        if (search.status !== undefined) where.status = search.status;
+        if (search.settlement !== undefined) where.settlement = search.settlement;
+        if (search.contactId !== undefined) where.contactId = search.contactId;
+        const issuedOn = EffectRecord.empty<"gte" | "lte", IsoDate>();
+        if (search.from !== undefined) issuedOn["gte"] = search.from;
+        if (search.to !== undefined) issuedOn["lte"] = search.to;
+        return Effect.map(table.list(workspaceId, { where, range: { issuedOn } }), (rows) => {
+          const after = page.after;
+          const sorted = EffectArray.filter(
+            EffectArray.filter(rows, (row) => matchesSearch(row, search)),
+            (row) => after === undefined || afterCursor(row, after),
+          ).sort(listOrder);
+          return { rows: sorted.slice(0, page.limit), more: sorted.length > page.limit };
+        });
+      }),
 
       // ReportsSource reads ---------------------------------------------------------------
-      reportable: (workspaceId, range) =>
+      reportable: Effect.fn("DocumentsRepo.reportable")((workspaceId, range) =>
         range.field === "issuedOn"
           ? table.list(workspaceId, {
               whereIn: { status: ["issued", "cancelled"] },
@@ -228,25 +234,30 @@ export const DocumentsRepoMemory: Layer.Layer<DocumentsRepo, never, MemoryTables
             Effect.map(
               table.list(workspaceId, { whereIn: { status: ["issued", "cancelled"] } }),
               (rows) =>
-                rows.filter((row) => {
+                EffectArray.filter(rows, (row) => {
                   const point = reportTaxPoint(row);
                   return point !== null && range.from <= point && point <= range.to;
                 }),
             ),
-      receivable: (workspaceId) =>
+      ),
+      receivable: Effect.fn("DocumentsRepo.receivable")((workspaceId) =>
         table.list(workspaceId, {
           where: { status: "issued" },
           whereIn: { kind: ["invoice", "proforma"], settlement: ["unpaid", "partially_paid"] },
         }),
+      ),
       // Bank account references --------------------------------------------------------------
-      draftsUsingBankAccount: (workspaceId, bankAccountId) =>
-        Effect.map(table.list(workspaceId, { where: { status: "draft" } }), (rows) =>
-          rows.filter(
-            (row) =>
-              row.given.bankAccount === bankAccountId ||
-              row.issuer.bankAccount?.id === bankAccountId,
+      draftsUsingBankAccount: Effect.fn("DocumentsRepo.draftsUsingBankAccount")(
+        (workspaceId, bankAccountId) =>
+          Effect.map(table.list(workspaceId, { where: { status: "draft" } }), (rows) =>
+            EffectArray.filter(
+              rows,
+              (row) =>
+                row.given.bankAccount === bankAccountId ||
+                row.issuer.bankAccount?.id === bankAccountId,
+            ),
           ),
-        ),
+      ),
     });
   }),
 );

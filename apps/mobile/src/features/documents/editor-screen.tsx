@@ -1,38 +1,45 @@
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
+import * as Effect from "effect/Effect";
+import { fromMobilePromise } from "../../runtime/request-intent";
+import { runFeatureEffect } from "../ui-effect";
 /**
  * Document editor (`new/[kind].tsx`, `[id]/edit.tsx`) and quick Credit Note creator
  * (`new/credit_note.tsx`). Uses `@kvitbit/ui-port/view-models` `calculate()` for instant
  * VAT & CZK FX breakdown preview alongside live CNB rate lookup.
  */
+
 import type {
   ContactId,
-  CurrencyCode,
   DocumentId,
   DocumentPatch,
   DocumentView,
   FxRateView,
-  IsoDate,
   Locale,
   TemplateId,
 } from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
+import { CurrencyCode, IsoDate, MoneyMath } from "@kvitbit/domain/contract";
 import {
   describeError,
   idempotencyHeaders,
   ifMatchHeaders,
   issuesAt,
-  type UiError,
+  UiError,
 } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney, formatVatRate, parseIsoDate } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { displayAmount } from "@kvitbit/ui-port/view-models";
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Str from "effect/String";
 import { router } from "expo-router";
 import { BookOpen, Plus, Save, Send, Trash2, Users } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, ScrollView, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
-import { useApi, useRemote } from "../../runtime/api-runtime";
+import { useApi, useReloadSignal, useRemote } from "../../runtime/api-runtime";
 import { isRequestIntentExpired, requestIntentFailure } from "../../runtime/request-intent";
 import { useTheme } from "../../theme/theme-provider";
 import {
@@ -90,12 +97,18 @@ import {
 import { requestErrorText, useRequestMutation, useRequestOwner } from "./request-mutation";
 import {
   discardExpiredTemplateImport,
-  ImportedDraftRevisionMismatch,
   importTemplate,
   openImportedDraft,
   recordImportedDraftWrite,
   type TemplateSeed,
 } from "./template-import";
+
+const contactSubtitle = (contact: ContactOption): string => {
+  const numbers: string[] = [];
+  if ((contact.ico ?? "") !== "") numbers.push(`IČO ${contact.ico}`);
+  if ((contact.dic ?? "") !== "") numbers.push(`DIČ ${contact.dic}`);
+  return numbers.length > 0 ? Arr.join(numbers, " · ") : Arr.join(contact.billingEmails, ", ");
+};
 
 export function DocumentFromTemplateScreen({ templateId }: { readonly templateId: TemplateId }) {
   const { workspace } = useWorkspace();
@@ -105,45 +118,51 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
   const requestOwner = useRequestOwner(workspace.id);
   const writable = canWriteWorkspace(workspace);
   const [failure, setFailure] = useState<UiError | null>(null);
-  const [attempt, setAttempt] = useState(0);
+  const [importSignal, reloadImport] = useReloadSignal();
   const [restarting, setRestarting] = useState(false);
   const expired = failure !== null && isRequestIntentExpired(failure);
 
   const retry = () => {
     setFailure(null);
-    setAttempt((n) => n + 1);
+    reloadImport();
   };
 
-  const startNewImport = async () => {
-    if (requestOwner === null || restarting) return;
+  const startNewImport = Effect.fn("startNewImport")(function* () {
+    if (requestOwner === null || restarting === true) return;
     setRestarting(true);
     const label = local({ cs: "Zahájit nový import", en: "Start new import" });
-    try {
-      const confirmed = await overlay.confirm({
-        title: label,
-        body: local({
-          cs: "Zkontrolujte, zda už předchozí import nevytvořil koncept. Pokračováním vytvoříte nový koncept.",
-          en: "Check whether the earlier import already created a draft. Continuing will start a new draft.",
+    yield* Effect.gen(function* () {
+      const confirmed = yield* fromMobilePromise(() =>
+        overlay.confirm({
+          title: label,
+          body: local({
+            cs: "Zkontrolujte, zda už předchozí import nevytvořil koncept. Pokračováním vytvoříte nový koncept.",
+            en: "Check whether the earlier import already created a draft. Continuing will start a new draft.",
+          }),
+          confirmLabel: label,
+          cancelLabel: t("common.action.cancel"),
         }),
-        confirmLabel: label,
-        cancelLabel: t("common.action.cancel"),
-      });
+      );
       if (!confirmed) return;
-      await discardExpiredTemplateImport(requestOwner, templateId);
+      yield* discardExpiredTemplateImport(requestOwner, templateId);
       retry();
-    } catch (error) {
-      setFailure(requestIntentFailure(error));
-    } finally {
-      setRestarting(false);
-    }
-  };
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.sync(() =>
+          setFailure(
+            error._tag === "SchemaError" ? UiError.offline : requestIntentFailure(error.cause),
+          ),
+        ),
+      ),
+      Effect.ensuring(Effect.sync(() => setRestarting(false))),
+    );
+  }, runFeatureEffect);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new attempt
   useEffect(() => {
-    if (!writable || requestOwner === null) return;
+    if (!writable || requestOwner === null || importSignal.aborted) return;
     let active = true;
-    void importTemplate(requestOwner, workspace, templateId, run).then((result) => {
-      if (!active) return;
+    runFeatureEffect(importTemplate(requestOwner, workspace, templateId, run)).then((result) => {
+      if (!active || importSignal.aborted) return;
       if (result._tag === "Err") {
         setFailure(result.error);
       } else {
@@ -156,7 +175,7 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
     return () => {
       active = false;
     };
-  }, [attempt, requestOwner, run, templateId, workspace, writable]);
+  }, [importSignal, requestOwner, run, templateId, workspace, writable]);
 
   return (
     <Screen title={t("documents.editor.titleDraft")} back>
@@ -182,7 +201,7 @@ export function DocumentFromTemplateScreen({ templateId }: { readonly templateId
                 label={local({ cs: "Zahájit nový import", en: "Start new import" })}
                 testID="template-import-start-new"
                 busy={restarting}
-                onPress={() => void startNewImport()}
+                onPress={() => startNewImport()}
               />
             </>
           ) : (
@@ -215,8 +234,8 @@ function PickerModal<T>(props: {
   const theme = useTheme();
   const [query, setQuery] = useState("");
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return q === "" ? props.items : props.items.filter((item) => props.filter(item, q));
+    const q = Str.toLowerCase(Str.trim(query));
+    return q === "" ? props.items : Arr.filter(props.items, (item) => props.filter(item, q));
   }, [props, query]);
 
   return (
@@ -240,7 +259,7 @@ function PickerModal<T>(props: {
             {filtered.length === 0 ? (
               <EmptyState title={t("common.state.noMatches")} />
             ) : (
-              filtered.map((item) => (
+              Arr.map(filtered, (item) => (
                 <View key={props.keyOf(item)}>
                   {props.renderItem(item, () => {
                     props.onSelect(item);
@@ -283,24 +302,38 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const overlay = useOverlay();
 
   const wsRemote = useRemote(
-    (api) => api.workspace.current({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) => api.workspace.current({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
   const contactsRemote = useRemote(
-    (api) => api.contacts.search({ params: { workspaceId: workspace.id }, query: { limit: 100 } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.contacts.search({ params: { workspaceId: workspace.id }, query: { limit: 100 } }),
+      [workspace.id],
+    ),
   );
   const priceListRemote = useRemote(
-    (api) => api.priceList.list({ params: { workspaceId: workspace.id }, query: {} }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.priceList.list({ params: { workspaceId: workspace.id }, query: {} }),
+      [workspace.id],
+    ),
   );
   const bankAccountsRemote = useRemote(
-    (api) => api.workspace.listBankAccounts({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.workspace.listBankAccounts({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
   const seriesRemote = useRemote(
-    (api) => api.workspace.listSeries({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.workspace.listSeries({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
 
   const sourceDocId =
@@ -311,13 +344,16 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         : null;
 
   const sourceDocRemote = useRemote(
-    sourceDocId === null
-      ? null
-      : (api) =>
-          api.documents.get({
-            params: { workspaceId: workspace.id, documentId: sourceDocId },
-          }),
-    [workspace.id, sourceDocId],
+    useMemo(
+      () =>
+        sourceDocId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.documents.get({
+                params: { workspaceId: workspace.id, documentId: sourceDocId },
+              }),
+      [workspace.id, sourceDocId],
+    ),
   );
 
   const originalDoc: DocumentView | null =
@@ -329,15 +365,22 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     readonly seed: TemplateSeed | null;
   } | null>(null);
   const templateContactId =
-    cachedTemplate?.seed != null && originalDoc !== null && originalDoc.status === "draft"
-      ? parseContactSnapshot(originalDoc.contact).contactId || null
+    (cachedTemplate?.seed ?? null) !== null &&
+    originalDoc !== null &&
+    originalDoc.status === "draft"
+      ? parseContactSnapshot(originalDoc.contact).contactId
       : null;
   const templateContactRemote = useRemote(
-    templateContactId === null
-      ? null
-      : (api) =>
-          api.contacts.get({ params: { workspaceId: workspace.id, contactId: templateContactId } }),
-    [workspace.id, templateContactId],
+    useMemo(
+      () =>
+        templateContactId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.contacts.get({
+                params: { workspaceId: workspace.id, contactId: templateContactId },
+              }),
+      [workspace.id, templateContactId],
+    ),
   );
   const templateContactArchived =
     templateContactId !== null &&
@@ -356,7 +399,10 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const contacts: ReadonlyArray<ContactOption> = useMemo(
     () =>
       contactsRemote.state._tag === "Ready"
-        ? contactsRemote.state.value.items.map(parseContactOption).filter((c) => !c.archived)
+        ? Arr.filter(
+            Arr.map(contactsRemote.state.value.items, parseContactOption),
+            (c) => !c.archived,
+          )
         : [],
     [contactsRemote.state],
   );
@@ -364,7 +410,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const priceList: ReadonlyArray<PriceListOption> = useMemo(
     () =>
       priceListRemote.state._tag === "Ready"
-        ? priceListRemote.state.value.map(parsePriceListOption).filter((p) => !p.archived)
+        ? Arr.filter(Arr.map(priceListRemote.state.value, parsePriceListOption), (p) => !p.archived)
         : [],
     [priceListRemote.state],
   );
@@ -372,7 +418,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const bankAccounts: ReadonlyArray<BankAccountOption> = useMemo(
     () =>
       bankAccountsRemote.state._tag === "Ready"
-        ? bankAccountsRemote.state.value.map(parseBankAccountOption)
+        ? Arr.map(bankAccountsRemote.state.value, parseBankAccountOption)
         : [],
     [bankAccountsRemote.state],
   );
@@ -386,34 +432,40 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   const [templateLoadFailure, setTemplateLoadFailure] = useState<"storage" | "revision" | null>(
     null,
   );
-  const [templateLoadAttempt, setTemplateLoadAttempt] = useState(0);
+  const [templateLoadSignal, reloadTemplate] = useReloadSignal();
   const importDocId = originalDoc?.id ?? null;
   const importRevision = originalDoc?.revision ?? null;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: the retry button starts a new lookup
   useEffect(() => {
-    if (draft !== null || requestOwner === null || importDocId === null || importRevision === null)
+    if (
+      draft !== null ||
+      requestOwner === null ||
+      importDocId === null ||
+      importRevision === null ||
+      templateLoadSignal.aborted
+    )
       return;
     let live = true;
-    void openImportedDraft(requestOwner, importDocId, importRevision).then(
-      (seed) => {
-        if (live) {
-          setTemplateLoadFailure(null);
-          setCachedTemplate({ revision: importRevision, seed });
-        }
-      },
-      (error: unknown) => {
-        if (live) {
-          setTemplateLoadFailure(
-            error instanceof ImportedDraftRevisionMismatch ? "revision" : "storage",
-          );
-        }
-      },
+    runFeatureEffect(
+      openImportedDraft(requestOwner, importDocId, importRevision).pipe(
+        Effect.match({
+          onSuccess: (seed) => {
+            if (live && !templateLoadSignal.aborted) {
+              setTemplateLoadFailure(null);
+              setCachedTemplate({ revision: importRevision, seed });
+            }
+          },
+          onFailure: (error) => {
+            if (live && !templateLoadSignal.aborted)
+              setTemplateLoadFailure(error._tag === "StaleImportedDraft" ? "revision" : "storage");
+          },
+        }),
+      ),
     );
     return () => {
       live = false;
     };
-  }, [draft, importDocId, importRevision, requestOwner, templateLoadAttempt]);
+  }, [draft, importDocId, importRevision, requestOwner, templateLoadSignal]);
 
   const readyToInit =
     wsRemote.state._tag === "Ready" &&
@@ -478,7 +530,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     if (props.mode === "new") {
       const preselected =
         props.contactId !== undefined
-          ? (contacts.find((c) => c.id === props.contactId) ?? null)
+          ? (Option.getOrUndefined(Arr.findFirst(contacts, (c) => c.id === props.contactId)) ??
+            null)
           : null;
       setDraft(
         draftForNew({
@@ -505,7 +558,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
   ]);
 
   // Fetch CNB FX rate whenever non-CZK currency & CNB mode are active.
-  const fxCurrency = draft?.currency ?? ("CZK" as CurrencyCode);
+  const fxCurrency = draft?.currency ?? CurrencyCode.make("CZK");
   const fxMode = draft?.fxMode ?? "cnb";
   const fxDate =
     draft !== null && parseIsoDate(draft.taxableSupplyOn) !== undefined
@@ -524,22 +577,29 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     let live = true;
     setFxLoading(true);
     setFxUnavailable(false);
-    void run((api) =>
+    run((api) =>
       api.reports.fxRate({
         params: { workspaceId: workspace.id, currency: fxCurrency },
-        query: { on: fxDate as IsoDate },
+        query: { on: IsoDate.make(fxDate) },
       }),
-    ).then((res) => {
-      if (!live) return;
-      setFxLoading(false);
-      if (res._tag === "Ok") {
-        setCnbFx(res.value);
-        setFxUnavailable(false);
-      } else {
+    )
+      .then((res) => {
+        if (!live) return;
+        setFxLoading(false);
+        if (res._tag === "Ok") {
+          setCnbFx(res.value);
+          setFxUnavailable(false);
+        } else {
+          setCnbFx(null);
+          setFxUnavailable(true);
+        }
+      })
+      .catch(() => {
+        if (!live) return;
+        setFxLoading(false);
         setCnbFx(null);
         setFxUnavailable(true);
-      }
-    });
+      });
     return () => {
       live = false;
     };
@@ -587,7 +647,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
         ? prev
         : {
             ...prev,
-            lines: prev.lines.map((line) => (line.key === lineKey ? { ...line, ...patch } : line)),
+            lines: Arr.map(prev.lines, (line) =>
+              line.key === lineKey ? { ...line, ...patch } : line,
+            ),
           },
     );
   }, []);
@@ -596,7 +658,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     setDraft((prev) =>
       prev === null || prev.lines.length <= 1
         ? prev
-        : { ...prev, lines: prev.lines.filter((line) => line.key !== lineKey) },
+        : { ...prev, lines: Arr.filter(prev.lines, (line) => line.key !== lineKey) },
     );
   }, []);
 
@@ -614,7 +676,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
     );
   }, [workspaceDefaults.taxRegime]);
 
-  const submit = async (intent: "save" | "issue") => {
+  const submit = Effect.fn("submitDocument")(function* (intent: "save" | "issue") {
     if (draft === null || validation === null || submitting.current || pendingCheckpoint !== null)
       return;
     setValidationShown(true);
@@ -624,21 +686,23 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
 
     submitting.current = true;
     setBusyMode(intent);
-    try {
-      await saveOrIssue(draft, intent);
-    } finally {
-      submitting.current = false;
-      setBusyMode(null);
-    }
-  };
+    yield* saveOrIssue(draft, intent).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          submitting.current = false;
+          setBusyMode(null);
+        }),
+      ),
+    );
+  }, runFeatureEffect);
 
-  const recordWrite = async (
+  const recordWrite = Effect.fn("recordWrite")(function* (
     documentId: DocumentId,
     patch: DocumentPatch | null,
     baseRevision: number,
     revision: number,
-  ): Promise<boolean> => {
-    if (requestOwner === null || cachedTemplate?.seed == null) return true;
+  ) {
+    if (requestOwner === null || (cachedTemplate?.seed ?? null) === null) return true;
     const checkpoint: Parameters<typeof recordImportedDraftWrite> = [
       requestOwner,
       documentId,
@@ -646,48 +710,59 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       baseRevision,
       revision,
     ];
-    try {
-      await recordImportedDraftWrite(...checkpoint);
-      return true;
-    } catch {
-      setPendingCheckpoint(checkpoint);
-      return false;
-    }
-  };
+    return yield* recordImportedDraftWrite(...checkpoint).pipe(
+      Effect.match({
+        onSuccess: () => true,
+        onFailure: () => {
+          setPendingCheckpoint(checkpoint);
+          return false;
+        },
+      }),
+    );
+  });
 
-  const retryCheckpoint = async () => {
+  const retryCheckpoint = Effect.fn("retryCheckpoint")(function* () {
     if (pendingCheckpoint === null || submitting.current) return;
     submitting.current = true;
     setBusyMode("save");
-    try {
-      await recordImportedDraftWrite(...pendingCheckpoint);
-      setPendingCheckpoint(null);
-    } catch {
+    yield* recordImportedDraftWrite(...pendingCheckpoint).pipe(
+      Effect.tap(() => Effect.sync(() => setPendingCheckpoint(null))),
       // Keep the acknowledged revision and retry only its local checkpoint.
-    } finally {
-      submitting.current = false;
-      setBusyMode(null);
-    }
-  };
+      Effect.ignore,
+      Effect.ensuring(
+        Effect.sync(() => {
+          submitting.current = false;
+          setBusyMode(null);
+        }),
+      ),
+    );
+  }, runFeatureEffect);
 
-  const saveOrIssue = async (draft: EditorDraft, intent: "save" | "issue") => {
+  const saveOrIssue = Effect.fn("saveOrIssue")(function* (
+    currentDraft: EditorDraft,
+    intent: "save" | "issue",
+  ) {
     if (props.mode === "new") {
-      const input = buildDocumentInput(draft);
+      const input = buildDocumentInput(currentDraft);
       const res =
         intent === "issue"
-          ? await runMutation("documents.issueFromInput", input, (api, key) =>
-              api.documents.issueFromInput({
-                params: { workspaceId: workspace.id },
-                headers: idempotencyHeaders(key),
-                payload: { input },
-              }),
+          ? yield* fromMobilePromise(() =>
+              runMutation("documents.issueFromInput", input, (api, key) =>
+                api.documents.issueFromInput({
+                  params: { workspaceId: workspace.id },
+                  headers: idempotencyHeaders(key),
+                  payload: { input },
+                }),
+              ),
             )
-          : await runMutation("documents.createDraft", input, (api, key) =>
-              api.documents.createDraft({
-                params: { workspaceId: workspace.id },
-                headers: idempotencyHeaders(key),
-                payload: input,
-              }),
+          : yield* fromMobilePromise(() =>
+              runMutation("documents.createDraft", input, (api, key) =>
+                api.documents.createDraft({
+                  params: { workspaceId: workspace.id },
+                  headers: idempotencyHeaders(key),
+                  payload: input,
+                }),
+              ),
             );
       if (res._tag === "Err") {
         const described = describeError(res.error);
@@ -721,16 +796,18 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
 
     let finalDoc = originalDoc;
     const patch =
-      base.draft === draft
+      base.draft === currentDraft
         ? {}
-        : buildDocumentPatch(draft, base.draft, originalDoc, workspace.role);
-    if (Object.keys(patch).length > 0) {
-      const editRes = await run((api) =>
-        api.documents.edit({
-          params: { workspaceId: workspace.id, documentId: originalDoc.id },
-          headers: ifMatchHeaders(originalDoc.revision),
-          payload: patch,
-        }),
+        : buildDocumentPatch(currentDraft, base.draft, originalDoc, workspace.role);
+    if (EffectRecord.keys<string, DocumentPatch[keyof DocumentPatch]>(patch).length > 0) {
+      const editRes = yield* fromMobilePromise(() =>
+        run((api) =>
+          api.documents.edit({
+            params: { workspaceId: workspace.id, documentId: originalDoc.id },
+            headers: ifMatchHeaders(originalDoc.revision),
+            payload: patch,
+          }),
+        ),
       );
       if (editRes._tag === "Err") {
         const described = describeError(editRes.error);
@@ -740,20 +817,22 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       }
       finalDoc = editRes.value;
       sourceDocRemote.set(finalDoc);
-      savedDraft.current = { draft, id: finalDoc.id, revision: finalDoc.revision };
-      if (!(await recordWrite(originalDoc.id, patch, originalDoc.revision, finalDoc.revision))) {
+      savedDraft.current = { draft: currentDraft, id: finalDoc.id, revision: finalDoc.revision };
+      if (!(yield* recordWrite(originalDoc.id, patch, originalDoc.revision, finalDoc.revision))) {
         return;
       }
     }
 
     if (intent === "issue" && finalDoc.status === "draft") {
       const { id, revision } = finalDoc;
-      const issueRes = await runMutation(`documents.issueDraft:${id}`, { revision }, (api, key) =>
-        api.documents.issueDraft({
-          params: { workspaceId: workspace.id, documentId: id },
-          headers: { ...ifMatchHeaders(revision), ...idempotencyHeaders(key) },
-          payload: {},
-        }),
+      const issueRes = yield* fromMobilePromise(() =>
+        runMutation(`documents.issueDraft:${id}`, { revision }, (api, key) =>
+          api.documents.issueDraft({
+            params: { workspaceId: workspace.id, documentId: id },
+            headers: { ...ifMatchHeaders(revision), ...idempotencyHeaders(key) },
+            payload: {},
+          }),
+        ),
       );
       if (issueRes._tag === "Err") {
         const described = describeError(issueRes.error);
@@ -763,8 +842,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       }
       finalDoc = issueRes.value;
       sourceDocRemote.set(finalDoc);
-      savedDraft.current = { draft, id: finalDoc.id, revision: finalDoc.revision };
-      if (!(await recordWrite(id, null, revision, finalDoc.revision))) return;
+      savedDraft.current = { draft: currentDraft, id: finalDoc.id, revision: finalDoc.revision };
+      if (!(yield* recordWrite(id, null, revision, finalDoc.revision))) return;
     }
 
     overlay.toast(
@@ -776,7 +855,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
       { _tag: "Document", ws: workspace.slug, id: finalDoc.id, tab: "preview" },
       { replace: true },
     );
-  };
+  });
 
   const title =
     props.mode === "new"
@@ -789,19 +868,23 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
 
   const isLocked = originalDoc?.locked === true;
   const isIssued = originalDoc?.status === "issued";
-  const hasSavedTerms = props.mode === "new" || cachedTemplate?.seed != null;
+  const hasSavedTerms = props.mode === "new" || (cachedTemplate?.seed ?? null) !== null;
   const keepSaved = {
     value: "keep" as const,
     label: local({ cs: "Ponechat uložené", en: "Keep saved value" }),
   };
   const canAdmin = workspace.role === "owner" || workspace.role === "admin";
   const selectedContact =
-    draft === null ? null : (contacts.find((c) => c.id === draft.contactId) ?? null);
+    draft === null
+      ? null
+      : (Option.getOrUndefined(Arr.findFirst(contacts, (c) => c.id === draft.contactId)) ?? null);
   const currencyBankAccounts =
     draft === null ? [] : matchingBankAccounts(bankAccounts, draft.currency);
   const kindSeries = draft === null ? [] : matchingSeries(seriesList, draft.kind);
   const selectedSeries =
-    draft === null ? null : (kindSeries.find((s) => s.id === draft.seriesId) ?? null);
+    draft === null
+      ? null
+      : (Option.getOrUndefined(Arr.findFirst(kindSeries, (s) => s.id === draft.seriesId)) ?? null);
 
   return (
     <Screen
@@ -821,7 +904,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               busy={busyMode === "save"}
               disabled={busyMode !== null}
               testID="editor-save-button"
-              onPress={() => void submit("save")}
+              onPress={() => submit("save")}
             />
             {!isIssued ? (
               <Button
@@ -831,7 +914,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 busy={busyMode === "issue"}
                 disabled={busyMode !== null}
                 testID="editor-issue-button"
-                onPress={() => void submit("issue")}
+                onPress={() => submit("issue")}
               />
             ) : null}
           </>
@@ -858,7 +941,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             label={t("common.action.retry")}
             testID="editor-template-checkpoint-retry"
             busy={busyMode !== null}
-            onPress={() => void retryCheckpoint()}
+            onPress={() => retryCheckpoint()}
           />
         </>
       ) : draft === null && templateLoadFailure !== null ? (
@@ -876,7 +959,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             onPress: () => {
               setTemplateLoadFailure(null);
               sourceDocRemote.reload();
-              setTemplateLoadAttempt((n) => n + 1);
+              reloadTemplate();
             },
           }}
         />
@@ -916,27 +999,22 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               <ListRow
                 title={selectedContact?.name ?? t("documents.editor.contact")}
                 subtitle={
-                  selectedContact !== null
-                    ? [
-                        selectedContact.ico ? `IČO ${selectedContact.ico}` : null,
-                        selectedContact.dic ? `DIČ ${selectedContact.dic}` : null,
-                      ]
-                        .filter(Boolean)
-                        .join(" · ") || selectedContact.billingEmails.join(", ")
-                    : t("documents.editor.contactSearch")
+                  selectedContact === null
+                    ? t("documents.editor.contactSearch")
+                    : contactSubtitle(selectedContact)
                 }
                 leading={Users}
                 testID="editor-contact-picker"
                 {...(isLocked ? {} : { onPress: () => setContactPickerOpen(true) })}
               />
-              {validationShown && validation?.contact !== undefined ? (
+              {validationShown === true && validation?.contact !== undefined ? (
                 <Text variant="bodySmall" color="error">
                   {validation.contact}
                 </Text>
               ) : null}
-              {issuesAt(serverIssues, ["contact"]).map((iss) => (
+              {Arr.map(issuesAt(serverIssues, ["contact"]), (iss) => (
                 <Text
-                  key={`${iss.path.join(".")}-${iss.text.key}`}
+                  key={`${Arr.join(Arr.map(iss.path, String), ".")}-${iss.text.key}`}
                   variant="bodySmall"
                   color="error"
                 >
@@ -968,9 +1046,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               ) : null
             }
           >
-            {draft.lines.map((line, index) => {
+            {Arr.map(draft.lines, (line, index) => {
               const lineCalc = preview?.lines[index];
-              const lineError = validationShown ? validation?.lines[line.key] : undefined;
+              const lineError = validationShown === true ? validation?.lines[line.key] : undefined;
               return (
                 <Card key={line.key}>
                   <View className="flex-row items-center justify-between">
@@ -1042,9 +1120,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     <SegmentedChoice
                       label={t("documents.editor.line.vat")}
                       value={line.treatment}
-                      choices={VAT_TREATMENTS.map((tr) => ({
+                      choices={Arr.map(VAT_TREATMENTS, (tr) => ({
                         value: tr,
-                        label: t(enumKey("vatTreatment", tr)),
+                        label: t(enumKey({ name: "vatTreatment", value: tr })),
                       }))}
                       onChange={(value) => {
                         if (!isLocked) updateLine(line.key, { treatment: value });
@@ -1080,7 +1158,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 onChangeText={(value) => setDraft({ ...draft, issuedOn: value })}
                 placeholder="YYYY-MM-DD"
                 disabled={isLocked}
-                {...(validationShown && validation?.issuedOn !== undefined
+                {...(validationShown === true && validation?.issuedOn !== undefined
                   ? { error: validation.issuedOn }
                   : {})}
                 testID="editor-issued-on"
@@ -1092,7 +1170,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                   onChangeText={(value) => setDraft({ ...draft, taxableSupplyOn: value })}
                   placeholder="YYYY-MM-DD"
                   disabled={isLocked}
-                  {...(validationShown && validation?.taxableSupplyOn !== undefined
+                  {...(validationShown === true && validation?.taxableSupplyOn !== undefined
                     ? { error: validation.taxableSupplyOn }
                     : {})}
                   testID="editor-taxable-supply-on"
@@ -1104,7 +1182,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 onChangeText={(value) => setDraft({ ...draft, dueOn: value })}
                 placeholder="YYYY-MM-DD"
                 disabled={isLocked}
-                {...(validationShown && validation?.dueOn !== undefined
+                {...(validationShown === true && validation?.dueOn !== undefined
                   ? { error: validation.dueOn }
                   : {})}
                 testID="editor-due-on"
@@ -1118,7 +1196,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               <SegmentedChoice
                 label={t("documents.editor.currency")}
                 value={draft.currency}
-                choices={COMMON_CURRENCIES.map((cur) => ({ value: cur, label: cur }))}
+                choices={Arr.map(COMMON_CURRENCIES, (cur) => ({ value: cur, label: cur }))}
                 onChange={(currency) => {
                   if (isLocked) return;
                   setDraft({
@@ -1135,7 +1213,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     label={t("documents.editor.fx.title")}
                     value={draft.fxMode}
                     choices={[
-                      { value: "cnb", label: t(enumKey("fxSource", "cnb")) },
+                      { value: "cnb", label: t(enumKey({ name: "fxSource", value: "cnb" })) },
                       { value: "manual", label: t("documents.editor.fx.manual") },
                     ]}
                     onChange={(mode) => {
@@ -1143,7 +1221,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     }}
                   />
                   {draft.fxMode === "cnb" ? (
-                    fxLoading ? (
+                    fxLoading === true ? (
                       <Text variant="meta" color="onSurfaceVariant">
                         {t("documents.editor.fx.loading")}
                       </Text>
@@ -1153,10 +1231,10 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                           rate: BigDecimal.format(cnbFx.rate),
                           quantity: cnbFx.quantity,
                           currency: draft.currency,
-                          date: formatDate(locale, cnbFx.fixingDate),
+                          date: formatDate({ locale, date: cnbFx.fixingDate }),
                         })}
                       </Text>
-                    ) : fxUnavailable ? (
+                    ) : fxUnavailable === true ? (
                       <Banner tone="warning" text={t("documents.editor.fx.unavailable")} />
                     ) : null
                   ) : (
@@ -1182,7 +1260,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                       </View>
                     </View>
                   )}
-                  {validationShown && validation?.fx !== undefined ? (
+                  {validationShown === true && validation?.fx !== undefined ? (
                     <Text variant="bodySmall" color="error">
                       {validation.fx}
                     </Text>
@@ -1193,9 +1271,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
               <SegmentedChoice
                 label={t("documents.editor.paymentMethod")}
                 value={draft.paymentMethod}
-                choices={PAYMENT_METHODS.map((m) => ({
+                choices={Arr.map(PAYMENT_METHODS, (m) => ({
                   value: m,
-                  label: t(enumKey("paymentMethod", m)),
+                  label: t(enumKey({ name: "paymentMethod", value: m })),
                 }))}
                 onChange={(paymentMethod) => {
                   if (!isLocked) setDraft({ ...draft, paymentMethod });
@@ -1213,9 +1291,9 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 <SegmentedChoice
                   label={t("documents.editor.bankAccount")}
                   value={draft.bankAccountId}
-                  choices={currencyBankAccounts.map((b) => ({
+                  choices={Arr.map(currencyBankAccounts, (b) => ({
                     value: b.id,
-                    label: b.name ? `${b.name} (${b.iban})` : b.iban,
+                    label: (b.name ?? "") !== "" ? `${b.name} (${b.iban})` : b.iban,
                   }))}
                   onChange={(bankAccountId) => {
                     if (!isLocked) setDraft({ ...draft, bankAccountId });
@@ -1230,7 +1308,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     value={draft.seriesId ?? (hasSavedTerms ? null : "keep")}
                     choices={[
                       ...(!hasSavedTerms ? [keepSaved] : []),
-                      ...kindSeries.map((s) => ({ value: s.id, label: s.name })),
+                      ...Arr.map(kindSeries, (s) => ({ value: s.id, label: s.name })),
                     ]}
                     onChange={(seriesId) => {
                       if (!isLocked)
@@ -1258,8 +1336,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                 value={draft.language ?? (hasSavedTerms ? null : "keep")}
                 choices={[
                   ...(!hasSavedTerms ? [keepSaved] : []),
-                  { value: "cs", label: t(enumKey("locale", "cs")) },
-                  { value: "en", label: t(enumKey("locale", "en")) },
+                  { value: "cs", label: t(enumKey({ name: "locale", value: "cs" })) },
+                  { value: "en", label: t(enumKey({ name: "locale", value: "en" })) },
                 ]}
                 onChange={(language: Locale | "keep") => {
                   if (!isLocked)
@@ -1281,7 +1359,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                     value={
                       draft.pricesIncludeVat === null
                         ? "keep"
-                        : draft.pricesIncludeVat
+                        : draft.pricesIncludeVat === true
                           ? "inclusive"
                           : "exclusive"
                     }
@@ -1326,13 +1404,13 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
           {preview !== null ? (
             <Section title={t("documents.editor.section.preview")}>
               <Card>
-                {preview.breakdown.buckets.map((bucket) => (
+                {Arr.map(preview.breakdown.buckets, (bucket) => (
                   <View
                     key={`${bucket.treatment}-${String(bucket.ratePercent)}`}
                     className="flex-row items-center justify-between gap-3"
                   >
                     <Text variant="bodyMedium" className="flex-1">
-                      {`${t(enumKey("vatTreatment", bucket.treatment))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
+                      {`${t(enumKey({ name: "vatTreatment", value: bucket.treatment }))} (${formatVatRate(locale, Number(BigDecimal.format(bucket.ratePercent)))})`}
                     </Text>
                     <View className="items-end gap-0.5">
                       <Text variant="bodyMedium" numeric>
@@ -1348,7 +1426,7 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
                         <Text variant="meta" color="onSurfaceVariant" numeric>
                           {`CZK ${t("common.field.vat")}: ${formatMoney(
                             locale,
-                            MoneyMath.make(bucket.vatCzk, "CZK" as CurrencyCode),
+                            MoneyMath.make(bucket.vatCzk, CurrencyCode.make("CZK")),
                           )}`}
                         </Text>
                       ) : null}
@@ -1430,16 +1508,23 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             items={contacts}
             keyOf={(c) => c.id}
             filter={(c, q) =>
-              c.name.toLowerCase().includes(q) ||
-              (c.ico ?? "").toLowerCase().includes(q) ||
-              (c.dic ?? "").toLowerCase().includes(q)
+              Str.includes(q)(Str.toLowerCase(c.name)) ||
+              Str.includes(q)(Str.toLowerCase(c.ico ?? "")) ||
+              Str.includes(q)(Str.toLowerCase(c.dic ?? ""))
             }
             renderItem={(c, select) => (
               <ListRow
                 title={c.name}
-                subtitle={[c.ico ? `IČO ${c.ico}` : null, c.dic ? `DIČ ${c.dic}` : null]
-                  .filter(Boolean)
-                  .join(" · ")}
+                subtitle={Arr.join(
+                  Arr.filter(
+                    [
+                      (c.ico ?? "") !== "" ? `IČO ${c.ico}` : null,
+                      (c.dic ?? "") !== "" ? `DIČ ${c.dic}` : null,
+                    ],
+                    (part): part is string => part !== null && part !== "",
+                  ),
+                  " · ",
+                )}
                 onPress={select}
               />
             )}
@@ -1467,8 +1552,8 @@ export function DocumentEditorScreen(props: DocumentEditorProps) {
             items={priceList}
             keyOf={(item) => item.id}
             filter={(item, q) =>
-              item.name.toLowerCase().includes(q) ||
-              (item.description ?? "").toLowerCase().includes(q)
+              Str.includes(q)(Str.toLowerCase(item.name)) ||
+              Str.includes(q)(Str.toLowerCase(item.description ?? ""))
             }
             renderItem={(item, select) => (
               <ListRow
@@ -1512,12 +1597,14 @@ export function CreditNoteCreatorScreen() {
   const overlay = useOverlay();
 
   const issuedRemote = useRemote(
-    (api) =>
-      api.documents.list({
-        params: { workspaceId: workspace.id },
-        query: { status: "issued", limit: 100 },
-      }),
-    [workspace.id],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.documents.list({
+          params: { workspaceId: workspace.id },
+          query: { status: "issued", limit: 100 },
+        }),
+      [workspace.id],
+    ),
   );
 
   const [selectedDocId, setSelectedDocId] = useState<DocumentId | null>(null);
@@ -1527,41 +1614,46 @@ export function CreditNoteCreatorScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedDocRemote = useRemote(
-    selectedDocId === null
-      ? null
-      : (api) =>
-          api.documents.get({
-            params: { workspaceId: workspace.id, documentId: selectedDocId },
-          }),
-    [workspace.id, selectedDocId],
+    useMemo(
+      () =>
+        selectedDocId === null
+          ? null
+          : (api: KvitbitApiClient) =>
+              api.documents.get({
+                params: { workspaceId: workspace.id, documentId: selectedDocId },
+              }),
+      [workspace.id, selectedDocId],
+    ),
   );
 
-  const submit = async () => {
+  const submit = Effect.fn("submit")(function* () {
     if (selectedDocId === null) {
       setError(local({ cs: "Vyberte původní doklad.", en: "Select the original document." }));
       return;
     }
-    if (reason.trim() === "") {
+    if (Str.trim(reason) === "") {
       setError(local({ cs: "Zadejte důvod opravy.", en: "Enter a correction reason." }));
       return;
     }
-    if (correctedOn.trim() !== "" && parseIsoDate(correctedOn) === undefined) {
+    if (Str.trim(correctedOn) !== "" && parseIsoDate(correctedOn) === undefined) {
       setError(local({ cs: "Použijte formát RRRR-MM-DD.", en: "Use YYYY-MM-DD format." }));
       return;
     }
     setBusy(true);
     setError(null);
-    const payload = {
-      reason: reason.trim(),
-      lines: "full" as const,
-      ...(correctedOn.trim() !== "" ? { correctedOn: correctedOn as IsoDate } : {}),
-    };
-    const res = await runMutation(`documents.correct:${selectedDocId}`, payload, (api, key) =>
-      api.documents.correct({
-        params: { workspaceId: workspace.id, documentId: selectedDocId },
-        headers: idempotencyHeaders(key),
-        payload,
-      }),
+    const correction = { reason: Str.trim(reason), lines: "full" as const };
+    const payload =
+      Str.trim(correctedOn) === ""
+        ? correction
+        : { ...correction, correctedOn: IsoDate.make(correctedOn) };
+    const res = yield* fromMobilePromise(() =>
+      runMutation(`documents.correct:${selectedDocId}`, payload, (api, key) =>
+        api.documents.correct({
+          params: { workspaceId: workspace.id, documentId: selectedDocId },
+          headers: idempotencyHeaders(key),
+          payload,
+        }),
+      ),
     );
     setBusy(false);
     if (res._tag === "Err") {
@@ -1573,7 +1665,7 @@ export function CreditNoteCreatorScreen() {
       { _tag: "Document", ws: workspace.slug, id: res.value.id, tab: "preview" },
       { replace: true },
     );
-  };
+  }, runFeatureEffect);
 
   return (
     <Screen
@@ -1590,7 +1682,7 @@ export function CreditNoteCreatorScreen() {
           busy={busy}
           disabled={selectedDocId === null}
           testID="credit-note-create-submit"
-          onPress={() => void submit()}
+          onPress={() => submit()}
         />
       }
     >
@@ -1605,9 +1697,10 @@ export function CreditNoteCreatorScreen() {
       >
         <RemoteView state={issuedRemote.state} onRetry={issuedRemote.reload}>
           {(page) => {
-            const eligible = page.items
-              .map(parseDocumentSummary)
-              .filter((d) => d.kind === "invoice" || d.kind === "payment_tax_document");
+            const eligible = Arr.filter(
+              Arr.map(page.items, parseDocumentSummary),
+              (d) => d.kind === "invoice" || d.kind === "payment_tax_document",
+            );
             if (eligible.length === 0) {
               return (
                 <EmptyState
@@ -1620,12 +1713,12 @@ export function CreditNoteCreatorScreen() {
             }
             return (
               <Card className="px-2 py-1">
-                {eligible.map((doc) => (
+                {Arr.map(eligible, (doc) => (
                   <ListRow
                     key={doc.id}
                     testID={`credit-source-${doc.id}`}
                     title={doc.number ?? doc.id}
-                    subtitle={`${doc.contact.name} · ${formatDate(locale, doc.issuedOn)}`}
+                    subtitle={`${doc.contact.name} · ${formatDate({ locale, date: doc.issuedOn })}`}
                     trailing={formatMoney(locale, doc.total)}
                     badge={
                       selectedDocId === doc.id ? (
@@ -1646,7 +1739,7 @@ export function CreditNoteCreatorScreen() {
       {selectedDocRemote.state._tag === "Ready" ? (
         <Section title={t("documents.editor.section.lines")}>
           <Card className="px-2 py-1">
-            {selectedDocRemote.state.value.lines.map((raw) => {
+            {Arr.map(selectedDocRemote.state.value.lines, (raw) => {
               const line = parseLineView(raw);
               return (
                 <ListRow
@@ -1658,7 +1751,7 @@ export function CreditNoteCreatorScreen() {
                       line.amount,
                       selectedDocRemote.state._tag === "Ready"
                         ? selectedDocRemote.state.value.totals.gross.currency
-                        : ("CZK" as CurrencyCode),
+                        : CurrencyCode.make("CZK"),
                     ),
                   )}
                 />

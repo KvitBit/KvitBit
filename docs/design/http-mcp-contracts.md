@@ -115,7 +115,7 @@ Two middlewares do all of it. `Authentication` turns a credential into a verifie
 // packages/api-contract/src/security.ts
 import { Context, Schema } from "effect"
 import { HttpApiMiddleware, HttpApiSecurity } from "effect/http-api"
-import { Caller, CurrentCaller, UserId, WorkspaceId, Locale } from "@kvitbit/core/contract"
+import { Caller, UserId, WorkspaceId, Locale } from "@kvitbit/core/contract"
 import { Unauthorized } from "./edge-errors.js"
 
 /** What a verified credential proves. Built only by apps/server. */
@@ -129,11 +129,12 @@ export interface Principal {
     | { readonly _tag: "McpGrant"; readonly grantId: string; readonly clientId: string; readonly clientName: string; readonly workspaceId: WorkspaceId; readonly scopes: ReadonlyArray<Scope> }
   readonly locale: Locale // account preference, else Accept-Language, else "cs"
 }
-export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()("kvitbit/edge/Principal") {}
+export class RequestCaller extends Context.Service<RequestCaller, Caller>()("@kvitbit/api-contract/security/RequestCaller") {}
+export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()("@kvitbit/api-contract/security/CurrentPrincipal") {}
 
 /** Session (cookie or bearer) or API Key. Provides the principal and an Account caller. */
 export class Authentication extends HttpApiMiddleware.Service<Authentication>()("kvitbit/edge/Authentication", {
-  provides: [CurrentPrincipal, CurrentCaller], // CurrentCaller = Caller.account(...) at this stage
+  provides: [CurrentPrincipal, RequestCaller], // RequestCaller = Caller.account(...) at this stage
   error: Unauthorized,
   security: {
     session: HttpApiSecurity.apiKey({ in: "cookie", key: "__Secure-kvitbit.session_token" }),
@@ -141,11 +142,11 @@ export class Authentication extends HttpApiMiddleware.Service<Authentication>()(
   },
 }) {}
 
-/** Replaces CurrentCaller with the MemberCaller from Workspaces.enter. Needs Authentication first. */
+/** Replaces RequestCaller with the MemberCaller from Workspaces.enter. Needs Authentication first. */
 export class WorkspaceMember extends HttpApiMiddleware.Service<WorkspaceMember>()("kvitbit/edge/WorkspaceMember", {
-  provides: CurrentCaller,
+  provides: RequestCaller,
   error: [NotFound.schema, Forbidden.schema],
-  requires: CurrentPrincipal,
+  requires: [CurrentPrincipal, RequestCaller],
 }) {}
 
 /** Session only: rejects API Keys on account endpoints (rule A4). */
@@ -156,7 +157,7 @@ export class SessionOnly extends HttpApiMiddleware.Service<SessionOnly>()("kvitb
 
 /** Public Share Link visitor. Provides Caller.shareLinkVisitor from the {token} path segment. */
 export class ShareLinkVisitor extends HttpApiMiddleware.Service<ShareLinkVisitor>()("kvitbit/edge/ShareLinkVisitor", {
-  provides: CurrentCaller,
+  provides: RequestCaller,
 }) {}
 ```
 
@@ -168,6 +169,7 @@ export const WorkspaceMemberLive = Layer.effect(WorkspaceMember, Effect.gen(func
   const workspaces = yield* Workspaces
   return WorkspaceMember.of(Effect.gen(function* () {
     const principal = yield* CurrentPrincipal
+    const account = yield* RequestCaller
     const workspaceId = yield* pathParam("workspaceId", WorkspaceId) // 404 NotFound{Workspace} when malformed
     const bound = principal.credential._tag === "Session" ? null : principal.credential.workspaceId
     if (bound !== null && bound !== workspaceId) {
@@ -179,15 +181,15 @@ export const WorkspaceMemberLive = Layer.effect(WorkspaceMember, Effect.gen(func
     const client = c._tag === "ApiKey" ? { kind: "api_key" as const, id: c.keyId, name: c.keyName }
       : c._tag === "McpGrant" ? { kind: "mcp" as const, id: c.grantId, name: c.clientName }
       : undefined
-    return yield* workspaces.enter(workspaceId, { scopes, channel: principal.channel, client })
+    return yield* workspaces.enter(account, workspaceId, { scopes, channel: principal.channel, client })
   }))
 }))
 ```
 
 1. `Authentication` reads the cookie or bearer value. Session: `auth.api.getSession` with the request headers. API Key: hash lookup, check not revoked or expired, update `lastUsedAt` at most once a minute. Failure is `401 Unauthorized` with `WWW-Authenticate: Bearer realm="kvitbit"` for bearer callers.
-2. It provides `CurrentPrincipal` and `CurrentCaller = Caller.account({ userId, email, locale, channel })`.
-3. `WorkspaceMember` applies rule A3, then calls `Workspaces.enter(workspaceId, { scopes, channel })`. `NotFound` means not a Member (existence not revealed). The returned `MemberCaller` replaces `CurrentCaller` for the handler.
-4. The handler calls exactly one module method (sometimes two for a read-after-write such as `create` then `current`). Core runs `can(caller, action)` first, then request-log replay (rule R1a), so a Member who lost access never replays a stored result.
+2. It provides `CurrentPrincipal` and `RequestCaller = Caller.account({ userId, email, locale, channel })`.
+3. `WorkspaceMember` applies rule A3, then calls `Workspaces.enter(account, workspaceId, { scopes, channel })`. `NotFound` means not a Member (existence not revealed). The returned `MemberCaller` replaces `RequestCaller` for the handler.
+4. The handler passes the value from `RequestCaller` as the first argument to the module method (sometimes two for a read-after-write such as `create` then `current`). Core runs `can(caller, action)` first, then request-log replay (rule R1a), so a Member who lost access never replays a stored result.
 5. Public share routes skip 1 to 3. `ShareLinkVisitor` builds `Caller.shareLinkVisitor({ token, visitor: VisitorHash(ip, userAgent), locale })` from the path and connection.
 
 Core gap G7 (section 9, resolved): audit entries show "X via <client name>" for MCP and "X via API Key <name>" for keys. The edge passes the verified `client` (`ClientRef`) to `enter`, which copies it into `MemberCaller.client` and the audit actor.
@@ -875,11 +877,11 @@ Rules for the edge-owned administration endpoints:
 | `documents` | `list` | `GET {ws}/documents?<DocumentQuery>&cursor&limit` | `Documents.list` | | `Page<DocumentSummary>` | `Invalid` |
 | `documents` | `preview` | `POST {ws}/documents/preview` | `Documents.preview` | | `DocumentView` | `Invalid`, `Unavailable` |
 | `documents` | `createDraft` | `POST {ws}/documents` | `Documents.createDraft` | Idem | 201 `DocumentView` | `Invalid`, `Unavailable` |
-| `documents` | `issueFromInput` | `POST {ws}/documents/issue` | `Documents.issue({ input })` | Idem | 201 `DocumentView` | core errors |
+| `documents` | `issueFromInput` | `POST {ws}/documents/issue` | `Documents.issue(caller, { input })` | Idem | 201 `DocumentView` | core errors |
 | `documents` | `get` | `GET {ws}/documents/{documentId}` | `Documents.get` | | `DocumentView` (ETag) | |
 | `documents` | `edit` | `PATCH {ws}/documents/{documentId}` | `Documents.edit` | If-Match | `DocumentView` (ETag) | core errors |
 | `documents` | `discardDraft` | `DELETE {ws}/documents/{documentId}` | `Documents.discardDraft` | If-Match | 204 | `Conflict{illegal_transition}` |
-| `documents` | `issueDraft` | `POST {ws}/documents/{documentId}/issue` | `Documents.issue({ draft, expectedRevision })` | If-Match, Idem | `DocumentView` (ETag) | core errors |
+| `documents` | `issueDraft` | `POST {ws}/documents/{documentId}/issue` | `Documents.issue(caller, { draft, expectedRevision })` | If-Match, Idem | `DocumentView` (ETag) | core errors |
 | `documents` | `lock` | `POST {ws}/documents/{documentId}/lock` | `Documents.lock` | | `DocumentView` (ETag) | `Conflict` |
 | `documents` | `unlock` | `POST {ws}/documents/{documentId}/unlock` | `Documents.unlock` | | `DocumentView` (ETag) | `Conflict`, `Invalid` |
 | `documents` | `cancel` | `POST {ws}/documents/{documentId}/cancel` | `Documents.cancel` | Idem | `CancelResult` | core errors |
@@ -1017,19 +1019,31 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
   .annotate(OpenApi.Description, "Invoices, Proformas, Payment Tax Documents and Credit Notes") {}
 ```
 
-Handler sketch for the two `issue` shapes, showing the header mapping:
+Both `issue` handlers read the caller from `RequestCaller` and map the request headers to core options.
 
 ```ts
-// apps/server/src/http/documents.ts
+// apps/server/src/http/groups/documents.ts (sketch)
 export const DocumentsLive = HttpApiBuilder.group(Api, "documents", (handlers) => handlers
   .handle("issueDraft", ({ params, headers, payload }) =>
-    withRevision(headers["if-match"], (expectedRevision) =>
-      Documents.use((d) => d.issue(
-        { draft: params.documentId, expectedRevision },
-        { requestKey: headers["idempotency-key"], send: payload.send },
-      ))))
+    Effect.flatMap(RequestCaller, (caller) =>
+      withRevision(headers["if-match"], (expectedRevision) =>
+        Documents.use((d) => d.issue(
+          caller,
+          { draft: params.documentId, expectedRevision },
+          { ...requestOptions(headers), ...compact({ send: payload.send }) },
+        )),
+      ),
+    ),
+  )
   .handle("issueFromInput", ({ headers, payload }) =>
-    Documents.use((d) => d.issue({ input: payload.input }, { requestKey: headers["idempotency-key"], send: payload.send })))
+    Effect.flatMap(RequestCaller, (caller) =>
+      Documents.use((d) => d.issue(
+        caller,
+        { input: payload.input },
+        { ...requestOptions(headers), ...compact({ send: payload.send }) },
+      )),
+    ),
+  )
   // ... one line per endpoint, each calling one core method
 )
 ```
@@ -1289,16 +1303,15 @@ export const mcpCaller = (request: HttpServerRequest) => Effect.gen(function* ()
   const token = yield* bearerToken(request)                      // 401 with WWW-Authenticate when missing
   const grant = yield* McpGrants.use((g) => g.verifyAccessToken(token, { audience: mcpResourceUrl }))
   const account = Caller.account({ userId: grant.userId, email: grant.email, locale: grant.locale, channel: "mcp" })
-  return yield* Workspaces.use((w) => w.enter(grant.workspaceId, {
+  return yield* Workspaces.use((w) => w.enter(account, grant.workspaceId, {
     scopes: grant.scopes, channel: "mcp", client: { kind: "mcp", id: grant.grantId, name: grant.clientName },
   })).pipe(
-    Effect.provideService(CurrentCaller, account),
     Effect.catchTag("NotFound", () => Effect.fail(new Unauthorized({ reason: "invalid" }))), // membership gone: token is dead
   )
 })
 ```
 
-- The `MemberCaller` is built once per HTTP request and provided to every tool call in it. Its `scopes` come from the verified grant, never from tool arguments.
+- The `MemberCaller` is built once per HTTP request and passed to every tool call in it. Its `scopes` come from the verified grant, never from tool arguments.
 - No tool takes a `workspaceId`. The Workspace is the grant's.
 - Locale for tool text: the account preference, else the grant's consent-time locale, else `cs`. Tool text can be either language; structured content is language-neutral.
 

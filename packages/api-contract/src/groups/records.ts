@@ -43,8 +43,10 @@ import {
   TemplateView,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
+import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
+import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
+import * as OpenApi from "effect/http-api/OpenApi";
+import * as Schema from "effect/Schema";
 import { PayloadTooLarge, RateLimited, RevisionedEdgeErrors } from "../edge-errors";
 import {
   Accepted,
@@ -505,7 +507,7 @@ export class TemplatesGroup extends HttpApiGroup.make("templates")
 
 export const ReportGroupBy = Schema.Literals(["month", "contact", "currency", "category"]);
 export type ReportGroupBy = typeof ReportGroupBy.Type;
-export const ReportRange = {
+const ReportRange = {
   from: IsoDate,
   to: IsoDate,
   groupBy: Schema.optional(ReportGroupBy),

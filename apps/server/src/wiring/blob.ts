@@ -1,21 +1,28 @@
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 /**
  * Live `BlobStorage` port wiring: LocalDisk (`KVITBIT_BLOB_DRIVER=local`) or GCS (`gcs`),
  * validated against the typed-mode environment contract.
  */
+
 import { GcsAccessTokens, GcsBlobStorage, LocalDiskBlobStorage } from "@kvitbit/adapters/blob";
 import { BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
-import { type Config, Effect, Layer, Option } from "effect";
-import { FetchHttpClient } from "effect/http";
+import type * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import {
   type KvitbitEnv,
-  liftValidation,
   loadKvitbitEnv,
   resolveBlobConfig,
+  toConfigError,
 } from "../config-contract";
 import { type BlobWiringConfig, BlobWiringConfigSchema } from "./config";
 
 /** Builds a `BlobStorage` layer from explicit config (used by live wiring and tests). */
-export const makeBlobStorageLayer = (
+const makeBlobStorageLayerImpl = (
   config: BlobWiringConfig,
   env: KvitbitEnv = "development",
 ): Layer.Layer<BlobStorage, BlobUnavailable | Config.ConfigError> => {
@@ -28,21 +35,19 @@ export const makeBlobStorageLayer = (
   if (!checked.ok) {
     if (
       config.driver === "gcs" &&
-      (Option.isNone(config.gcsBucket) || config.gcsBucket.value.trim() === "")
+      (Option.isNone(config.gcsBucket) || Str.trim(config.gcsBucket.value) === "")
     ) {
       return Layer.effect(
         BlobStorage,
         Effect.fail(
-          new BlobUnavailable({
+          BlobUnavailable.make({
             cause: checked.error.reason,
           }),
         ),
       );
     }
-    return Layer.effect(
-      BlobStorage,
-      liftValidation(checked) as Effect.Effect<never, Config.ConfigError>,
-    );
+    const error = toConfigError(checked.error);
+    return Layer.effect(BlobStorage)(Effect.fail(error));
   }
 
   if (checked.value.driver === "gcs") {
@@ -53,6 +58,11 @@ export const makeBlobStorageLayer = (
   }
   return LocalDiskBlobStorage.layer({ root: checked.value.localDir });
 };
+
+export const makeBlobStorageLayer: {
+  (env?: KvitbitEnv): (config: BlobWiringConfig) => ReturnType<typeof makeBlobStorageLayerImpl>;
+  (config: BlobWiringConfig, env?: KvitbitEnv): ReturnType<typeof makeBlobStorageLayerImpl>;
+} = Fn.dual((args) => Predicate.isObject(args[0]), makeBlobStorageLayerImpl);
 
 /**
  * Live `BlobStorage` configured from `KVITBIT_ENV`/`NODE_ENV`, `KVITBIT_BLOB_DRIVER` (`local` | `gcs`),

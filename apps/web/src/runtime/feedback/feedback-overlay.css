@@ -1,11 +1,11 @@
 :host {
   color-scheme: light dark;
-  --surface: light-dark(#fffdf9, #252622);
-  --ink: light-dark(#1d251b, #f3f4ee);
-  --line: light-dark(#b8c5b2, #626a5d);
-  --accent: light-dark(#305d37, #adcf9f);
-  --on-accent: light-dark(#fff, #18341e);
-  --error: light-dark(#a32c1e, #ffb4a6);
+  --surface: #fffdf9;
+  --ink: #1d251b;
+  --line: #b8c5b2;
+  --accent: #305d37;
+  --on-accent: #fff;
+  --error: #a32c1e;
   --shadow: 0 6px 24px rgb(0 0 0 / 22%);
   position: fixed;
   inset: 0;
@@ -22,6 +22,23 @@
 }
 :host([data-mode="dark"]) {
   color-scheme: dark;
+  --surface: #252622;
+  --ink: #f3f4ee;
+  --line: #626a5d;
+  --accent: #adcf9f;
+  --on-accent: #18341e;
+  --error: #ffb4a6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :host([data-mode="system"]) {
+    --surface: #252622;
+    --ink: #f3f4ee;
+    --line: #626a5d;
+    --accent: #adcf9f;
+    --on-accent: #18341e;
+    --error: #ffb4a6;
+  }
 }
 
 *,
@@ -234,9 +251,14 @@ button:disabled {
   border: 1px solid var(--line);
   border-radius: 7px;
   padding: 8px;
-  resize: vertical;
+
   inline-size: 100%;
   min-block-size: 4rem;
+}
+@supports (resize: vertical) {
+  .composer textarea {
+    resize: vertical;
+  }
 }
 
 .error {

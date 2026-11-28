@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
-import type { BlobKey, CnbFixing, OutboundEmail } from "@kvitbit/domain/ports";
+import { CurrencyCode, IsoDate } from "@kvitbit/domain/contract";
+import type { CnbFixing, OutboundEmail } from "@kvitbit/domain/ports";
 import {
+  BlobKey,
   BlobMissing,
   BlobStorage,
   BlobTooLarge,
@@ -12,7 +13,12 @@ import {
   RatesUnavailable,
   RegistryUnavailable,
 } from "@kvitbit/domain/ports";
-import { BigDecimal, Effect, Exit, Ref, Stream } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Ref from "effect/Ref";
+import * as Stream from "effect/Stream";
 import { sha256Hex } from "../src/shared/hash";
 import {
   CaptureEmailSender,
@@ -23,9 +29,9 @@ import {
 import { account, runTest } from "./helpers";
 
 const fixing = (fixingDate: string, rate: string): CnbFixing => ({
-  fixingDate: fixingDate as IsoDate,
+  fixingDate: IsoDate.make(fixingDate),
   sequence: 1,
-  rates: [{ code: "EUR" as CurrencyCode, quantity: 1, rate: BigDecimal.fromStringUnsafe(rate) }],
+  rates: [{ code: CurrencyCode.make("EUR"), quantity: 1, rate: BigDecimal.fromStringUnsafe(rate) }],
 });
 
 const email: OutboundEmail = {
@@ -44,16 +50,16 @@ describe("test fakes", () => {
       account(),
       Effect.gen(function* () {
         const rates = yield* ExchangeRates;
-        const saturday = yield* rates.fixing("2026-11-21" as IsoDate);
-        const friday = yield* rates.fixing("2026-11-20" as IsoDate);
-        const before = yield* Effect.flip(rates.fixing("2026-11-01" as IsoDate));
-        return [saturday.fixingDate, friday.fixingDate, before._tag] as ReadonlyArray<string>;
+        const saturday = yield* rates.fixing(IsoDate.make("2026-11-21"));
+        const friday = yield* rates.fixing(IsoDate.make("2026-11-20"));
+        const before = yield* Effect.flip(rates.fixing(IsoDate.make("2026-11-01")));
+        return [saturday.fixingDate, friday.fixingDate, before._tag];
       }),
       { fixings: [fixing("2026-11-19", "25.1"), fixing("2026-11-20", "25.2")] },
     );
     expect(Exit.isSuccess(exit) && exit.value).toEqual([
-      "2026-11-20",
-      "2026-11-20",
+      IsoDate.make("2026-11-20"),
+      IsoDate.make("2026-11-20"),
       "RatesUnavailable",
     ]);
   });
@@ -64,12 +70,12 @@ describe("test fakes", () => {
       Effect.gen(function* () {
         yield* Ref.set((yield* FixtureRates).unavailable, true);
         yield* Ref.set((yield* FakeCompanyRegistry).unavailable, true);
-        const rates = yield* Effect.flip((yield* ExchangeRates).fixing("2026-11-20" as IsoDate));
+        const rates = yield* Effect.flip((yield* ExchangeRates).fixing(IsoDate.make("2026-11-20")));
         const registry = yield* Effect.flip((yield* CompanyRegistry).lookup("27074358"));
         return [rates, registry];
       }),
     );
-    expect(exit).toEqual(Exit.succeed([new RatesUnavailable({}), new RegistryUnavailable({})]));
+    expect(exit).toEqual(Exit.succeed([RatesUnavailable.make({}), RegistryUnavailable.make({})]));
   });
 
   test("FakeCompanyRegistry serves fixtures and records lookups", async () => {
@@ -113,12 +119,12 @@ describe("test fakes", () => {
       }),
     );
     expect(exit).toEqual(
-      Exit.succeed({ failed: new EmailNotAccepted({}), same: true, sent: 1, attempts: 3 }),
+      Exit.succeed({ failed: EmailNotAccepted.make({}), same: true, sent: 1, attempts: 3 }),
     );
   });
 
   test("MemoryBlobStorage stores, hashes, enforces maxBytes and deletes", async () => {
-    const key = "ws/a/file.txt" as BlobKey;
+    const key = BlobKey.make("ws/a/file.txt");
     const bytes = new TextEncoder().encode("abc");
     const exit = await runTest(
       account(),
@@ -136,7 +142,7 @@ describe("test fakes", () => {
         yield* blobs.delete(key);
         const missing = yield* Effect.flip(blobs.get(key));
         const stored = (yield* Ref.get((yield* MemoryBlobStorage).blobs)).size;
-        return { put, read: read.map((c) => [...c]), tooLarge, missing, stored };
+        return { put, read: EffectArray.map(read, (c) => [...c]), tooLarge, missing, stored };
       }),
     );
     expect(exit).toEqual(
@@ -144,18 +150,18 @@ describe("test fakes", () => {
         put: {
           key,
           bytes: 3,
-          sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"),
         },
         read: [[97, 98, 99]],
-        tooLarge: new BlobTooLarge({ maxBytes: 2 }),
-        missing: new BlobMissing({ key }),
+        tooLarge: BlobTooLarge.make({ maxBytes: 2 }),
+        missing: BlobMissing.make({ key }),
         stored: 0,
       }),
     );
   });
 
   test("MemoryBlobStorage stops reading at the first chunk past maxBytes", async () => {
-    const key = "ws/a/big.bin" as BlobKey;
+    const key = BlobKey.make("ws/a/big.bin");
     const exit = await runTest(
       account(),
       Effect.gen(function* () {
@@ -167,11 +173,11 @@ describe("test fakes", () => {
         return yield* Effect.flip(blobs.put(key, body, { contentType: "x", maxBytes: 2 }));
       }),
     );
-    expect(exit).toEqual(Exit.succeed(new BlobTooLarge({ maxBytes: 2 })));
+    expect(exit).toEqual(Exit.succeed(BlobTooLarge.make({ maxBytes: 2 })));
   });
 
   test("MemoryBlobStorage returns detached copies", async () => {
-    const key = "ws/a/two.bin" as BlobKey;
+    const key = BlobKey.make("ws/a/two.bin");
     const exit = await runTest(
       account(),
       Effect.gen(function* () {
@@ -183,14 +189,14 @@ describe("test fakes", () => {
         const chunk = first[0];
         if (chunk !== undefined) chunk[0] = 9;
         const second = yield* Effect.flatMap(blobs.get(key), Stream.runCollect);
-        return second.map((c) => [...c]);
+        return EffectArray.map(second, (c) => [...c]);
       }),
     );
     expect(exit).toEqual(Exit.succeed([[1, 2]]));
   });
 
   test("MemoryBlobStorage copies each chunk as it arrives (a reused Buffer)", async () => {
-    const key = "ws/a/reused.bin" as BlobKey;
+    const key = BlobKey.make("ws/a/reused.bin");
     const exit = await runTest(
       account(),
       Effect.gen(function* () {
@@ -199,21 +205,21 @@ describe("test fakes", () => {
         const body = Stream.fromEffect(
           Effect.sync(() => {
             shared[0] = 1;
-            return shared as Uint8Array;
+            return shared;
           }),
         ).pipe(
           Stream.concat(
             Stream.fromEffect(
               Effect.sync(() => {
                 shared[0] = 2;
-                return shared as Uint8Array;
+                return shared;
               }),
             ),
           ),
         );
         const receipt = yield* blobs.put(key, body, { contentType: "x", maxBytes: 10 });
         const read = yield* Effect.flatMap(blobs.get(key), Stream.runCollect);
-        const bytes = read.flatMap((c) => [...c]);
+        const bytes = EffectArray.flatMap(read, (c) => [...c]);
         return { bytes, sha: receipt.sha256 === (yield* sha256Hex(new Uint8Array([1, 2]))) };
       }),
     );

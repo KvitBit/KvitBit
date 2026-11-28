@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as Arr from "effect/Array";
 import {
   cam16FromRgb,
   contrastRatio,
@@ -17,7 +18,7 @@ const channels = (hex: string) => {
 /** Max per-channel distance between two hex colours. */
 const distance = (a: string, b: string) => {
   const [x, y] = [channels(a), channels(b)];
-  return Math.max(...x.map((v, i) => Math.abs(v - (y[i] ?? 0))));
+  return Math.max(...Arr.map(x, (v, i) => Math.abs(v - (y[i] ?? 0))));
 };
 
 describe("CAM16 / HCT against material-color-utilities reference values", () => {

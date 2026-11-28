@@ -2,7 +2,15 @@
  * Settings of the HTTP edge (http-mcp-contracts section 1). The shared process settings come
  * from `ServerConfig`; the variables below are read only by this stream.
  */
-import { Config, Context, Effect, Layer, Option, Redacted } from "effect";
+
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Str from "effect/String";
 import { PostHogConfig, type PostHogSettings, ServerConfig } from "../config";
 import { loadBotProtectionConfig } from "../config-contract";
 import { type FeedbackConfig, makeFeedbackConfig } from "./feedback/access";
@@ -33,18 +41,20 @@ export interface HttpConfigShape {
 }
 
 export class HttpConfig extends Context.Service<HttpConfig, HttpConfigShape>()(
-  "kvitbit/server/http/HttpConfig",
+  "@kvitbit/server/http/config/HttpConfig",
 ) {}
 
 const originList = (name: string) =>
   Config.String(name).pipe(
     Config.withDefault(""),
     Config.map((raw) =>
-      raw
-        .split(",")
-        .map((entry) => entry.trim())
-        .filter((entry) => entry.length > 0)
-        .map((entry) => new URL(entry).origin),
+      Arr.map(
+        Arr.filter(
+          Arr.map(Str.split(raw, ","), (entry) => Str.trim(entry)),
+          (entry) => entry.length > 0,
+        ),
+        (entry) => new URL(entry).origin,
+      ),
     ),
   );
 

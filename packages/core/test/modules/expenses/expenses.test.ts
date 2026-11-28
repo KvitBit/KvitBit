@@ -1,45 +1,61 @@
 import { describe, expect, test } from "bun:test";
-import type { AttachmentId, ExpenseId, IsoDate } from "@kvitbit/domain/contract";
+import type { CoreError, Issue } from "@kvitbit/domain/contract";
 import {
+  AttachmentId,
   Conflict,
+  ExpenseId,
   Expenses,
   Forbidden,
-  Invalid,
+  IsoDate,
   NotFound,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect, Exit, Ref } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
 import { decodeSummary } from "../../../src/modules/expenses";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { FixtureRates, member, WORKSPACE_A } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
+import { withoutStackTrace } from "../../helpers/run";
 import {
-  as,
+  asCaller,
+  attachmentFields,
   bytesOf,
   czkInput,
   expenseId,
   fields,
   ownerB,
   record,
+  recordWithKey,
   SUPPLIER_CONTACT,
   SUPPLIER_CONTACT_B,
   scenario,
 } from "./fixtures";
 
-const svc = Expenses;
 const fmt = (d: BigDecimal.BigDecimal | null | undefined) =>
-  d == null ? String(d) : BigDecimal.format(BigDecimal.normalize(d));
+  d === null || d === undefined ? String(d) : d.pipe(BigDecimal.normalize, BigDecimal.format);
 
-const issuesOf = (exit: Exit.Exit<unknown, unknown>) => {
+const issuesOf = (exit: Exit.Exit<unknown, CoreError>) => {
   if (Exit.isSuccess(exit)) throw new Error("expected a failure");
-  const error = exit.cause.reasons.find((r) => r._tag === "Fail");
-  return error?._tag === "Fail" && error.error instanceof Invalid ? error.error.issues : [];
+  const error = exit.pipe(Exit.findErrorOption, Option.getOrUndefined);
+  return error?._tag === "Invalid" ? error.issues : [];
+};
+
+const issuePath = (path: Issue["path"]) => {
+  const segments = EffectArray.map(path, String);
+  return EffectArray.join(segments, ".");
 };
 
 describe("Expenses.record", () => {
   test("a complete CZK Expense: supplier Contact link, VAT buckets checked not recalculated, audit", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const view = fields(yield* record(czkInput));
+        const result = yield* record(czkInput);
+        const view = fields(result);
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id: view.id });
         return { view, audit };
@@ -56,7 +72,8 @@ describe("Expenses.record", () => {
       ico: "27074358",
       dic: "CZ27074358",
     });
-    expect(view.totals?.buckets.map((b) => [b.treatment, fmt(b.ratePercent), fmt(b.vat)])).toEqual([
+    const buckets = view.totals?.buckets ?? [];
+    expect(EffectArray.map(buckets, (b) => [b.treatment, fmt(b.ratePercent), fmt(b.vat)])).toEqual([
       ["standard", "21", "21"],
     ]);
     expect(fmt(view.totals?.gross.amount)).toBe("121");
@@ -65,12 +82,15 @@ describe("Expenses.record", () => {
     expect(view.deductibility).toBe("full");
     expect(fmt(view.deductibleVat?.amount)).toBe("21");
     expect(view.payment).toEqual({ settlement: "unpaid", paid: null, payments: 0 });
-    expect(audit.map((e) => [e.action, e.revision])).toEqual([["expense.record", 1]]);
+    expect(EffectArray.map(audit, (e) => [e.action, e.revision])).toEqual([["expense.record", 1]]);
   });
 
   test("status defaults to complete and runs the required-field checks", async () => {
     const exit = await scenario(record({ note: "only a note" }));
-    expect(issuesOf(exit).map((i) => [i.code, i.path.join("."), i.params?.reason])).toEqual([
+    const issues = issuesOf(exit);
+    expect(
+      EffectArray.map(issues, (i) => [i.code, issuePath(i.path), i.params?.["reason"]]),
+    ).toEqual([
       ["request.malformed", "issuedOn", "required"],
       ["request.malformed", "currency", "required"],
       ["request.malformed", "total", "required"],
@@ -93,7 +113,8 @@ describe("Expenses.record", () => {
 
   test("the VAT breakdown must add up to the gross", async () => {
     const exit = await scenario(record({ ...czkInput, total: "122.00" }));
-    expect(issuesOf(exit)).toEqual([
+    const issues = issuesOf(exit);
+    expect(issues).toEqual([
       {
         path: ["vat"],
         code: "request.malformed",
@@ -110,7 +131,8 @@ describe("Expenses.record", () => {
         vat: [{ treatment: "outside_scope", base: "45.005", vat: "5" }],
       }),
     );
-    expect(issuesOf(exit).map((i) => [i.path.join("."), i.params?.reason])).toEqual([
+    const issues = issuesOf(exit);
+    expect(EffectArray.map(issues, (i) => [issuePath(i.path), i.params?.["reason"]])).toEqual([
       ["total", "precision"],
       ["vat.0.base", "precision"],
       ["vat.0.vat", "vat_not_allowed"],
@@ -122,7 +144,8 @@ describe("Expenses.record", () => {
     const exit = await scenario(Effect.map(record({ ...input, total: "99.90" }), fields));
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
-    expect(exit.value.totals?.buckets.map((b) => [b.treatment, fmt(b.base), fmt(b.vat)])).toEqual([
+    const buckets = exit.value.totals?.buckets ?? [];
+    expect(EffectArray.map(buckets, (b) => [b.treatment, fmt(b.base), fmt(b.vat)])).toEqual([
       ["outside_scope", "99.9", "0"],
     ]);
     expect(fmt(exit.value.deductibleVat?.amount)).toBe("0");
@@ -130,17 +153,20 @@ describe("Expenses.record", () => {
 
   test("malformed open fields are request.malformed", async () => {
     const exit = await scenario(record({ ...czkInput, total: 121 }));
-    expect(issuesOf(exit).map((i) => i.code)).toEqual(["request.malformed"]);
+    const issues = issuesOf(exit);
+    expect(EffectArray.map(issues, (i) => i.code)).toEqual(["request.malformed"]);
   });
 
   test("idempotency: same key and input replays; a different input conflicts", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const first = yield* record(czkInput, "key-1");
-        const again = yield* record(czkInput, "key-1");
-        const other = yield* Effect.exit(record({ ...czkInput, note: "changed" }, "key-1"));
-        const s = yield* svc;
-        const page = yield* s.list({});
+        const testCaller = yield* TestCaller;
+        const recordWithRequestKey = recordWithKey("key-1");
+        const first = yield* recordWithRequestKey(czkInput);
+        const again = yield* recordWithRequestKey(czkInput);
+        const other = yield* Effect.exit(recordWithRequestKey({ ...czkInput, note: "changed" }));
+        const s = yield* Expenses;
+        const page = yield* s.list(testCaller, {});
         return { first, again, other, count: page.items.length };
       }),
     );
@@ -149,8 +175,8 @@ describe("Expenses.record", () => {
     expect(exit.value.again).toEqual(exit.value.first);
     expect(exit.value.count).toBe(1);
     // The same key with a different payload is Conflict{idempotency_mismatch} (rule C3).
-    expect(exit.value.other as Exit.Exit<unknown, unknown>).toEqual(
-      Exit.fail(new Conflict({ reason: "idempotency_mismatch" })),
+    expect(exit.value.other.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Conflict.make({ reason: "idempotency_mismatch" })),
     );
   });
 });
@@ -158,7 +184,8 @@ describe("Expenses.record", () => {
 describe("input decoding", () => {
   test("unknown keys and wrong types are request.malformed at their paths", async () => {
     const exit = await scenario(record({ ...czkInput, total: 121, bogus: true }));
-    expect(issuesOf(exit).map((i) => [i.code, i.path.join(".")])).toEqual(
+    const issues = issuesOf(exit);
+    expect(EffectArray.map(issues, (i) => [i.code, issuePath(i.path)])).toEqual(
       expect.arrayContaining([
         ["request.malformed", "total"],
         ["request.malformed", "bogus"],
@@ -168,18 +195,22 @@ describe("input decoding", () => {
 
   test("open fields must be plain JSON", async () => {
     const exit = await scenario(record({ ...czkInput, total: BigDecimal.fromStringUnsafe("121") }));
-    expect(issuesOf(exit).map((i) => [i.code, i.path.length])).toEqual([["request.malformed", 0]]);
+    const issues = issuesOf(exit);
+    expect(EffectArray.map(issues, (i) => [i.code, i.path.length])).toEqual([
+      ["request.malformed", 0],
+    ]);
   });
 
   test("a reused key with a changed payload conflicts even when the new payload is invalid", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        yield* record(czkInput, "key-2");
-        return yield* Effect.exit(record({ ...czkInput, total: "nope" }, "key-2"));
+        const recordWithRequestKey = recordWithKey("key-2");
+        yield* recordWithRequestKey(czkInput);
+        return yield* Effect.exit(recordWithRequestKey({ ...czkInput, total: "nope" }));
       }),
     );
-    expect(exit as Exit.Exit<unknown, unknown>).toEqual(
-      Exit.succeed(Exit.fail(new Conflict({ reason: "idempotency_mismatch" }))),
+    expect(exit).toEqual(
+      Conflict.make({ reason: "idempotency_mismatch" }).pipe(Exit.fail, Exit.succeed),
     );
   });
 
@@ -200,21 +231,21 @@ describe("authorization and Workspace scoping", () => {
       Effect.gen(function* () {
         const view = yield* record(czkInput);
         const id = expenseId(view);
-        const s = yield* svc;
+        const s = yield* Expenses;
         const accountant = member("accountant");
-        const read = yield* as(accountant, s.get(id));
-        const write = yield* Effect.exit(as(accountant, record(czkInput)));
-        const edit = yield* Effect.exit(as(accountant, s.edit(id, { note: "x" }, 1)));
-        const remove = yield* Effect.exit(as(accountant, s.remove(id, 1)));
+        const read = yield* s.get(accountant, id);
+        const write = yield* s.record(accountant, czkInput).pipe(Effect.exit);
+        const edit = yield* s.edit(accountant, id, { note: "x" }, 1).pipe(Effect.exit);
+        const remove = yield* s.remove(accountant, id, 1).pipe(Effect.exit);
         return { read: fields(read).id === id, write, edit, remove };
       }),
     );
     expect(exit).toEqual(
       Exit.succeed({
         read: true,
-        write: Exit.fail(new Forbidden({ action: "expense.write" })),
-        edit: Exit.fail(new Forbidden({ action: "expense.write" })),
-        remove: Exit.fail(new Forbidden({ action: "expense.write" })),
+        write: Exit.fail(Forbidden.make({ action: "expense.write" })),
+        edit: Exit.fail(Forbidden.make({ action: "expense.write" })),
+        remove: Exit.fail(Forbidden.make({ action: "expense.write" })),
       }),
     );
   });
@@ -223,84 +254,102 @@ describe("authorization and Workspace scoping", () => {
     const reader = member("member", { scopes: ["expenses:read"] });
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record(czkInput));
-        const s = yield* svc;
-        const att = (yield* s.attach(id, {
+        const testCaller = yield* TestCaller;
+        const result = yield* record(czkInput);
+        const id = expenseId(result);
+        const s = yield* Expenses;
+        const attached = yield* s.attach(testCaller, id, {
           name: "a.pdf",
           contentType: "application/pdf",
           bytes: bytesOf("%PDF-1.7"),
-        })) as unknown as { readonly id: AttachmentId };
-        yield* as(reader, s.get(id));
-        yield* as(reader, s.list({}));
-        const download = yield* as(reader, s.attachment(id, att.id));
+        });
+        const att = yield* attachmentFields(attached);
+        yield* s.get(reader, id);
+        yield* s.list(reader, {});
+        const download = yield* s.attachment(reader, id, att.id);
         expect(download.filename).toBe("a.pdf");
-        return yield* Effect.exit(
-          as(
-            reader,
-            s.attach(id, { name: "a.pdf", contentType: "application/pdf", bytes: bytesOf("%PDF") }),
-          ),
-        );
+        return yield* s
+          .attach(reader, id, {
+            name: "a.pdf",
+            contentType: "application/pdf",
+            bytes: bytesOf("%PDF"),
+          })
+          .pipe(Effect.exit);
       }),
     );
-    expect(exit).toEqual(Exit.succeed(Exit.fail(new Forbidden({ action: "expense.write" }))));
+    expect(exit).toEqual(Forbidden.make({ action: "expense.write" }).pipe(Exit.fail, Exit.succeed));
   });
 
   test("a token without the expenses scope is Forbidden even for reads", async () => {
     const outsider = member("member", { scopes: ["contacts:read"] });
     const exit = await scenario(
       Effect.gen(function* () {
-        const s = yield* svc;
-        return yield* as(outsider, s.list({}));
+        const s = yield* Expenses;
+        return yield* s.list(outsider, {}).pipe(asCaller(outsider));
       }),
     );
-    expect(exit).toEqual(Exit.fail(new Forbidden({ action: "expense.read" })));
+    expect(exit.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(Forbidden.make({ action: "expense.read" })),
+    );
   });
 
   test("another Workspace's Expense is NotFound for every method", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record(czkInput));
-        const s = yield* svc;
-        const results = yield* Effect.all(
+        const result = yield* record(czkInput);
+        const id = expenseId(result);
+        const s = yield* Expenses;
+        const attachmentId = AttachmentId.make(id);
+        const results = yield* Effect.forEach(
           [
-            s.get(id),
-            s.edit(id, { note: "x" }, 1),
-            s.remove(id, 1),
-            s.attachment(id, id as never),
-            s.detach(id, id as never),
-          ].map((e) => Effect.exit(as(ownerB, e as Effect.Effect<unknown, unknown, never>))),
+            s.get(ownerB, id),
+            s.edit(ownerB, id, { note: "x" }, 1),
+            s.remove(ownerB, id, 1),
+            s.attachment(ownerB, id, attachmentId),
+            s.detach(ownerB, id, attachmentId),
+          ],
+          Effect.exit,
+          { concurrency: 1 },
         );
-        const list = yield* as(ownerB, s.list({}));
-        return { results, listed: list.items.length };
+        const list = yield* s.list(ownerB, {});
+        return { results, listed: list.items.length, id };
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
     for (const r of exit.value.results) {
       expect(Exit.isFailure(r)).toBe(true);
-      expect(JSON.stringify(r)).toContain('"entity":"Expense"');
+      expect(r.pipe(withoutStackTrace)).toEqual(
+        Exit.fail(NotFound.make({ entity: "Expense", id: exit.value.id })),
+      );
     }
     expect(exit.value.listed).toBe(0);
   });
 
   test("a token scoped to expenses links a typed supplier but needs contacts scopes for Contacts", async () => {
-    const token = member("member", { scopes: ["expenses:write", "expenses:read"] });
+    const asToken = asCaller(member("member", { scopes: ["expenses:write", "expenses:read"] }));
     const exit = await scenario(
       Effect.gen(function* () {
-        const byIco = yield* Effect.exit(
-          as(token, record({ ...czkInput, supplier: { ico: "27074358" } })),
+        const byIco = yield* record({ ...czkInput, supplier: { ico: "27074358" } }).pipe(
+          asToken,
+          Effect.exit,
         );
-        const byContact = yield* Effect.exit(as(token, record(czkInput)));
-        const manual = yield* Effect.exit(
-          as(token, record({ ...czkInput, supplier: { manual: { name: "Shop" } } })),
+        const byContact = yield* record(czkInput).pipe(asToken, Effect.exit);
+        const manual = yield* record({ ...czkInput, supplier: { manual: { name: "Shop" } } }).pipe(
+          asToken,
+          Effect.exit,
         );
-        return { byIco, byContact, manual: Exit.isSuccess(manual) };
+        return {
+          byIco: byIco.pipe(withoutStackTrace),
+          byContact: byContact.pipe(withoutStackTrace),
+          manual: Exit.isSuccess(manual),
+        };
       }),
     );
     expect(exit).toEqual(
       Exit.succeed({
-        byIco: Exit.fail(new Forbidden({ action: "contact.write" })),
-        byContact: Exit.fail(new Forbidden({ action: "contact.read" })),
+        byIco: Exit.fail(Forbidden.make({ action: "contact.write" })),
+        byContact: Exit.fail(Forbidden.make({ action: "contact.read" })),
         manual: true,
       }),
     );
@@ -308,19 +357,21 @@ describe("authorization and Workspace scoping", () => {
 
   test("a supplier Contact of another Workspace is NotFound", async () => {
     const exit = await scenario(record({ ...czkInput, supplier: { contact: SUPPLIER_CONTACT_B } }));
-    expect(exit).toEqual(Exit.fail(new NotFound({ entity: "Contact", id: SUPPLIER_CONTACT_B })));
+    expect(exit.pipe(withoutStackTrace)).toEqual(
+      Exit.fail(NotFound.make({ entity: "Contact", id: SUPPLIER_CONTACT_B })),
+    );
   });
 
   test("supplier by IČO resolves the supplier Contact; a manual supplier links none", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const byIco = fields(yield* record({ ...czkInput, supplier: { ico: "27074358" } }));
-        const manual = fields(
-          yield* record({
-            ...czkInput,
-            supplier: { manual: { name: "Foreign GmbH", dic: "DE123" } },
-          }),
-        );
+        const result = yield* record({ ...czkInput, supplier: { ico: "27074358" } });
+        const byIco = fields(result);
+        const result2 = yield* record({
+          ...czkInput,
+          supplier: { manual: { name: "Foreign GmbH", dic: "DE123" } },
+        });
+        const manual = fields(result2);
         return [byIco.supplier, manual.supplier];
       }),
     );
@@ -342,15 +393,18 @@ describe("Expenses.edit and remove", () => {
   test("optimistic revision: a stale expectedRevision is Conflict{revision_changed}", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record(czkInput));
-        const s = yield* svc;
-        const edited = fields(yield* s.edit(id, { note: "first" }, 1));
-        const staleEdit = yield* Effect.exit(s.edit(id, { note: "second" }, 1));
-        const staleRemove = yield* Effect.exit(s.remove(id, 1));
+        const testCaller = yield* TestCaller;
+        const result = yield* record(czkInput);
+        const id = expenseId(result);
+        const s = yield* Expenses;
+        const editResult = yield* s.edit(testCaller, id, { note: "first" }, 1);
+        const edited = fields(editResult);
+        const staleEdit = yield* Effect.exit(s.edit(testCaller, id, { note: "second" }, 1));
+        const staleRemove = yield* Effect.exit(s.remove(testCaller, id, 1));
         return { revision: edited.revision, note: edited.note, staleEdit, staleRemove };
       }),
     );
-    const stale = Exit.fail(new Conflict({ reason: "revision_changed", currentRevision: 2 }));
+    const stale = Exit.fail(Conflict.make({ reason: "revision_changed", currentRevision: 2 }));
     expect(exit).toEqual(
       Exit.succeed({ revision: 2, note: "first", staleEdit: stale, staleRemove: stale }),
     );
@@ -359,10 +413,13 @@ describe("Expenses.edit and remove", () => {
   test("setting status complete runs the full validation; filling the fields then passes", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record({ status: "incomplete" }));
-        const s = yield* svc;
-        const tooEarly = yield* Effect.exit(s.edit(id, { status: "complete" }, 1));
-        const done = fields(yield* s.edit(id, { ...czkInput, status: "complete" }, 1));
+        const testCaller = yield* TestCaller;
+        const result = yield* record({ status: "incomplete" });
+        const id = expenseId(result);
+        const s = yield* Expenses;
+        const tooEarly = yield* Effect.exit(s.edit(testCaller, id, { status: "complete" }, 1));
+        const editResult = yield* s.edit(testCaller, id, { ...czkInput, status: "complete" }, 1);
+        const done = fields(editResult);
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
         return { tooEarly: issuesOf(tooEarly).length, done, audit };
@@ -375,20 +432,26 @@ describe("Expenses.edit and remove", () => {
     expect(exit.value.done.revision).toBe(2);
     const editEntry = exit.value.audit[1];
     expect(editEntry?.action).toBe("expense.edit");
-    expect(editEntry?.changes.map((c) => c.path)).toContain("status");
-    expect(editEntry?.changes.find((c) => c.path === "status")).toEqual({
-      path: "status",
-      before: "incomplete",
-      after: "complete",
-    });
+    const changes = editEntry?.changes ?? [];
+    expect(EffectArray.map(changes, (c) => c.path)).toContain("status");
+    expect(EffectArray.findFirst(changes, (c) => c.path === "status")).toEqual(
+      Option.some({
+        path: "status",
+        before: "incomplete",
+        after: "complete",
+      }),
+    );
   });
 
   test("null clears a field; an absent field keeps it", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record({ ...czkInput, note: "keep me" }));
-        const s = yield* svc;
-        return fields(yield* s.edit(id, { category: null }, 1));
+        const testCaller = yield* TestCaller;
+        const result = yield* record({ ...czkInput, note: "keep me" });
+        const id = expenseId(result);
+        const s = yield* Expenses;
+        const editResult = yield* s.edit(testCaller, id, { category: null }, 1);
+        return fields(editResult);
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
@@ -400,22 +463,30 @@ describe("Expenses.edit and remove", () => {
   test("remove soft-deletes: the Expense is NotFound and leaves the list; audit kept", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record(czkInput));
-        const s = yield* svc;
-        yield* s.remove(id, 1);
-        const get = yield* Effect.exit(s.get(id));
-        const again = yield* Effect.exit(s.remove(id, 2));
-        const page = yield* s.list({});
+        const testCaller = yield* TestCaller;
+        const result = yield* record(czkInput);
+        const id = expenseId(result);
+        const s = yield* Expenses;
+        yield* s.remove(testCaller, id, 1);
+        const get = yield* Effect.exit(s.get(testCaller, id));
+        const again = yield* Effect.exit(s.remove(testCaller, id, 2));
+        const page = yield* s.list(testCaller, {});
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
-        return { get, again, listed: page.items.length, actions: audit.map((e) => e.action), id };
+        return {
+          get,
+          again,
+          listed: page.items.length,
+          actions: EffectArray.map(audit, (e) => e.action),
+          id,
+        };
       }),
     );
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
-    const nf = Exit.fail(new NotFound({ entity: "Expense", id: exit.value.id }));
-    expect(exit.value.get).toEqual(nf);
-    expect(exit.value.again).toEqual(nf);
+    const nf = Exit.fail(NotFound.make({ entity: "Expense", id: exit.value.id }));
+    expect(exit.value.get.pipe(withoutStackTrace)).toEqual(nf);
+    expect(exit.value.again.pipe(withoutStackTrace)).toEqual(nf);
     expect(exit.value.listed).toBe(0);
     expect(exit.value.actions).toEqual(["expense.record", "expense.remove"]);
   });
@@ -425,8 +496,10 @@ describe("deductibility, reverse charge and FX", () => {
   test("partial and no deductibility scale the claimable input VAT", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const partial = fields(yield* record({ ...czkInput, deductibility: { partial: 33 } }));
-        const none = fields(yield* record({ ...czkInput, deductibility: "none" }));
+        const result = yield* record({ ...czkInput, deductibility: { partial: 33 } });
+        const partial = fields(result);
+        const result2 = yield* record({ ...czkInput, deductibility: "none" });
+        const none = fields(result2);
         return [
           partial.deductibility,
           fmt(partial.deductibleVat?.amount),
@@ -440,7 +513,8 @@ describe("deductibility, reverse charge and FX", () => {
 
   test("an out-of-range partial share is malformed", async () => {
     const exit = await scenario(record({ ...czkInput, deductibility: { partial: 100 } }));
-    expect(issuesOf(exit).map((i) => i.code)).toEqual(["request.malformed"]);
+    const issues = issuesOf(exit);
+    expect(EffectArray.map(issues, (i) => i.code)).toEqual(["request.malformed"]);
   });
 
   test("reverse charge: supplier VAT 0, the recipient self-assesses at the tax point's rate", async () => {
@@ -460,10 +534,13 @@ describe("deductibility, reverse charge and FX", () => {
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
     const v = exit.value;
-    expect(v.totals?.buckets.map((b) => [b.treatment, fmt(b.vat), fmt(b.gross)])).toEqual([
+    const buckets = v.totals?.buckets ?? [];
+    expect(EffectArray.map(buckets, (b) => [b.treatment, fmt(b.vat), fmt(b.gross)])).toEqual([
       ["reverse_charge", "0", "1000"],
     ]);
-    expect(v.selfAssessed.map((b) => [fmt(b.ratePercent), fmt(b.base), fmt(b.vat)])).toEqual([
+    expect(
+      EffectArray.map(v.selfAssessed, (b) => [fmt(b.ratePercent), fmt(b.base), fmt(b.vat)]),
+    ).toEqual([
       ["21", "600", "126"],
       ["12", "400", "48"],
     ]);
@@ -477,7 +554,8 @@ describe("deductibility, reverse charge and FX", () => {
         vat: [{ treatment: "standard", base: "100.00", vat: "21.00", selfAssessed: "reduced" }],
       }),
     );
-    expect(issuesOf(exit).map((i) => [i.path.join("."), i.params?.reason])).toEqual([
+    const issues = issuesOf(exit);
+    expect(EffectArray.map(issues, (i) => [issuePath(i.path), i.params?.["reason"]])).toEqual([
       ["vat.0.selfAssessed", "self_assessment_not_allowed"],
     ]);
   });
@@ -501,7 +579,7 @@ describe("deductibility, reverse charge and FX", () => {
     expect(v.fx).toEqual({
       rate: expect.anything(),
       quantity: 1,
-      fixingDate: "2026-11-20" as IsoDate,
+      fixingDate: IsoDate.make("2026-11-20"),
       source: "cnb",
     });
     expect(fmt(v.fx?.rate)).toBe("25.125");
@@ -526,11 +604,12 @@ describe("deductibility, reverse charge and FX", () => {
         const down = yield* Effect.exit(
           record({ ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-21" }),
         );
-        const czkStillWorks = Exit.isSuccess(yield* Effect.exit(record(czkInput)));
+        const exitResult = yield* Effect.exit(record(czkInput));
+        const czkStillWorks = Exit.isSuccess(exitResult);
         return {
-          missing: issuesOf(missing).map((i) => i.code),
+          missing: EffectArray.map(issuesOf(missing), (i) => i.code),
           cachedFixing: Exit.isSuccess(cached) ? fields(cached.value).fx?.fixingDate : null,
-          down,
+          down: down.pipe(withoutStackTrace),
           czkStillWorks,
         };
       }),
@@ -538,8 +617,8 @@ describe("deductibility, reverse charge and FX", () => {
     expect(exit).toEqual(
       Exit.succeed({
         missing: ["fx.rate_missing"],
-        cachedFixing: "2026-11-20" as IsoDate,
-        down: Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
+        cachedFixing: IsoDate.make("2026-11-20"),
+        down: Exit.fail(Unavailable.make({ dependency: "exchange_rates" })),
         czkStillWorks: true,
       }),
     );
@@ -550,21 +629,30 @@ describe("FX stability and self-assessment scope", () => {
   test("an unrelated edit keeps the stored fixing (no CNB call); a new tax point refetches", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const eur = { ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-22" };
-        const id = expenseId(yield* record(eur));
+        const result = yield* record(eur);
+        const id = expenseId(result);
         const s = yield* Expenses;
         const rates = yield* FixtureRates;
         yield* Ref.set(rates.unavailable, true);
-        const noted = fields(yield* s.edit(id, { note: "paid by card" }, 1));
-        const moved = yield* Effect.exit(s.edit(id, { taxableSupplyOn: "2026-11-21" }, 2));
-        return { fx: noted.fx?.fixingDate, czk: fmt(noted.totalCzk), moved };
+        const editResult = yield* s.edit(testCaller, id, { note: "paid by card" }, 1);
+        const noted = fields(editResult);
+        const moved = yield* Effect.exit(
+          s.edit(testCaller, id, { taxableSupplyOn: "2026-11-21" }, 2),
+        );
+        return {
+          fx: noted.fx?.fixingDate,
+          czk: fmt(noted.totalCzk),
+          moved: moved.pipe(withoutStackTrace),
+        };
       }),
     );
     expect(exit).toEqual(
       Exit.succeed({
-        fx: "2026-11-20" as IsoDate,
+        fx: IsoDate.make("2026-11-20"),
         czk: "3040.13",
-        moved: Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
+        moved: Exit.fail(Unavailable.make({ dependency: "exchange_rates" })),
       }),
     );
   });
@@ -572,12 +660,14 @@ describe("FX stability and self-assessment scope", () => {
   test("a currency change is audited with its new rate and CZK total", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const id = expenseId(yield* record({ ...czkInput, taxableSupplyOn: "2026-11-22" }));
+        const testCaller = yield* TestCaller;
+        const result = yield* record({ ...czkInput, taxableSupplyOn: "2026-11-22" });
+        const id = expenseId(result);
         const s = yield* Expenses;
-        yield* s.edit(id, { currency: "EUR" }, 1);
+        yield* s.edit(testCaller, id, { currency: "EUR" }, 1);
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
-        return audit[1]?.changes.map((c) => c.path);
+        return EffectArray.map(audit[1]?.changes ?? [], (c) => c.path);
       }),
     );
     expect(exit).toEqual(Exit.succeed(["currency", "fx", "totalCzk"]));
@@ -597,7 +687,11 @@ describe("FX stability and self-assessment scope", () => {
     expect(Exit.isSuccess(exit)).toBe(true);
     if (!Exit.isSuccess(exit)) return;
     expect(
-      exit.value.selfAssessed.map((b) => [b.treatment, fmt(b.ratePercent), fmt(b.vat)]),
+      EffectArray.map(exit.value.selfAssessed, (b) => [
+        b.treatment,
+        fmt(b.ratePercent),
+        fmt(b.vat),
+      ]),
     ).toEqual([["exempt_intra_eu_goods", "12", "60"]]);
     expect(fmt(exit.value.deductibleVat?.amount)).toBe("60");
   });
@@ -607,25 +701,30 @@ describe("Expenses.list", () => {
   test("pages newest first; incomplete filter; a cursor is bound to its filter", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
-        const a = expenseId(yield* record(czkInput));
-        const b = expenseId(yield* record({ status: "incomplete" }));
-        const c = expenseId(yield* record(czkInput));
-        const s = yield* svc;
-        const first = yield* s.list({ limit: 2 });
-        const second = yield* s.list({ limit: 2, cursor: first.nextCursor ?? "" });
-        const incomplete = yield* s.list({ incomplete: true });
+        const testCaller = yield* TestCaller;
+        const result = yield* record(czkInput);
+        const a = expenseId(result);
+        const result2 = yield* record({ status: "incomplete" });
+        const b = expenseId(result2);
+        const result3 = yield* record(czkInput);
+        const c = expenseId(result3);
+        const s = yield* Expenses;
+        const first = yield* s.list(testCaller, { limit: 2 });
+        const second = yield* s.list(testCaller, { limit: 2, cursor: first.nextCursor ?? "" });
+        const incomplete = yield* s.list(testCaller, { incomplete: true });
         const mismatch = yield* Effect.exit(
-          s.list({ incomplete: true, cursor: first.nextCursor ?? "" }),
+          s.list(testCaller, { incomplete: true, cursor: first.nextCursor ?? "" }),
         );
-        const garbage = yield* Effect.exit(s.list({ cursor: "%%%" }));
-        const ids = (p: typeof first) => p.items.map((i) => decodeSummary(i).id as ExpenseId);
+        const garbage = yield* Effect.exit(s.list(testCaller, { cursor: "%%%" }));
+        const ids = (p: typeof first) =>
+          EffectArray.map(p.items, (i) => ExpenseId.make(decodeSummary(i).id));
         return {
           first: ids(first),
           second: ids(second),
           end: second.nextCursor,
-          incomplete: incomplete.items.map((i) => decodeSummary(i).status),
-          mismatch: issuesOf(mismatch).map((i) => i.code),
-          garbage: issuesOf(garbage).map((i) => i.code),
+          incomplete: EffectArray.map(incomplete.items, (i) => decodeSummary(i).status),
+          mismatch: EffectArray.map(issuesOf(mismatch), (i) => i.code),
+          garbage: EffectArray.map(issuesOf(garbage), (i) => i.code),
           expected: [c, b, a],
         };
       }),

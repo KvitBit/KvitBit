@@ -1,3 +1,7 @@
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
 /**
  * Pure-TS cryptographic primitives for ALTCHA PoW v2 (SHA-256, PBKDF2/SHA-256, BLAKE2b, Argon2id).
  * Matches `altcha-lib` server verification (ARGON2ID, PBKDF2/SHA-256, SHA-256).
@@ -8,18 +12,17 @@ const HEX = "0123456789abcdef";
 
 export const bytesToHex = (bytes: Uint8Array): string => {
   let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i] ?? 0;
+  for (const b of bytes) {
     out += (HEX[b >>> 4] ?? "") + (HEX[b & 0x0f] ?? "");
   }
   return out;
 };
 
 export const hexToBytes = (hex: string): Uint8Array | null => {
-  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) return null;
+  if (hex.length % 2 !== 0 || !hexText.test(hex)) return null;
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    out[i] = Number.parseInt(Str.slice(i * 2, i * 2 + 2)(hex), 16);
   }
   return out;
 };
@@ -145,28 +148,12 @@ const hmacSha256 = (key: Uint8Array, data: Uint8Array): Uint8Array => {
   return sha256(outer);
 };
 
-export const pbkdf2Sha256 = async (
+const pbkdf2Fallback = (
   password: Uint8Array,
   salt: Uint8Array,
   iterations: number,
   keyLength: number,
-): Promise<Uint8Array> => {
-  const subtle = globalThis.crypto?.subtle;
-  if (subtle !== undefined) {
-    try {
-      const baseKey = await subtle.importKey("raw", password as BufferSource, "PBKDF2", false, [
-        "deriveBits",
-      ]);
-      const bits = await subtle.deriveBits(
-        { name: "PBKDF2", hash: "SHA-256", salt: salt as BufferSource, iterations },
-        baseKey,
-        keyLength * 8,
-      );
-      return new Uint8Array(bits);
-    } catch {
-      // Fall back to pure-TS implementation.
-    }
-  }
+): Uint8Array => {
   const blocks = Math.ceil(keyLength / 32);
   const out = new Uint8Array(blocks * 32);
   const saltBlock = new Uint8Array(salt.length + 4);
@@ -184,6 +171,41 @@ export const pbkdf2Sha256 = async (
   }
   return out.subarray(0, keyLength);
 };
+
+class Pbkdf2Error extends Schema.TaggedError<Pbkdf2Error, { readonly brand: unique symbol }>()(
+  "Pbkdf2Error",
+  {},
+) {}
+
+export const pbkdf2Sha256 = Effect.fn("pbkdf2Sha256")(function* (options: {
+  readonly password: Uint8Array;
+  readonly salt: Uint8Array;
+  readonly iterations: number;
+  readonly keyLength: number;
+}) {
+  const { password, salt, iterations, keyLength } = options;
+  const fallback = () => pbkdf2Fallback(password, salt, iterations, keyLength);
+  const subtle = globalThis.crypto?.subtle;
+  if (subtle === undefined) return fallback();
+  const derive = Effect.gen(function* () {
+    const baseKey = yield* Effect.tryPromise({
+      try: () =>
+        subtle.importKey("raw", Uint8Array.from(password), "PBKDF2", false, ["deriveBits"]),
+      catch: () => Pbkdf2Error.make({}),
+    });
+    const bits = yield* Effect.tryPromise({
+      try: () =>
+        subtle.deriveBits(
+          { name: "PBKDF2", hash: "SHA-256", salt: Uint8Array.from(salt), iterations },
+          baseKey,
+          keyLength * 8,
+        ),
+      catch: () => Pbkdf2Error.make({}),
+    });
+    return new Uint8Array(bits);
+  });
+  return yield* Effect.orElseSucceed(derive, fallback);
+});
 
 const BLAKE2B_IV = new Uint32Array([
   0xf3bcc908, 0x6a09e667, 0x84caa73b, 0xbb67ae85, 0xfe94f82b, 0x3c6ef372, 0x5f1d36f1, 0xa54ff53a,
@@ -245,7 +267,7 @@ const b2bG = (
   v[b + 1] = ((xHi << 1) | (xLo >>> 31)) >>> 0;
 };
 
-export const blake2b = (input: Uint8Array, outLen: number): Uint8Array => {
+const blake2b = (input: Uint8Array, outLen: number): Uint8Array => {
   const h = new Uint32Array(BLAKE2B_IV);
   h[0] = (h[0] ?? 0) ^ (0x01010000 ^ outLen);
   const v = new Uint32Array(32);
@@ -617,3 +639,5 @@ export const createArgon2id = (params: Argon2idParams) => {
     return blake2bLong(finalBytes, tagLen);
   };
 };
+
+const hexText = /^[0-9a-fA-F]*$/;

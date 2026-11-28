@@ -1,13 +1,17 @@
 import { describe, expect, mock, test } from "bun:test";
-import type {
+import {
   CurrencyCode,
   PriceListItemId,
+  PriceListItemInput,
   WorkspaceId,
   WorkspaceSlug,
-  WorkspaceSummary,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import { Remote as RemoteOps, sessionCookie } from "@kvitbit/ui-port/api";
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import type { ReactElement } from "react";
 import { makeApiRunner } from "../../runtime/api-runtime";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
@@ -18,21 +22,21 @@ import {
   type PriceListItemRecord,
   parsePriceListItem,
   priceListFormFromItem,
+  reloadPriceListItem,
   validatePriceListForm,
 } from "./model";
 
 mock.module("expo-router", () => expoRouterStandIn());
 
 const { allText, findAll, hostTree } = await import("../../testing/element-tree");
-type HostProps = import("../../testing/element-tree").HostProps;
 const { TestProviders } = await import("../../testing/providers");
-const { PriceListContent, reloadPriceListItem } = await import("./price-list-screen");
+const { PriceListContent } = await import("./price-list-screen");
 
-const CZK = "CZK" as CurrencyCode;
+const CZK = CurrencyCode.make("CZK");
 
 const workspace: WorkspaceSummary = {
-  id: "01937c7a-0000-7000-8000-000000000001" as WorkspaceId,
-  slug: "acme" as WorkspaceSlug,
+  id: WorkspaceId.make("01937c7a-0000-7000-8000-000000000001"),
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 1,
@@ -41,7 +45,7 @@ const workspace: WorkspaceSummary = {
 };
 
 const sampleItem: PriceListItemRecord = {
-  id: "pli_1" as PriceListItemId,
+  id: PriceListItemId.make("01937c7a-0000-7000-8000-8f761e425cb5"),
   name: "Senior Consulting",
   description: "Architecture & code review",
   unit: "h",
@@ -74,7 +78,13 @@ describe("price list model", () => {
 
     const api = makeApiRunner(server.url.origin, sessionCookie, () => "en");
     const reload = () =>
-      api.run((client) => reloadPriceListItem(client.priceList, workspace.id, sampleItem.id));
+      api.run((client) =>
+        reloadPriceListItem({
+          priceList: client.priceList,
+          workspaceId: workspace.id,
+          editingId: sampleItem.id,
+        }),
+      );
     try {
       const current = await reload();
       if (current._tag !== "Ok" || current.value === undefined) {
@@ -98,7 +108,7 @@ describe("price list model", () => {
 
   test("parses PriceListItemView and normalizes Czech decimal inputs", () => {
     const parsed = parsePriceListItem({
-      id: "pli_1",
+      id: "01937c7a-0000-7000-8000-8f761e425cb5",
       name: "Hosting",
       description: "Monthly plan",
       unit: "month",
@@ -118,8 +128,8 @@ describe("price list model", () => {
 
   test("validates price list form and builds wire payload", () => {
     const emptyErrors = validatePriceListForm(emptyPriceListForm());
-    expect(emptyErrors.name).toBe("name_required");
-    expect(emptyErrors.unitPrice).toBe("price_invalid");
+    expect(emptyErrors["name"]).toBe("name_required");
+    expect(emptyErrors["unitPrice"]).toBe("price_invalid");
 
     const form = priceListFormFromItem(sampleItem);
     expect(validatePriceListForm(form)).toEqual({});
@@ -128,15 +138,17 @@ describe("price list model", () => {
       ...form,
       unitPrice: "2 500,50",
       description: "  ",
-    }) as unknown as Record<string, unknown>;
-    expect(payload).toEqual({
-      name: "Senior Consulting",
-      description: null,
-      unit: "h",
-      unitPrice: "2500.50",
-      currency: "CZK",
-      vat: "standard",
     });
+    expect(payload).toEqual(
+      PriceListItemInput.make({
+        name: "Senior Consulting",
+        description: null,
+        unit: "h",
+        unitPrice: "2500.50",
+        currency: "CZK",
+        vat: "standard",
+      }),
+    );
   });
 });
 
@@ -165,7 +177,7 @@ describe("PriceListContent", () => {
         onClearFilters={() => undefined}
       />,
       within,
-    ) as ReactElement<HostProps>;
+    );
 
     const text = allText(tree);
     expect(text).toContain("Senior Consulting");
@@ -173,10 +185,14 @@ describe("PriceListContent", () => {
     expect(text).toContain("Architecture & code review");
 
     const pressables = findAll<{ onPress?: () => void }>(tree, "Pressable");
-    pressables.find((p) => allText(p) === "Edit")?.props.onPress?.();
-    pressables.find((p) => allText(p) === "Archive")?.props.onPress?.();
-    expect(edited[0]?.id).toBe("pli_1" as PriceListItemId);
-    expect(archived[0]?.id).toBe("pli_1" as PriceListItemId);
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => allText(p) === "Edit"),
+    )?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => allText(p) === "Archive"),
+    )?.props.onPress?.();
+    expect(edited[0]?.id).toBe(PriceListItemId.make("01937c7a-0000-7000-8000-8f761e425cb5"));
+    expect(archived[0]?.id).toBe(PriceListItemId.make("01937c7a-0000-7000-8000-8f761e425cb5"));
   });
 
   test("renders inline editor with stale revision reload and saves", () => {
@@ -210,15 +226,19 @@ describe("PriceListContent", () => {
         onClearFilters={() => undefined}
       />,
       within,
-    ) as ReactElement<HostProps>;
+    );
 
     const text = allText(tree);
     expect(text).toContain("Edit: Senior Consulting");
     expect(text).toContain("Reload");
 
     const pressables = findAll<{ testID?: string; onPress?: () => void }>(tree, "Pressable");
-    pressables.find((p) => p.props.testID === "price-list-save-button")?.props.onPress?.();
-    pressables.find((p) => allText(p).includes("Reload"))?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.testID === "price-list-save-button"),
+    )?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => Str.includes("Reload")(allText(p))),
+    )?.props.onPress?.();
     expect(saved).toBe(1);
     expect(reloaded).toBe(1);
   });
@@ -241,7 +261,7 @@ describe("PriceListContent", () => {
         onClearFilters={() => undefined}
       />,
       within,
-    ) as ReactElement<HostProps>;
+    );
 
     const text = allText(tree);
     expect(text).toContain("No items yet");

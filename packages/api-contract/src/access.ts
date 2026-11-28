@@ -5,9 +5,14 @@
  */
 
 import { SCOPE_AREAS, Scope, ScopeArea, ScopeLevel } from "@kvitbit/domain/contract";
-import { Schema, SchemaTransformation } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as SchemaParser from "effect/SchemaParser";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Str from "effect/String";
 
-export { SCOPE_AREAS, Scope, ScopeArea, ScopeLevel };
+export { SCOPE_AREAS, Scope, ScopeArea, ScopeLevel } from "@kvitbit/domain/contract";
 
 export const AccessMode = Schema.Literals(["read", "read_write", "custom"]);
 export type AccessMode = typeof AccessMode.Type;
@@ -25,30 +30,38 @@ export type AccessRequest = typeof AccessRequest.Type;
 const scopeOf = (area: ScopeArea, level: ScopeLevel): Scope => `${area}:${level}`;
 
 /** Every core scope in canonical order: per area, read before write. */
-export const ALL_SCOPES: ReadonlyArray<Scope> = SCOPE_AREAS.flatMap((area) => [
+export const ALL_SCOPES: ReadonlyArray<Scope> = Arr.flatMap(SCOPE_AREAS, (area) => [
   scopeOf(area, "read"),
   scopeOf(area, "write"),
 ]);
-export const READ_SCOPES: ReadonlyArray<Scope> = SCOPE_AREAS.map((area) => scopeOf(area, "read"));
+export const READ_SCOPES: ReadonlyArray<Scope> = Arr.map(SCOPE_AREAS, (area) =>
+  scopeOf(area, "read"),
+);
+const readScopeByArea = new Map<string, Scope>(
+  Arr.map(SCOPE_AREAS, (area) => [area, scopeOf(area, "read")]),
+);
 
 /** Canonical, de-duplicated scope list where `<area>:write` adds `<area>:read`. */
 export const normalizeScopes = (scopes: Iterable<Scope>): ReadonlyArray<Scope> => {
   const wanted = new Set<Scope>();
   for (const scope of scopes) {
     wanted.add(scope);
-    const [area, level] = scope.split(":") as [ScopeArea, ScopeLevel];
-    if (level === "write") wanted.add(scopeOf(area, "read"));
+    const [area, level] = Str.split(scope, ":");
+    if (level === "write") {
+      const readScope = readScopeByArea.get(area);
+      if (readScope !== undefined) wanted.add(readScope);
+    }
   }
-  return ALL_SCOPES.filter((scope) => wanted.has(scope));
+  return Arr.filter(ALL_SCOPES, (scope) => wanted.has(scope));
 };
 
 const sameList = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean =>
-  a.length === b.length && a.every((scope, i) => scope === b[i]);
+  a.length === b.length && Arr.every(a, (scope, i) => scope === b[i]);
 
 /** Same members, no duplicates, any order. */
 const sameMembers = (a: ReadonlyArray<Scope>, b: ReadonlyArray<Scope>): boolean => {
   const set = new Set(a);
-  return a.length === b.length && set.size === a.length && b.every((scope) => set.has(scope));
+  return a.length === b.length && set.size === a.length && Arr.every(b, (scope) => set.has(scope));
 };
 
 /**
@@ -106,19 +119,22 @@ export const OAUTH_SCOPE_PREFIX = "kvitbit:";
 export const OAuthAreaScope = Schema.TemplateLiteral(["kvitbit:", ScopeArea, ":", ScopeLevel]);
 export type OAuthAreaScope = typeof OAuthAreaScope.Type;
 
+const decodeCoreScope = SchemaParser.decodeUnknownEffect(Scope);
+const coreScopeText = Str.slice(OAUTH_SCOPE_PREFIX.length);
+const wireScopeOf = (scope: Scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`;
+
 /** Decodes `kvitbit:<area>:<level>` to the core `Scope` and encodes it back. */
 export const ScopeFromOAuth = OAuthAreaScope.pipe(
   Schema.decodeTo(
     Scope,
-    SchemaTransformation.transform<Scope, OAuthAreaScope>({
-      decode: (wire) => coreScopeOf(wire),
-      encode: (scope) => wireScopeOf(scope),
+    SchemaTransformation.transformEffect<Scope, OAuthAreaScope>({
+      decode: (wire) => decodeCoreScope(coreScopeText(wire)),
+      encode: (scope) => Effect.succeed(wireScopeOf(scope)),
     }),
   ),
 );
 
-export const OAuthPresetScope = Schema.Literals(["kvitbit:read", "kvitbit:write"]);
-export type OAuthPresetScope = typeof OAuthPresetScope.Type;
+const OAuthPresetScope = Schema.Literals(["kvitbit:read", "kvitbit:write"]);
 
 /** A Kvitbit access scope on the wire: a preset or a per-area scope. Grants map to these. */
 export const OAuthAccessScope = Schema.Union([OAuthPresetScope, OAuthAreaScope]);
@@ -126,22 +142,20 @@ export type OAuthAccessScope = typeof OAuthAccessScope.Type;
 
 /** The standard OIDC scope asking for a refresh token; it grants no Kvitbit access (6.3). */
 export const OAUTH_OFFLINE_ACCESS = "offline_access";
-export const OAuthOfflineAccessScope = Schema.Literal(OAUTH_OFFLINE_ACCESS);
-export type OAuthOfflineAccessScope = typeof OAuthOfflineAccessScope.Type;
+const OAuthOfflineAccessScope = Schema.Literal(OAUTH_OFFLINE_ACCESS);
 
 /** One token of the OAuth `scope` parameter that Kvitbit understands. */
 export const OAuthScopeToken = Schema.Union([OAuthAccessScope, OAuthOfflineAccessScope]);
 export type OAuthScopeToken = typeof OAuthScopeToken.Type;
 
 const isOAuthAreaScope = Schema.is(OAuthAreaScope);
-const coreScopeOf = (wire: OAuthAreaScope): Scope => wire.slice(OAUTH_SCOPE_PREFIX.length) as Scope;
-const wireScopeOf = (scope: Scope): OAuthAreaScope => `${OAUTH_SCOPE_PREFIX}${scope}`;
+const decodeOAuthAreaScope = Schema.decodeResult(ScopeFromOAuth);
 
 /** `scopes_supported` of the protected resource metadata (section 6.2), in that order. */
 export const OAUTH_SCOPES_SUPPORTED: ReadonlyArray<OAuthScopeToken> = [
   "kvitbit:read",
   "kvitbit:write",
-  ...ALL_SCOPES.map(wireScopeOf),
+  ...Arr.map(ALL_SCOPES, wireScopeOf),
   OAUTH_OFFLINE_ACCESS,
 ];
 
@@ -166,7 +180,9 @@ export const accessFromOAuthScopes = (
     return { access: { access: "read_write", scopes: ALL_SCOPES }, offlineAccess };
   }
   const wantsReadPreset = tokens.includes("kvitbit:read");
-  const areaScopes = tokens.filter(isOAuthAreaScope).map(coreScopeOf);
+  const areaScopes = Arr.filterMap(Arr.filter(tokens, isOAuthAreaScope), (wire) =>
+    decodeOAuthAreaScope(wire),
+  );
   if (areaScopes.length > 0) {
     const scopes = normalizeScopes(wantsReadPreset ? [...READ_SCOPES, ...areaScopes] : areaScopes);
     return { access: { access: "custom", scopes }, offlineAccess };
@@ -187,6 +203,6 @@ export const oauthScopesForGrant = (grant: GrantedAccess): ReadonlyArray<OAuthAc
     case "read_write":
       return ["kvitbit:write"];
     case "custom":
-      return normalizeScopes(grant.scopes).map(wireScopeOf);
+      return Arr.map(normalizeScopes(grant.scopes), wireScopeOf);
   }
 };

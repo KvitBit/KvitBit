@@ -6,18 +6,17 @@
  * `schedule` and `resume` bump the Template's revision: it covers the attached schedule.
  * The issuance steps of RecurringIssuance live in ./issuance.ts.
  */
+
 import type {
   Action,
+  Caller,
   DocumentInput,
   DocumentPatch,
-  DocumentView,
-  IsoDate,
   NotFound,
   Page,
   PageRequest,
   RecurringRunView,
   RequestOptions,
-  ScheduleId,
   TemplateId,
   TemplateInput,
   TemplateSchedule,
@@ -27,16 +26,30 @@ import type {
 } from "@kvitbit/domain/contract";
 import {
   Conflict,
-  type CurrentCaller,
   DocumentPatch as DocumentPatchSchema,
   Documents,
+  DocumentView,
   Forbidden,
   Invalid,
+  IsoDate,
+  ScheduleId,
   TemplateId as TemplateIdSchema,
   TemplateInput as TemplateInputSchema,
   Templates,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Clock, Effect, Layer, Option, Result, Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+import * as Struct from "effect/Struct";
 import { pragueDate } from "../../engines/calendar";
 import { Schedules } from "../../engines/schedules";
 import { authorizeInWorkspace } from "../../policy/Policy";
@@ -49,7 +62,7 @@ import { DeliveryStatusLookup } from "./deliveries";
 import type { CadenceUnit, ScheduleRow, TemplateRow } from "./repo";
 import { dieOnUnique, RecurringRepo } from "./repo";
 import { startingOccurrence } from "./sweep";
-import { runView, scheduleView, TemplateViewCodec, templateView } from "./view";
+import { runView, scheduleView, TemplateViewSchema, templateView } from "./view";
 
 /** Default and maximum page sizes of `runs` (PageRequest). */
 const DEFAULT_PAGE = 50;
@@ -62,37 +75,42 @@ type CoreFailure = Invalid | Conflict | Forbidden | Unavailable;
  */
 export interface TemplatesImpl {
   readonly save: (
+    caller: Caller,
     input: TemplateInput & { readonly id?: TemplateId; readonly expectedRevision?: number },
     opts?: RequestOptions,
-  ) => Effect.Effect<TemplateView, CoreFailure | NotFound, CurrentCaller>;
+  ) => Effect.Effect<TemplateView, CoreFailure | NotFound>;
   readonly archive: (
+    caller: Caller,
     id: TemplateId,
-  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable>;
   readonly schedule: (
+    caller: Caller,
     template: TemplateId,
     schedule: TemplateSchedule | null,
     expectedRevision: number,
-  ) => Effect.Effect<TemplateView, CoreFailure | NotFound, CurrentCaller>;
+  ) => Effect.Effect<TemplateView, CoreFailure | NotFound>;
   readonly resume: (
+    caller: Caller,
     template: TemplateId,
-  ) => Effect.Effect<TemplateView, NotFound | Conflict | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<TemplateView, NotFound | Conflict | Forbidden | Unavailable>;
   readonly use: (
+    caller: Caller,
     template: TemplateId,
     input?: { readonly as?: "draft" | "issued"; readonly patch?: DocumentPatch },
     opts?: RequestOptions,
-  ) => Effect.Effect<DocumentView, CoreFailure | NotFound, CurrentCaller>;
+  ) => Effect.Effect<DocumentView, CoreFailure | NotFound>;
   readonly get: (
+    caller: Caller,
     id: TemplateId,
-  ) => Effect.Effect<TemplateView, NotFound | Forbidden | Unavailable, CurrentCaller>;
-  readonly list: Effect.Effect<ReadonlyArray<TemplateView>, Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<TemplateView, NotFound | Forbidden | Unavailable>;
+  readonly list: (
+    caller: Caller,
+  ) => Effect.Effect<ReadonlyArray<TemplateView>, Forbidden | Unavailable>;
   readonly runs: (
+    caller: Caller,
     template: TemplateId,
     page?: PageRequest,
-  ) => Effect.Effect<
-    Page<RecurringRunView>,
-    Invalid | NotFound | Forbidden | Unavailable,
-    CurrentCaller
-  >;
+  ) => Effect.Effect<Page<RecurringRunView>, Invalid | NotFound | Forbidden | Unavailable>;
 }
 
 /**
@@ -100,9 +118,9 @@ export interface TemplatesImpl {
  * read-only for core streams (board #430, same as numbering). Used for that case only.
  */
 const malformed = (path: ReadonlyArray<string>, reason: string) =>
-  new Invalid({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
 
-const illegal = () => new Conflict({ reason: "illegal_transition" });
+const illegal = () => Conflict.make({ reason: "illegal_transition" });
 
 const UsePayload = Schema.Struct({
   template: TemplateIdSchema,
@@ -117,23 +135,57 @@ const UsePayload = Schema.Struct({
  */
 const ViewSnapshot = Schema.Struct({ json: Schema.String });
 const DECIMAL = "$kvitbit.decimal";
-const tagDecimals = (value: unknown): unknown => {
+const tagDecimals = <A>(value: A): unknown => {
   if (BigDecimal.isBigDecimal(value)) return { [DECIMAL]: [value.value.toString(), value.scale] };
-  if (Array.isArray(value)) return value.map(tagDecimals);
-  if (typeof value === "object" && value !== null) {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, tagDecimals(v)]));
+  if (EffectArray.isArray(value)) return EffectArray.map(value, tagDecimals);
+  if (Predicate.isObject(value)) {
+    return EffectRecord.fromEntries(
+      EffectArray.map(EffectRecord.toEntries(value), ([k, v]) => [k, tagDecimals(v)]),
+    );
   }
   return value;
 };
-const snapshotOf = (view: unknown): string => JSON.stringify(tagDecimals(view));
-const restoreSnapshot = (json: string): unknown =>
-  JSON.parse(json, (_key, value: unknown) => {
-    if (typeof value === "object" && value !== null && DECIMAL in value) {
-      const [digits, scale] = (value as Record<string, [string, number]>)[DECIMAL] ?? ["0", 0];
-      return BigDecimal.make(BigInt(digits), scale);
+const Json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeEffect(Json);
+const decodeJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Json));
+const DecimalSnapshot = Schema.Tuple([Schema.BigIntFromString, Schema.Int]);
+const decodeDecimal = Schema.decodeUnknownEffect(DecimalSnapshot);
+
+const isJsonArray = (value: Schema.Json): value is Schema.JsonArray => EffectArray.isArray(value);
+
+const isJsonObject = (value: Exclude<Schema.Json, Schema.JsonArray>): value is Schema.JsonObject =>
+  Predicate.isObject(value);
+
+const restoreDecimals = Effect.fnUntraced(function* (
+  value: Schema.Json,
+): Effect.fn.Return<unknown, Schema.SchemaError> {
+  if (isJsonArray(value)) {
+    return yield* Effect.forEach(value, restoreDecimals, { concurrency: 1 });
+  }
+  if (isJsonObject(value)) {
+    if (DECIMAL in value) {
+      const [digits, scale] = yield* decodeDecimal(value[DECIMAL]);
+      return BigDecimal.make(digits, scale);
     }
-    return value;
-  });
+    const fields = yield* Effect.forEach(
+      EffectRecord.toEntries<string, Schema.Json>(value),
+      ([key, input]) => restoreDecimals(input).pipe(Effect.map((item) => [key, item] as const)),
+      { concurrency: 1 },
+    );
+    return EffectRecord.fromEntries(fields);
+  }
+  return value;
+});
+
+// Refine the restored value in place so persisted view fields survive decoding.
+const RestoredView = Schema.Unknown.pipe(Schema.refine(Schema.is(Schema.toType(DocumentView))));
+
+const restoreSnapshot = (json: string) =>
+  decodeJson(json).pipe(
+    Effect.flatMap(restoreDecimals),
+    Effect.flatMap(Schema.decodeUnknownEffect(RestoredView)),
+    Effect.orDie,
+  );
 
 const SavePayload = Schema.Struct({
   ...TemplateInputSchema.fields,
@@ -141,31 +193,46 @@ const SavePayload = Schema.Struct({
   expectedRevision: Schema.optional(Schema.Int),
 });
 
-const TemplateInputJson = Schema.toCodecJson(TemplateInputSchema);
-const encodeInput = (input: TemplateInput): Record<string, unknown> =>
-  Schema.encodeSync(TemplateInputJson)(input) as Record<string, unknown>;
+const encodeInput = Schema.encodeEffect(Schema.toCodecJson(TemplateInputSchema));
+const InputFields = Schema.Record(Schema.String, Schema.Unknown);
+const decodeInputFields = Schema.decodeUnknownEffect(InputFields);
 
 /** Field-level audit changes between two saved inputs (encoded, so decimals compare by value). */
-const inputChanges = (before: TemplateInput | null, after: TemplateInput) => {
-  const a = before === null ? {} : encodeInput(before);
-  const b = encodeInput(after);
-  const keys = [...new Set([...Object.keys(a), ...Object.keys(b)])].sort();
-  return keys.flatMap((key) =>
-    JSON.stringify(a[key]) === JSON.stringify(b[key])
-      ? []
-      : [{ path: key, before: a[key] ?? null, after: b[key] ?? null }],
+const inputChanges = Effect.fn("Templates.inputChanges")(function* (
+  before: TemplateInput | null,
+  after: TemplateInput,
+) {
+  const a =
+    before === null ? {} : yield* encodeInput(before).pipe(Effect.flatMap(decodeInputFields));
+  const b = yield* encodeInput(after).pipe(Effect.flatMap(decodeInputFields));
+  const keys = [...new Set([...EffectRecord.keys(a), ...EffectRecord.keys(b)])].sort(
+    (left, right) => (left < right ? -1 : left > right ? 1 : 0),
   );
-};
+  const changes = yield* Effect.forEach(
+    keys,
+    Effect.fnUntraced(function* (key) {
+      const previous = a[key];
+      const next = b[key];
+      const previousJson = previous === undefined ? undefined : yield* encodeJson(previous);
+      const nextJson = next === undefined ? undefined : yield* encodeJson(next);
+      return previousJson === nextJson
+        ? Option.none()
+        : Option.some({ path: key, before: previous ?? null, after: next ?? null });
+    }),
+    { concurrency: 1 },
+  );
+  return EffectArray.getSomes(changes);
+}, Effect.orDie);
 
 /** Stateless input rules of `save`. */
 const validateInput = (input: TemplateInput): Result.Result<TemplateInput, Invalid> => {
-  if (input.name.trim().length === 0) return Result.fail(malformed(["name"], "empty"));
+  if (EffectString.trim(input.name).length === 0) return Result.fail(malformed(["name"], "empty"));
   if (input.due !== undefined && input.due.inDays < 0) {
     return Result.fail(
-      new Invalid({ issues: [{ path: ["due", "inDays"], code: "document.due_before_issue" }] }),
+      Invalid.make({ issues: [{ path: ["due", "inDays"], code: "document.due_before_issue" }] }),
     );
   }
-  return Result.succeed({ ...input, name: input.name.trim() });
+  return Result.succeed({ ...input, name: EffectString.trim(input.name) });
 };
 
 /** The rule and send options of a `schedule` argument, or `Invalid{schedule.cadence_invalid}`. */
@@ -182,31 +249,38 @@ const validateSchedule = (
   },
   Invalid
 > => {
-  const cadence = (input: TemplateSchedule["every"]) => {
-    const keys = Object.keys(input);
+  const cadence = (value: TemplateSchedule["every"]) => {
+    if (!Predicate.isObject(value)) return null;
+    const record: Readonly<Record<string, number>> = value;
+    const keys = EffectRecord.keys(record);
     if (keys.length !== 1) return null;
-    if ("weeks" in input) return { unit: "weeks" as const, interval: input.weeks };
-    if ("months" in input) return { unit: "months" as const, interval: input.months };
-    if ("years" in input) return { unit: "years" as const, interval: input.years };
+    if ("weeks" in value) {
+      return { unit: "weeks" as const, interval: value.weeks };
+    }
+    if ("months" in value) {
+      return { unit: "months" as const, interval: value.months };
+    }
+    if ("years" in value) {
+      return { unit: "years" as const, interval: value.years };
+    }
     return null;
   };
   const invalid = (path: ReadonlyArray<string>, reason: string) =>
     Result.fail(
-      new Invalid({
+      Invalid.make({
         issues: [{ path: [...path], code: "schedule.cadence_invalid", params: { reason } }],
       }),
     );
-  const every =
-    typeof input.every === "object" && input.every !== null ? cadence(input.every) : null;
+  const every = cadence(input.every);
   if (every === null) return invalid(["every"], "unit");
   if (input.issueAs !== "invoice" && input.issueAs !== "proforma") {
     return invalid(["issueAs"], "kind");
   }
-  if (typeof input.autoSend !== "boolean") return invalid(["autoSend"], "type");
+  if (!Predicate.isBoolean(input.autoSend)) return invalid(["autoSend"], "type");
   const rule = {
     every: input.every,
     startOn: input.startOn,
-    ...(input.endOn !== undefined ? { endOn: input.endOn } : {}),
+    endOn: input.endOn,
   };
   return Result.map(Schedules.validate(rule), () => ({
     unit: every.unit,
@@ -238,7 +312,7 @@ const PATCH_FIELDS = [
 /** The template's values as a DocumentInput (relative due kept as `inDays`). */
 export const documentInputOf = (input: TemplateInput): DocumentInput => {
   const { name: _name, due, ...rest } = input;
-  return { ...rest, ...(due !== undefined ? { due: { inDays: due.inDays } } : {}) };
+  return { ...rest, due };
 };
 
 /** `use`: template values as defaults, the patch on top. */
@@ -254,42 +328,29 @@ const applyPatch = (
     // A new document snapshots the parties anyway; refreshing is an edit of an existing one.
     return Result.fail(illegal());
   }
-  const next: Record<string, unknown> = { ...base };
-  for (const field of PATCH_FIELDS) {
-    if (patch[field] !== undefined) next[field] = patch[field];
-  }
-  if (patch.fx === null) delete next.fx;
-  else if (patch.fx !== undefined) next.fx = patch.fx;
-  return Result.succeed(next as unknown as DocumentInput);
+  const selected: Readonly<Record<string, DocumentPatch[(typeof PATCH_FIELDS)[number]]>> =
+    Struct.pick(patch, PATCH_FIELDS);
+  const definedFields = EffectRecord.filter(selected, (value) => value !== undefined);
+  const { fx: originalFx, ...original } = base;
+  const fx = patch.fx === undefined ? originalFx : patch.fx;
+  return Result.succeed({
+    ...original,
+    ...definedFields,
+    fx: fx ?? undefined,
+  });
 };
 
-interface Cursor {
-  readonly template: string;
-  readonly occurrence: IsoDate;
-  readonly id: string;
-}
-
-const encodeCursor = (cursor: Cursor): string =>
-  Buffer.from(JSON.stringify([cursor.template, cursor.occurrence, cursor.id])).toString(
-    "base64url",
+const CursorJson = Schema.fromJsonString(Schema.Tuple([Schema.String, IsoDate, Schema.String]));
+const encodeCursorJson = Schema.encodeEffect(CursorJson);
+const decodeCursorJson = Schema.decodeEffect(CursorJson);
+const encodeCursor = (template: TemplateId, occurrence: IsoDate, id: string) =>
+  encodeCursorJson([template, occurrence, id]).pipe(
+    Effect.map((value) => Buffer.from(value).toString("base64url")),
+    Effect.orDie,
   );
 
-const decodeCursor = (raw: string, template: TemplateId): Cursor | null => {
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === 3 &&
-      parsed.every((part) => typeof part === "string") &&
-      parsed[0] === template
-    ) {
-      return { template, occurrence: parsed[1] as IsoDate, id: parsed[2] as string };
-    }
-    return null;
-  } catch {
-    return null;
-  }
-};
+const decodeCursor = (raw: string) =>
+  decodeCursorJson(Buffer.from(raw, "base64url").toString("utf8")).pipe(Effect.option);
 
 export const makeTemplates = Effect.gen(function* () {
   const store = yield* CoreStore;
@@ -300,7 +361,7 @@ export const makeTemplates = Effect.gen(function* () {
   const provide = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     effect.pipe(Effect.provideService(CoreStore, store), Effect.provideService(IdGenerator, ids));
 
-  const nowIso = Effect.map(Clock.currentTimeMillis, (ms) => new Date(ms).toISOString());
+  const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
   const today = Effect.map(Clock.currentTimeMillis, pragueDate);
 
   const attached = (workspaceId: WorkspaceId, templateId: TemplateId) =>
@@ -316,27 +377,32 @@ export const makeTemplates = Effect.gen(function* () {
     );
 
   /** The latest occurrence any schedule of the Template (detached ones too) issued. */
-  const lastIssuedOfTemplate = (workspaceId: WorkspaceId, templateId: TemplateId) =>
-    Effect.gen(function* () {
-      const schedules = yield* repo.schedulesOfTemplate(workspaceId, templateId);
-      let last: IsoDate | null = null;
-      for (const s of schedules) {
-        const run = yield* repo.lastIssuedRun(workspaceId, s.id);
-        if (Option.isSome(run) && (last === null || run.value.occurrence > last)) {
-          last = run.value.occurrence;
-        }
+  const lastIssuedOfTemplate = Effect.fn("lastIssuedOfTemplate")(function* (
+    workspaceId: WorkspaceId,
+    templateId: TemplateId,
+  ) {
+    const schedules = yield* repo.schedulesOfTemplate(workspaceId, templateId);
+    let last: IsoDate | null = null;
+    for (const s of schedules) {
+      const run = yield* repo.lastIssuedRun(workspaceId, s.id);
+      if (Option.isSome(run) && (last === null || run.value.occurrence > last)) {
+        last = run.value.occurrence;
       }
-      return last;
-    });
+    }
+    return last;
+  });
 
   const viewOf = (row: TemplateRow) =>
-    Effect.map(attached(row.workspaceId, row.id), (schedule) => templateView(row, schedule));
+    Effect.map(attached(row.workspaceId, row.id), (attachedSchedule) =>
+      templateView(row, attachedSchedule),
+    );
 
   /** Bumps the Template's revision for a schedule change it covers. */
   const touch = (row: TemplateRow) =>
     Effect.flatMap(nowIso, (at) => repo.updateTemplate({ ...row, updatedAt: at }, row.revision));
 
   const audit = (
+    caller: Caller,
     row: TemplateRow,
     action: string,
     changes: ReadonlyArray<{
@@ -345,7 +411,7 @@ export const makeTemplates = Effect.gen(function* () {
       readonly after: unknown;
     }>,
   ) =>
-    appendAudit({
+    appendAudit(caller, {
       workspaceId: row.workspaceId,
       subject: { entity: "Template", id: row.id },
       action,
@@ -353,24 +419,24 @@ export const makeTemplates = Effect.gen(function* () {
       changes,
     });
 
-  const save: TemplatesImpl["save"] = (input, opts) =>
-    Effect.gen(function* () {
-      const { workspaceId } = yield* authorizeInWorkspace("template.write");
+  const save: TemplatesImpl["save"] = Effect.fn("save")(
+    function* (caller: Caller, input, opts) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "template.write");
       const { id, expectedRevision, ...fields } = input;
       return yield* withIdempotency(
         {
           scope: { _tag: "Workspace", workspaceId },
           key: opts?.requestKey,
           method: "Templates.save",
-          payload: { schema: SavePayload as Schema.Codec<typeof input, unknown>, value: input },
-          result: TemplateViewCodec,
+          payload: { schema: SavePayload, value: input },
+          result: TemplateViewSchema,
         },
         Effect.gen(function* () {
           const at = yield* nowIso;
           if (id === undefined) {
             const valid = yield* Effect.fromResult(validateInput(fields));
             const row = yield* repo.insertTemplate({
-              id: yield* newId<TemplateId>(),
+              id: yield* newId(TemplateIdSchema.make),
               workspaceId,
               revision: 1,
               name: valid.name,
@@ -379,14 +445,15 @@ export const makeTemplates = Effect.gen(function* () {
               createdAt: at,
               updatedAt: at,
             });
-            yield* audit(row, "template.create", inputChanges(null, row.input));
+            const changes = yield* inputChanges(null, row.input);
+            yield* audit(caller, row, "template.create", changes);
             return templateView(row, null);
           }
           // An update without expectedRevision cannot be checked (C2): report the current
           // revision as a revision conflict so the caller refetches and retries.
           if (expectedRevision === undefined) {
             const locked = yield* repo.lockTemplateState(workspaceId, id);
-            return yield* new Conflict({
+            return yield* Conflict.make({
               reason: "revision_changed",
               currentRevision: locked.revision,
             });
@@ -398,39 +465,51 @@ export const makeTemplates = Effect.gen(function* () {
             { ...current, name: valid.name, input: valid, updatedAt: at },
             current.revision,
           );
-          yield* audit(row, "template.save", inputChanges(current.input, row.input));
+          const changes = yield* inputChanges(current.input, row.input);
+          yield* audit(caller, row, "template.save", changes);
           return yield* viewOf(row);
         }),
       );
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["save"]>;
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const detach = (schedule: ScheduleRow) =>
-    Effect.flatMap(nowIso, (at) =>
-      repo.updateSchedule({ ...schedule, detachedAt: at }, schedule.revision),
-    );
+  const detach = (row: ScheduleRow) =>
+    Effect.flatMap(nowIso, (at) => repo.updateSchedule({ ...row, detachedAt: at }, row.revision));
 
-  const archive: TemplatesImpl["archive"] = (id) =>
-    Effect.gen(function* () {
-      const { workspaceId } = yield* authorizeInWorkspace("template.write");
+  const archive: TemplatesImpl["archive"] = Effect.fn("archive")(
+    function* (caller: Caller, id) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "template.write");
       yield* store.transaction(
         Effect.gen(function* () {
           const current = yield* repo.lockTemplateState(workspaceId, id);
           if (current.archivedAt !== null) return;
-          const schedule = yield* attachedLocked(workspaceId, id);
-          if (schedule !== null) yield* detach(schedule);
+          const attachedSchedule = yield* attachedLocked(workspaceId, id);
+          if (attachedSchedule !== null) yield* detach(attachedSchedule);
           const at = yield* nowIso;
           const row = yield* repo.updateTemplate(
             { ...current, archivedAt: at, updatedAt: at },
             current.revision,
           );
-          yield* audit(row, "template.archive", [{ path: "archived", before: false, after: true }]);
-        }),
+          yield* audit(caller, row, "template.archive", [
+            { path: "archived", before: false, after: true },
+          ]);
+        }).pipe(
+          // The Template and any attached Schedule stay locked until commit.
+          Effect.catchTag("Conflict", Effect.die),
+        ),
       );
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["archive"]>;
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const schedule: TemplatesImpl["schedule"] = (templateId, input, expectedRevision) =>
-    Effect.gen(function* () {
-      const { workspaceId } = yield* authorizeInWorkspace("schedule.write");
+  const schedule: TemplatesImpl["schedule"] = Effect.fn("schedule")(
+    function* (caller: Caller, templateId, input, expectedRevision) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "schedule.write");
       return yield* store.transaction(
         Effect.gen(function* () {
           // Lock and revision check first (C2): a stale or foreign call never sees Invalid.
@@ -442,16 +521,21 @@ export const makeTemplates = Effect.gen(function* () {
             if (before === null) return templateView(current, null);
             yield* detach(before);
             const row = yield* touch(current);
-            yield* audit(row, "template.schedule", [
+            yield* audit(caller, row, "template.schedule", [
               { path: "schedule", before: scheduleView(before), after: null },
             ]);
             return templateView(row, null);
           }
           const day = yield* today;
           const rule = {
-            every: { [valid.unit]: valid.interval } as TemplateSchedule["every"],
+            every:
+              valid.unit === "weeks"
+                ? { weeks: valid.interval }
+                : valid.unit === "months"
+                  ? { months: valid.interval }
+                  : { years: valid.interval },
             startOn: valid.startOn,
-            ...(valid.endOn !== null ? { endOn: valid.endOn } : {}),
+            endOn: valid.endOn ?? undefined,
           };
           const fields = {
             cadenceUnit: valid.unit,
@@ -467,7 +551,7 @@ export const makeTemplates = Effect.gen(function* () {
           let next: ScheduleRow;
           if (before === null) {
             next = yield* repo.insertSchedule({
-              id: yield* newId<ScheduleId>(),
+              id: yield* newId(ScheduleId.make),
               workspaceId,
               revision: 1,
               templateId,
@@ -509,7 +593,7 @@ export const makeTemplates = Effect.gen(function* () {
             );
           }
           const row = yield* touch(current);
-          yield* audit(row, "template.schedule", [
+          yield* audit(caller, row, "template.schedule", [
             {
               path: "schedule",
               before: before === null ? null : scheduleView(before),
@@ -519,11 +603,15 @@ export const makeTemplates = Effect.gen(function* () {
           return templateView(row, next);
         }),
       );
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["schedule"]>;
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const resume: TemplatesImpl["resume"] = (templateId) =>
-    Effect.gen(function* () {
-      const { workspaceId } = yield* authorizeInWorkspace("schedule.write");
+  const resume: TemplatesImpl["resume"] = Effect.fn("resume")(
+    function* (caller: Caller, templateId) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "schedule.write");
       return yield* store.transaction(
         Effect.gen(function* () {
           const current = yield* repo.lockTemplateState(workspaceId, templateId);
@@ -543,28 +631,32 @@ export const makeTemplates = Effect.gen(function* () {
             before.revision,
           );
           const row = yield* touch(current);
-          yield* audit(row, "template.resume", [
+          yield* audit(caller, row, "template.resume", [
             { path: "schedule.pausedReason", before: before.pausedReason, after: null },
           ]);
           return templateView(row, next);
         }),
       );
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["resume"]>;
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const use: TemplatesImpl["use"] = (templateId, input, opts) =>
-    Effect.gen(function* () {
-      const { caller, workspaceId } = yield* authorizeInWorkspace("template.read");
+  const use: TemplatesImpl["use"] = Effect.fn("use")(
+    function* (caller: Caller, templateId, input, opts) {
+      const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+        caller,
+        "template.read",
+      );
       const as = input?.as ?? "draft";
       const action: Action = as === "issued" ? "document.issue" : "document.draft";
       // R1a: both permissions before any read or replay.
-      yield* authorizeInWorkspace(action);
+      yield* authorizeInWorkspace(workspaceCaller, action);
       // Manual use only: a System caller issues through its RecurringIssuance job (R4, R5).
-      if (caller._tag !== "Member") return yield* new Forbidden({ action });
-      const payload = {
-        template: templateId,
-        as,
-        ...(input?.patch !== undefined ? { patch: input.patch } : {}),
-      };
+      if (workspaceCaller._tag !== "Member") return yield* Forbidden.make({ action });
+      const target = { template: templateId, as };
+      const payload = input?.patch === undefined ? target : { ...target, patch: input.patch };
       // The request key is Templates': a retry with another template or patch is a mismatch.
       // Documents runs nested in this transaction, without a key of its own. The request log
       // stores a clean snapshot of the created document (no share URL, no delivery history; the
@@ -574,7 +666,7 @@ export const makeTemplates = Effect.gen(function* () {
           scope: { _tag: "Workspace", workspaceId },
           key: opts?.requestKey,
           method: "Templates.use",
-          payload: { schema: UsePayload as Schema.Codec<typeof payload, unknown>, value: payload },
+          payload: { schema: UsePayload, value: payload },
           result: ViewSnapshot,
         },
         Effect.gen(function* () {
@@ -585,63 +677,90 @@ export const makeTemplates = Effect.gen(function* () {
           );
           const view =
             as === "issued"
-              ? yield* documents.issue({ input: document })
-              : yield* documents.createDraft(document);
+              ? yield* documents.issue(caller, { input: document })
+              : yield* documents.createDraft(caller, document);
           // Never the owner-facing share URL or delivery history (core-ports.md 66-68).
-          return { json: snapshotOf({ ...view, share: null, deliveries: [] }) };
+          const json = yield* encodeJson(
+            tagDecimals({ ...view, share: null, deliveries: [] }),
+          ).pipe(Effect.orDie);
+          return { json };
         }),
       );
-      return restoreSnapshot(created.json) as DocumentView;
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["use"]>;
+      return yield* restoreSnapshot(created.json);
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const get: TemplatesImpl["get"] = (id) =>
-    Effect.gen(function* () {
-      const { workspaceId } = yield* authorizeInWorkspace("template.read");
+  const get: TemplatesImpl["get"] = Effect.fn("get")(
+    function* (caller: Caller, id) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "template.read");
       return yield* store.transaction(Effect.flatMap(repo.getTemplate(workspaceId, id), viewOf));
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["get"]>;
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const list: TemplatesImpl["list"] = Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("template.read");
-    return yield* store.transaction(
-      Effect.flatMap(repo.listTemplates(workspaceId), (rows) => Effect.forEach(rows, viewOf)),
-    );
-  }).pipe(provide, dieOnUnique, orUnavailable) as TemplatesImpl["list"];
+  const list: TemplatesImpl["list"] = Effect.fn("list")(
+    function* (caller) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "template.read");
+      return yield* store.transaction(
+        Effect.flatMap(repo.listTemplates(workspaceId), (rows) =>
+          Effect.forEach(rows, viewOf, { concurrency: 1 }),
+        ),
+      );
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
-  const runs: TemplatesImpl["runs"] = (templateId, page) =>
-    Effect.gen(function* () {
-      const { workspaceId } = yield* authorizeInWorkspace("template.read");
+  const runs: TemplatesImpl["runs"] = Effect.fn("runs")(
+    function* (caller: Caller, templateId, page) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "template.read");
       const limit = page?.limit ?? DEFAULT_PAGE;
       // PageRequest bounds are enforced where the request is decoded; clamp defensively here.
       const size = Math.min(100, Math.max(1, Math.trunc(limit)));
-      const cursor = page?.cursor === undefined ? null : decodeCursor(page.cursor, templateId);
-      if (page?.cursor !== undefined && cursor === null) {
-        return yield* new Invalid({ issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }] });
+      const cursor = page?.cursor === undefined ? Option.none() : yield* decodeCursor(page.cursor);
+      if (page?.cursor !== undefined && (Option.isNone(cursor) || cursor.value[0] !== templateId)) {
+        return yield* Invalid.make({
+          issues: [{ path: ["cursor"], code: "page.cursor_mismatch" }],
+        });
       }
       return yield* store.transaction(
         Effect.gen(function* () {
           yield* repo.getTemplate(workspaceId, templateId);
           const schedules = yield* repo.schedulesOfTemplate(workspaceId, templateId);
-          const rows = yield* repo.listRuns(workspaceId, {
-            scheduleIds: schedules.map((s) => s.id),
-            ...(cursor !== null ? { after: [cursor.occurrence, cursor.id] as const } : {}),
+          const query = {
+            scheduleIds: EffectArray.map(schedules, (s) => s.id),
             limit: size + 1,
-          });
+          };
+          const rows = yield* repo.listRuns(
+            workspaceId,
+            Option.isSome(cursor) ? { ...query, after: [cursor.value[1], cursor.value[2]] } : query,
+          );
           const items = rows.slice(0, size);
           const statuses = yield* deliveries.statuses(
             workspaceId,
-            items.flatMap((run) => (run.deliveryId === null ? [] : [run.deliveryId])),
+            EffectArray.flatMap(items, (run) => (run.deliveryId === null ? [] : [run.deliveryId])),
           );
           const last = items.at(-1);
           return {
-            items: items.map((run) => runView(run, statuses)),
+            items: EffectArray.map(items, (run) => runView(run, statuses)),
             nextCursor:
               rows.length > size && last !== undefined
-                ? encodeCursor({ template: templateId, occurrence: last.occurrence, id: last.id })
+                ? yield* encodeCursor(templateId, last.occurrence, last.id)
                 : null,
           };
         }),
       );
-    }).pipe(provide, dieOnUnique, orUnavailable) as ReturnType<TemplatesImpl["runs"]>;
+    },
+    provide,
+    dieOnUnique,
+    orUnavailable,
+  );
 
   return { save, archive, schedule, resume, use, get, list, runs } satisfies TemplatesImpl;
 });

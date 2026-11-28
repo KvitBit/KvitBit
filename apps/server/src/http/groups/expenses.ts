@@ -2,68 +2,99 @@
  * `expenses` group handlers (http-mcp-contracts 3.4 & 3.5.4): CRUD, streamed multipart
  * attachment upload, download, and detach.
  */
-import { API_PREFIX, Api, ATTACHMENT_MAX_BYTES } from "@kvitbit/api-contract";
-import { CurrentCaller, Expenses } from "@kvitbit/domain/contract";
-import { Effect, Predicate } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
+
+import { API_PREFIX, Api, ATTACHMENT_MAX_BYTES, RequestCaller } from "@kvitbit/api-contract";
+import { Expenses } from "@kvitbit/domain/contract";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Predicate from "effect/Predicate";
 import { Analytics } from "../../runtime/analytics";
-import { compact, fileDownload, requestOptions, setLocation, withRevision } from "../conventions";
+import {
+  compact,
+  downloadResponse,
+  requestOptions,
+  setLocation,
+  withRevision,
+} from "../conventions";
 import { streamSingleFile } from "./records/multipart";
 
-export const ExpensesGroupLive = HttpApiBuilder.group(Api, "expenses", (handlers) =>
-  Effect.gen(function* () {
+export const ExpensesGroupLive = HttpApiBuilder.group(
+  Api,
+  "expenses",
+  Effect.fnUntraced(function* (handlers) {
     const expenses = yield* Expenses;
     const analytics = yield* Analytics;
     return handlers
-      .handle("list", ({ query }) => expenses.list(compact(query)))
+      .handle("list", ({ query }) =>
+        Effect.flatMap(RequestCaller, (caller) => expenses.list(caller, compact(query))),
+      )
       .handle("record", ({ params, headers, payload }) =>
-        Effect.tap(expenses.record(payload, requestOptions(headers)), (view) =>
-          typeof view.id === "string"
-            ? setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${view.id}`)
-            : Effect.void,
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.tap(expenses.record(caller, payload, requestOptions(headers)), (view) => {
+            if (!Predicate.isString(view["id"])) return Effect.void;
+            return setLocation(
+              `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${view["id"]}`,
+            );
+          }),
         ),
       )
-      .handle("get", ({ params }) => expenses.get(params.expenseId))
+      .handle("get", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) => expenses.get(caller, params.expenseId)),
+      )
       .handle("edit", ({ params, headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          expenses.edit(params.expenseId, payload, expectedRevision),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            expenses.edit(caller, params.expenseId, payload, expectedRevision),
+          ),
         ),
       )
       .handle("remove", ({ params, headers }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          expenses.remove(params.expenseId, expectedRevision),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            expenses.remove(caller, params.expenseId, expectedRevision),
+          ),
         ),
       )
       .handle("attach", ({ params, payload }) =>
-        streamSingleFile(payload, ATTACHMENT_MAX_BYTES, (file) =>
-          expenses.attach(params.expenseId, file),
-        ).pipe(
-          Effect.tap((view) =>
-            Predicate.hasProperty(view, "id") && typeof view.id === "string"
-              ? setLocation(
-                  `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${params.expenseId}/attachments/${view.id}`,
-                )
-              : Effect.void,
-          ),
-          Effect.tap(() =>
-            Effect.gen(function* () {
-              const caller = yield* CurrentCaller;
-              if (caller._tag === "Member") {
-                yield* analytics.capture({
-                  event: "expense_receipt_uploaded",
-                  userId: caller.userId,
-                  workspaceId: params.workspaceId,
-                });
-              }
-            }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.tap(
+            streamSingleFile(payload, ATTACHMENT_MAX_BYTES, (file) =>
+              expenses.attach(caller, params.expenseId, file),
+            ),
+            (view) => {
+              if (!(Predicate.hasProperty(view, "id") && Predicate.isString(view.id)))
+                return Effect.void;
+              return setLocation(
+                `${API_PREFIX}/workspaces/${params.workspaceId}/expenses/${params.expenseId}/attachments/${view.id}`,
+              );
+            },
+          ).pipe(
+            Effect.tap(
+              Effect.fn("Analytics.captureReceipt")(function* () {
+                if (caller._tag === "Member") {
+                  yield* analytics.capture({
+                    event: "expense_receipt_uploaded",
+                    userId: caller.userId,
+                    workspaceId: params.workspaceId,
+                  });
+                }
+              }),
+            ),
           ),
         ),
       )
       .handle("attachment", ({ params, query }) =>
-        Effect.map(expenses.attachment(params.expenseId, params.attachmentId), (file) =>
-          fileDownload(file, { disposition: query.disposition }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(
+            expenses.attachment(caller, params.expenseId, params.attachmentId),
+            downloadResponse({ disposition: query.disposition }),
+          ),
         ),
       )
-      .handle("detach", ({ params }) => expenses.detach(params.expenseId, params.attachmentId));
+      .handle("detach", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          expenses.detach(caller, params.expenseId, params.attachmentId),
+        ),
+      );
   }),
 );

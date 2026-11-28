@@ -7,9 +7,12 @@
  * payments or links are the named guards below it (`paymentsBlockCancel`, `hasFinalInvoice`,
  * `hasDependents`); `settlementOf` (credit.ts) derives the stored settlement.
  */
+
 import type { ConflictReason } from "@kvitbit/domain/contract";
 import { Conflict } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import type { DocumentRecord } from "./record";
 
 /** `issued` split by the Document Lock; a cancelled document is always locked (D5). */
@@ -125,28 +128,43 @@ export const TRANSITIONS: Readonly<
 export const stateOf = (row: Pick<DocumentRecord, "status" | "locked">): LifecycleState =>
   row.status === "issued" ? (row.locked ? "locked" : "issued") : row.status;
 
-export const outcomeOf = (
-  row: Pick<DocumentRecord, "status" | "locked">,
-  action: LifecycleAction,
-): TransitionOutcome => TRANSITIONS[stateOf(row)][action];
+export const outcomeOf: {
+  (action: LifecycleAction): (row: Pick<DocumentRecord, "status" | "locked">) => TransitionOutcome;
+  (row: Pick<DocumentRecord, "status" | "locked">, action: LifecycleAction): TransitionOutcome;
+} = Fn.dual(
+  2,
+  (row: Pick<DocumentRecord, "status" | "locked">, action: LifecycleAction): TransitionOutcome =>
+    TRANSITIONS[stateOf(row)][action],
+);
 
 /**
  * Checks `action` against the table: succeeds with `ok` or `noop`, fails with the Conflict
  * (no `detail`) otherwise.
  */
-export const guard = (
-  row: Pick<DocumentRecord, "status" | "locked">,
-  action: LifecycleAction,
-): Effect.Effect<"ok" | "noop", Conflict> => {
-  const outcome = outcomeOf(row, action);
-  return outcome === "ok" || outcome === "noop"
-    ? Effect.succeed(outcome)
-    : Effect.fail(new Conflict({ reason: outcome }));
-};
+export const guard: {
+  (
+    action: LifecycleAction,
+  ): (row: Pick<DocumentRecord, "status" | "locked">) => Effect.Effect<"ok" | "noop", Conflict>;
+  (
+    row: Pick<DocumentRecord, "status" | "locked">,
+    action: LifecycleAction,
+  ): Effect.Effect<"ok" | "noop", Conflict>;
+} = Fn.dual(
+  2,
+  (
+    row: Pick<DocumentRecord, "status" | "locked">,
+    action: LifecycleAction,
+  ): Effect.Effect<"ok" | "noop", Conflict> => {
+    const outcome = outcomeOf(row, action);
+    return outcome === "ok" || outcome === "noop"
+      ? Effect.succeed(outcome)
+      : Effect.fail(Conflict.make({ reason: outcome }));
+  },
+);
 
 /** The document has a Final Invoice (rule D8 link on the Proforma). */
 export const hasFinalInvoice = (row: Pick<DocumentRecord, "links">): boolean =>
-  row.links.some((l) => l.relation === "final_invoice_for");
+  EffectArray.some(row.links, (l) => l.relation === "final_invoice_for");
 
 /** D6: a document with recorded payments cannot be cancelled until they are removed. */
 export const paymentsBlockCancel = (row: Pick<DocumentRecord, "payments">): boolean =>
@@ -159,4 +177,7 @@ export const paymentsBlockCancel = (row: Pick<DocumentRecord, "payments">): bool
  */
 export const hasDependents = (row: Pick<DocumentRecord, "kind" | "payments" | "links">): boolean =>
   (row.kind === "proforma" && row.payments > 0) ||
-  row.links.some((l) => l.relation === "corrected_by" || l.relation === "final_invoice_for");
+  EffectArray.some(
+    row.links,
+    (l) => l.relation === "corrected_by" || l.relation === "final_invoice_for",
+  );

@@ -1,7 +1,19 @@
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export interface GuardIssue {
+const normalizeRelPathPattern = /\/+$/;
+const normalizeRelPathPattern2 = /^(\.\/)+/;
+const tokenizeCommandPattern = /\s/;
+
+interface GuardIssue {
   readonly scope: "workspace-tests" | "root-script-tests" | "formal-manifest";
   readonly message: string;
 }
@@ -17,47 +29,53 @@ export interface GuardReport {
   };
 }
 
-interface PackageJson {
-  readonly name?: string;
-  readonly workspaces?: ReadonlyArray<string> | { readonly packages?: ReadonlyArray<string> };
-  readonly scripts?: Readonly<Record<string, string>>;
-}
+const PackageJsonSchema = Schema.Struct({
+  name: Schema.optionalKey(Schema.String),
+  workspaces: Schema.optionalKey(
+    Schema.Union([
+      Schema.Array(Schema.String),
+      Schema.Struct({ packages: Fn.pipe(Schema.Array(Schema.String), Schema.optionalKey) }),
+    ]),
+  ),
+  scripts: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+});
 
-interface TurboTask {
-  readonly dependsOn?: ReadonlyArray<string>;
-  readonly inputs?: ReadonlyArray<string>;
-}
+const TurboTaskSchema = Schema.Struct({
+  dependsOn: Fn.pipe(Schema.Array(Schema.String), Schema.optionalKey),
+  inputs: Fn.pipe(Schema.Array(Schema.String), Schema.optionalKey),
+});
 
-interface TurboConfig {
-  readonly tasks?: Readonly<Record<string, TurboTask>>;
-}
+const TurboConfigSchema = Schema.Struct({
+  tasks: Schema.optionalKey(Schema.Record(Schema.String, TurboTaskSchema)),
+});
 
-interface FormalManifestMutant {
-  readonly name: string;
-  readonly config: string;
-}
+const FormalManifestCheckSchema = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.String,
+  status: Schema.optionalKey(Schema.String),
+  spec: Schema.optionalKey(Schema.String),
+  config: Schema.optionalKey(Schema.String),
+  wideConfig: Schema.optionalKey(Schema.String),
+  mutants: Fn.pipe(
+    Schema.Array(Schema.Struct({ name: Schema.String, config: Schema.String })),
+    Schema.optionalKey,
+  ),
+  replay: Fn.pipe(Schema.Array(Schema.String), Schema.optionalKey),
+  coveredFiles: Fn.pipe(Schema.Array(Schema.Struct({ path: Schema.String })), Schema.optionalKey),
+});
 
-interface FormalManifestCoveredFile {
-  readonly path: string;
-}
+const FormalManifestSchema = Schema.Struct({ checks: Schema.Array(FormalManifestCheckSchema) });
 
-interface FormalManifestCheck {
-  readonly id: string;
-  readonly kind: string;
-  readonly status?: string;
-  readonly spec?: string;
-  readonly config?: string;
-  readonly wideConfig?: string;
-  readonly mutants?: ReadonlyArray<FormalManifestMutant>;
-  readonly replay?: ReadonlyArray<string>;
-  readonly coveredFiles?: ReadonlyArray<FormalManifestCoveredFile>;
-}
+type PackageJson = typeof PackageJsonSchema.Type;
+type TurboTask = typeof TurboTaskSchema.Type;
 
-interface FormalManifest {
-  readonly checks: ReadonlyArray<FormalManifestCheck>;
-}
+const decodePackageJson = Schema.decodeUnknownResult(Schema.fromJsonString(PackageJsonSchema));
+const decodeTurboConfig = Schema.decodeUnknownResult(Schema.fromJsonString(TurboConfigSchema));
+const decodeFormalManifest = Schema.decodeUnknownResult(
+  Schema.fromJsonString(FormalManifestSchema),
+);
 
-export type ParsedBunTestTargets =
+type ParsedBunTestTargets =
   | { readonly kind: "invalid"; readonly reason: string }
   | { readonly kind: "all"; readonly cwd?: string }
   | { readonly kind: "targets"; readonly targets: ReadonlyArray<string>; readonly cwd?: string };
@@ -93,15 +111,31 @@ const BUN_TEST_FLAGS_WITH_VALUE = new Set([
 ]);
 
 const normalizeRelPath = (value: string): string =>
-  value
-    .replaceAll("\\", "/")
-    .replace(/^(\.\/)+/, "")
-    .replace(/\/+$/, "");
+  Str.replace(
+    normalizeRelPathPattern,
+    "",
+  )(Str.replace(normalizeRelPathPattern2, "")(Str.replaceAll("\\", "/")(value)));
 
-const readJsonFile = <T>(filePath: string): T => JSON.parse(readFileSync(filePath, "utf8")) as T;
+const readJsonFile = Effect.fn("CacheGuard.readJsonFile")(function* <T>({
+  filePath,
+  decode,
+}: {
+  readonly filePath: string;
+  readonly decode: (text: string) => Result.Result<T, Schema.SchemaError>;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  return yield* fs
+    .readFileString(filePath)
+    .pipe(Effect.map((text) => Result.getOrThrow(decode(text))));
+});
 
-const readOptionalJsonFile = <T>(filePath: string): T | undefined =>
-  existsSync(filePath) ? readJsonFile<T>(filePath) : undefined;
+const readOptionalTurboConfig = Effect.fn("CacheGuard.readOptionalTurboConfig")(function* (
+  filePath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const exists = yield* fs.exists(filePath);
+  return exists ? yield* readJsonFile({ filePath, decode: decodeTurboConfig }) : undefined;
+});
 
 const tokenizeCommand = (command: string): ReadonlyArray<string> => {
   const tokens: Array<string> = [];
@@ -126,7 +160,7 @@ const tokenizeCommand = (command: string): ReadonlyArray<string> => {
       continue;
     }
 
-    if (/\s/.test(ch)) {
+    if (tokenizeCommandPattern.test(ch)) {
       if (current.length > 0) {
         tokens.push(current);
         current = "";
@@ -165,8 +199,8 @@ export const parseBunTestTargets = (script: string): ParsedBunTestTargets => {
       break;
     }
 
-    if (token.startsWith("--cwd=")) {
-      cwd = normalizeRelPath(token.slice("--cwd=".length));
+    if (Str.startsWith("--cwd=")(token)) {
+      cwd = normalizeRelPath(Str.slice("--cwd=".length)(token));
       continue;
     }
 
@@ -179,8 +213,8 @@ export const parseBunTestTargets = (script: string): ParsedBunTestTargets => {
       continue;
     }
 
-    if (token.startsWith("-")) {
-      if (!token.includes("=") && BUN_TEST_FLAGS_WITH_VALUE.has(token)) {
+    if (Str.startsWith("-")(token)) {
+      if (!Str.includes("=")(token) && BUN_TEST_FLAGS_WITH_VALUE.has(token)) {
         i += 1;
       }
       continue;
@@ -199,16 +233,16 @@ export const parseBunTestTargets = (script: string): ParsedBunTestTargets => {
 const matchSingleGlob = (relPath: string, rawPattern: string): boolean => {
   const pattern = normalizeRelPath(rawPattern);
   if (pattern === relPath) return true;
-  if (pattern.endsWith("/**")) {
-    const prefix = pattern.slice(0, -3);
-    if (relPath === prefix || relPath.startsWith(`${prefix}/`)) {
+  if (Str.endsWith("/**")(pattern)) {
+    const prefix = Str.slice(0, -3)(pattern);
+    if (relPath === prefix || Str.startsWith(`${prefix}/`)(relPath)) {
       return true;
     }
   }
   return new Bun.Glob(pattern).match(relPath);
 };
 
-export const matchesTurboInputs = (
+const matchesTurboInputsImpl = (
   relPath: string,
   inputs: ReadonlyArray<string> | undefined,
   options: { readonly isRoot: boolean },
@@ -224,13 +258,13 @@ export const matchesTurboInputs = (
       continue;
     }
 
-    const negated = rawEntry.startsWith("!");
-    const body = negated ? rawEntry.slice(1) : rawEntry;
+    const negated = Str.startsWith("!")(rawEntry);
+    const body = negated ? Str.slice(1)(rawEntry) : rawEntry;
 
     let pattern = body;
-    if (body.startsWith("$TURBO_ROOT$/")) {
+    if (Str.startsWith("$TURBO_ROOT$/")(body)) {
       if (!options.isRoot) continue;
-      pattern = body.slice("$TURBO_ROOT$/".length);
+      pattern = Str.slice("$TURBO_ROOT$/".length)(body);
     }
 
     if (matchSingleGlob(normalized, pattern)) {
@@ -240,6 +274,18 @@ export const matchesTurboInputs = (
 
   return matched;
 };
+
+export const matchesTurboInputs: {
+  (
+    inputs: ReadonlyArray<string> | undefined,
+    options: { readonly isRoot: boolean },
+  ): (relPath: string) => boolean;
+  (
+    relPath: string,
+    inputs: ReadonlyArray<string> | undefined,
+    options: { readonly isRoot: boolean },
+  ): boolean;
+} = Fn.dual(3, matchesTurboInputsImpl);
 
 const discoverUnitTestFiles = (
   dirAbs: string,
@@ -253,21 +299,25 @@ const discoverUnitTestFiles = (
     if (IGNORED_SEGMENT_PATTERN.test(relPath)) continue;
     if (!TEST_FILE_PATTERN.test(relPath)) continue;
     if (EXCLUDED_UNIT_FILE_PATTERN.test(relPath)) continue;
-    if (options.excludeTopLevelE2e && relPath.startsWith("e2e/")) continue;
+    if (options.excludeTopLevelE2e && Str.startsWith("e2e/")(relPath)) continue;
     found.push(relPath);
   }
 
-  return found.sort();
+  return found.sort(Order.String);
 };
 
 const getWorkspacePatterns = (rootPkg: PackageJson): ReadonlyArray<string> => {
   const { workspaces } = rootPkg;
   if (workspaces === undefined) return [];
-  if (Array.isArray(workspaces)) return workspaces;
-  return "packages" in workspaces && Array.isArray(workspaces.packages) ? workspaces.packages : [];
+  if (Arr.isArray(workspaces)) return Arr.filter(workspaces, Predicate.isString);
+  return "packages" in workspaces && Arr.isArray(workspaces.packages) ? workspaces.packages : [];
 };
 
-const discoverWorkspaces = (rootAbs: string, rootPkg: PackageJson): ReadonlyArray<string> => {
+const discoverWorkspaces = (
+  rootAbs: string,
+  rootPkg: PackageJson,
+  path: Path.Path,
+): ReadonlyArray<string> => {
   const workspaces = new Set<string>();
 
   for (const rawPattern of getWorkspacePatterns(rootPkg)) {
@@ -276,194 +326,213 @@ const discoverWorkspaces = (rootAbs: string, rootPkg: PackageJson): ReadonlyArra
     for (const pkgPath of glob.scanSync({ cwd: rootAbs, onlyFiles: true })) {
       const normalizedPkg = normalizeRelPath(pkgPath);
       if (IGNORED_SEGMENT_PATTERN.test(normalizedPkg)) continue;
-      workspaces.add(normalizeRelPath(dirname(normalizedPkg)));
+      workspaces.add(normalizeRelPath(path.dirname(normalizedPkg)));
     }
   }
 
-  return [...workspaces].sort();
+  return [...workspaces].sort(Order.String);
 };
 
 const targetMatchesFile = (relPath: string, target: string): boolean =>
-  relPath === target || relPath.startsWith(`${target}/`);
+  relPath === target || Str.startsWith(`${target}/`)(relPath);
 
-export const checkWorkspaceTestCoverage = (
-  root: string,
-): {
-  readonly issues: ReadonlyArray<GuardIssue>;
-  readonly workspacesChecked: number;
-  readonly workspaceTestFiles: number;
-} => {
-  const rootAbs = resolve(root);
-  const rootPkg = readJsonFile<PackageJson>(join(rootAbs, "package.json"));
-  const rootTurbo = readJsonFile<TurboConfig>(join(rootAbs, "turbo.json"));
-  const rootTasks = rootTurbo.tasks ?? {};
-  const workspaces = discoverWorkspaces(rootAbs, rootPkg);
+export const checkWorkspaceTestCoverage = Effect.fn("CacheGuard.checkWorkspaceTestCoverage")(
+  function* (root: string) {
+    const path = yield* Path.Path;
+    const fs = yield* FileSystem.FileSystem;
+    const rootAbs = path.resolve(root);
+    const rootPkg = yield* readJsonFile({
+      filePath: path.join(rootAbs, "package.json"),
+      decode: decodePackageJson,
+    });
+    const rootTurbo = yield* readJsonFile({
+      filePath: path.join(rootAbs, "turbo.json"),
+      decode: decodeTurboConfig,
+    });
+    const rootTasks = rootTurbo.tasks ?? {};
+    const workspaces = discoverWorkspaces(rootAbs, rootPkg, path);
 
-  const issues: Array<GuardIssue> = [];
-  let workspaceTestFiles = 0;
+    const issues: Array<GuardIssue> = [];
+    let workspaceTestFiles = 0;
 
-  for (const wsRel of workspaces) {
-    const wsAbs = join(rootAbs, wsRel);
-    const wsPkg = readJsonFile<PackageJson>(join(wsAbs, "package.json"));
-    const wsTurbo = readOptionalJsonFile<TurboConfig>(join(wsAbs, "turbo.json"));
-    const wsTasks = wsTurbo?.tasks ?? {};
+    for (const wsRel of workspaces) {
+      const wsAbs = path.join(rootAbs, wsRel);
+      const wsPkg = yield* readJsonFile({
+        filePath: path.join(wsAbs, "package.json"),
+        decode: decodePackageJson,
+      });
+      const wsTurbo = yield* readOptionalTurboConfig(path.join(wsAbs, "turbo.json"));
+      const wsTasks = wsTurbo?.tasks ?? {};
 
-    const testFiles = discoverUnitTestFiles(wsAbs, { excludeTopLevelE2e: true });
-    workspaceTestFiles += testFiles.length;
+      const testFiles = discoverUnitTestFiles(wsAbs, { excludeTopLevelE2e: true });
+      workspaceTestFiles += testFiles.length;
 
-    const suiteTask = wsTasks["test:suite"] ?? rootTasks["test:suite"];
-    const dependsOn = suiteTask?.dependsOn ?? [];
+      const suiteTask = wsTasks["test:suite"] ?? rootTasks["test:suite"];
+      const dependsOn = suiteTask?.dependsOn ?? [];
 
-    if (dependsOn.length === 0) {
-      if (testFiles.length > 0) {
-        issues.push({
-          scope: "workspace-tests",
-          message: `${wsRel}: has ${testFiles.length} unit test file(s) but test:suite has no dependsOn tasks`,
-        });
-      }
-      continue;
-    }
-
-    const fileOwners = new Map<string, Array<string>>();
-
-    for (const dep of dependsOn) {
-      if (dep.startsWith("^") || dep.startsWith("//#")) continue;
-
-      const script = wsPkg.scripts?.[dep];
-      if (script === undefined) {
-        issues.push({
-          scope: "workspace-tests",
-          message: `${wsRel}: test:suite depends on "${dep}", but ${wsRel}/package.json has no "${dep}" script`,
-        });
-        continue;
-      }
-
-      const parsed = parseBunTestTargets(script);
-      if (parsed.kind === "invalid") {
-        issues.push({
-          scope: "workspace-tests",
-          message: `${wsRel}#${dep}: ${parsed.reason}`,
-        });
-        continue;
-      }
-
-      const taskDef = wsTasks[dep] ?? rootTasks[dep];
-      if (taskDef === undefined) {
-        issues.push({
-          scope: "workspace-tests",
-          message: `${wsRel}#${dep}: task is listed in test:suite.dependsOn but missing from ${wsRel}/turbo.json and root turbo.json`,
-        });
-      }
-
-      const matchedInTask = new Set<string>();
-
-      if (parsed.kind === "all") {
-        const prefix = parsed.cwd !== undefined ? normalizeRelPath(parsed.cwd) : undefined;
-        for (const file of testFiles) {
-          if (prefix === undefined || targetMatchesFile(file, prefix)) {
-            matchedInTask.add(file);
-          }
-        }
-      } else {
-        for (const rawTarget of parsed.targets) {
-          const target =
-            parsed.cwd !== undefined
-              ? normalizeRelPath(`${parsed.cwd}/${rawTarget}`)
-              : normalizeRelPath(rawTarget);
-
-          if (!existsSync(join(wsAbs, target))) {
-            issues.push({
-              scope: "workspace-tests",
-              message: `${wsRel}#${dep}: test target "${target}" does not exist`,
-            });
-            continue;
-          }
-
-          let targetMatchedAny = false;
-          for (const file of testFiles) {
-            if (!targetMatchesFile(file, target)) continue;
-            targetMatchedAny = true;
-            if (matchedInTask.has(file)) {
-              issues.push({
-                scope: "workspace-tests",
-                message: `${wsRel}#${dep}: test file "${file}" is matched more than once in the same script`,
-              });
-            }
-            matchedInTask.add(file);
-          }
-
-          if (!targetMatchedAny) {
-            issues.push({
-              scope: "workspace-tests",
-              message: `${wsRel}#${dep}: target "${target}" matches no unit test files`,
-            });
-          }
-        }
-      }
-
-      for (const file of matchedInTask) {
-        const owners = fileOwners.get(file) ?? [];
-        owners.push(dep);
-        fileOwners.set(file, owners);
-
-        if (taskDef !== undefined && !matchesTurboInputs(file, taskDef.inputs, { isRoot: false })) {
+      if (dependsOn.length === 0) {
+        if (testFiles.length > 0) {
           issues.push({
             scope: "workspace-tests",
-            message: `${wsRel}#${dep}: executes "${file}", which is not matched by its turbo.json inputs`,
+            message: `${wsRel}: has ${testFiles.length} unit test file(s) but test:suite has no dependsOn tasks`,
+          });
+        }
+        continue;
+      }
+
+      const fileOwners = new Map<string, Array<string>>();
+
+      for (const dep of dependsOn) {
+        if (Str.startsWith("^")(dep) || Str.startsWith("//#")(dep)) continue;
+
+        const script = wsPkg.scripts?.[dep];
+        if (script === undefined) {
+          issues.push({
+            scope: "workspace-tests",
+            message: `${wsRel}: test:suite depends on "${dep}", but ${wsRel}/package.json has no "${dep}" script`,
+          });
+          continue;
+        }
+
+        const parsed = parseBunTestTargets(script);
+        if (parsed.kind === "invalid") {
+          issues.push({
+            scope: "workspace-tests",
+            message: `${wsRel}#${dep}: ${parsed.reason}`,
+          });
+          continue;
+        }
+
+        const taskDef = wsTasks[dep] ?? rootTasks[dep];
+        if (taskDef === undefined) {
+          issues.push({
+            scope: "workspace-tests",
+            message: `${wsRel}#${dep}: task is listed in test:suite.dependsOn but missing from ${wsRel}/turbo.json and root turbo.json`,
+          });
+        }
+
+        const matchedInTask = new Set<string>();
+
+        if (parsed.kind === "all") {
+          const prefix = parsed.cwd !== undefined ? normalizeRelPath(parsed.cwd) : undefined;
+          for (const file of testFiles) {
+            if (prefix === undefined || targetMatchesFile(file, prefix)) {
+              matchedInTask.add(file);
+            }
+          }
+        } else {
+          for (const rawTarget of parsed.targets) {
+            const target =
+              parsed.cwd !== undefined
+                ? normalizeRelPath(`${parsed.cwd}/${rawTarget}`)
+                : normalizeRelPath(rawTarget);
+
+            if (!(yield* fs.exists(path.join(wsAbs, target)))) {
+              issues.push({
+                scope: "workspace-tests",
+                message: `${wsRel}#${dep}: test target "${target}" does not exist`,
+              });
+              continue;
+            }
+
+            let targetMatchedAny = false;
+            for (const file of testFiles) {
+              if (!targetMatchesFile(file, target)) continue;
+              targetMatchedAny = true;
+              if (matchedInTask.has(file)) {
+                issues.push({
+                  scope: "workspace-tests",
+                  message: `${wsRel}#${dep}: test file "${file}" is matched more than once in the same script`,
+                });
+              }
+              matchedInTask.add(file);
+            }
+
+            if (!targetMatchedAny) {
+              issues.push({
+                scope: "workspace-tests",
+                message: `${wsRel}#${dep}: target "${target}" matches no unit test files`,
+              });
+            }
+          }
+        }
+
+        for (const file of matchedInTask) {
+          const owners = fileOwners.get(file) ?? [];
+          owners.push(dep);
+          fileOwners.set(file, owners);
+
+          if (
+            taskDef !== undefined &&
+            !matchesTurboInputs(file, taskDef.inputs, { isRoot: false })
+          ) {
+            issues.push({
+              scope: "workspace-tests",
+              message: `${wsRel}#${dep}: executes "${file}", which is not matched by its turbo.json inputs`,
+            });
+          }
+        }
+      }
+
+      for (const file of testFiles) {
+        const owners = fileOwners.get(file) ?? [];
+        if (owners.length === 0) {
+          issues.push({
+            scope: "workspace-tests",
+            message: `${wsRel}: unit test "${file}" is not covered by any task in test:suite (${Arr.join(dependsOn, ", ")})`,
+          });
+        } else if (owners.length > 1) {
+          issues.push({
+            scope: "workspace-tests",
+            message: `${wsRel}: unit test "${file}" is covered by multiple tasks in test:suite (${Arr.join(owners, ", ")})`,
           });
         }
       }
     }
 
-    for (const file of testFiles) {
-      const owners = fileOwners.get(file) ?? [];
-      if (owners.length === 0) {
-        issues.push({
-          scope: "workspace-tests",
-          message: `${wsRel}: unit test "${file}" is not covered by any task in test:suite (${dependsOn.join(", ")})`,
-        });
-      } else if (owners.length > 1) {
-        issues.push({
-          scope: "workspace-tests",
-          message: `${wsRel}: unit test "${file}" is covered by multiple tasks in test:suite (${owners.join(", ")})`,
-        });
-      }
-    }
-  }
+    return {
+      issues,
+      workspacesChecked: workspaces.length,
+      workspaceTestFiles,
+    };
+  },
+);
 
-  return {
-    issues,
-    workspacesChecked: workspaces.length,
-    workspaceTestFiles,
-  };
-};
-
-export const checkRootScriptTests = (
+export const checkRootScriptTests = Effect.fn("CacheGuard.checkRootScriptTests")(function* (
   root: string,
-): {
-  readonly issues: ReadonlyArray<GuardIssue>;
-  readonly rootScriptTestFiles: number;
-} => {
-  const rootAbs = resolve(root);
-  const rootPkg = readJsonFile<PackageJson>(join(rootAbs, "package.json"));
-  const rootTurbo = readJsonFile<TurboConfig>(join(rootAbs, "turbo.json"));
+) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+  const rootAbs = path.resolve(root);
+  const rootPkg = yield* readJsonFile({
+    filePath: path.join(rootAbs, "package.json"),
+    decode: decodePackageJson,
+  });
+  const rootTurbo = yield* readJsonFile({
+    filePath: path.join(rootAbs, "turbo.json"),
+    decode: decodeTurboConfig,
+  });
   const rootTasks = rootTurbo.tasks ?? {};
-  const scriptsDirAbs = join(rootAbs, "scripts");
+  const scriptsDirAbs = path.join(rootAbs, "scripts");
 
-  const testFiles = existsSync(scriptsDirAbs)
-    ? discoverUnitTestFiles(scriptsDirAbs, { excludeTopLevelE2e: false }).map(
+  const scriptsExist = yield* fs.exists(scriptsDirAbs);
+  const testFiles = scriptsExist
+    ? Arr.map(
+        discoverUnitTestFiles(scriptsDirAbs, { excludeTopLevelE2e: false }),
         (rel) => `scripts/${rel}`,
       )
     : [];
 
   const issues: Array<GuardIssue> = [];
-  const rootTestScript = rootPkg.scripts?.test ?? "";
-  const rootTaskRefs = tokenizeCommand(rootTestScript).filter((token) => token.startsWith("//#"));
+  const rootTestScript = rootPkg.scripts?.["test"] ?? "";
+  const rootTaskRefs = Arr.filter(tokenizeCommand(rootTestScript), (token) =>
+    Str.startsWith("//#")(token),
+  );
 
   const fileOwners = new Map<string, Array<string>>();
 
   for (const taskKey of rootTaskRefs) {
-    const scriptName = taskKey.slice(3);
+    const scriptName = Str.slice(3)(taskKey);
     const script = rootPkg.scripts?.[scriptName];
     if (script === undefined) {
       issues.push({
@@ -505,7 +574,7 @@ export const checkRootScriptTests = (
             ? normalizeRelPath(`${parsed.cwd}/${rawTarget}`)
             : normalizeRelPath(rawTarget);
 
-        if (!existsSync(join(rootAbs, target))) {
+        if (!(yield* fs.exists(path.join(rootAbs, target)))) {
           issues.push({
             scope: "root-script-tests",
             message: `${taskKey}: test target "${target}" does not exist`,
@@ -553,7 +622,7 @@ export const checkRootScriptTests = (
     } else if (owners.length > 1) {
       issues.push({
         scope: "root-script-tests",
-        message: `scripts unit test "${file}" is covered by multiple tasks in root package.json "test" script (${owners.join(", ")})`,
+        message: `scripts unit test "${file}" is covered by multiple tasks in root package.json "test" script (${Arr.join(owners, ", ")})`,
       });
     }
   }
@@ -562,7 +631,7 @@ export const checkRootScriptTests = (
     issues,
     rootScriptTestFiles: testFiles.length,
   };
-};
+});
 
 const parseFormalScript = (script: string): ParsedFormalScript => {
   const tokens = tokenizeCommand(script);
@@ -585,8 +654,8 @@ const parseFormalScript = (script: string): ParsedFormalScript => {
         only = next;
         i += 1;
       }
-    } else if (token?.startsWith("--only=")) {
-      only = token.slice("--only=".length);
+    } else if (token !== undefined && Str.startsWith("--only=")(token)) {
+      only = Str.slice("--only=".length)(token);
     }
   }
 
@@ -625,7 +694,7 @@ const collectFormalAggregate = (
   }
 
   for (const dep of aggregate.dependsOn ?? []) {
-    if (!dep.startsWith("//#")) {
+    if (!Str.startsWith("//#")(dep)) {
       issues.push({
         scope: "formal-manifest",
         message: `${aggregateKey}: expected root task dependency starting with "//#", got "${dep}"`,
@@ -642,7 +711,7 @@ const collectFormalAggregate = (
       continue;
     }
 
-    const scriptName = dep.slice(3);
+    const scriptName = Str.slice(3)(dep);
     const script = rootScripts[scriptName];
     if (script === undefined) {
       issues.push({
@@ -711,142 +780,152 @@ const verifyFormalTaskInputs = (
   }
 };
 
-export const checkFormalManifestCoverage = (
-  root: string,
-): {
-  readonly issues: ReadonlyArray<GuardIssue>;
-  readonly formalChecksChecked: number;
-  readonly formalCoveredFilesChecked: number;
-} => {
-  const rootAbs = resolve(root);
-  const rootPkg = readJsonFile<PackageJson>(join(rootAbs, "package.json"));
-  const rootTurbo = readJsonFile<TurboConfig>(join(rootAbs, "turbo.json"));
-  const manifest = readJsonFile<FormalManifest>(join(rootAbs, "formal/manifest.json"));
+export const checkFormalManifestCoverage = Effect.fn("CacheGuard.checkFormalManifestCoverage")(
+  function* (root: string) {
+    const path = yield* Path.Path;
+    const rootAbs = path.resolve(root);
+    const rootPkg = yield* readJsonFile({
+      filePath: path.join(rootAbs, "package.json"),
+      decode: decodePackageJson,
+    });
+    const rootTurbo = yield* readJsonFile({
+      filePath: path.join(rootAbs, "turbo.json"),
+      decode: decodeTurboConfig,
+    });
+    const manifest = yield* readJsonFile({
+      filePath: path.join(rootAbs, "formal/manifest.json"),
+      decode: decodeFormalManifest,
+    });
 
-  const rootTasks = rootTurbo.tasks ?? {};
-  const rootScripts = rootPkg.scripts ?? {};
-  const issues: Array<GuardIssue> = [];
+    const rootTasks = rootTurbo.tasks ?? {};
+    const rootScripts = rootPkg.scripts ?? {};
+    const issues: Array<GuardIssue> = [];
 
-  const allAggregate = collectFormalAggregate("//#formal:all", rootTasks, rootScripts, issues);
-  const wideAggregate = collectFormalAggregate("//#formal:wide", rootTasks, rootScripts, issues);
+    const allAggregate = collectFormalAggregate("//#formal:all", rootTasks, rootScripts, issues);
+    const wideAggregate = collectFormalAggregate("//#formal:wide", rootTasks, rootScripts, issues);
 
-  const activeFormalRunnerIds = new Set<string>();
-  const allCoveredFiles = new Set<string>();
+    const activeFormalRunnerIds = new Set<string>();
+    const allCoveredFiles = new Set<string>();
 
-  for (const check of manifest.checks) {
-    for (const covered of check.coveredFiles ?? []) {
-      allCoveredFiles.add(normalizeRelPath(covered.path));
-    }
+    for (const check of manifest.checks) {
+      for (const covered of check.coveredFiles ?? []) {
+        allCoveredFiles.add(normalizeRelPath(covered.path));
+      }
 
-    if (check.status === "blocked") continue;
-    if (check.kind !== "tlc" && check.kind !== "replay") continue;
+      if (check.status === "blocked") continue;
+      if (check.kind !== "tlc" && check.kind !== "replay") continue;
 
-    activeFormalRunnerIds.add(check.id);
+      activeFormalRunnerIds.add(check.id);
 
-    const allWired = allAggregate.byOnlyId.get(check.id);
-    if (allWired === undefined) {
-      issues.push({
-        scope: "formal-manifest",
-        message: `//#formal:all: active ${check.kind} check "${check.id}" from formal/manifest.json is not wired in turbo.json`,
-      });
-    } else {
-      if (allWired.parsed.wide) {
+      const allWired = allAggregate.byOnlyId.get(check.id);
+      if (allWired === undefined) {
         issues.push({
           scope: "formal-manifest",
-          message: `//#formal:all -> ${allWired.taskKey}: check "${check.id}" should not pass --wide in //#formal:all`,
+          message: `//#formal:all: active ${check.kind} check "${check.id}" from formal/manifest.json is not wired in turbo.json`,
         });
-      }
-      const requiredInputs: Array<string> = ["formal/run-formal.ts", "formal/manifest.json"];
-      if (check.kind === "tlc") {
-        if (check.spec !== undefined) requiredInputs.push(check.spec);
-        if (check.config !== undefined) requiredInputs.push(check.config);
-        for (const mutant of check.mutants ?? []) {
-          requiredInputs.push(mutant.config);
+      } else {
+        if (allWired.parsed.wide) {
+          issues.push({
+            scope: "formal-manifest",
+            message: `//#formal:all -> ${allWired.taskKey}: check "${check.id}" should not pass --wide in //#formal:all`,
+          });
         }
-      } else if (check.kind === "replay") {
-        for (const replayPath of check.replay ?? []) {
-          requiredInputs.push(replayPath);
+        const requiredInputs: Array<string> = ["formal/run-formal.ts", "formal/manifest.json"];
+        if (check.kind === "tlc") {
+          if (check.spec !== undefined) requiredInputs.push(check.spec);
+          if (check.config !== undefined) requiredInputs.push(check.config);
+          for (const mutant of check.mutants ?? []) {
+            requiredInputs.push(mutant.config);
+          }
+        } else if (check.kind === "replay") {
+          for (const replayPath of check.replay ?? []) {
+            requiredInputs.push(replayPath);
+          }
         }
+        verifyFormalTaskInputs(allWired.taskKey, allWired.taskDef, requiredInputs, issues);
       }
-      verifyFormalTaskInputs(allWired.taskKey, allWired.taskDef, requiredInputs, issues);
-    }
 
-    const wideWired = wideAggregate.byOnlyId.get(check.id);
-    const expectsWide = check.kind === "tlc" && check.wideConfig !== undefined;
-    if (wideWired === undefined) {
-      issues.push({
-        scope: "formal-manifest",
-        message: `//#formal:wide: active ${check.kind} check "${check.id}" from formal/manifest.json is not wired in turbo.json`,
-      });
-    } else {
-      if (expectsWide && !wideWired.parsed.wide) {
+      const wideWired = wideAggregate.byOnlyId.get(check.id);
+      const expectsWide = check.kind === "tlc" && check.wideConfig !== undefined;
+      if (wideWired === undefined) {
         issues.push({
           scope: "formal-manifest",
-          message: `//#formal:wide -> ${wideWired.taskKey}: check "${check.id}" has wideConfig in formal/manifest.json and must run with --wide`,
+          message: `//#formal:wide: active ${check.kind} check "${check.id}" from formal/manifest.json is not wired in turbo.json`,
         });
+      } else {
+        if (expectsWide && !wideWired.parsed.wide) {
+          issues.push({
+            scope: "formal-manifest",
+            message: `//#formal:wide -> ${wideWired.taskKey}: check "${check.id}" has wideConfig in formal/manifest.json and must run with --wide`,
+          });
+        }
+        if (!expectsWide && wideWired.parsed.wide) {
+          issues.push({
+            scope: "formal-manifest",
+            message: `//#formal:wide -> ${wideWired.taskKey}: check "${check.id}" has no wideConfig in formal/manifest.json and must not pass --wide`,
+          });
+        }
+        const requiredInputs: Array<string> = ["formal/run-formal.ts", "formal/manifest.json"];
+        if (check.kind === "tlc") {
+          if (check.spec !== undefined) requiredInputs.push(check.spec);
+          const cfg = expectsWide ? check.wideConfig : check.config;
+          if (cfg !== undefined) requiredInputs.push(cfg);
+          for (const mutant of check.mutants ?? []) {
+            requiredInputs.push(mutant.config);
+          }
+        } else if (check.kind === "replay") {
+          for (const replayPath of check.replay ?? []) {
+            requiredInputs.push(replayPath);
+          }
+        }
+        verifyFormalTaskInputs(wideWired.taskKey, wideWired.taskDef, requiredInputs, issues);
       }
-      if (!expectsWide && wideWired.parsed.wide) {
+    }
+
+    for (const [id, wired] of allAggregate.byOnlyId) {
+      if (!activeFormalRunnerIds.has(id)) {
         issues.push({
           scope: "formal-manifest",
-          message: `//#formal:wide -> ${wideWired.taskKey}: check "${check.id}" has no wideConfig in formal/manifest.json and must not pass --wide`,
+          message: `//#formal:all -> ${wired.taskKey}: references "${id}", which is not an active tlc/replay check in formal/manifest.json`,
         });
       }
-      const requiredInputs: Array<string> = ["formal/run-formal.ts", "formal/manifest.json"];
-      if (check.kind === "tlc") {
-        if (check.spec !== undefined) requiredInputs.push(check.spec);
-        const cfg = expectsWide ? check.wideConfig : check.config;
-        if (cfg !== undefined) requiredInputs.push(cfg);
-        for (const mutant of check.mutants ?? []) {
-          requiredInputs.push(mutant.config);
-        }
-      } else if (check.kind === "replay") {
-        for (const replayPath of check.replay ?? []) {
-          requiredInputs.push(replayPath);
-        }
+    }
+
+    for (const [id, wired] of wideAggregate.byOnlyId) {
+      if (!activeFormalRunnerIds.has(id)) {
+        issues.push({
+          scope: "formal-manifest",
+          message: `//#formal:wide -> ${wired.taskKey}: references "${id}", which is not an active tlc/replay check in formal/manifest.json`,
+        });
       }
-      verifyFormalTaskInputs(wideWired.taskKey, wideWired.taskDef, requiredInputs, issues);
     }
-  }
 
-  for (const [id, wired] of allAggregate.byOnlyId) {
-    if (!activeFormalRunnerIds.has(id)) {
-      issues.push({
-        scope: "formal-manifest",
-        message: `//#formal:all -> ${wired.taskKey}: references "${id}", which is not an active tlc/replay check in formal/manifest.json`,
-      });
+    const digestsTask = allAggregate.digestsTask ?? rootTasks["//#formal:digests"];
+    if (digestsTask !== undefined) {
+      verifyFormalTaskInputs(
+        "//#formal:digests",
+        digestsTask,
+        [
+          "formal/run-formal.ts",
+          "formal/manifest.json",
+          ...[...allCoveredFiles].sort(Order.String),
+        ],
+        issues,
+      );
     }
-  }
 
-  for (const [id, wired] of wideAggregate.byOnlyId) {
-    if (!activeFormalRunnerIds.has(id)) {
-      issues.push({
-        scope: "formal-manifest",
-        message: `//#formal:wide -> ${wired.taskKey}: references "${id}", which is not an active tlc/replay check in formal/manifest.json`,
-      });
-    }
-  }
-
-  const digestsTask = allAggregate.digestsTask ?? rootTasks["//#formal:digests"];
-  if (digestsTask !== undefined) {
-    verifyFormalTaskInputs(
-      "//#formal:digests",
-      digestsTask,
-      ["formal/run-formal.ts", "formal/manifest.json", ...[...allCoveredFiles].sort()],
+    return {
       issues,
-    );
-  }
+      formalChecksChecked: activeFormalRunnerIds.size,
+      formalCoveredFilesChecked: allCoveredFiles.size,
+    };
+  },
+);
 
-  return {
-    issues,
-    formalChecksChecked: activeFormalRunnerIds.size,
-    formalCoveredFilesChecked: allCoveredFiles.size,
-  };
-};
-
-export const checkTurboCacheGraph = (root: string): GuardReport => {
-  const workspaceResult = checkWorkspaceTestCoverage(root);
-  const rootScriptsResult = checkRootScriptTests(root);
-  const formalResult = checkFormalManifestCoverage(root);
+export const checkTurboCacheGraph = Effect.fn("CacheGuard.check")(function* (root: string) {
+  const workspaceResult = yield* checkWorkspaceTestCoverage(root);
+  const rootScriptsResult = yield* checkRootScriptTests(root);
+  const formalResult = yield* checkFormalManifestCoverage(root);
 
   return {
     issues: [...workspaceResult.issues, ...rootScriptsResult.issues, ...formalResult.issues],
@@ -858,12 +937,12 @@ export const checkTurboCacheGraph = (root: string): GuardReport => {
       formalCoveredFilesChecked: formalResult.formalCoveredFilesChecked,
     },
   };
-};
+});
 
 export const formatGuardReport = (report: GuardReport): string => {
   if (report.issues.length === 0) {
     return "Turbo cache graph verified with zero drift issues.";
   }
-  const lines = report.issues.map((issue) => `- [${issue.scope}] ${issue.message}`);
-  return `Turbo cache graph drift detected:\n${lines.join("\n")}`;
+  const lines = Arr.map(report.issues, (issue) => `- [${issue.scope}] ${issue.message}`);
+  return `Turbo cache graph drift detected:\n${Arr.join(lines, "\n")}`;
 };

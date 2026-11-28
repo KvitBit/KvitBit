@@ -10,25 +10,37 @@ import type { Html } from "@effect/ui/html";
  *   supplier ARES lookup, VAT breakdown & deductibility %, multi-currency CNB FX rate conversion,
  *   and record/remove payment workflow
  */
-import type {
+import {
   AttachmentId,
   CurrencyCode,
   ExpenseId,
   ExpenseInput,
   ExpensePatch,
   IsoDate,
-  Money,
+  type Money,
   PaymentId,
   PaymentMethod,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Format, ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Result, Schema } from "effect";
+import { Format } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
 import { Failure, request } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { attribute, type Markup, withAttributes } from "../../ui/html";
@@ -63,7 +75,7 @@ import {
   canWrite,
   computeExpensePreview,
   dateText,
-  downloadUrlCommand,
+  downloadUrl,
   ExpenseAttachmentRecord,
   ExpenseSummaryRecord,
   ExpenseViewRecord,
@@ -81,12 +93,17 @@ import {
   parseUserDecimal,
   settlementTone,
   todayIso,
-  uploadAttachmentCommand,
+  uploadAttachment,
   VAT_TREATMENTS,
   vatRatePercent,
 } from "./shared";
 
-export type Route = RouteOf<"Expenses" | "ExpenseCapture" | "Expense">;
+export const Route = Schema.Union([
+  RouteCases.Expenses,
+  RouteCases.ExpenseCapture,
+  RouteCases.Expense,
+]);
+export type Route = typeof Route.Type;
 
 const ALLOWED_MIME_TYPES = "application/pdf,image/jpeg,image/png,image/heic";
 
@@ -208,7 +225,7 @@ type ListFilterLiteral = typeof ListFilterLiteral.Type;
 const CaptureJob = Schema.Struct({
   id: Schema.String,
   fileName: Schema.String,
-  fileSize: Schema.Number,
+  fileSize: Schema.Finite,
   status: Schema.Literals(["creating", "uploading", "done", "failed"]),
   expenseId: Schema.NullOr(Schema.String),
   error: Schema.NullOr(Schema.String),
@@ -268,14 +285,14 @@ const PaymentDialogState = Schema.Struct({
 type PaymentDialogState = typeof PaymentDialogState.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   search: Schema.String,
   filter: ListFilterLiteral,
   dragActive: Schema.Boolean,
-  list: Remote.remoteSchema(Schema.Array(ExpenseSummaryRecord)),
+  list: ExpenseSummaryRecord.pipe(Schema.Array, Remote.remoteSchema),
   captureJobs: Schema.Array(CaptureJob),
   detail: Remote.remoteSchema(ExpenseViewRecord),
-  payments: Remote.remoteSchema(Schema.Array(PaymentRecord)),
+  payments: PaymentRecord.pipe(Schema.Array, Remote.remoteSchema),
   editor: Schema.NullOr(ExpenseEditorDraft),
   selectedAttachmentId: Schema.NullOr(Schema.String),
   viewerZoom: Schema.Int,
@@ -407,15 +424,16 @@ const loadListCommand = (
   incompleteOnly: boolean,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesList",
     request(
       (client) =>
         client.expenses.list({
-          params: { workspaceId: workspaceId as WorkspaceId },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           query: incompleteOnly ? { incomplete: true } : {},
         }),
       (pageRes): Message =>
-        Message.LoadedList({ seq, items: pageRes.items.map(normalizeExpenseSummary) }),
+        Message.LoadedList({ seq, items: Arr.map(pageRes.items, normalizeExpenseSummary) }),
       (failure): Message => Message.FailedList({ seq, failure }),
     ),
   );
@@ -426,11 +444,15 @@ const loadDetailCommand = (
   seq: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesGet",
     request(
       (client) =>
         client.expenses.get({
-          params: { workspaceId: workspaceId as WorkspaceId, expenseId: expenseId as ExpenseId },
+          params: {
+            workspaceId: WorkspaceId.make(workspaceId),
+            expenseId: ExpenseId.make(expenseId),
+          },
         }),
       (raw): Message => Message.LoadedDetail({ seq, expense: normalizeExpenseView(raw) }),
       (failure): Message => Message.FailedDetail({ seq, failure }),
@@ -443,13 +465,18 @@ const loadPaymentsCommand = (
   seq: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensePaymentsList",
     request(
       (client) =>
         client.payments.listForExpense({
-          params: { workspaceId: workspaceId as WorkspaceId, expenseId: expenseId as ExpenseId },
+          params: {
+            workspaceId: WorkspaceId.make(workspaceId),
+            expenseId: ExpenseId.make(expenseId),
+          },
         }),
-      (items): Message => Message.LoadedPayments({ seq, payments: items.map(normalizePayment) }),
+      (items): Message =>
+        Message.LoadedPayments({ seq, payments: Arr.map(items, normalizePayment) }),
       (failure): Message => Message.FailedPayments({ seq, failure }),
     ),
   );
@@ -461,20 +488,21 @@ const fetchFxCommand = (
   seq: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesFetchFx",
     request(
       (client) =>
         client.reports.fxRate({
           params: {
-            workspaceId: workspaceId as WorkspaceId,
-            currency: currency as CurrencyCode,
+            workspaceId: WorkspaceId.make(workspaceId),
+            currency: CurrencyCode.make(currency),
           },
-          query: { on: (on || todayIso()) as IsoDate },
+          query: { on: IsoDate.make(on || todayIso()) },
         }),
       (fx): Message =>
         Message.LoadedFxRate({
           seq,
-          rate: BigDecimal.format(BigDecimal.normalize(fx.rate)),
+          rate: fx.rate.pipe(BigDecimal.normalize, BigDecimal.format),
           quantity: fx.quantity,
           fixingDate: fx.fixingDate,
         }),
@@ -488,11 +516,12 @@ const lookupSupplierAresCommand = (
   seq: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesSupplierAres",
     request(
       (client) =>
         client.contacts.fromIco({
-          params: { workspaceId: workspaceId as WorkspaceId },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           payload: { ico, role: "supplier" },
         }),
       (raw): Message => {
@@ -515,16 +544,17 @@ const createCaptureExpenseCommand = (
   file: File,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesQuickCaptureCreate",
     request(
       (client) =>
         client.expenses.record({
-          params: { workspaceId: workspaceId as WorkspaceId },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           headers: { "idempotency-key": newIdempotencyKey("cap") },
-          payload: {
+          payload: ExpenseInput.make({
             status: "incomplete",
             note: file.name,
-          } as unknown as ExpenseInput,
+          }),
         }),
       (raw): Message =>
         Message.CaptureCreatedExpense({
@@ -536,16 +566,16 @@ const createCaptureExpenseCommand = (
     ),
   );
 
-const buildExpensePayload = (ed: ExpenseEditorDraft): Record<string, unknown> => {
+const buildExpensePayload = (ed: ExpenseEditorDraft) => {
   const supplier =
     ed.supplierContactId !== null
       ? { contact: ed.supplierContactId }
-      : ed.supplierName.trim() !== ""
+      : Str.trim(ed.supplierName) !== ""
         ? {
             manual: {
-              name: ed.supplierName.trim(),
-              ico: ed.supplierIco.trim() === "" ? null : Format.normalizeIco(ed.supplierIco),
-              dic: ed.supplierDic.trim() === "" ? null : Format.normalizeVatId(ed.supplierDic),
+              name: Str.trim(ed.supplierName),
+              ico: Str.trim(ed.supplierIco) === "" ? null : Format.normalizeIco(ed.supplierIco),
+              dic: Str.trim(ed.supplierDic) === "" ? null : Format.normalizeVatId(ed.supplierDic),
             },
           }
         : null;
@@ -554,12 +584,16 @@ const buildExpensePayload = (ed: ExpenseEditorDraft): Record<string, unknown> =>
   const vat =
     ed.vatLines.length === 0
       ? null
-      : ed.vatLines.map((row) => ({
-          treatment: row.treatment,
-          base: formatDecimalFixed(parseUserDecimal(row.base) ?? 0, 2),
-          vat: formatDecimalFixed(parseUserDecimal(row.vat) ?? 0, 2),
-          ...(row.selfAssessed !== null ? { selfAssessed: row.selfAssessed } : {}),
-        }));
+      : Arr.map(ed.vatLines, (row) => {
+          const amounts = {
+            treatment: row.treatment,
+            base: formatDecimalFixed(parseUserDecimal(row.base) ?? 0, 2),
+            vat: formatDecimalFixed(parseUserDecimal(row.vat) ?? 0, 2),
+          };
+          return row.selfAssessed === null
+            ? amounts
+            : { ...amounts, selfAssessed: row.selfAssessed };
+        });
 
   const deductibility =
     ed.deductibilityMode === "full"
@@ -573,45 +607,49 @@ const buildExpensePayload = (ed: ExpenseEditorDraft): Record<string, unknown> =>
             ),
           };
 
-  const tags = ed.tagsText
-    .split(",")
-    .map((t) => t.trim())
-    .filter((t) => t !== "");
+  const tags = Arr.filter(
+    Arr.map(Str.split(ed.tagsText, ","), (t) => Str.trim(t)),
+    (t) => t !== "",
+  );
 
   return {
     status: ed.status,
     supplier,
     supplierDocumentNumber:
-      ed.supplierDocumentNumber.trim() === "" ? null : ed.supplierDocumentNumber.trim(),
-    issuedOn: ed.issuedOn.trim() === "" ? null : ed.issuedOn.trim(),
-    taxableSupplyOn: ed.taxableSupplyOn.trim() === "" ? null : ed.taxableSupplyOn.trim(),
-    dueOn: ed.dueOn.trim() === "" ? null : ed.dueOn.trim(),
+      Str.trim(ed.supplierDocumentNumber) === "" ? null : Str.trim(ed.supplierDocumentNumber),
+    issuedOn: Str.trim(ed.issuedOn) === "" ? null : Str.trim(ed.issuedOn),
+    taxableSupplyOn: Str.trim(ed.taxableSupplyOn) === "" ? null : Str.trim(ed.taxableSupplyOn),
+    dueOn: Str.trim(ed.dueOn) === "" ? null : Str.trim(ed.dueOn),
     currency: ed.currency,
     total: totalNum === null ? null : formatDecimalFixed(totalNum, 2),
     vat,
     deductibility,
-    category: ed.category.trim() === "" ? null : ed.category.trim(),
+    category: Str.trim(ed.category) === "" ? null : Str.trim(ed.category),
     tags,
-    note: ed.note.trim() === "" ? null : ed.note.trim(),
+    note: Str.trim(ed.note) === "" ? null : Str.trim(ed.note),
   };
 };
 
 const saveExpenseCommand = (workspaceId: string, ed: ExpenseEditorDraft): PageCommand<Message> => {
   const payload = buildExpensePayload(ed);
   return apiCommand(
+    Message,
     "ExpensesSave",
     request(
       (client) =>
         ed.id === null
           ? client.expenses.record({
-              params: { workspaceId: workspaceId as WorkspaceId },
+              params: { workspaceId: WorkspaceId.make(workspaceId) },
               headers: { "idempotency-key": ed.idempotencyKey },
-              payload: payload as unknown as ExpenseInput,
+              payload: ExpenseInput.make(payload),
             })
           : client.expenses.edit({
-              params: { workspaceId: workspaceId as WorkspaceId, expenseId: ed.id as ExpenseId },
+              params: {
+                workspaceId: WorkspaceId.make(workspaceId),
+                expenseId: ExpenseId.make(ed.id),
+              },
               headers: { "if-match": `"${ed.revision ?? 1}"` },
-              payload: payload as unknown as ExpensePatch,
+              payload: ExpensePatch.make(payload),
             }),
       (raw): Message => Message.SavedExpense({ expense: normalizeExpenseView(raw) }),
       (failure): Message => Message.FailedSave({ failure }),
@@ -625,11 +663,15 @@ const removeExpenseCommand = (
   revision: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesRemove",
     request(
       (client) =>
         client.expenses.remove({
-          params: { workspaceId: workspaceId as WorkspaceId, expenseId: expenseId as ExpenseId },
+          params: {
+            workspaceId: WorkspaceId.make(workspaceId),
+            expenseId: ExpenseId.make(expenseId),
+          },
           headers: { "if-match": `"${revision}"` },
         }),
       (): Message => Message.RemovedExpense(),
@@ -643,14 +685,15 @@ const detachAttachmentCommand = (
   attachmentId: string,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpensesDetach",
     request(
       (client) =>
         client.expenses.detach({
           params: {
-            workspaceId: workspaceId as WorkspaceId,
-            expenseId: expenseId as ExpenseId,
-            attachmentId: attachmentId as AttachmentId,
+            workspaceId: WorkspaceId.make(workspaceId),
+            expenseId: ExpenseId.make(expenseId),
+            attachmentId: AttachmentId.make(attachmentId),
           },
         }),
       (): Message => Message.DetachedAttachment({ id: attachmentId }),
@@ -669,24 +712,29 @@ const recordPaymentCommand = (
     parsed !== null && parsed > 0
       ? {
           amount: BigDecimal.fromStringUnsafe(formatDecimalFixed(parsed, 2)),
-          currency: currency as CurrencyCode,
+          currency: CurrencyCode.make(currency),
         }
       : undefined;
   return apiCommand(
+    Message,
     "ExpenseRecordPayment",
     request(
-      (client) =>
-        client.payments.record({
-          params: { workspaceId: workspaceId as WorkspaceId },
+      (client) => {
+        const payload: Parameters<typeof client.payments.record>[0]["payload"] = {
+          target: { expense: ExpenseId.make(expenseId) },
+          method: Schema.is(PaymentMethod)(dlg.method) ? dlg.method : "bank_transfer",
+        };
+        const paidOn = Str.trim(dlg.paidOn);
+        const note = Str.trim(dlg.note);
+        const paymentAmount = amount === undefined ? undefined : { amount };
+        const paymentDate = paidOn === "" ? undefined : { paidOn: IsoDate.make(paidOn) };
+        const paymentNote = note === "" ? undefined : { note };
+        return client.payments.record({
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           headers: { "idempotency-key": dlg.idempotencyKey },
-          payload: {
-            target: { expense: expenseId as ExpenseId },
-            ...(amount !== undefined ? { amount } : {}),
-            ...(dlg.paidOn.trim() !== "" ? { paidOn: dlg.paidOn.trim() as IsoDate } : {}),
-            method: dlg.method as PaymentMethod,
-            ...(dlg.note.trim() !== "" ? { note: dlg.note.trim() } : {}),
-          },
-        }),
+          payload: { ...payload, ...paymentAmount, ...paymentDate, ...paymentNote },
+        });
+      },
       (res): Message => Message.RecordedPayment({ payment: normalizePayment(res.payment) }),
       (failure): Message => Message.FailedRecordPayment({ failure }),
     ),
@@ -699,11 +747,15 @@ const removePaymentCommand = (
   reason: string,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ExpenseRemovePayment",
     request(
       (client) =>
         client.payments.remove({
-          params: { workspaceId: workspaceId as WorkspaceId, paymentId: paymentId as PaymentId },
+          params: {
+            workspaceId: WorkspaceId.make(workspaceId),
+            paymentId: PaymentId.make(paymentId),
+          },
           payload: { reason },
         }),
       (): Message => Message.RemovedPayment({ id: paymentId }),
@@ -777,7 +829,7 @@ const editorFromExpense = (e: ExpenseViewRecord): ExpenseEditorDraft => {
     total: e.total ?? "",
     vatLines:
       e.vat !== null && e.vat.length > 0
-        ? e.vat.map((v) => ({
+        ? Arr.map(e.vat, (v) => ({
             treatment: v.treatment,
             base: v.base,
             vat: v.vat,
@@ -792,7 +844,7 @@ const editorFromExpense = (e: ExpenseViewRecord): ExpenseEditorDraft => {
     fxBusy: false,
     fxSeq: 0,
     category: e.category ?? "",
-    tagsText: e.tags.join(", "),
+    tagsText: Arr.join(e.tags, ", "),
     note: e.note ?? "",
     idempotencyKey: newIdempotencyKey("exp"),
     saving: false,
@@ -802,7 +854,10 @@ const editorFromExpense = (e: ExpenseViewRecord): ExpenseEditorDraft => {
 
 // --- Init & Update -------------------------------------------------------------------------------
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const wsId = ctx.workspace?.id;
   const base: Omit<
     Model,
@@ -897,15 +952,14 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
             loadPaymentsCommand(wsId, route.id, Remote.seqOf(payments)),
           ],
   };
-};
+});
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   const wsId = ctx.workspace?.id;
 
   return Message.match(message, {
@@ -950,11 +1004,12 @@ export const update = (
       if (wsId === undefined || files.length === 0) {
         return { model: { ...model, dragActive: false } };
       }
-      const realFiles = files.filter(
-        (f): f is File => typeof File !== "undefined" && f instanceof File,
+      const realFiles = Arr.filter(
+        files,
+        (f): f is File => globalThis.File !== undefined && f instanceof File,
       );
       if (realFiles.length === 0) return { model: { ...model, dragActive: false } };
-      const newJobs: Array<CaptureJob> = realFiles.map((f, idx) => ({
+      const newJobs: Array<CaptureJob> = Arr.map(realFiles, (f, idx) => ({
         id: newIdempotencyKey(`job${idx}`),
         fileName: f.name,
         fileSize: f.size,
@@ -962,11 +1017,9 @@ export const update = (
         expenseId: null,
         error: null,
       }));
-      const cmds = realFiles.map((f, idx) => {
-        // biome-ignore lint/style/noNonNullAssertion: aligned with realFiles length
-        const job = newJobs[idx]!;
-        return createCaptureExpenseCommand(wsId, job.id, f);
-      });
+      const cmds = Arr.map(Arr.zip(realFiles, newJobs), ([file, job]) =>
+        createCaptureExpenseCommand(wsId, job.id, file),
+      );
       return {
         model: {
           ...model,
@@ -978,30 +1031,33 @@ export const update = (
     },
 
     CaptureCreatedExpense: ({ jobId, expense, file }) => {
-      const jobs = model.captureJobs.map((j) =>
+      const jobs = Arr.map(model.captureJobs, (j) =>
         j.id === jobId ? { ...j, status: "uploading" as const, expenseId: expense.id } : j,
       );
-      if (wsId === undefined || !(typeof File !== "undefined" && file instanceof File)) {
+      if (wsId === undefined || !(globalThis.File !== undefined && file instanceof File)) {
         return { model: { ...model, captureJobs: jobs } };
       }
       return {
         model: { ...model, captureJobs: jobs },
         commands: [
-          uploadAttachmentCommand(
+          apiCommand(
+            Message,
             "ExpensesCaptureUpload",
-            wsId,
-            expense.id,
-            file,
-            (attachment) =>
-              Message.CaptureUploadedFile({ jobId, expenseId: expense.id, attachment }),
-            (failure) => Message.CaptureFailed({ jobId, failure }),
+            uploadAttachment({
+              workspaceId: wsId,
+              expenseId: expense.id,
+              file,
+              onSuccess: (attachment) =>
+                Message.CaptureUploadedFile({ jobId, expenseId: expense.id, attachment }),
+              onFailure: (failure) => Message.CaptureFailed({ jobId, failure }),
+            }),
           ),
         ],
       };
     },
 
     CaptureUploadedFile: ({ jobId, expenseId }) => {
-      const jobs = model.captureJobs.map((j) =>
+      const jobs = Arr.map(model.captureJobs, (j) =>
         j.id === jobId ? { ...j, status: "done" as const, expenseId } : j,
       );
       return {
@@ -1009,7 +1065,12 @@ export const update = (
         outMessage:
           route._tag === "Expenses"
             ? Intent_.navigate(
-                href({ _tag: "Expense", ws: route.ws, id: expenseId as ExpenseId, mode: "edit" }),
+                href({
+                  _tag: "Expense",
+                  ws: route.ws,
+                  id: ExpenseId.make(expenseId),
+                  mode: "edit",
+                }),
                 false,
               )
             : Intent_.toast(tLocal(ctx.locale, "attachmentAdded"), "info"),
@@ -1019,7 +1080,7 @@ export const update = (
     CaptureFailed: ({ jobId, failure }) => ({
       model: {
         ...model,
-        captureJobs: model.captureJobs.map((j) =>
+        captureJobs: Arr.map(model.captureJobs, (j) =>
           j.id === jobId ? { ...j, status: "failed" as const, error: textOf(tr, failure.text) } : j,
         ),
       },
@@ -1066,7 +1127,10 @@ export const update = (
       const nextEd: ExpenseEditorDraft = {
         ...model.editor,
         [field]: value,
-        ...(field === "supplierName" || field === "supplierIco" ? { supplierContactId: null } : {}),
+        supplierContactId:
+          field === "supplierName" || field === "supplierIco"
+            ? null
+            : model.editor.supplierContactId,
         error: null,
         aresError: null,
       };
@@ -1141,7 +1205,7 @@ export const update = (
           ...model,
           editor: {
             ...model.editor,
-            vatLines: model.editor.vatLines.filter((_, i) => i !== index),
+            vatLines: Arr.filter(model.editor.vatLines, (_, i) => i !== index),
           },
         },
       };
@@ -1149,7 +1213,7 @@ export const update = (
 
     ChangedVatRow: ({ index, field, value }) => {
       if (model.editor === null) return { model };
-      const vatLines = model.editor.vatLines.map((row, i) => {
+      const vatLines = Arr.map(model.editor.vatLines, (row, i) => {
         if (i !== index) return row;
         if (field === "treatment") {
           const isSelfAssessed = value === "reverse_charge" || value === "exempt_intra_eu_goods";
@@ -1265,7 +1329,10 @@ export const update = (
     SubmittedEditor: () => {
       if (model.editor === null || model.editor.saving || wsId === undefined) return { model };
       if (model.editor.status === "complete") {
-        if (parseUserDecimal(model.editor.total) === null || model.editor.issuedOn.trim() === "") {
+        if (
+          parseUserDecimal(model.editor.total) === null ||
+          Str.trim(model.editor.issuedOn) === ""
+        ) {
           return {
             model: {
               ...model,
@@ -1306,7 +1373,7 @@ export const update = (
         editor: null,
       },
       outMessage: Intent_.navigate(
-        href({ _tag: "Expense", ws: route.ws, id: expense.id as ExpenseId, mode: "view" }),
+        href({ _tag: "Expense", ws: route.ws, id: ExpenseId.make(expense.id), mode: "view" }),
         false,
       ),
     }),
@@ -1332,18 +1399,23 @@ export const update = (
     SelectedDetailFiles: ({ files }) => {
       const expense = Remote.dataOf(model.detail);
       if (wsId === undefined || expense === undefined) return { model };
-      const first = files.find((f): f is File => typeof File !== "undefined" && f instanceof File);
+      const first = Option.getOrUndefined(
+        Arr.findFirst(files, (f): f is File => globalThis.File !== undefined && f instanceof File),
+      );
       if (first === undefined) return { model };
       return {
         model: { ...model, uploadingAttachment: true },
         commands: [
-          uploadAttachmentCommand(
+          apiCommand(
+            Message,
             "ExpensesDetailUpload",
-            wsId,
-            expense.id,
-            first,
-            (attachment) => Message.UploadedAttachment({ attachment }),
-            (failure) => Message.FailedUploadAttachment({ failure }),
+            uploadAttachment({
+              workspaceId: wsId,
+              expenseId: expense.id,
+              file: first,
+              onSuccess: (attachment) => Message.UploadedAttachment({ attachment }),
+              onFailure: (failure) => Message.FailedUploadAttachment({ failure }),
+            }),
           ),
         ],
       };
@@ -1379,12 +1451,15 @@ export const update = (
       return {
         model,
         commands: [
-          downloadUrlCommand(
-            "ExpensesDownloadAttachment",
-            path,
-            attachment.name,
-            () => Message.CompletedDownload(),
-            (failure) => Message.FailedDownload({ failure }),
+          apiCommand(
+            Message,
+            "Expenses.DownloadAttachment",
+            downloadUrl({
+              path,
+              filename: attachment.name,
+              onSuccess: () => Message.CompletedDownload(),
+              onFailure: (failure) => Message.FailedDownload({ failure }),
+            }),
           ),
         ],
       };
@@ -1415,7 +1490,7 @@ export const update = (
       if (expense === undefined) {
         return { model: { ...model, detaching: false, confirmDetachId: null } };
       }
-      const nextAtts = expense.attachments.filter((a) => a.id !== id);
+      const nextAtts = Arr.filter(expense.attachments, (a) => a.id !== id);
       return {
         model: {
           ...model,
@@ -1560,7 +1635,7 @@ export const update = (
 
     ConfirmedRemovePayment: () => {
       if (wsId === undefined || model.confirmRemovePaymentId === null) return { model };
-      const reason = model.removePaymentReason.trim() || "Removed by user";
+      const reason = Str.trim(model.removePaymentReason) || "Removed by user";
       return {
         model: { ...model, removingPayment: true },
         commands: [removePaymentCommand(wsId, model.confirmRemovePaymentId, reason)],
@@ -1569,7 +1644,7 @@ export const update = (
 
     RemovedPayment: ({ id }) => {
       const expense = Remote.dataOf(model.detail);
-      const remaining = (Remote.dataOf(model.payments) ?? []).filter((p) => p.id !== id);
+      const remaining = Arr.filter(Remote.dataOf(model.payments) ?? [], (p) => p.id !== id);
       const nextDetail = Remote.load(model.detail);
       return {
         model: {
@@ -1593,17 +1668,20 @@ export const update = (
       outMessage: Intent_.toast(textOf(tr, failure.text), "error"),
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
-};
+});
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, (model: Model, ctx: PageContext): string => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   if (route._tag === "Expenses") return tr.t("expenses.list.title");
   if (route._tag === "ExpenseCapture") return tr.t("expenses.capture.title");
   if (route.id === "new") return tr.t("expenses.list.new");
   const detail = Remote.dataOf(model.detail);
   return detail?.supplier?.name ?? detail?.supplierDocumentNumber ?? tr.t("expenses.editor.title");
-};
+});
 
 // --- Attachment Viewer Helper --------------------------------------------------------------------
 
@@ -1616,7 +1694,9 @@ const renderAttachmentViewer = (
 ): Markup<Message> => {
   const tr = translator(ctx.locale);
   const attachments = expense?.attachments ?? [];
-  const selected = attachments.find((a) => a.id === model.selectedAttachmentId) ?? attachments[0];
+  const selected =
+    Option.getOrUndefined(Arr.findFirst(attachments, (a) => a.id === model.selectedAttachmentId)) ??
+    attachments[0];
   const wsId = ctx.workspace?.id ?? "";
   const inlineUrl =
     selected !== undefined
@@ -1692,7 +1772,7 @@ const renderAttachmentViewer = (
                 "flex min-h-[320px] flex-col items-center justify-center gap-2.5 overflow-hidden rounded-control border border-outline-variant bg-surface-container-low p-4 [&_iframe]:min-h-[400px] [&_iframe]:w-full [&_iframe]:rounded-control [&_iframe]:border-0 [&_iframe]:bg-surface-container-lowest [&_img]:max-h-[440px] [&_img]:w-auto [&_img]:rounded-control [&_img]:object-contain [&_object]:min-h-[400px] [&_object]:w-full [&_object]:rounded-control [&_object]:border-0 [&_object]:bg-surface-container-lowest",
               )
               .children([
-                selected.contentType.startsWith("image/")
+                Str.startsWith("image/")(selected.contentType)
                   ? h.img
                       .attr("src", inlineUrl)
                       .attr("alt", selected.name)
@@ -1714,7 +1794,7 @@ const renderAttachmentViewer = (
                   h.div
                     .class("flex flex-wrap gap-2")
                     .children(
-                      attachments.map((att) =>
+                      Arr.map(attachments, (att) =>
                         withAttributes(h.button.class(), [
                           (element) =>
                             element.class(
@@ -1741,17 +1821,20 @@ const renderAttachmentViewer = (
 
 // --- Main View -----------------------------------------------------------------------------------
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message>;
+} = Fn.dual(3, (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   const writable = canWrite(ctx);
 
   // --- Screen 13: Expenses List ---
   if (route._tag === "Expenses") {
     const allItems = Remote.dataOf(model.list) ?? [];
-    const incompleteCount = allItems.filter((i) => i.status === "incomplete").length;
-    const query = model.search.trim().toLowerCase();
-    const filtered = allItems.filter((item) => {
+    const incompleteCount = Arr.filter(allItems, (i) => i.status === "incomplete").length;
+    const query = Str.toLowerCase(Str.trim(model.search));
+    const filtered = Arr.filter(allItems, (item) => {
       if (model.filter === "incomplete" && item.status !== "incomplete") return false;
       if (
         model.filter === "unpaid" &&
@@ -1763,9 +1846,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         return false;
       if (query === "") return true;
       return (
-        (item.supplierName ?? "").toLowerCase().includes(query) ||
-        (item.supplierDocumentNumber ?? "").toLowerCase().includes(query) ||
-        (item.category ?? "").toLowerCase().includes(query)
+        Str.includes(query)(Str.toLowerCase(item.supplierName ?? "")) ||
+        Str.includes(query)(Str.toLowerCase(item.supplierDocumentNumber ?? "")) ||
+        Str.includes(query)(Str.toLowerCase(item.category ?? ""))
       );
     });
 
@@ -1793,18 +1876,19 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         });
       }
       if (filtered.length === 0) {
+        const action = writable
+          ? {
+              action: linkButton(h, {
+                label: tr.t("expenses.list.new"),
+                href: href({ _tag: "Expense", ws: route.ws, id: "new", mode: "edit" }),
+                variant: "primary",
+              }),
+            }
+          : undefined;
         return emptyState(h, {
           title: tr.t("expenses.list.empty.title"),
           body: tr.t("expenses.list.empty.web"),
-          ...(writable
-            ? {
-                action: linkButton(h, {
-                  label: tr.t("expenses.list.new"),
-                  href: href({ _tag: "Expense", ws: route.ws, id: "new", mode: "edit" }),
-                  variant: "primary",
-                }),
-              }
-            : {}),
+          ...action,
         });
       }
       return table(h, {
@@ -1825,7 +1909,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       href({
                         _tag: "Expense",
                         ws: route.ws,
-                        id: item.id as ExpenseId,
+                        id: ExpenseId.make(item.id),
                         mode: item.status === "incomplete" && writable ? "edit" : "view",
                       }),
                     )
@@ -2035,7 +2119,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             model.captureJobs.length === 0
               ? h.p.class(ui.muted).children([tLocal(ctx.locale, "captureEmpty")])
               : h.div.class(ui.stack).children(
-                  model.captureJobs.map((job) =>
+                  Arr.map(model.captureJobs, (job) =>
                     h.div
                       .attr("data-slot", "spread")
                       .class(ui.spread)
@@ -2073,7 +2157,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                                   href: href({
                                     _tag: "Expense",
                                     ws: route.ws,
-                                    id: job.expenseId as ExpenseId,
+                                    id: ExpenseId.make(job.expenseId),
                                     mode: "edit",
                                   }),
                                   small: true,
@@ -2128,7 +2212,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         title:
           route.id === "new"
             ? tr.t("expenses.list.new")
-            : ed.supplierName || tr.t("expenses.editor.title"),
+            : ed.supplierName === ""
+              ? tr.t("expenses.editor.title")
+              : ed.supplierName,
         eyebrow: linkButton(h, {
           label: tLocal(ctx.locale, "backToList"),
           href: href({ _tag: "Expenses", ws: route.ws, query: {} }),
@@ -2250,7 +2336,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       id: "exp-currency",
                       label: tr.t("common.field.currency"),
                       value: ed.currency,
-                      options: CURRENCIES.map((c) => ({ value: c, label: c })),
+                      options: Arr.map(CURRENCIES, (c) => ({ value: c, label: c })),
                       onChange: (value) => Message.ChangedEditorField({ field: "currency", value }),
                     }),
                   ]),
@@ -2285,7 +2371,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       }),
                     ]),
                   h.div.class("flex flex-col gap-2").children(
-                    ed.vatLines.map((row, idx) =>
+                    Arr.map(ed.vatLines, (row, idx) =>
                       h.div
                         .class(
                           "grid grid-cols-1 items-end gap-2 sm:grid-cols-[minmax(140px,1.3fr)_minmax(90px,1fr)_minmax(90px,1fr)_auto]",
@@ -2295,7 +2381,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                             id: `exp-vat-tr-${idx}`,
                             label: tr.t("common.field.vatRate"),
                             value: row.treatment,
-                            options: VAT_TREATMENTS.map((v) => ({
+                            options: Arr.map(VAT_TREATMENTS, (v) => ({
                               value: v,
                               label: enumLabel(tr, "vatTreatment", v),
                             })),
@@ -2347,7 +2433,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           ],
                           onSelect: (id) =>
                             Message.ChangedDeductibilityMode({
-                              mode: id as "full" | "none" | "partial",
+                              mode: id,
                             }),
                         }),
                       ]),
@@ -2471,8 +2557,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         { id: "complete", label: tLocal(ctx.locale, "statusComplete") },
                         { id: "incomplete", label: tLocal(ctx.locale, "statusIncomplete") },
                       ],
-                      onSelect: (id) =>
-                        Message.ChangedExpenseStatus({ status: id as "complete" | "incomplete" }),
+                      onSelect: (id) => Message.ChangedExpenseStatus({ status: id }),
                     }),
                     button(h, {
                       label: tr.t("common.action.save"),
@@ -2520,7 +2605,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               href: href({
                 _tag: "Expense",
                 ws: route.ws,
-                id: loadedExpense.id as ExpenseId,
+                id: ExpenseId.make(loadedExpense.id),
                 mode: "edit",
               }),
             }),
@@ -2600,7 +2685,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               [tr.t("common.field.category"), loadedExpense.category ?? "—"],
               [
                 tr.t("common.field.tags"),
-                loadedExpense.tags.length > 0 ? loadedExpense.tags.join(", ") : "—",
+                loadedExpense.tags.length > 0 ? Arr.join(loadedExpense.tags, ", ") : "—",
               ],
               [tr.t("common.field.note"), loadedExpense.note ?? "—"],
             ]),
@@ -2632,7 +2717,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     },
                     {
                       header: tLocal(ctx.locale, "method"),
-                      cell: (p) => enumLabel(tr, "paymentMethod", p.method as PaymentMethod),
+                      cell: (p) => enumLabel(tr, "paymentMethod", p.method),
                     },
                     {
                       header: tr.t("common.field.amount"),
@@ -2721,7 +2806,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               id: "pay-method",
               label: tLocal(ctx.locale, "method"),
               value: model.paymentDialog.method,
-              options: PAYMENT_METHODS.map((pm) => ({
+              options: Arr.map(PAYMENT_METHODS, (pm) => ({
                 value: pm,
                 label: enumLabel(tr, "paymentMethod", pm),
               })),
@@ -2777,4 +2862,4 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         })
       : h.text(""),
   ]);
-};
+});

@@ -2,70 +2,77 @@
  * Runtime decoders for domain views whose contract schemas are opaque (`Schema.Unknown` brands or
  * `OpenStruct`), plus Europe/Prague date and decimal parsing helpers.
  */
+
 import {
-  type BankAccountId,
+  BankAccountId,
   type BankAccountView,
-  type ContactId,
+  ContactId,
   type ContactSnapshot,
   type ContactView,
-  type CurrencyCode,
-  type DocumentId,
-  type DocumentKind,
-  type DocumentSettlement,
-  type DocumentStatus,
+  CurrencyCode,
+  DocumentId,
+  DocumentKind,
+  DocumentSettlement,
+  DocumentStatus,
   type DocumentSummary,
-  type IsoDate,
+  IsoDate,
   type IssuerSnapshot,
-  type LineId,
+  LineId,
   type LineView,
   type Locale,
   type Money,
   MoneyMath,
-  type NumberingSeriesId,
-  type PaymentId,
-  type PaymentMethod,
+  NumberingSeriesId,
+  PaymentId,
+  PaymentMethod,
   type PaymentView,
-  type PriceListItemId,
+  PriceListItemId,
   type PriceListItemView,
-  type TaxRegime,
-  type VatTreatment,
+  TaxRegime,
+  VatTreatment,
   type WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { BUSINESS_TIME_ZONE, parseIsoDate } from "@kvitbit/ui-port/format";
-import { BigDecimal, Option } from "effect";
+import { BUSINESS_TIME_ZONE } from "@kvitbit/ui-port/format";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
 // --- Small runtime guards -----------------------------------------------------------------------
 
-const asRecord = (value: unknown): Record<string, unknown> =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+const WireRecord = Schema.Record(Schema.String, Schema.Unknown);
+const emptyRecord = (): typeof WireRecord.Type => ({});
+const asRecord = Fn.flow(Schema.decodeUnknownOption(WireRecord), Option.getOrElse(emptyRecord));
+const asNullableString = Fn.flow(Schema.decodeUnknownOption(Schema.String), Option.getOrNull);
+const readString = Schema.decodeUnknownOption(Schema.String);
+const readBoolean = Schema.decodeUnknownOption(Schema.Boolean);
+const readNumber = Schema.decodeUnknownOption(Schema.Finite);
+const readStrings = Schema.decodeUnknownOption(Schema.Array(Schema.String));
+const readDecimal = Schema.decodeUnknownOption(
+  Schema.Union([Schema.BigDecimal, Schema.String, Schema.Finite]),
+);
+const readCurrency = Schema.decodeUnknownOption(CurrencyCode);
+const readSeriesId = Schema.decodeUnknownOption(NumberingSeriesId);
+const readVatTreatment = Schema.decodeUnknownOption(VatTreatment);
 
-const asString = (value: unknown, fallback = ""): string =>
-  typeof value === "string" ? value : fallback;
-
-const asNullableString = (value: unknown): string | null =>
-  typeof value === "string" ? value : null;
-
-const asBoolean = (value: unknown, fallback = false): boolean =>
-  typeof value === "boolean" ? value : fallback;
-
-const asNumber = (value: unknown, fallback = 0): number =>
-  typeof value === "number" && Number.isFinite(value) ? value : fallback;
-
-const asStringArray = (value: unknown): ReadonlyArray<string> =>
-  Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-
-export const toBigDecimal = (value: unknown, fallback = "0"): BigDecimal.BigDecimal => {
-  if (BigDecimal.isBigDecimal(value)) return value;
-  if (typeof value === "string" || typeof value === "number") {
-    const parsed = BigDecimal.fromString(String(value).trim());
-    if (Option.isSome(parsed)) return parsed.value;
-  }
-  return Option.getOrElse(BigDecimal.fromString(fallback), () => BigDecimal.fromBigInt(0n));
-};
+const toBigDecimal = (value: ReturnType<typeof asRecord>[string], fallback = "0") =>
+  readDecimal(value).pipe(
+    Option.flatMap((input) =>
+      BigDecimal.isBigDecimal(input)
+        ? Option.some(input)
+        : BigDecimal.fromString(Str.trim(String(input))),
+    ),
+    Option.getOrElse(() =>
+      Option.getOrElse(BigDecimal.fromString(fallback), () => BigDecimal.fromBigInt(0n)),
+    ),
+  );
 
 /** Parses user-typed decimal text (accepts `.` or `,`, ignores spaces). */
 export const parseDecimalInput = (raw: string): BigDecimal.BigDecimal | null => {
-  const normalized = raw.replace(/\s+/g, "").replace(",", ".");
+  const normalized = Str.replace(",", ".")(Str.replace(/\s+/g, "")(raw));
   if (normalized === "" || normalized === "-" || normalized === "." || normalized === "-.") {
     return null;
   }
@@ -76,14 +83,19 @@ export const parseDecimalInput = (raw: string): BigDecimal.BigDecimal | null => 
 /** Formats a BigDecimal or wire decimal into a plain editable string without scientific notation. */
 export const decimalToInputString = (value: BigDecimal.BigDecimal | string | number): string => {
   const bd = BigDecimal.isBigDecimal(value) ? value : toBigDecimal(value);
-  return BigDecimal.format(BigDecimal.normalize(bd));
+  return bd.pipe(BigDecimal.normalize, BigDecimal.format);
 };
 
-const parseMoney = (value: unknown, fallbackCurrency = "CZK"): Money => {
-  const rec = asRecord(value);
-  const currency = asString(rec.currency, fallbackCurrency).toUpperCase() as CurrencyCode;
-  return MoneyMath.make(toBigDecimal(rec.amount), currency);
-};
+const currencyOrCzk = Fn.flow(
+  asNullableString,
+  (currency) => readCurrency(Str.toUpperCase(currency ?? "")),
+  Option.getOrElse(() => CurrencyCode.make("CZK")),
+);
+
+const parseMoney = Fn.flow(
+  asRecord,
+  (rec): Money => MoneyMath.make(toBigDecimal(rec["amount"]), currencyOrCzk(rec["currency"])),
+);
 
 // --- Concrete view shapes -----------------------------------------------------------------------
 
@@ -94,19 +106,31 @@ export interface AddressView {
   readonly country: string;
 }
 
-const parseAddress = (value: unknown): AddressView => {
-  const rec = asRecord(value);
-  return {
-    street: asNullableString(rec.street),
-    city: asNullableString(rec.city),
-    postalCode: asNullableString(rec.postalCode),
-    country: asString(rec.country, "CZ"),
-  };
-};
+const parseAddress = Fn.flow(
+  asRecord,
+  (rec): AddressView => ({
+    street: asNullableString(rec["street"]),
+    city: asNullableString(rec["city"]),
+    postalCode: asNullableString(rec["postalCode"]),
+    country: Option.getOrElse(readString(rec["country"]), () => "CZ"),
+  }),
+);
 
 export const formatAddress = (address: AddressView): string => {
-  const cityLine = [address.postalCode, address.city].filter(Boolean).join(" ");
-  return [address.street, cityLine, address.country].filter(Boolean).join(", ");
+  const cityLine = Arr.join(
+    Arr.filter(
+      [address.postalCode, address.city],
+      (part): part is string => part !== null && part !== "",
+    ),
+    " ",
+  );
+  return Arr.join(
+    Arr.filter(
+      [address.street, cityLine, address.country],
+      (part): part is string => part !== null && part !== "",
+    ),
+    ", ",
+  );
 };
 
 export interface DocumentSummaryView {
@@ -126,23 +150,29 @@ export interface DocumentSummaryView {
 
 export const parseDocumentSummary = (raw: DocumentSummary): DocumentSummaryView => {
   const rec = asRecord(raw);
-  const contact = asRecord(rec.contact);
+  const contact = asRecord(rec["contact"]);
   return {
-    id: asString(rec.id) as DocumentId,
-    kind: asString(rec.kind, "invoice") as DocumentKind,
-    number: asNullableString(rec.number),
-    status: asString(rec.status, "draft") as DocumentStatus,
-    locked: asBoolean(rec.locked),
-    settlement: asString(rec.settlement, "unpaid") as DocumentSettlement,
-    overdue: asBoolean(rec.overdue),
-    revision: asNumber(rec.revision),
+    id: DocumentId.make(asNullableString(rec["id"]) ?? ""),
+    kind: Option.getOrElse(Schema.decodeUnknownOption(DocumentKind)(rec["kind"]), () => "invoice"),
+    number: asNullableString(rec["number"]),
+    status: Option.getOrElse(
+      Schema.decodeUnknownOption(DocumentStatus)(rec["status"]),
+      () => "draft",
+    ),
+    locked: Option.getOrElse(readBoolean(rec["locked"]), () => false),
+    settlement: Option.getOrElse(
+      Schema.decodeUnknownOption(DocumentSettlement)(rec["settlement"]),
+      () => "unpaid",
+    ),
+    overdue: Option.getOrElse(readBoolean(rec["overdue"]), () => false),
+    revision: Option.getOrElse(readNumber(rec["revision"]), () => 0),
     contact: {
-      id: asString(contact.id) as ContactId,
-      name: asString(contact.name),
+      id: ContactId.make(asNullableString(contact["id"]) ?? ""),
+      name: asNullableString(contact["name"]) ?? "",
     },
-    issuedOn: asString(rec.issuedOn) as IsoDate,
-    dueOn: asString(rec.dueOn) as IsoDate,
-    total: parseMoney(rec.total),
+    issuedOn: IsoDate.make(asNullableString(rec["issuedOn"]) ?? ""),
+    dueOn: IsoDate.make(asNullableString(rec["dueOn"]) ?? ""),
+    total: parseMoney(rec["total"]),
   };
 };
 
@@ -159,17 +189,17 @@ export interface ContactSnapshotView {
 export const parseContactSnapshot = (raw: ContactSnapshot): ContactSnapshotView => {
   const rec = asRecord(raw);
   return {
-    contactId: asString(rec.contactId) as ContactId,
-    name: asString(rec.name),
-    ico: asNullableString(rec.ico),
-    dic: asNullableString(rec.dic),
-    legalForm: asNullableString(rec.legalForm),
-    address: parseAddress(rec.address),
-    billingEmails: asStringArray(rec.billingEmails),
+    contactId: ContactId.make(asNullableString(rec["contactId"]) ?? ""),
+    name: asNullableString(rec["name"]) ?? "",
+    ico: asNullableString(rec["ico"]),
+    dic: asNullableString(rec["dic"]),
+    legalForm: asNullableString(rec["legalForm"]),
+    address: parseAddress(rec["address"]),
+    billingEmails: Option.getOrElse(readStrings(rec["billingEmails"]), () => []),
   };
 };
 
-export interface IssuerBankAccountView {
+interface IssuerBankAccountView {
   readonly id: BankAccountId;
   readonly name: string | null;
   readonly currency: CurrencyCode;
@@ -194,27 +224,32 @@ export interface IssuerSnapshotView {
 export const parseIssuerSnapshot = (raw: IssuerSnapshot): IssuerSnapshotView => {
   const rec = asRecord(raw);
   const bank =
-    rec.bankAccount === null || rec.bankAccount === undefined ? null : asRecord(rec.bankAccount);
+    rec["bankAccount"] === null || rec["bankAccount"] === undefined
+      ? null
+      : asRecord(rec["bankAccount"]);
   return {
-    name: asString(rec.name),
-    ico: asNullableString(rec.ico),
-    dic: asNullableString(rec.dic),
-    address: parseAddress(rec.address),
-    registerEntry: asNullableString(rec.registerEntry),
-    email: asNullableString(rec.email),
-    phone: asNullableString(rec.phone),
-    web: asNullableString(rec.web),
-    regime: asString(rec.regime, "non_vat_payer") as TaxRegime,
+    name: asNullableString(rec["name"]) ?? "",
+    ico: asNullableString(rec["ico"]),
+    dic: asNullableString(rec["dic"]),
+    address: parseAddress(rec["address"]),
+    registerEntry: asNullableString(rec["registerEntry"]),
+    email: asNullableString(rec["email"]),
+    phone: asNullableString(rec["phone"]),
+    web: asNullableString(rec["web"]),
+    regime: Option.getOrElse(
+      Schema.decodeUnknownOption(TaxRegime)(rec["regime"]),
+      () => "non_vat_payer",
+    ),
     bankAccount:
       bank === null
         ? null
         : {
-            id: asString(bank.id) as BankAccountId,
-            name: asNullableString(bank.name),
-            currency: asString(bank.currency, "CZK").toUpperCase() as CurrencyCode,
-            accountNumber: asNullableString(bank.accountNumber),
-            iban: asNullableString(bank.iban),
-            bic: asNullableString(bank.bic),
+            id: BankAccountId.make(asNullableString(bank["id"]) ?? ""),
+            name: asNullableString(bank["name"]),
+            currency: currencyOrCzk(bank["currency"]),
+            accountNumber: asNullableString(bank["accountNumber"]),
+            iban: asNullableString(bank["iban"]),
+            bic: asNullableString(bank["bic"]),
           },
   };
 };
@@ -235,16 +270,19 @@ export interface LineItemView {
 export const parseLineView = (raw: LineView): LineItemView => {
   const rec = asRecord(raw);
   return {
-    id: asString(rec.id) as LineId,
-    item: asNullableString(rec.item) as PriceListItemId | null,
-    description: asString(rec.description),
-    quantity: toBigDecimal(rec.quantity, "1"),
-    unit: asNullableString(rec.unit),
-    unitPrice: toBigDecimal(rec.unitPrice, "0"),
-    treatment: asString(rec.treatment, "standard") as VatTreatment,
-    ratePercent: toBigDecimal(rec.ratePercent, "0"),
-    amount: toBigDecimal(rec.amount, "0"),
-    deducts: asNullableString(rec.deducts) as DocumentId | null,
+    id: LineId.make(asNullableString(rec["id"]) ?? ""),
+    item: Option.getOrNull(Schema.decodeUnknownOption(PriceListItemId)(rec["item"])),
+    description: asNullableString(rec["description"]) ?? "",
+    quantity: toBigDecimal(rec["quantity"], "1"),
+    unit: asNullableString(rec["unit"]),
+    unitPrice: toBigDecimal(rec["unitPrice"], "0"),
+    treatment: Option.getOrElse(
+      Schema.decodeUnknownOption(VatTreatment)(rec["treatment"]),
+      () => "standard",
+    ),
+    ratePercent: toBigDecimal(rec["ratePercent"], "0"),
+    amount: toBigDecimal(rec["amount"], "0"),
+    deducts: Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(rec["deducts"])),
   };
 };
 
@@ -262,14 +300,17 @@ export interface PaymentRecordView {
 export const parsePaymentView = (raw: PaymentView): PaymentRecordView => {
   const rec = asRecord(raw);
   return {
-    id: asString(rec.id) as PaymentId,
-    revision: asNumber(rec.revision),
-    amount: parseMoney(rec.amount),
-    paidOn: asString(rec.paidOn) as IsoDate,
-    method: asString(rec.method, "bank_transfer") as PaymentMethod,
-    note: asNullableString(rec.note),
-    taxDocument: asNullableString(rec.taxDocument) as DocumentId | null,
-    createdAt: asString(rec.createdAt),
+    id: PaymentId.make(asNullableString(rec["id"]) ?? ""),
+    revision: Option.getOrElse(readNumber(rec["revision"]), () => 0),
+    amount: parseMoney(rec["amount"]),
+    paidOn: IsoDate.make(asNullableString(rec["paidOn"]) ?? ""),
+    method: Option.getOrElse(
+      Schema.decodeUnknownOption(PaymentMethod)(rec["method"]),
+      () => "bank_transfer",
+    ),
+    note: asNullableString(rec["note"]),
+    taxDocument: Option.getOrNull(Schema.decodeUnknownOption(DocumentId)(rec["taxDocument"])),
+    createdAt: asNullableString(rec["createdAt"]) ?? "",
   };
 };
 
@@ -286,12 +327,12 @@ export interface ContactOption {
 export const parseContactOption = (raw: ContactView): ContactOption => {
   const rec = asRecord(raw);
   return {
-    id: asString(rec.id) as ContactId,
-    name: asString(rec.name),
-    ico: asNullableString(rec.ico),
-    dic: asNullableString(rec.dic),
-    billingEmails: asStringArray(rec.billingEmails),
-    archived: asBoolean(rec.archived),
+    id: ContactId.make(asNullableString(rec["id"]) ?? ""),
+    name: asNullableString(rec["name"]) ?? "",
+    ico: asNullableString(rec["ico"]),
+    dic: asNullableString(rec["dic"]),
+    billingEmails: Option.getOrElse(readStrings(rec["billingEmails"]), () => []),
+    archived: Option.getOrElse(readBoolean(rec["archived"]), () => false),
     defaults: raw.defaults,
   };
 };
@@ -310,14 +351,14 @@ export interface PriceListOption {
 export const parsePriceListOption = (raw: PriceListItemView): PriceListOption => {
   const rec = asRecord(raw);
   return {
-    id: asString(rec.id) as PriceListItemId,
-    name: asString(rec.name),
-    description: asNullableString(rec.description),
-    unit: asNullableString(rec.unit),
-    unitPrice: toBigDecimal(rec.unitPrice, "0"),
-    currency: asString(rec.currency, "CZK").toUpperCase() as CurrencyCode,
-    vat: (asNullableString(rec.vat) as VatTreatment | null) ?? null,
-    archived: asBoolean(rec.archived),
+    id: PriceListItemId.make(asNullableString(rec["id"]) ?? ""),
+    name: asNullableString(rec["name"]) ?? "",
+    description: asNullableString(rec["description"]),
+    unit: asNullableString(rec["unit"]),
+    unitPrice: toBigDecimal(rec["unitPrice"], "0"),
+    currency: currencyOrCzk(rec["currency"]),
+    vat: Option.getOrNull(readVatTreatment(rec["vat"])),
+    archived: Option.getOrElse(readBoolean(rec["archived"]), () => false),
   };
 };
 
@@ -333,12 +374,12 @@ export interface BankAccountOption {
 export const parseBankAccountOption = (raw: BankAccountView): BankAccountOption => {
   const rec = asRecord(raw);
   return {
-    id: asString(rec.id) as BankAccountId,
-    name: asNullableString(rec.name),
-    iban: asString(rec.iban),
-    bic: asNullableString(rec.bic),
-    currency: asString(rec.currency, "CZK").toUpperCase() as CurrencyCode,
-    isDefault: asBoolean(rec.isDefault),
+    id: BankAccountId.make(asNullableString(rec["id"]) ?? ""),
+    name: asNullableString(rec["name"]),
+    iban: asNullableString(rec["iban"]) ?? "",
+    bic: asNullableString(rec["bic"]),
+    currency: currencyOrCzk(rec["currency"]),
+    isDefault: Option.getOrElse(readBoolean(rec["isDefault"]), () => false),
   };
 };
 
@@ -353,56 +394,55 @@ export interface WorkspaceDefaultsView {
   readonly preferredSeriesByKind: Readonly<Partial<Record<DocumentKind, NumberingSeriesId>>>;
 }
 
-export const parseWorkspaceDefaults = (
-  raw: WorkspaceView | null,
-  fallbackRegime: TaxRegime,
-): WorkspaceDefaultsView => {
+export const parseWorkspaceDefaults: {
+  (raw: WorkspaceView | null, fallbackRegime: TaxRegime): WorkspaceDefaultsView;
+  (fallbackRegime: TaxRegime): (raw: WorkspaceView | null) => WorkspaceDefaultsView;
+} = Fn.dual(2, (raw: WorkspaceView | null, fallbackRegime: TaxRegime): WorkspaceDefaultsView => {
   const rec = asRecord(raw);
-  const defaults = asRecord(rec.defaults);
-  const preferred = asRecord(defaults.preferredSeriesByKind);
+  const defaults = asRecord(rec["defaults"]);
+  const preferred = asRecord(defaults["preferredSeriesByKind"]);
   const preferredSeriesByKind: Partial<Record<DocumentKind, NumberingSeriesId>> = {};
   for (const kind of ["invoice", "proforma", "payment_tax_document", "credit_note"] as const) {
-    const id = preferred[kind];
-    if (typeof id === "string" && id.length > 0) {
-      preferredSeriesByKind[kind] = id as NumberingSeriesId;
-    }
+    const id = readSeriesId(preferred[kind]);
+    if (Option.isSome(id)) preferredSeriesByKind[kind] = id.value;
   }
-  const rounding = defaults.paymentRounding === "whole_unit" ? "whole_unit" : "none";
+  const rounding = defaults["paymentRounding"] === "whole_unit" ? "whole_unit" : "none";
   return {
-    taxRegime: (asString(rec.taxRegime, fallbackRegime) as TaxRegime) || fallbackRegime,
-    currency: asString(defaults.currency, "CZK").toUpperCase() as CurrencyCode,
-    language: defaults.language === "en" ? "en" : "cs",
-    dueDays: asNumber(defaults.dueDays, 14),
-    paymentMethod: asString(defaults.paymentMethod, "bank_transfer") as PaymentMethod,
+    taxRegime: Option.getOrElse(
+      Schema.decodeUnknownOption(TaxRegime)(rec["taxRegime"]),
+      () => fallbackRegime,
+    ),
+    currency: currencyOrCzk(defaults["currency"]),
+    language: defaults["language"] === "en" ? "en" : "cs",
+    dueDays: Option.getOrElse(readNumber(defaults["dueDays"]), () => 14),
+    paymentMethod: Option.getOrElse(
+      Schema.decodeUnknownOption(PaymentMethod)(defaults["paymentMethod"]),
+      () => "bank_transfer",
+    ),
     paymentRounding: rounding,
-    note: asNullableString(defaults.defaultNote) ?? asNullableString(defaults.note),
+    note: asNullableString(defaults["defaultNote"]) ?? asNullableString(defaults["note"]),
     preferredSeriesByKind,
   };
-};
-
-// --- Dates & idempotency ------------------------------------------------------------------------
+});
 
 /** Current calendar date in Europe/Prague (`YYYY-MM-DD`). */
-export const todayIsoPrague = (now: Date = new Date()): IsoDate => {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: BUSINESS_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
-  return `${get("year")}-${get("month")}-${get("day")}` as IsoDate;
-};
+export const todayIsoPrague = (now?: Date): IsoDate =>
+  (now === undefined ? DateTime.nowUnsafe() : DateTime.makeUnsafe(now)).pipe(
+    DateTime.setZoneNamedUnsafe(BUSINESS_TIME_ZONE),
+    DateTime.formatIsoDate,
+    IsoDate.make,
+  );
 
 /** Adds `days` calendar days to an ISO date (`YYYY-MM-DD`). */
-export const addDaysIso = (iso: string, days: number): IsoDate => {
-  const parsed = parseIsoDate(iso);
-  if (parsed === undefined) return todayIsoPrague();
-  const date = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day + days));
-  const y = String(date.getUTCFullYear()).padStart(4, "0");
-  const m = String(date.getUTCMonth() + 1).padStart(2, "0");
-  const d = String(date.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${d}` as IsoDate;
-};
-
-/** Mints one RFC 9562 UUIDv7 Idempotency-Key for a user write intent. */
+export const addDaysIso: {
+  (iso: string, days: number): IsoDate;
+  (days: number): (iso: string) => IsoDate;
+} = Fn.dual(2, (iso: string, days: number): IsoDate => {
+  const parsed = Schema.decodeOption(IsoDate)(iso);
+  if (Option.isNone(parsed)) return todayIsoPrague();
+  return DateTime.makeUnsafe(`${parsed.value}T00:00:00Z`).pipe(
+    DateTime.add({ days }),
+    DateTime.formatIsoDateUtc,
+    IsoDate.make,
+  );
+});

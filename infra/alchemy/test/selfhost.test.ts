@@ -1,109 +1,121 @@
 import { describe, expect, test } from "bun:test";
-import { randomUUID } from "node:crypto";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as Arr from "effect/Array";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Record from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { parseDeployWorkflow } from "./deploy-workflow";
+import { runCommand, runSerial, systemPath } from "./process-fixture";
 
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const environmentLibMkoptionPattern = /environment\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/;
+const blobdriverLibMkoptionPattern = /blobDriver\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/;
+const botprotectionmodeLibMkoptionPattern =
+  /botProtectionMode\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/;
+const systemdServicesKvitbitPattern =
+  /systemd\.services\.kvitbit\s*=\s*\{[\s\S]*?serviceConfig\s*=/;
+const environmentPattern = /environment\s*=\s*\{([\s\S]*?)\}/;
+const defaultPattern = /default\s*=\s*([^;]+);/;
+const matchPattern = /^sha256:[a-f0-9]{64}$/;
+
+const fs = await FileSystem.FileSystem.pipe(Effect.provide(BunFileSystem.layer), Effect.runPromise);
+const { join, resolve } = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
 const repoRoot = resolve(import.meta.dir, "../../..");
 const entrypointPath = join(repoRoot, "docker/entrypoint.sh");
+const syntheticPassword = "synthetic";
+const postgresDsn = (user: string) => (target: string) =>
+  `postgres://${user}:${syntheticPassword}@${target}`;
+const appDsn = postgresDsn("app");
+const ownerDsn = postgresDsn("owner");
+const onBundledDatabase = (query: string) => appDsn(`postgres:5432/kvitbit?${query}`);
+const cliValueFormat = (field: string) => `--format='value(${field})'`;
+const postgres17Version = /^17[0-9]{4}$/;
+const ownershipDenied = /must be owner|permission denied/;
+const sha256Digest = /^sha256:[a-f0-9]{64}$/;
+const shellReference = (text: string) => `\${${text}}`;
 
-const runEntrypoint = (
-  args: ReadonlyArray<string>,
-  env: Record<string, string>,
-): { readonly exitCode: number; readonly stdout: string; readonly stderr: string } => {
-  const result = Bun.spawnSync(["sh", entrypointPath, ...args], {
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      ...env,
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  return {
-    exitCode: result.exitCode,
-    stdout: new TextDecoder().decode(result.stdout),
-    stderr: new TextDecoder().decode(result.stderr),
-  };
-};
+const runEntrypoint = (args: ReadonlyArray<string>, env: Record<string, string>) =>
+  runCommand({ command: ["sh", entrypointPath, ...args], env: { PATH: systemPath, ...env } });
 
-const runEntrypointAsync = async (
-  args: ReadonlyArray<string>,
-  env: Record<string, string>,
-): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
-  const proc = Bun.spawn(["sh", entrypointPath, ...args], {
-    env: {
-      PATH: process.env.PATH ?? "/usr/bin:/bin",
-      ...env,
-    },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  return { exitCode, stdout, stderr };
-};
+const environment = Schema.Record(Schema.String, Schema.String);
+const dependsOn = Schema.Record(Schema.String, Schema.Struct({ condition: Schema.String }));
+const Compose = Schema.Struct({
+  services: Schema.Struct({
+    postgres: Schema.Struct({ volumes: Schema.Array(Schema.String), environment }),
+    migrate: Schema.Struct({ environment }),
+    "reconcile-roles": Schema.Struct({
+      depends_on: dependsOn,
+      volumes: Schema.Array(Schema.String),
+      environment,
+    }),
+    kvitbit: Schema.Struct({ depends_on: dependsOn, environment }),
+  }),
+});
+const decodeCompose = Schema.decodeUnknownEffect(Compose);
+
+const literalInterpolation = (expression: string): string => `\${${expression}}`;
 
 describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
-  test("exits 69 with clear stderr message when apps/server is absent", () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-missing-"));
+  test("exits 69 with clear stderr message when apps/server is absent", async () => {
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-ep-missing-" }),
+    );
     try {
-      const serverRes = runEntrypoint(["server"], { KVITBIT_APP_ROOT: sandbox });
+      const serverRes = await runEntrypoint(["server"], { KVITBIT_APP_ROOT: sandbox });
       expect(serverRes.exitCode).toBe(69);
       expect(serverRes.stderr).toContain("apps/server/src/main.ts");
 
-      const workerRes = runEntrypoint(["worker"], { KVITBIT_APP_ROOT: sandbox });
+      const workerRes = await runEntrypoint(["worker"], { KVITBIT_APP_ROOT: sandbox });
       expect(workerRes.exitCode).toBe(69);
       expect(workerRes.stderr).toContain("apps/server/src/worker.ts");
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
-  test("dispatches server, worker, and migrate to bun with expected entrypoints", () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-ok-"));
+  test("dispatches server, worker, and migrate to bun with expected entrypoints", async () => {
+    const sandbox = await Effect.runPromise(fs.makeTempDirectory({ prefix: "kvitbit-ep-ok-" }));
     try {
       const serverDir = join(sandbox, "apps/server/src");
-      mkdirSync(serverDir, { recursive: true });
-      writeFileSync(join(serverDir, "main.ts"), "// main\n");
-      writeFileSync(join(serverDir, "worker.ts"), "// worker\n");
-      writeFileSync(join(serverDir, "migrate.ts"), "// migrate\n");
+      await Effect.runPromise(fs.makeDirectory(serverDir, { recursive: true }));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "main.ts"), "// main\n"));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "worker.ts"), "// worker\n"));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "migrate.ts"), "// migrate\n"));
 
       const fakeBun = join(sandbox, "fake-bun.sh");
-      writeFileSync(fakeBun, '#!/bin/sh\necho "FAKE_BUN:$*"\n');
-      chmodSync(fakeBun, 0o755);
+      await Effect.runPromise(fs.writeFileString(fakeBun, '#!/bin/sh\necho "FAKE_BUN:$*"\n'));
+      await Effect.runPromise(fs.chmod(fakeBun, 0o755));
 
-      const serverRes = runEntrypoint(["server"], {
+      const serverRes = await runEntrypoint(["server"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
       });
       expect(serverRes.exitCode).toBe(0);
-      expect(serverRes.stdout.trim()).toBe(`FAKE_BUN:${join(serverDir, "main.ts")}`);
+      expect(Str.trim(serverRes.stdout)).toBe(`FAKE_BUN:${join(serverDir, "main.ts")}`);
 
-      const workerRes = runEntrypoint(["worker"], {
+      const workerRes = await runEntrypoint(["worker"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
       });
       expect(workerRes.exitCode).toBe(0);
-      expect(workerRes.stdout.trim()).toBe(`FAKE_BUN:${join(serverDir, "worker.ts")}`);
+      expect(Str.trim(workerRes.stdout)).toBe(`FAKE_BUN:${join(serverDir, "worker.ts")}`);
 
-      const migrateNoDb = runEntrypoint(["migrate"], {
+      const migrateNoDb = await runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
       });
       expect(migrateNoDb.exitCode).toBe(64);
 
-      const migrateRuntimeOnly = runEntrypoint(["migrate"], {
+      const migrateRuntimeOnly = await runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
         DATABASE_URL: "postgres://app:pw@external.invalid:5432/kvitbit",
@@ -111,35 +123,35 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       expect(migrateRuntimeOnly.exitCode).toBe(64);
       expect(migrateRuntimeOnly.stderr).toContain("direct owner connection");
 
-      const migrateOk = runEntrypoint(["migrate"], {
+      const migrateOk = await runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
-        DATABASE_URL_UNPOOLED: "postgres://user:pass@localhost:5432/kvitbit",
+        DATABASE_URL_UNPOOLED: `postgres://user:${syntheticPassword}@localhost:5432/kvitbit`,
       });
       expect(migrateOk.exitCode).toBe(0);
-      expect(migrateOk.stdout.trim()).toBe(`FAKE_BUN:${join(serverDir, "migrate.ts")}`);
+      expect(Str.trim(migrateOk.stdout)).toBe(`FAKE_BUN:${join(serverDir, "migrate.ts")}`);
 
       // External DATABASE_URL with missing DATABASE_URL_UNPOOLED must fail fast instead of
       // silently falling back to bundled postgres.
-      const migrateExternalMissingUnpooled = runEntrypoint(["migrate"], {
+      const migrateExternalMissingUnpooled = await runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
         KVITBIT_RUNTIME_DATABASE_URL: "postgres://app:pw@external.invalid:5432/kvitbit",
-        KVITBIT_BUNDLED_MIGRATION_URL: "postgres://kvitbit:kvitbit@postgres:5432/kvitbit",
+        KVITBIT_BUNDLED_MIGRATION_URL: `postgres://kvitbit:${syntheticPassword}@postgres:5432/kvitbit`,
       });
       expect(migrateExternalMissingUnpooled.exitCode).toBe(64);
       expect(migrateExternalMissingUnpooled.stderr).toContain("external database");
 
       // Bundled postgres fallback succeeds when runtime URL is unset
-      const migrateBundled = runEntrypoint(["migrate"], {
+      const migrateBundled = await runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
-        KVITBIT_BUNDLED_MIGRATION_URL: "postgres://kvitbit:kvitbit@postgres:5432/kvitbit",
+        KVITBIT_BUNDLED_MIGRATION_URL: `postgres://kvitbit:${syntheticPassword}@postgres:5432/kvitbit`,
       });
       expect(migrateBundled.exitCode).toBe(0);
-      expect(migrateBundled.stdout.trim()).toBe(`FAKE_BUN:${join(serverDir, "migrate.ts")}`);
+      expect(Str.trim(migrateBundled.stdout)).toBe(`FAKE_BUN:${join(serverDir, "migrate.ts")}`);
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
@@ -157,14 +169,14 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       },
     });
     try {
-      const ok = await runEntrypointAsync(["healthcheck"], {
+      const ok = await runEntrypoint(["healthcheck"], {
         PORT: String(server.port),
         KVITBIT_BUN_BIN: process.execPath,
       });
       expect(ok.exitCode).toBe(0);
 
       status = 503;
-      const fail = await runEntrypointAsync(["healthcheck"], {
+      const fail = await runEntrypoint(["healthcheck"], {
         PORT: String(server.port),
         KVITBIT_BUN_BIN: process.execPath,
       });
@@ -173,57 +185,71 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       server.stop(true);
     }
 
-    const arbitrary = runEntrypoint(["echo", "kvitbit-ok"], {});
+    const arbitrary = await runEntrypoint(["echo", "kvitbit-ok"], {});
     expect(arbitrary.exitCode).toBe(0);
-    expect(arbitrary.stdout.trim()).toBe("kvitbit-ok");
+    expect(Str.trim(arbitrary.stdout)).toBe("kvitbit-ok");
   });
 
-  test("migrate and reconcile require the bundled host, port, and database before using owner credentials", () => {
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-ep-migrate-"));
+  test("migrate and reconcile require the bundled host, port, and database before using owner credentials", async () => {
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-ep-migrate-" }),
+    );
     try {
       const serverDir = join(sandbox, "apps/server/src");
-      mkdirSync(serverDir, { recursive: true });
-      writeFileSync(join(serverDir, "migrate.ts"), "// migrate\n");
+      await Effect.runPromise(fs.makeDirectory(serverDir, { recursive: true }));
+      await Effect.runPromise(fs.writeFileString(join(serverDir, "migrate.ts"), "// migrate\n"));
       const fakeBun = join(sandbox, "fake-bun.sh");
-      writeFileSync(fakeBun, '#!/bin/sh\nprintf "%s\\n" "$DATABASE_URL_UNPOOLED"\n');
-      chmodSync(fakeBun, 0o755);
+      await Effect.runPromise(
+        fs.writeFileString(fakeBun, '#!/bin/sh\nprintf "%s\\n" "$DATABASE_URL_UNPOOLED"\n'),
+      );
+      await Effect.runPromise(fs.chmod(fakeBun, 0o755));
 
-      const bundledUrl = "postgres://owner:synthetic@postgres:5432/kvitbit";
-      const ownerUrl = "postgres://owner:synthetic@postgres:5432/other";
-      const migrate = (url: string, owner?: string) =>
-        runEntrypoint(["migrate"], {
+      const bundledUrl = ownerDsn("postgres:5432/kvitbit");
+      const ownerUrl = ownerDsn("postgres:5432/other");
+      const migrate = (url: string, owner?: string) => {
+        const env = {
           KVITBIT_APP_ROOT: sandbox,
           KVITBIT_BUN_BIN: fakeBun,
           KVITBIT_RUNTIME_DATABASE_URL: url,
           KVITBIT_BUNDLED_DATABASE_NAME: "kvitbit",
           KVITBIT_BUNDLED_MIGRATION_URL: bundledUrl,
-          ...(owner === undefined ? {} : { DATABASE_MIGRATION_URL: owner }),
-        });
+        };
+        return runEntrypoint(
+          ["migrate"],
+          owner === undefined ? env : { ...env, DATABASE_MIGRATION_URL: owner },
+        );
+      };
 
-      const same = migrate("postgresql://app:p%40ss@Postgres/kvit%62it?sslmode=disable");
+      const escapedCredentials = "app:p%40ss";
+      const escapedDatabase = "kvit%62it";
+      const unescapedTarget = "postgres:5432";
+      const otherHost = "away.invalid";
+      const same = await migrate(
+        `postgresql://${escapedCredentials}@Postgres/${escapedDatabase}?sslmode=disable`,
+      );
       expect(same.exitCode).toBe(0);
-      expect(same.stdout.trim()).toBe(bundledUrl);
+      expect(Str.trim(same.stdout)).toBe(bundledUrl);
 
-      for (const url of [
-        "postgres://app:synthetic@postgres:5432/other",
-        "postgres://app:synthetic@postgres:5433/kvitbit",
-        "postgres://app:synthetic@away.invalid:5432/kvitbit?application_name=@postgres:5432",
-        "postgres://app:synthetic@postgres:5432/kvitbit?%68ost=away.invalid",
-        "postgres://app:synthetic@postgres:5432/kvitbit?port=5433",
-        "postgres://app:synthetic@postgres:5432/kvitbit?host=away.invalid&host=postgres",
-        "postgres://app:synthetic@postgres:5432/kvitbit?dbname=other",
-      ]) {
-        const rejected = migrate(url);
+      await runSerial([
+        appDsn("postgres:5432/other"),
+        appDsn("postgres:5433/kvitbit"),
+        appDsn(`away.invalid:5432/kvitbit?application_name=@${unescapedTarget}`),
+        onBundledDatabase("%68ost=away.invalid"),
+        onBundledDatabase("port=5433"),
+        onBundledDatabase(`host=${otherHost}&host=postgres`),
+        onBundledDatabase("dbname=other"),
+      ])(async (url) => {
+        const rejected = await migrate(url);
         expect(rejected.exitCode).toBe(64);
         expect(rejected.stdout).toBe("");
         expect(rejected.stderr).not.toContain("synthetic");
-      }
+      });
 
-      const explicit = migrate("postgres://app:synthetic@postgres:5432/other", ownerUrl);
+      const explicit = await migrate(appDsn("postgres:5432/other"), ownerUrl);
       expect(explicit.exitCode).toBe(0);
-      expect(explicit.stdout.trim()).toBe(ownerUrl);
+      expect(Str.trim(explicit.stdout)).toBe(ownerUrl);
 
-      const invalidFallback = runEntrypoint(["migrate"], {
+      const invalidFallback = await runEntrypoint(["migrate"], {
         KVITBIT_APP_ROOT: sandbox,
         KVITBIT_BUN_BIN: fakeBun,
         KVITBIT_BUNDLED_DATABASE_NAME: "kvitbit",
@@ -232,60 +258,64 @@ describe("docker/entrypoint.sh dispatch contract (#878, #908, #913)", () => {
       expect(invalidFallback.exitCode).toBe(64);
       expect(invalidFallback.stdout).toBe("");
 
-      const runtimeUrl = "postgres://app:synthetic@postgres:5432/second_db";
+      const runtimeUrl = appDsn("postgres:5432/second_db");
       const fakePsql = join(sandbox, "psql");
-      writeFileSync(fakePsql, '#!/bin/sh\nprintf "%s\\n" "unexpected owner access"\n');
-      chmodSync(fakePsql, 0o755);
-      for (const runtime of [
-        { DATABASE_URL: runtimeUrl },
-        { KVITBIT_RUNTIME_DATABASE_URL: runtimeUrl },
-      ]) {
-        const wrongDatabase = runEntrypoint(["migrate"], {
-          KVITBIT_APP_ROOT: sandbox,
-          KVITBIT_BUN_BIN: fakeBun,
-          KVITBIT_BUNDLED_DATABASE_NAME: "first_db",
-          KVITBIT_BUNDLED_MIGRATION_URL: "postgres://owner:synthetic@postgres:5432/first_db",
-          ...runtime,
-        });
-        expect(wrongDatabase.exitCode).toBe(64);
-        expect(wrongDatabase.stdout).toBe("");
-
-        const roleResult = Bun.spawnSync(["sh", join(repoRoot, "docker/reconcile-app-role.sh")], {
-          env: {
-            PATH: `${sandbox}:${process.env.PATH ?? "/usr/bin:/bin"}`,
-            PGHOST: "postgres",
-            PGPORT: "5432",
-            POSTGRES_DB: "first_db",
+      await Effect.runPromise(
+        fs.writeFileString(fakePsql, '#!/bin/sh\nprintf "%s\\n" "unexpected owner access"\n'),
+      );
+      await Effect.runPromise(fs.chmod(fakePsql, 0o755));
+      await runSerial([{ DATABASE_URL: runtimeUrl }, { KVITBIT_RUNTIME_DATABASE_URL: runtimeUrl }])(
+        async (runtime) => {
+          const wrongDatabase = await runEntrypoint(["migrate"], {
+            KVITBIT_APP_ROOT: sandbox,
+            KVITBIT_BUN_BIN: fakeBun,
+            KVITBIT_BUNDLED_DATABASE_NAME: "first_db",
+            KVITBIT_BUNDLED_MIGRATION_URL: ownerDsn("postgres:5432/first_db"),
             ...runtime,
-          },
-          stdout: "pipe",
-          stderr: "pipe",
-        });
-        expect(roleResult.exitCode).toBe(64);
-        expect(roleResult.stdout.toString()).toBe("");
-        expect(roleResult.stderr.toString()).toContain("different database");
-      }
+          });
+          expect(wrongDatabase.exitCode).toBe(64);
+          expect(wrongDatabase.stdout).toBe("");
+
+          const roleResult = await runCommand({
+            command: ["sh", join(repoRoot, "docker/reconcile-app-role.sh")],
+            env: {
+              PATH: `${sandbox}:${systemPath}`,
+              PGHOST: "postgres",
+              PGPORT: "5432",
+              POSTGRES_DB: "first_db",
+              ...runtime,
+            },
+          });
+          expect(roleResult.exitCode).toBe(64);
+          expect(roleResult.stdout).toBe("");
+          expect(roleResult.stderr).toContain("different database");
+        },
+      );
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 });
 
 describe("Self-hosting and CI deploy artifacts", () => {
-  test("Dockerfile includes static assets, Bun 1.4.2 multi-stage build, Chromium, non-root uid 10001, and tini entrypoint", () => {
-    const dockerfile = readFileSync(join(repoRoot, "Dockerfile"), "utf8");
-    const dockerignore = readFileSync(join(repoRoot, ".dockerignore"), "utf8");
+  test("Dockerfile includes static assets, Bun 1.4.2 multi-stage build, Chromium, non-root uid 10001, and tini entrypoint", async () => {
+    const dockerfile = await Effect.runPromise(fs.readFileString(join(repoRoot, "Dockerfile")));
+    const dockerignore = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".dockerignore")),
+    );
 
     // Static assets (assets/brand) must be in Docker build context and copied before web/mobile builds
-    const ignoredLines = dockerignore
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0 && !line.startsWith("#"));
+    const ignoredLines = Arr.filter(
+      Arr.map(Str.split("\n")(dockerignore), (line) => Str.trim(line)),
+      (line) => line.length > 0 && !Str.startsWith("#")(line),
+    );
     expect(ignoredLines).not.toContain("assets");
     expect(ignoredLines).not.toContain("assets/brand");
     expect(dockerfile).toContain("COPY assets ./assets");
-    expect(dockerfile.indexOf("COPY assets ./assets")).toBeLessThan(
-      dockerfile.indexOf("bun run --filter @kvitbit/web build"),
+    expect(
+      Option.getOrElse(Str.indexOf("COPY assets ./assets")(dockerfile), () => -1),
+    ).toBeLessThan(
+      Option.getOrElse(Str.indexOf("bun run --filter @kvitbit/web build")(dockerfile), () => -1),
     );
 
     expect(dockerfile).toContain("ARG BUN_VERSION=1.4.2");
@@ -302,50 +332,35 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(dockerfile).toContain("KVITBIT_RUNNER_MODE=single");
   });
 
-  test("docker-compose.yml separates migration owner credentials from DML-only app role, reconciles roles post-migration, and preserves DATABASE_URL_UNPOOLED (S5)", () => {
-    const compose = readFileSync(join(repoRoot, "docker-compose.yml"), "utf8");
+  test("docker-compose.yml separates migration owner credentials from DML-only app role, reconciles roles post-migration, and preserves DATABASE_URL_UNPOOLED (S5)", async () => {
+    const compose = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, "docker-compose.yml")),
+    );
     const initScriptPath = join(repoRoot, "docker/postgres-init/01-create-app-role.sh");
     const reconcileScriptPath = join(repoRoot, "docker/reconcile-app-role.sh");
     const targetScriptPath = join(repoRoot, "docker/database-target.sh");
-    expect(existsSync(initScriptPath)).toBe(true);
-    expect(existsSync(reconcileScriptPath)).toBe(true);
+    expect(await Effect.runPromise(fs.exists(initScriptPath))).toBe(true);
+    expect(await Effect.runPromise(fs.exists(reconcileScriptPath))).toBe(true);
 
-    for (const scriptPath of [initScriptPath, reconcileScriptPath, targetScriptPath]) {
-      const syntax = Bun.spawnSync(["sh", "-n", scriptPath], {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+    await runSerial([initScriptPath, reconcileScriptPath, targetScriptPath])(async (scriptPath) => {
+      const syntax = await runCommand({ command: ["sh", "-n", scriptPath] });
       expect(syntax.exitCode).toBe(0);
-    }
+    });
 
-    const parsed = Bun.YAML.parse(compose) as {
-      services: {
-        postgres: { volumes: string[]; environment: Record<string, string> };
-        migrate: { environment: Record<string, string> };
-        "reconcile-roles": {
-          depends_on: Record<string, { condition: string }>;
-          volumes: string[];
-          environment: Record<string, string>;
-        };
-        kvitbit: {
-          depends_on: Record<string, { condition: string }>;
-          environment: Record<string, string>;
-        };
-      };
-    };
+    const parsed = decodeCompose(Bun.YAML.parse(compose)).pipe(Effect.runSync);
     expect(parsed.services.postgres.volumes).toContain(
       "./docker/postgres-init:/docker-entrypoint-initdb.d:ro",
     );
     expect(parsed.services.postgres.volumes).toContain(
       "./docker/reconcile-app-role.sh:/usr/local/bin/reconcile-app-role.sh:ro",
     );
-    expect(parsed.services.migrate.environment.DATABASE_URL_UNPOOLED).toContain(
+    expect(parsed.services.migrate.environment["DATABASE_URL_UNPOOLED"]).toContain(
       "DATABASE_URL_UNPOOLED",
     );
-    expect(parsed.services.migrate.environment.KVITBIT_BUNDLED_MIGRATION_URL).toContain(
+    expect(parsed.services.migrate.environment["KVITBIT_BUNDLED_MIGRATION_URL"]).toContain(
       "POSTGRES_USER",
     );
-    expect(parsed.services["reconcile-roles"].depends_on.migrate?.condition).toBe(
+    expect(parsed.services["reconcile-roles"].depends_on["migrate"]?.condition).toBe(
       "service_completed_successfully",
     );
     expect(parsed.services["reconcile-roles"].volumes).toContain(
@@ -357,16 +372,20 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(parsed.services.kvitbit.depends_on["reconcile-roles"]?.condition).toBe(
       "service_completed_successfully",
     );
-    expect(parsed.services.kvitbit.environment.DATABASE_URL).toContain("POSTGRES_APP_USER");
-    expect(parsed.services.kvitbit.environment.DATABASE_URL_UNPOOLED).toBeUndefined();
+    expect(parsed.services.kvitbit.environment["DATABASE_URL"]).toContain("POSTGRES_APP_USER");
+    expect(parsed.services.kvitbit.environment["DATABASE_URL_UNPOOLED"]).toBeUndefined();
     // Preserve production fail-fast behavior on upgrade (never silently downgrade to development/capture).
-    expect(parsed.services.kvitbit.environment.NODE_ENV).toBe("production");
-    expect(parsed.services.kvitbit.environment.KVITBIT_ENV).toBe(`\${KVITBIT_ENV:-}`);
-    expect(parsed.services.kvitbit.environment.KVITBIT_ENV).not.toContain("development");
-    expect(parsed.services.kvitbit.environment.KVITBIT_BOT_PROTECTION_MODE).toBe(
-      `\${KVITBIT_BOT_PROTECTION_MODE:-}`,
+    expect(parsed.services.kvitbit.environment["NODE_ENV"]).toBe("production");
+    expect(parsed.services.kvitbit.environment["KVITBIT_ENV"]).toBe(
+      literalInterpolation("KVITBIT_ENV:-"),
     );
-    expect(parsed.services.kvitbit.environment.ALTCHA_HMAC_KEY).toBe(`\${ALTCHA_HMAC_KEY:-}`);
+    expect(parsed.services.kvitbit.environment["KVITBIT_ENV"]).not.toContain("development");
+    expect(parsed.services.kvitbit.environment["KVITBIT_BOT_PROTECTION_MODE"]).toBe(
+      literalInterpolation("KVITBIT_BOT_PROTECTION_MODE:-"),
+    );
+    expect(parsed.services.kvitbit.environment["ALTCHA_HMAC_KEY"]).toBe(
+      literalInterpolation("ALTCHA_HMAC_KEY:-"),
+    );
     expect(compose).toContain("postgres:17-alpine");
     expect(compose).toContain('command: ["migrate"]');
     expect(compose).toContain("condition: service_completed_successfully");
@@ -381,18 +400,11 @@ describe("Self-hosting and CI deploy artifacts", () => {
     const fresh = "kvitbit_fresh";
     const existing = "kvitbit_existing";
     const migration = join(repoRoot, "packages/db/drizzle/20261123175822_init/migration.sql");
-    const runDocker = (args: ReadonlyArray<string>) => {
-      const result = Bun.spawnSync(["docker", ...args], { stdout: "pipe", stderr: "pipe" });
-      return {
-        exitCode: result.exitCode,
-        stdout: result.stdout.toString(),
-        stderr: result.stderr.toString(),
-      };
-    };
+    const runDocker = (args: ReadonlyArray<string>) => runCommand({ command: ["docker", ...args] });
     const exec = (args: ReadonlyArray<string>, env: Record<string, string> = {}) =>
       runDocker([
         "exec",
-        ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
+        ...Arr.flatMap(Record.toEntries(env), ([key, value]) => ["--env", `${key}=${value}`]),
         container,
         ...args,
       ]);
@@ -414,18 +426,17 @@ describe("Self-hosting and CI deploy artifacts", () => {
         { PGPASSWORD: user === owner ? ownerPassword : password },
       );
     const sql = (db: string, statement: string, user?: string) => psql(db, ["-c", statement], user);
-    const assertOk = (result: ReturnType<typeof runDocker>) => {
-      if (result.exitCode !== 0) throw new Error(result.stderr.replaceAll(password, "[redacted]"));
-      return result.stdout.trim();
+    const assertOk = (result: Awaited<ReturnType<typeof runDocker>>) => {
+      if (result.exitCode !== 0)
+        throw new Error(Str.replaceAll(password, "[redacted]")(result.stderr));
+      return Str.trim(result.stdout);
     };
-    const assertPrivate = (result: ReturnType<typeof runDocker>) => {
-      expect(result.stdout.includes(passwordMarker)).toBe(false);
-      expect(result.stderr.includes(passwordMarker)).toBe(false);
-    };
+    const redactedOutput = (result: Awaited<ReturnType<typeof runDocker>>) =>
+      !(Str.includes(passwordMarker)(result.stdout) || Str.includes(passwordMarker)(result.stderr));
 
     const start = async () => {
       assertOk(
-        runDocker([
+        await runDocker([
           "run",
           "--detach",
           "--rm",
@@ -451,19 +462,22 @@ describe("Self-hosting and CI deploy artifacts", () => {
         ]),
       );
 
-      let version = "";
-      for (let attempt = 0; attempt < 50; attempt++) {
-        const probe = sql(fresh, "SHOW server_version_num");
-        if (probe.exitCode === 0) {
-          version = probe.stdout.trim();
-          break;
-        }
+      const probeVersion = async (attempts: number): Promise<string> => {
+        const probe = await sql(fresh, "SHOW server_version_num");
+        if (probe.exitCode === 0) return Str.trim(probe.stdout);
+        if (attempts === 1) return "";
         await Bun.sleep(100);
-      }
-      if (!version)
-        throw new Error(runDocker(["logs", container]).stderr.replaceAll(password, "[redacted]"));
-      expect(version).toMatch(/^17[0-9]{4}$/);
-      expect(assertOk(sql(fresh, "SELECT current_user", "kvitbit_app"))).toBe("kvitbit_app");
+        return probeVersion(attempts - 1);
+      };
+      const version = await probeVersion(50);
+      if (version === "")
+        throw new Error(
+          Str.replaceAll(password, "[redacted]")((await runDocker(["logs", container])).stderr),
+        );
+      if (!postgres17Version.test(version))
+        throw new Error(`Expected PostgreSQL 17, got ${version}`);
+      const runtime = assertOk(await sql(fresh, "SELECT current_user", "kvitbit_app"));
+      if (runtime !== "kvitbit_app") throw new Error(`Expected the runtime role, got ${runtime}`);
     };
     const init = "/docker-entrypoint-initdb.d/01-create-app-role.sh";
     const reconcile = "/usr/local/bin/reconcile-app-role.sh";
@@ -472,8 +486,8 @@ describe("Self-hosting and CI deploy artifacts", () => {
       db: string,
       role: string,
       env: Record<string, string> = {},
-    ) => {
-      return exec(["sh", script], {
+    ) =>
+      exec(["sh", script], {
         PGHOST: "127.0.0.1",
         PGPORT: "5432",
         PGPASSWORD: ownerPassword,
@@ -482,7 +496,6 @@ describe("Self-hosting and CI deploy artifacts", () => {
         POSTGRES_APP_PASSWORD: password,
         ...env,
       });
-    };
     return {
       start,
       stop: () => runDocker(["rm", "-f", container]),
@@ -496,45 +509,45 @@ describe("Self-hosting and CI deploy artifacts", () => {
       psql,
       sql,
       assertOk,
-      assertPrivate,
+      redactedOutput,
     };
   };
 
   const withPostgresRoleSandbox = async (
-    run: (fixture: ReturnType<typeof makePostgresRoleSandbox>) => void,
+    run: (fixture: ReturnType<typeof makePostgresRoleSandbox>) => Promise<void>,
   ) => {
-    const fixture = makePostgresRoleSandbox(`kvitbit-pg-roles-${randomUUID()}`);
+    const fixture = makePostgresRoleSandbox(`kvitbit-pg-roles-${SecureRandom.uuidV4Unsafe()}`);
     try {
       await fixture.start();
-      run(fixture);
+      await run(fixture);
     } finally {
-      fixture.stop();
+      await fixture.stop();
     }
   };
 
   test("PostgreSQL 17 init and reconcile keep runtime passwords out of stdout and stderr", async () => {
     await withPostgresRoleSandbox(
-      ({ init, reconcile, fresh, roleScript, logs, sql, assertOk, assertPrivate }) => {
-        assertPrivate(logs());
-        assertOk(sql(fresh, "CREATE ROLE elevated_privacy SUPERUSER"));
-        for (const script of [init, reconcile]) {
-          const ok = roleScript(script, fresh, "kvitbit_app");
-          assertPrivate(ok);
+      async ({ init, reconcile, fresh, roleScript, logs, sql, assertOk, redactedOutput }) => {
+        expect(redactedOutput(await logs())).toBe(true);
+        assertOk(await sql(fresh, "CREATE ROLE elevated_privacy SUPERUSER"));
+        await runSerial([init, reconcile])(async (script) => {
+          const ok = await roleScript(script, fresh, "kvitbit_app");
+          expect(redactedOutput(ok)).toBe(true);
           assertOk(ok);
 
-          const rejected = roleScript(script, fresh, "elevated_privacy");
-          assertPrivate(rejected);
+          const rejected = await roleScript(script, fresh, "elevated_privacy");
+          expect(redactedOutput(rejected)).toBe(true);
           expect(rejected.exitCode).not.toBe(0);
           expect(rejected.stderr).toContain("Refusing elevated runtime role");
-        }
+        });
       },
     );
   }, 45_000);
 
   test("PostgreSQL 17 rejects runtime ownership of existing application tables", async () => {
-    await withPostgresRoleSandbox(({ init, reconcile, fresh, roleScript, sql, assertOk }) => {
+    await withPostgresRoleSandbox(async ({ init, reconcile, fresh, roleScript, sql, assertOk }) => {
       assertOk(
-        sql(
+        await sql(
           fresh,
           `
           CREATE ROLE legacy_app;
@@ -562,17 +575,17 @@ describe("Self-hosting and CI deploy artifacts", () => {
         ),
       );
 
-      for (const role of [
+      await runSerial([
         "legacy_app",
         "legacy_member",
         "legacy_inherit_member",
         "legacy_set_inherit_member",
         "legacy_admin_member",
         "legacy_inherit_admin_member",
-      ]) {
+      ])(async (role) => {
         expect(
           assertOk(
-            sql(
+            await sql(
               fresh,
               `
               SELECT has_database_privilege('${role}', current_database(), 'CREATE'),
@@ -582,22 +595,22 @@ describe("Self-hosting and CI deploy artifacts", () => {
             ),
           ),
         ).toBe("f|f|f");
-        for (const script of [init, reconcile]) {
-          const result = roleScript(script, fresh, role);
+        await runSerial([init, reconcile])(async (script) => {
+          const result = await roleScript(script, fresh, role);
           expect(result.exitCode).not.toBe(0);
           expect(result.stderr).toContain("owns database object");
-        }
+        });
         expect(
-          assertOk(sql(fresh, `SELECT rolcanlogin FROM pg_roles WHERE rolname = '${role}'`)),
+          assertOk(await sql(fresh, `SELECT rolcanlogin FROM pg_roles WHERE rolname = '${role}'`)),
         ).toBe("f");
-      }
+      });
     });
   }, 45_000);
 
   test("PostgreSQL 17 allows inactive table-owner membership while keeping runtime DDL blocked", async () => {
-    await withPostgresRoleSandbox(({ init, reconcile, fresh, roleScript, sql, assertOk }) => {
+    await withPostgresRoleSandbox(async ({ init, reconcile, fresh, roleScript, sql, assertOk }) => {
       assertOk(
-        sql(
+        await sql(
           fresh,
           `
           CREATE ROLE relation_owner;
@@ -611,7 +624,7 @@ describe("Self-hosting and CI deploy artifacts", () => {
 
       expect(
         assertOk(
-          sql(
+          await sql(
             fresh,
             `
             SELECT pg_has_role('report_reader', 'relation_owner', 'MEMBER'),
@@ -622,13 +635,13 @@ describe("Self-hosting and CI deploy artifacts", () => {
         ),
       ).toBe("t|f|f");
 
-      for (const script of [init, reconcile]) {
-        assertOk(roleScript(script, fresh, "report_reader"));
-      }
+      await runSerial([init, reconcile])(async (script) => {
+        assertOk(await roleScript(script, fresh, "report_reader"));
+      });
 
       expect(
         assertOk(
-          sql(
+          await sql(
             fresh,
             "INSERT INTO public.owned_records (id) VALUES (1); SELECT count(*) FROM public.owned_records;",
             "report_reader",
@@ -636,30 +649,32 @@ describe("Self-hosting and CI deploy artifacts", () => {
         ),
       ).toBe("1");
 
-      for (const ddl of [
+      await runSerial([
         "ALTER TABLE public.owned_records ADD COLUMN extra integer",
         "DROP TABLE public.owned_records",
         "SET ROLE relation_owner",
         "GRANT relation_owner TO report_reader WITH SET TRUE",
-      ]) {
-        const denied = sql(fresh, ddl, "report_reader");
+      ])(async (ddl) => {
+        const denied = await sql(fresh, ddl, "report_reader");
         expect(denied.exitCode).not.toBe(0);
-        expect(denied.stderr).toMatch(/must be owner|permission denied/);
-      }
+        expect(denied.stderr).toMatch(ownershipDenied);
+      });
     });
   }, 45_000);
 
   test("PostgreSQL 17 revokes database CREATE and enforces DML-only runtime roles", async () => {
     await withPostgresRoleSandbox(
-      ({ init, reconcile, fresh, existing, owner, roleScript, psql, sql, assertOk }) => {
+      async ({ init, reconcile, fresh, existing, owner, roleScript, psql, sql, assertOk }) => {
         const runtimeUrl = `postgres://kvitbit_app:synthetic@127.0.0.1/${fresh}`;
-        assertOk(psql(fresh, ["-f", "/migration.sql"]));
+        assertOk(await psql(fresh, ["-f", "/migration.sql"]));
         assertOk(
-          roleScript(reconcile, fresh, "kvitbit_app", { KVITBIT_RUNTIME_DATABASE_URL: runtimeUrl }),
+          await roleScript(reconcile, fresh, "kvitbit_app", {
+            KVITBIT_RUNTIME_DATABASE_URL: runtimeUrl,
+          }),
         );
         expect(
           assertOk(
-            sql(
+            await sql(
               fresh,
               `
         INSERT INTO auth."user" (id, name, email, email_verified, created_at, updated_at)
@@ -673,39 +688,41 @@ describe("Self-hosting and CI deploy artifacts", () => {
             ),
           ),
         ).toBe("1\n0");
-        for (const ddl of [
+        await runSerial([
           "CREATE SCHEMA should_fail",
           "CREATE TABLE public.should_fail (id int)",
           "CREATE TABLE auth.should_fail (id int)",
           "DROP TABLE auth.account",
-        ]) {
-          expect(sql(fresh, ddl, "kvitbit_app").stderr).toMatch(/permission denied|must be owner/);
-        }
+        ])(async (ddl) => {
+          expect((await sql(fresh, ddl, "kvitbit_app")).stderr).toMatch(ownershipDenied);
+        });
 
-        assertOk(sql(fresh, `CREATE DATABASE ${existing}`));
-        assertOk(psql(existing, ["-f", "/migration.sql"]));
-        assertOk(roleScript(reconcile, existing, "new_app"));
-        expect(assertOk(sql(existing, "SELECT count(*) FROM auth.account", "new_app"))).toBe("0");
+        assertOk(await sql(fresh, `CREATE DATABASE ${existing}`));
+        assertOk(await psql(existing, ["-f", "/migration.sql"]));
+        assertOk(await roleScript(reconcile, existing, "new_app"));
+        expect(assertOk(await sql(existing, "SELECT count(*) FROM auth.account", "new_app"))).toBe(
+          "0",
+        );
 
         const wrongDbUrl = { KVITBIT_RUNTIME_DATABASE_URL: `${runtimeUrl}_other` };
-        const wrongDb = roleScript(reconcile, fresh, "unselected_app", wrongDbUrl);
+        const wrongDb = await roleScript(reconcile, fresh, "unselected_app", wrongDbUrl);
         expect(wrongDb.exitCode).toBe(64);
         expect(wrongDb.stderr).toContain("different database");
         assertOk(
-          roleScript(reconcile, fresh, "unselected_app", {
+          await roleScript(reconcile, fresh, "unselected_app", {
             ...wrongDbUrl,
-            DATABASE_URL_UNPOOLED: "postgres://owner:synthetic@127.0.0.1/kvitbit_fresh_other",
+            DATABASE_URL_UNPOOLED: ownerDsn("127.0.0.1/kvitbit_fresh_other"),
           }),
         );
         assertOk(
-          roleScript(reconcile, fresh, "unselected_app", {
+          await roleScript(reconcile, fresh, "unselected_app", {
             KVITBIT_RUNTIME_DATABASE_URL: `${runtimeUrl}?port=5433`,
           }),
         );
-        expect(assertOk(sql(fresh, "SELECT to_regrole('unselected_app') IS NULL"))).toBe("t");
+        expect(assertOk(await sql(fresh, "SELECT to_regrole('unselected_app') IS NULL"))).toBe("t");
 
         assertOk(
-          sql(
+          await sql(
             existing,
             `
         CREATE ROLE actual_db_owner;
@@ -733,12 +750,12 @@ describe("Self-hosting and CI deploy artifacts", () => {
           ),
         );
 
-        for (const [script, role] of [
+        await runSerial([
           [init, "init_app"],
           [reconcile, "reconcile_app"],
-        ] as const) {
+        ] as const)(async ([script, role]) => {
           assertOk(
-            sql(
+            await sql(
               existing,
               `
           CREATE ROLE ${role};
@@ -747,10 +764,10 @@ describe("Self-hosting and CI deploy artifacts", () => {
         `,
             ),
           );
-          assertOk(roleScript(script, existing, role));
+          assertOk(await roleScript(script, existing, role));
           expect(
             assertOk(
-              sql(
+              await sql(
                 existing,
                 `
           SELECT has_database_privilege(current_user, current_database(), 'CREATE'),
@@ -761,9 +778,11 @@ describe("Self-hosting and CI deploy artifacts", () => {
               ),
             ),
           ).toBe("f|f|f");
-          expect(assertOk(sql(existing, "SELECT count(*) FROM public.workspaces", role))).toBe("0");
+          expect(
+            assertOk(await sql(existing, "SELECT count(*) FROM public.workspaces", role)),
+          ).toBe("0");
 
-          for (const [invalidRole, diagnostic] of [
+          await runSerial([
             [owner, "must name different roles"],
             ["actual_db_owner", "owns the database or belongs"],
             ["owner_member", "owns the database or belongs"],
@@ -771,18 +790,19 @@ describe("Self-hosting and CI deploy artifacts", () => {
             ["superuser_member", "owns the database or belongs"],
             ["set_role_app", "effective CREATE privileges"],
             ["inherit_role_app", "effective CREATE privileges"],
-            ...["superuser", "createdb", "createrole", "bypassrls", "replication"].map(
+            ...Arr.map(
+              ["superuser", "createdb", "createrole", "bypassrls", "replication"],
               (flag) => [`elevated_${flag}`, "Refusing elevated runtime role"] as const,
             ),
-          ] as const) {
-            const result = roleScript(script, existing, invalidRole);
+          ] as const)(async ([invalidRole, diagnostic]) => {
+            const result = await roleScript(script, existing, invalidRole);
             expect(result.stderr).toContain(diagnostic);
             expect(result.exitCode).not.toBe(0);
-          }
+          });
 
-          for (const target of [`DATABASE ${existing}`, "SCHEMA public"]) {
+          await runSerial([`DATABASE ${existing}`, "SCHEMA public"])(async (target) => {
             assertOk(
-              sql(
+              await sql(
                 existing,
                 `
             GRANT CREATE ON DATABASE ${existing} TO ${role};
@@ -790,14 +810,14 @@ describe("Self-hosting and CI deploy artifacts", () => {
           `,
               ),
             );
-            const result = roleScript(script, existing, role);
+            const result = await roleScript(script, existing, role);
             expect(result.exitCode).not.toBe(0);
             expect(result.stderr).toContain("effective CREATE privileges");
-            assertOk(sql(existing, `REVOKE CREATE ON ${target} FROM PUBLIC`));
+            assertOk(await sql(existing, `REVOKE CREATE ON ${target} FROM PUBLIC`));
             // A failed check rolls back the role script's direct grant changes.
             expect(
               assertOk(
-                sql(
+                await sql(
                   existing,
                   `
             SELECT has_database_privilege('${role}', current_database(), 'CREATE')
@@ -805,18 +825,18 @@ describe("Self-hosting and CI deploy artifacts", () => {
                 ),
               ),
             ).toBe("t");
-            assertOk(roleScript(script, existing, role));
-          }
-        }
+            assertOk(await roleScript(script, existing, role));
+          });
+        });
       },
     );
   }, 45_000);
 
-  test("flake.nix has valid bun.nix, writable OCI storage dirs for uid 10001, and separate NixOS migration credentials", () => {
-    const flake = readFileSync(join(repoRoot, "flake.nix"), "utf8");
+  test("flake.nix has valid bun.nix, writable OCI storage dirs for uid 10001, and separate NixOS migration credentials", async () => {
+    const flake = await Effect.runPromise(fs.readFileString(join(repoRoot, "flake.nix")));
     const bunNixPath = join(repoRoot, "bun.nix");
-    expect(existsSync(bunNixPath)).toBe(true);
-    const bunNix = readFileSync(bunNixPath, "utf8");
+    expect(await Effect.runPromise(fs.exists(bunNixPath))).toBe(true);
+    const bunNix = await Effect.runPromise(fs.readFileString(bunNixPath));
     expect(bunNix).toContain("{ fetchurl }:");
     expect(bunNix).toContain("sha512-");
 
@@ -832,18 +852,18 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(flake).toContain('KVITBIT_RUNNER_MODE = "single"');
 
     // Parse the exact option blocks so restoring `environment` or `blobDriver` defaults fails.
-    const environmentOption = flake.match(/environment\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/);
+    const environmentOption = Option.getOrNull(Str.match(environmentLibMkoptionPattern)(flake));
     expect(environmentOption?.[0]).toBeDefined();
     expect(environmentOption?.[0]).toContain('default = "production";');
 
-    const blobDriverOption = flake.match(/blobDriver\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/);
+    const blobDriverOption = Option.getOrNull(Str.match(blobdriverLibMkoptionPattern)(flake));
     expect(blobDriverOption?.[0]).toBeDefined();
     expect(blobDriverOption?.[0]).toContain("lib.types.nullOr");
     expect(blobDriverOption?.[0]).toContain("default = null;");
     expect(blobDriverOption?.[0]).not.toContain('default = "local"');
 
-    const botProtectionOption = flake.match(
-      /botProtectionMode\s*=\s*lib\.mkOption\s*\{[\s\S]*?\n\s*\};/,
+    const botProtectionOption = Option.getOrNull(
+      Str.match(botprotectionmodeLibMkoptionPattern)(flake),
     );
     expect(botProtectionOption?.[0]).toBeDefined();
     expect(botProtectionOption?.[0]).toContain("lib.types.nullOr");
@@ -851,49 +871,44 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(botProtectionOption?.[0]).not.toContain('default = "none"');
 
     // Verify the evaluated staging systemd service environment omits KVITBIT_BLOB_DRIVER when blobDriver is omitted.
-    const kvitbitServiceBlock = flake.match(
-      /systemd\.services\.kvitbit\s*=\s*\{[\s\S]*?serviceConfig\s*=/,
-    );
+    const kvitbitServiceBlock = Option.getOrNull(Str.match(systemdServicesKvitbitPattern)(flake));
     expect(kvitbitServiceBlock?.[0]).toBeDefined();
     const serviceText = kvitbitServiceBlock?.[0] ?? "";
-    const unconditionalEnvMatch = serviceText.match(/environment\s*=\s*\{([\s\S]*?)\}/);
+    const unconditionalEnvMatch = Option.getOrNull(Str.match(environmentPattern)(serviceText));
     expect(unconditionalEnvMatch?.[1]).toBeDefined();
     expect(unconditionalEnvMatch?.[1]).not.toContain("KVITBIT_BLOB_DRIVER");
     expect(serviceText).toContain(
       "lib.optionalAttrs (cfg.blobDriver != null) { KVITBIT_BLOB_DRIVER = cfg.blobDriver; }",
     );
-    const defaultBlobDriverMatch = blobDriverOption?.[0].match(/default\s*=\s*([^;]+);/);
-    const stagingBlobDriverDefault = defaultBlobDriverMatch?.[1]?.trim();
+    const defaultBlobDriverMatch = defaultPattern.exec(blobDriverOption?.[0] ?? "");
+    const stagingBlobDriverDefault = Str.trim(defaultBlobDriverMatch?.[1] ?? "");
     expect(stagingBlobDriverDefault).toBe("null");
-    const evaluatedStagingEnv: Record<string, string> = {
+    const KVITBITBLOBDRIVERFields =
+      stagingBlobDriverDefault !== "null"
+        ? { KVITBIT_BLOB_DRIVER: stagingBlobDriverDefault ?? "" }
+        : {};
+    const evaluatedStagingEnv = {
       NODE_ENV: "production",
       KVITBIT_ENV: "staging",
-      ...(stagingBlobDriverDefault !== "null"
-        ? { KVITBIT_BLOB_DRIVER: stagingBlobDriverDefault ?? "" }
-        : {}),
-    };
-    expect(evaluatedStagingEnv.KVITBIT_BLOB_DRIVER).toBeUndefined();
+      ...KVITBITBLOBDRIVERFields,
+    } satisfies Record<string, string>;
+    expect(evaluatedStagingEnv["KVITBIT_BLOB_DRIVER"]).toBeUndefined();
 
     expect(flake).not.toContain('KVITBIT_BLOB_DRIVER = "local"');
     expect(flake).toContain("systemd.services.kvitbit-migrate");
     expect(flake).toContain("services.nginx = lib.mkIf cfg.nginx.enable");
   });
 
-  test(".github/workflows/deploy.yml enforces prod-only stage, bootstrap preflight, --yes deploy, optional secret flags, immutable attempt tags, runner digest check, and edge probing", () => {
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
-    const parsed = Bun.YAML.parse(workflow) as {
-      on?: { workflow_dispatch?: { inputs?: Record<string, unknown> } };
-      jobs: {
-        deploy: {
-          steps: Array<{ name?: string; run?: string; env?: Record<string, string> }>;
-        };
-      };
-    };
+  test(".github/workflows/deploy.yml enforces prod-only stage, bootstrap preflight, --yes deploy, optional secret flags, immutable attempt tags, runner digest check, and edge probing", async () => {
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
+    const parsed = parseDeployWorkflow(workflow);
     expect(parsed).toBeDefined();
 
     // Production-only: no staging option pointing at prod secrets
-    expect(parsed.on?.workflow_dispatch?.inputs?.stage).toBeUndefined();
-    expect(parsed.on?.workflow_dispatch?.inputs?.bootstrap_foundation).toBeDefined();
+    expect(parsed.on.workflow_dispatch.inputs["stage"]).toBeUndefined();
+    expect(parsed.on.workflow_dispatch.inputs["bootstrap_foundation"]).toBeDefined();
     expect(workflow).toContain("KVITBIT_STAGE: prod");
     expect(workflow).not.toContain("- staging");
 
@@ -921,74 +936,89 @@ describe("Self-hosting and CI deploy artifacts", () => {
     expect(workflow).toContain("GOOGLE_ACCESS_TOKEN");
     expect(workflow).toContain("GOOGLE_PROJECT_ID");
     expect(workflow).toContain("gcloud artifacts repositories describe kvitbit");
-    expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-runner-database-url-unpooled`);
-    expect(workflow).toContain(`sha-\${GITHUB_SHA}-run-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}`);
+    expect(workflow).toContain(
+      `kvitbit-${shellReference("KVITBIT_STAGE")}-runner-database-url-unpooled`,
+    );
+    expect(workflow).toContain(
+      `sha-${shellReference("GITHUB_SHA")}-run-${shellReference("GITHUB_RUN_ID")}-${shellReference("GITHUB_RUN_ATTEMPT")}`,
+    );
     expect(workflow).toContain("bun apps/server/src/migrate.ts");
     expect(workflow).toContain("bunx alchemy deploy --yes");
-    const alchemyStep = parsed.jobs.deploy.steps.find((step) =>
-      step.run?.includes("bunx alchemy deploy --yes"),
+    const alchemyStep = Option.getOrUndefined(
+      Arr.findFirst(parsed.jobs.deploy.steps, (step) =>
+        Str.includes("bunx alchemy deploy --yes")(step.run ?? ""),
+      ),
     );
     expect(alchemyStep?.name).toStartWith("Run pure-Alchemy GCP stack");
     expect(alchemyStep?.env).toMatchObject({
-      KVITBIT_DNS_ZONES: `\${{ vars.KVITBIT_DNS_ZONES }}`,
-      KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: `\${{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}`,
-      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: `\${{ env.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET }}`,
-      KVITBIT_BOT_PROTECTION_MODE: `\${{ env.KVITBIT_BOT_PROTECTION_MODE }}`,
-      KVITBIT_BOOTSTRAP_ALTCHA_SECRET: `\${{ env.BOOTSTRAP_ALTCHA_SECRET }}`,
-      KVITBIT_FEEDBACK_GITHUB_REPO: `\${{ vars.KVITBIT_FEEDBACK_GITHUB_REPO }}`,
-      KVITBIT_FEEDBACK_OWNER_EMAILS: `\${{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS }}`,
+      KVITBIT_DNS_ZONES: `${shellReference("{ vars.KVITBIT_DNS_ZONES ")}}`,
+      KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: `${shellReference("{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET ")}}`,
+      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: literalInterpolation(
+        "{ env.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET }",
+      ),
+      KVITBIT_BOT_PROTECTION_MODE: literalInterpolation("{ env.KVITBIT_BOT_PROTECTION_MODE }"),
+      KVITBIT_BOOTSTRAP_ALTCHA_SECRET: literalInterpolation("{ env.BOOTSTRAP_ALTCHA_SECRET }"),
+      KVITBIT_FEEDBACK_GITHUB_REPO: `${shellReference("{ vars.KVITBIT_FEEDBACK_GITHUB_REPO ")}}`,
+      KVITBIT_FEEDBACK_OWNER_EMAILS: `${shellReference("{ vars.KVITBIT_FEEDBACK_OWNER_EMAILS ")}}`,
     });
     expect(workflow).toContain("kvitbit/active-target");
-    expect(workflow).toContain("--format='value(value)'");
-    expect(workflow).not.toContain("--format='value(queryValue)'");
+    expect(workflow).toContain(cliValueFormat("value"));
+    expect(workflow).not.toContain(cliValueFormat("queryValue"));
     expect(workflow).toContain(
-      `KVITBIT_ENABLE_RESEND_SECRET: \${{ env.KVITBIT_ENABLE_RESEND_SECRET }}`,
+      `KVITBIT_ENABLE_RESEND_SECRET: ${shellReference("{ env.KVITBIT_ENABLE_RESEND_SECRET ")}}`,
     );
     expect(workflow).toContain(
-      `KVITBIT_ENABLE_SMTP_SECRET: \${{ env.KVITBIT_ENABLE_SMTP_SECRET }}`,
+      `KVITBIT_ENABLE_SMTP_SECRET: ${shellReference("{ env.KVITBIT_ENABLE_SMTP_SECRET ")}}`,
     );
     expect(workflow).toContain(
-      `KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: \${{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}`,
+      `KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${shellReference("{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET ")}}`,
     );
-    expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-feedback-github-token`);
-    expect(workflow).toContain(`kvitbit-\${KVITBIT_STAGE}-altcha-hmac-key`);
-    expect(workflow).toContain(`if [ -n "\${KVITBIT_EDGE_DOMAINS:-}" ]; then`);
+    expect(workflow).toContain(`kvitbit-${shellReference("KVITBIT_STAGE")}-feedback-github-token`);
+    expect(workflow).toContain(`kvitbit-${literalInterpolation("KVITBIT_STAGE")}-altcha-hmac-key`);
+    expect(workflow).toContain(`if [ -n "${shellReference("KVITBIT_EDGE_DOMAINS:-")}" ]; then`);
 
-    const preflightPos = workflow.indexOf("gcloud artifacts repositories describe kvitbit");
-    const pushPos = workflow.indexOf("docker push");
-    const migratePos = workflow.indexOf("bun apps/server/src/migrate.ts");
-    const deployPos = workflow.indexOf("bunx alchemy deploy --yes");
+    const preflightPos = Option.getOrElse(
+      Str.indexOf("gcloud artifacts repositories describe kvitbit")(workflow),
+      () => -1,
+    );
+    const pushPos = Option.getOrElse(Str.indexOf("docker push")(workflow), () => -1);
+    const migratePos = Option.getOrElse(
+      Str.indexOf("bun apps/server/src/migrate.ts")(workflow),
+      () => -1,
+    );
+    const deployPos = Option.getOrElse(
+      Str.indexOf("bunx alchemy deploy --yes")(workflow),
+      () => -1,
+    );
     expect(preflightPos).toBeGreaterThan(-1);
     expect(pushPos).toBeGreaterThan(preflightPos);
     expect(migratePos).toBeGreaterThan(pushPos);
     expect(deployPos).toBeGreaterThan(migratePos);
   });
 
-  test("feedback secret bootstrap can precede the first enabled token version", () => {
-    const workflow = Bun.YAML.parse(
-      readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8"),
-    ) as {
-      on: { workflow_dispatch: { inputs: Record<string, unknown> } };
-      jobs: { deploy: { steps: Array<{ name?: string; if?: string; run?: string }> } };
-    };
+  test("feedback secret bootstrap can precede the first enabled token version", async () => {
+    const workflow = parseDeployWorkflow(
+      await Effect.runPromise(fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml"))),
+    );
     const steps = workflow.jobs.deploy.steps;
-    const getStep = (name: string) => steps.find((step) => step.name?.startsWith(name));
-    expect(workflow.on.workflow_dispatch.inputs.bootstrap_feedback_secret).toEqual({
+    const getStep = (name: string) =>
+      Option.getOrUndefined(Arr.findFirst(steps, (step) => Str.startsWith(name)(step.name ?? "")));
+    expect(workflow.on.workflow_dispatch.inputs["bootstrap_feedback_secret"]).toEqual({
       description: expect.any(String),
       type: "boolean",
       default: false,
     });
-    expect(workflow.on.workflow_dispatch.inputs.bootstrap_altcha_secret).toEqual({
+    expect(workflow.on.workflow_dispatch.inputs["bootstrap_altcha_secret"]).toEqual({
       description: expect.any(String),
       type: "boolean",
       default: false,
     });
-    expect(workflow.on.workflow_dispatch.inputs.bootstrap_resend_secret).toEqual({
+    expect(workflow.on.workflow_dispatch.inputs["bootstrap_resend_secret"]).toEqual({
       description: expect.any(String),
       type: "boolean",
       default: false,
     });
-    expect(workflow.on.workflow_dispatch.inputs.bootstrap_turbo_cache_secret).toEqual({
+    expect(workflow.on.workflow_dispatch.inputs["bootstrap_turbo_cache_secret"]).toEqual({
       description: expect.any(String),
       type: "boolean",
       default: false,
@@ -1012,11 +1042,14 @@ describe("Self-hosting and CI deploy artifacts", () => {
       expect(getStep(name)?.if).toContain("env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'");
     }
 
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-feedback-bootstrap-"));
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-feedback-bootstrap-" }),
+    );
     try {
-      writeFileSync(
-        join(sandbox, "gcloud"),
-        `#!/bin/sh
+      await Effect.runPromise(
+        fs.writeFileString(
+          join(sandbox, "gcloud"),
+          `#!/bin/sh
 set -eu
 case "$1 $2 $3" in
   'artifacts repositories describe') exit 0 ;;
@@ -1033,28 +1066,32 @@ case "$1 $2 $3" in
   *) exit 1 ;;
 esac
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
-      writeFileSync(
-        join(sandbox, "bunx"),
-        `#!/bin/sh
+      await Effect.runPromise(
+        fs.writeFileString(
+          join(sandbox, "bunx"),
+          `#!/bin/sh
 set -eu
 printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DIGEST" "$*"
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
       const run = (step: string, env: Record<string, string> = {}) => {
         const script = getStep(step)?.run;
         expect(script).toBeDefined();
-        return Bun.spawnSync(["bash", "-c", script ?? ""], {
+        return runCommand({
+          command: ["bash", "-c", script ?? ""],
           cwd: repoRoot,
           env: {
-            PATH: `${sandbox}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+            PATH: `${sandbox}:${systemPath}`,
             GITHUB_SHA: "test-revision",
             GCP_PROJECT_ID: "kvitbit-prod",
             GCP_REGION: "europe-west3",
             KVITBIT_STAGE: "prod",
-            KVITBIT_IMAGE_DIGEST: `sha256:${"b".repeat(64)}`,
+            KVITBIT_IMAGE_DIGEST: `sha256:${Str.repeat(64)("b")}`,
             KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "false",
             KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "false",
             BOOTSTRAP_FOUNDATION: "false",
@@ -1065,56 +1102,56 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
             ALTCHA_VERSION_STATE: "",
             ...env,
           },
-          stdout: "pipe",
-          stderr: "pipe",
         });
       };
       const deploy = "Run pure-Alchemy GCP stack";
       const preflight = "Preflight Artifact Registry and Secret Manager versions";
       const enabled = { KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "true" };
-      expect(run(preflight).exitCode).toBe(0);
-      expect(run(deploy).stdout.toString().trim().split("\n")).toEqual([
+      expect((await run(preflight)).exitCode).toBe(0);
+      expect(Str.split("\n")(Str.trim((await run(deploy)).stdout.toString()))).toEqual([
         "false",
-        `sha256:${"b".repeat(64)}`,
+        `sha256:${Str.repeat(64)("b")}`,
         "alchemy deploy --yes --stage prod",
       ]);
-      for (const state of ["", "DISABLED", "DESTROYED"]) {
-        const failed = run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: state });
+      await runSerial(["", "DISABLED", "DESTROYED"])(async (state) => {
+        const failed = await run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: state });
         expect(failed.exitCode).toBe(1);
-        expect(failed.stdout.toString()).toContain("bootstrap_feedback_secret=true");
-      }
+        expect(failed.stdout).toContain("bootstrap_feedback_secret=true");
+      });
 
       const bootstrap = { BOOTSTRAP_FEEDBACK_SECRET: "true", KVITBIT_IMAGE_DIGEST: "" };
-      const disabledBootstrap = run(deploy, bootstrap);
+      const disabledBootstrap = await run(deploy, bootstrap);
       expect(disabledBootstrap.exitCode).toBe(1);
-      expect(disabledBootstrap.stdout.toString()).toContain(
+      expect(disabledBootstrap.stdout).toContain(
         "Set the KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET repository variable to true",
       );
-      for (const [dryRun, command] of [
+      await runSerial([
         ["false", "deploy --yes"],
         ["true", "plan"],
-      ] as const) {
-        const result = run(deploy, { ...bootstrap, ...enabled, DRY_RUN: dryRun });
+      ] as const)(async ([dryRun, command]) => {
+        const result = await run(deploy, { ...bootstrap, ...enabled, DRY_RUN: dryRun });
         expect(result.exitCode).toBe(0);
-        const [flag, digest, args] = result.stdout.toString().trim().split("\n");
+        const [flag, digest, args] = Str.split("\n")(Str.trim(result.stdout));
         expect(flag).toBe("true");
-        expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect(digest).toMatch(sha256Digest);
         expect(args).toBe(
           `alchemy ${command} --stage prod --include Secret-kvitbit-prod-feedback-github-token`,
         );
-      }
+      });
 
-      expect(run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: "ENABLED" }).exitCode).toBe(0);
+      expect(
+        (await run(preflight, { ...enabled, FEEDBACK_VERSION_STATE: "ENABLED" })).exitCode,
+      ).toBe(0);
 
       // ALTCHA HMAC key secret bootstrap follows the same targeted single-secret path.
       const altchaEnabled = { KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true" };
       for (const state of ["", "DISABLED", "DESTROYED"]) {
-        const failed = run(preflight, { ...altchaEnabled, ALTCHA_VERSION_STATE: state });
+        const failed = await run(preflight, { ...altchaEnabled, ALTCHA_VERSION_STATE: state });
         expect(failed.exitCode).toBe(1);
         expect(failed.stdout.toString()).toContain("bootstrap_altcha_secret=true");
       }
       const altchaBootstrap = { BOOTSTRAP_ALTCHA_SECRET: "true", KVITBIT_IMAGE_DIGEST: "" };
-      const disabledAltchaBootstrap = run(deploy, altchaBootstrap);
+      const disabledAltchaBootstrap = await run(deploy, altchaBootstrap);
       expect(disabledAltchaBootstrap.exitCode).toBe(1);
       expect(disabledAltchaBootstrap.stdout.toString()).toContain(
         "Set the KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET repository variable to true",
@@ -1123,43 +1160,46 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         ["false", "deploy --yes"],
         ["true", "plan"],
       ] as const) {
-        const result = run(deploy, { ...altchaBootstrap, ...altchaEnabled, DRY_RUN: dryRun });
+        const result = await run(deploy, { ...altchaBootstrap, ...altchaEnabled, DRY_RUN: dryRun });
         expect(result.exitCode).toBe(0);
-        const [, digest, args] = result.stdout.toString().trim().split("\n");
-        expect(digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        const [, digest, args] = Str.split(Str.trim(result.stdout.toString()), "\n");
+        expect(digest).toMatch(matchPattern);
         expect(args).toBe(
           `alchemy ${command} --stage prod --include Secret-kvitbit-prod-altcha-hmac-key`,
         );
       }
-      expect(run(preflight, { ...altchaEnabled, ALTCHA_VERSION_STATE: "ENABLED" }).exitCode).toBe(
-        0,
-      );
+      expect(
+        (await run(preflight, { ...altchaEnabled, ALTCHA_VERSION_STATE: "ENABLED" })).exitCode,
+      ).toBe(0);
 
-      const conflicting = run("Validate GCP deployment variables", {
+      const conflicting = await run("Validate GCP deployment variables", {
         ...bootstrap,
         BOOTSTRAP_FOUNDATION: "true",
       });
       expect(conflicting.exitCode).toBe(1);
-      expect(conflicting.stdout.toString()).toContain("Select only one");
+      expect(conflicting.stdout).toContain("Select only one");
 
-      const conflictingAltcha = run("Validate GCP deployment variables", {
+      const conflictingAltcha = await run("Validate GCP deployment variables", {
         ...altchaBootstrap,
         BOOTSTRAP_FEEDBACK_SECRET: "true",
       });
       expect(conflictingAltcha.exitCode).toBe(1);
       expect(conflictingAltcha.stdout.toString()).toContain("Select only one");
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
   test("deploy.yml verifies readiness and both static mounts through the public Cloud Run URL", async () => {
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
-    const parsed = Bun.YAML.parse(workflow) as {
-      jobs: { deploy: { steps: Array<{ name?: string; run?: string }> } };
-    };
-    const script = parsed.jobs.deploy.steps.find(
-      (step) => step.name === "Verify database readiness and static mounts",
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
+    );
+    const parsed = parseDeployWorkflow(workflow);
+    const script = Option.getOrUndefined(
+      Arr.findFirst(
+        parsed.jobs.deploy.steps,
+        (step) => step.name === "Verify database readiness and static mounts",
+      ),
     )?.run;
     if (script === undefined) throw new Error("Missing external deploy verification step");
 
@@ -1193,7 +1233,7 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         ["bash", "-c", `gcloud() { printf '%s\\n' "$TEST_ORIGIN"; }\n${script}`],
         {
           env: {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            PATH: systemPath,
             TEST_ORIGIN: server.url.origin,
             KVITBIT_STAGE: "prod",
             GCP_PROJECT_ID: "test",
@@ -1244,38 +1284,44 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
     }
   });
 
-  test("deploy.yml normalizes secret flags and resets legacy runners that cannot confirm a verified target", () => {
-    const workflow = readFileSync(join(repoRoot, ".github/workflows/deploy.yml"), "utf8");
-    const parsed = Bun.YAML.parse(workflow) as {
-      jobs: {
-        deploy: {
-          steps: Array<{ name?: string; run?: string; env?: Record<string, string> }>;
-        };
-      };
-    };
-
-    const validateStep = parsed.jobs.deploy.steps.find(
-      (s) => s.name === "Validate GCP deployment variables",
+  test("deploy.yml normalizes secret flags and resets legacy runners that cannot confirm a verified target", async () => {
+    const workflow = await Effect.runPromise(
+      fs.readFileString(join(repoRoot, ".github/workflows/deploy.yml")),
     );
-    const verifyStep = parsed.jobs.deploy.steps.find(
-      (s) => s.name === "Verify runner pool reconciled target digest and config",
+    const parsed = parseDeployWorkflow(workflow);
+
+    const validateStep = Option.getOrUndefined(
+      Arr.findFirst(
+        parsed.jobs.deploy.steps,
+        (s) => s.name === "Validate GCP deployment variables",
+      ),
+    );
+    const verifyStep = Option.getOrUndefined(
+      Arr.findFirst(
+        parsed.jobs.deploy.steps,
+        (s) => s.name === "Verify runner pool reconciled target digest and config",
+      ),
     );
     expect(validateStep?.run).toBeDefined();
-    expect(validateStep?.env?.KVITBIT_REPO_VARS_JSON).toBe(`\${{ toJSON(vars) }}`);
+    expect(validateStep?.env?.["KVITBIT_REPO_VARS_JSON"]).toBe(
+      literalInterpolation("{ toJSON(vars) }"),
+    );
     expect(verifyStep?.run).toBeDefined();
 
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-deploy-yml-"));
+    const sandbox = await Effect.runPromise(
+      fs.makeTempDirectory({ prefix: "kvitbit-deploy-yml-" }),
+    );
     try {
       // 1. Test boolean normalization step with YES / 1 / OFF and invalid value
       const ghEnv = join(sandbox, "github_env");
-      writeFileSync(ghEnv, "");
+      await Effect.runPromise(fs.writeFileString(ghEnv, ""));
       const baseVars = {
         KVITBIT_STAGE: "prod",
         BOOTSTRAP_FOUNDATION: "false",
         BOOTSTRAP_FEEDBACK_SECRET: "false",
         BOOTSTRAP_ALTCHA_SECRET: "false",
         GCP_PROJECT_ID: "kvitbit-prod",
-        GCP_PROJECT_NUMBER: "449188423567",
+        GCP_PROJECT_NUMBER: String(449_188_423_567),
         GCP_REGION: "europe-west3",
         GCP_ZONE: "europe-west3-a",
         GCP_WORKLOAD_IDENTITY_PROVIDER:
@@ -1288,10 +1334,11 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
         GITHUB_ENV: ghEnv,
       };
-      const normOk = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
+      const normOk = await runCommand({
+        command: ["bash", "-c", validateStep?.run ?? ""],
         cwd: repoRoot,
         env: {
-          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          PATH: systemPath,
           ...baseVars,
           KVITBIT_ENABLE_RESEND_SECRET: "YES",
           KVITBIT_ENABLE_SMTP_SECRET: "1",
@@ -1299,26 +1346,23 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
           KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " On ",
           KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "Yes",
         },
-        stdout: "pipe",
-        stderr: "pipe",
       });
       expect(normOk.exitCode).toBe(0);
-      const exported = readFileSync(ghEnv, "utf8");
+      const exported = await Effect.runPromise(fs.readFileString(ghEnv));
       expect(exported).toContain("KVITBIT_ENABLE_RESEND_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_SMTP_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET=false");
       expect(exported).toContain("KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET=true");
       expect(exported).toContain("KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET=true");
 
-      const normBad = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
+      const normBad = await runCommand({
+        command: ["bash", "-c", validateStep?.run ?? ""],
         cwd: repoRoot,
         env: {
-          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          PATH: systemPath,
           ...baseVars,
           KVITBIT_ENABLE_RESEND_SECRET: "maybe",
         },
-        stdout: "pipe",
-        stderr: "pipe",
       });
       expect(normBad.exitCode).not.toBe(0);
 
@@ -1330,8 +1374,8 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         { KVITBIT_ENABLE_RESEND_SECRET: "true", APP_ORIGIN: "https://[::ffff:127.0.0.1]" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: "a..b@example.org" },
-        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: `a@${"b".repeat(64)}.org` },
-        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: `a@${Str.repeat(64)("b")}.org` },
+        { KVITBIT_ENABLE_RESEND_SECRET: "true", EMAIL_FROM: `a@example.${Str.repeat(64)("c")}` },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EDGE_DOMAINS: "" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_EMAIL_MODE: "capture" },
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BLOB_DRIVER: "local" },
@@ -1340,30 +1384,29 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
         { KVITBIT_ENABLE_RESEND_SECRET: "true", KVITBIT_BOT_PROTECTION_MODE: "disabled" },
         {
           KVITBIT_ENABLE_RESEND_SECRET: "true",
-          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_BOT_PROTECTION: "true" }),
+          KVITBIT_REPO_VARS_JSON: encodeJson({ KVITBIT_DISABLE_BOT_PROTECTION: "true" }),
         },
         {
           KVITBIT_ENABLE_RESEND_SECRET: "true",
-          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }),
+          KVITBIT_REPO_VARS_JSON: encodeJson({ KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }),
         },
         {
           KVITBIT_ENABLE_RESEND_SECRET: "true",
-          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_BLOB: "true" }),
+          KVITBIT_REPO_VARS_JSON: encodeJson({ KVITBIT_DISABLE_BLOB: "true" }),
         },
         {
           KVITBIT_ENABLE_RESEND_SECRET: "true",
-          KVITBIT_REPO_VARS_JSON: JSON.stringify({ KVITBIT_DISABLE_HTTP_2: "true" }),
+          KVITBIT_REPO_VARS_JSON: encodeJson({ KVITBIT_DISABLE_HTTP_2: "true" }),
         },
       ]) {
-        const rejected = Bun.spawnSync(["bash", "-c", validateStep?.run ?? ""], {
+        const rejected = await runCommand({
+          command: ["bash", "-c", validateStep?.run ?? ""],
           cwd: repoRoot,
           env: {
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            PATH: systemPath,
             ...baseVars,
             ...badOverride,
           },
-          stdout: "pipe",
-          stderr: "pipe",
         });
         expect(rejected.exitCode).not.toBe(0);
       }
@@ -1371,18 +1414,19 @@ printf '%s\\n' "$KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET" "$KVITBIT_IMAGE_DI
       // 2. Verify the rollout step requires the combined acknowledgement from the current script.
       const binDir = join(sandbox, "bin");
       const stateDir = join(sandbox, "state");
-      mkdirSync(binDir, { recursive: true });
-      mkdirSync(stateDir, { recursive: true });
+      await Effect.runPromise(fs.makeDirectory(binDir, { recursive: true }));
+      await Effect.runPromise(fs.makeDirectory(stateDir, { recursive: true }));
 
-      const targetDigest = `sha256:${"a".repeat(64)}`;
-      const targetConfigSha = `sha256:${"c".repeat(64)}`;
+      const targetDigest = `sha256:${Str.repeat(64)("a")}`;
+      const targetConfigSha = `sha256:${Str.repeat(64)("c")}`;
 
-      writeFileSync(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n");
-      chmodSync(join(binDir, "sleep"), 0o755);
+      await Effect.runPromise(fs.writeFileString(join(binDir, "sleep"), "#!/bin/sh\nexit 0\n"));
+      await Effect.runPromise(fs.chmod(join(binDir, "sleep"), 0o755));
 
-      writeFileSync(
-        join(binDir, "gcloud"),
-        `#!/bin/sh
+      await Effect.runPromise(
+        fs.writeFileString(
+          join(binDir, "gcloud"),
+          `#!/bin/sh
 set -eu
 if [ "$1" = "compute" ] && [ "$2" = "instances" ] && [ "$3" = "list" ]; then
   printf 'kvitbit-prod-runner-0\\nkvitbit-prod-runner-1\\n'
@@ -1426,32 +1470,32 @@ if [ "$1" = "compute" ] && [ "$2" = "instances" ] && [ "$3" = "get-guest-attribu
 fi
 exit 1
 `,
+        ),
       );
-      chmodSync(join(binDir, "gcloud"), 0o755);
+      await Effect.runPromise(fs.chmod(join(binDir, "gcloud"), 0o755));
 
-      const verifyRes = Bun.spawnSync(["bash", "-c", verifyStep?.run ?? ""], {
+      const verifyRes = await runCommand({
+        command: ["bash", "-c", verifyStep?.run ?? ""],
         env: {
-          PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+          PATH: `${binDir}:${systemPath}`,
           GCP_PROJECT_ID: "kvitbit-prod",
           GCP_ZONE: "europe-west3-a",
           KVITBIT_STAGE: "prod",
           TARGET_DIGEST: targetDigest,
         },
-        stdout: "pipe",
-        stderr: "pipe",
       });
       expect(verifyRes.exitCode).toBe(0);
-      expect(new TextDecoder().decode(verifyRes.stdout)).toContain(
+      expect(verifyRes.stdout).toContain(
         `Verified runner kvitbit-prod-runner-0 is running digest=${targetDigest} config=${targetConfigSha}`,
       );
-      expect(new TextDecoder().decode(verifyRes.stdout)).toContain(
+      expect(verifyRes.stdout).toContain(
         `Verified runner kvitbit-prod-runner-1 is running digest=${targetDigest} config=${targetConfigSha}`,
       );
-      expect(readFileSync(join(stateDir, "resets"), "utf8").trim()).toBe(
+      expect(Str.trim(await Effect.runPromise(fs.readFileString(join(stateDir, "resets"))))).toBe(
         "reset:kvitbit-prod-runner-1",
       );
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fs.remove(sandbox, { recursive: true, force: true }));
     }
   });
 });

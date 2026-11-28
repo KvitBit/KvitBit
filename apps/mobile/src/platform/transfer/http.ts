@@ -3,6 +3,7 @@
  * mapping of a raw HTTP response (multipart upload, file download) to the same UiError the typed
  * client produces, so screens and the capture queue handle both paths alike.
  */
+
 import {
   InvalidBotProof,
   OriginRejected,
@@ -14,7 +15,14 @@ import {
 } from "@kvitbit/api-contract";
 import { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "@kvitbit/domain/contract";
 import { type Credentials, UiError } from "@kvitbit/ui-port/api";
-import { Option, Redacted, Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 
 /** A file the app holds locally: a `file://` URI on Android, an object URL or blob key on web. */
 export interface SavedFile {
@@ -43,24 +51,35 @@ export interface TransferTarget {
 }
 
 /** `origin + /api/v1 + path`, with the query's defined values appended. */
-export const apiUrl = (
-  origin: string,
-  path: string,
-  query: Readonly<Record<string, string | undefined>> = {},
-): string => {
-  const base = `${origin.replace(/\/+$/, "")}/api/v1${path.startsWith("/") ? path : `/${path}`}`;
-  const pairs = Object.entries(query).filter(
-    (entry): entry is [string, string] => entry[1] !== undefined,
-  );
-  if (pairs.length === 0) return base;
-  return `${base}?${pairs.map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")}`;
-};
+const trailingSlashes = /\/+$/;
+const isTokenText = Schema.is(Schema.String);
+
+type Query = Readonly<Record<string, string | undefined>>;
+
+export const apiUrl: {
+  (path: string, query?: Query): (origin: string) => string;
+  (origin: string, path: string, query?: Query): string;
+} = Fn.dual(
+  (args) => Predicate.isString(args[1]),
+  (origin: string, path: string, query: Query = {}): string => {
+    const base = `${EffectString.replace(trailingSlashes, "")(origin)}/api/v1${EffectString.startsWith("/")(path) ? path : `/${path}`}`;
+    const pairs = EffectArray.filter(
+      EffectRecord.toEntries(query),
+      (entry): entry is [string, string] => entry[1] !== undefined,
+    );
+    if (pairs.length === 0) return base;
+    return `${base}?${EffectArray.join(
+      EffectArray.map(pairs, ([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`),
+      "&",
+    )}`;
+  },
+);
 
 /** Bearer on Android; nothing on the web, where the session cookie rides along. */
 export const authHeaders = (credentials: Credentials): Record<string, string> =>
   credentials._tag === "Bearer"
     ? {
-        authorization: `Bearer ${typeof credentials.token === "string" ? credentials.token : Redacted.value(credentials.token)}`,
+        authorization: `Bearer ${isTokenText(credentials.token) ? credentials.token : Redacted.value(credentials.token)}`,
       }
     : {};
 
@@ -80,28 +99,28 @@ const WireErrorBody = Schema.Union([
 ]);
 const decodeWire = Schema.decodeUnknownOption(WireErrorBody);
 
-export const parseJson = (text: string): unknown => {
-  if (text.trim() === "") return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-};
+const decodeJson = Schema.decodeOption(Schema.fromJsonString(Schema.Unknown));
+
+export const parseJson = (text: string): unknown =>
+  EffectString.trim(text) === "" ? null : Option.getOrElse(decodeJson(text), () => text);
 
 /**
  * A non-2xx response to UiError: the declared error body when it decodes, else by status
  * (413 without a body still reads as too large; anything else is Unexpected with the request id).
  */
-export const errorFromResponse = (
-  status: number,
-  body: unknown,
-  requestId: string | null = null,
-): UiError => {
+export const errorFromResponse = ({
+  status,
+  body,
+  requestId = null,
+}: {
+  readonly status: number;
+  readonly body: unknown;
+  readonly requestId?: string | null;
+}): UiError => {
   const decoded = decodeWire(body);
   if (Option.isSome(decoded)) return decoded.value;
   if (status === 0) return UiError.offline;
-  if (status === 413) return new PayloadTooLarge({ limitBytes: 0 });
+  if (status === 413) return PayloadTooLarge.make({ limitBytes: 0 });
   return UiError.unexpected(status, requestId);
 };
 
@@ -109,6 +128,9 @@ export const isSuccess = (status: number): boolean => status >= 200 && status < 
 
 /** A file name safe to use as a path segment (download targets). */
 export const safeFileName = (name: string): string => {
-  const cleaned = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  const cleaned = EffectString.replace(
+    /^-+|-+$/g,
+    "",
+  )(EffectString.replace(/[^A-Za-z0-9._-]+/g, "-")(name));
   return cleaned === "" ? "file" : cleaned;
 };

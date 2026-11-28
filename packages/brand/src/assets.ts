@@ -1,3 +1,6 @@
+import * as Arr from "effect/Array";
+import * as Rec from "effect/Record";
+
 /** Repo-relative paths of the committed brand files (DESIGN.md "Brand Identity"). */
 export const brandAssets = {
   mark: {
@@ -49,6 +52,7 @@ type Leaves<T> = T extends string ? T : { [K in keyof T]: Leaves<T[K]> }[keyof T
 export type BrandAssetPath = Leaves<typeof brandAssets>;
 
 /** Every manifest path, flattened. */
-export const brandAssetPaths: readonly BrandAssetPath[] = Object.values(brandAssets).flatMap(
-  (group): BrandAssetPath[] => Object.values(group),
+export const brandAssetPaths: readonly BrandAssetPath[] = Arr.flatMap(
+  Rec.values(brandAssets),
+  (group: Readonly<Record<string, BrandAssetPath>>) => Rec.values(group),
 );

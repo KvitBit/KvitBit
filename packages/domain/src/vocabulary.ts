@@ -1,5 +1,7 @@
 /** Shared vocabulary (core-ports section 1). Terms follow CONTEXT.md. */
-import { Schema } from "effect";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { PriceListItemId, RequestKey } from "./ids";
 
 /** URL name of a Workspace: lowercase letters, digits and hyphens, 3 to 40 chars, unique across the install. */
@@ -51,13 +53,11 @@ export const CurrencyCode = Schema.String.pipe(
 );
 export type CurrencyCode = typeof CurrencyCode.Type;
 
-const isCalendarDate = (s: string): boolean => {
-  const [y, m, d] = s.split("-").map(Number);
-  if (y === undefined || m === undefined || d === undefined) return false;
-  const date = new Date(0);
-  date.setUTCFullYear(y, m - 1, d); // unlike Date.UTC, keeps years 0-99 as written
-  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d;
-};
+const isCalendarDate = (value: string): boolean =>
+  Option.exists(
+    DateTime.make(`${value}T00:00:00Z`),
+    (date) => DateTime.formatIsoDateUtc(date) === value,
+  );
 
 /** Calendar date in Europe/Prague, YYYY-MM-DD. Impossible days (2026-02-30) are rejected. */
 export const IsoDate = Schema.String.pipe(

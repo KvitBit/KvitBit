@@ -6,9 +6,11 @@
  * - `GET /mcp` and `DELETE /mcp` (405 Method Not Allowed, `Allow: POST`)
  */
 import { MCP_PATH } from "@kvitbit/api-contract";
-import { Effect, Layer } from "effect";
-import { HttpRouter, HttpServerResponse } from "effect/http";
-import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as Effect from "effect/Effect";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Layer from "effect/Layer";
 import { protectedResourceMetadata } from "./caller";
 import { McpConfig } from "./config";
 import { McpConfirmationsLive } from "./confirmation";
@@ -26,8 +28,8 @@ const methodNotAllowed = HttpServerResponse.jsonUnsafe(
   },
 );
 
-export const McpRoutesLive = HttpRouter.use((router) =>
-  Effect.gen(function* () {
+export const McpRoutesLive = HttpRouter.use(
+  Effect.fn("registerMcpRoutes")(function* (router: HttpRouter.HttpRouter) {
     const config = yield* McpConfig;
     const services = yield* Effect.context<McpTransportServices>();
     const metadata = protectedResourceMetadata(config.appOrigin);
@@ -45,7 +47,7 @@ export const McpRoutesLive = HttpRouter.use((router) =>
     yield* router.add(
       "POST",
       MCP_PATH,
-      Effect.flatMap(HttpServerRequest, (request) =>
+      Effect.flatMap(HttpServerRequest.HttpServerRequest, (request) =>
         handleMcpPost(request, config).pipe(Effect.provideContext(services)),
       ),
     );

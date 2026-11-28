@@ -2,8 +2,9 @@
  * The seven edge errors (http-mcp-contracts section 3.3). Core's five errors come from
  * `@kvitbit/domain/contract` and carry their own status; these exist only at the HTTP edge.
  */
-import { Schema } from "effect";
-import { HttpApiSchema } from "effect/http-api";
+
+import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
+import * as Schema from "effect/Schema";
 
 export const UnauthorizedReason = Schema.Literals([
   "missing",
@@ -14,42 +15,60 @@ export const UnauthorizedReason = Schema.Literals([
 ]);
 export type UnauthorizedReason = typeof UnauthorizedReason.Type;
 
-export class Unauthorized extends Schema.TaggedError<Unauthorized>()("Unauthorized", {
-  reason: UnauthorizedReason,
-}) {
+// Keep the nominal brand outside the public error fields.
+declare const edgeErrorBrand: unique symbol;
+interface EdgeErrorBrand {
+  readonly [edgeErrorBrand]: true;
+}
+
+export class Unauthorized extends Schema.TaggedError<Unauthorized, EdgeErrorBrand>()(
+  "Unauthorized",
+  {
+    reason: UnauthorizedReason,
+  },
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("Unauthorized")); // 401
 }
 
 /** ALTCHA payload missing, for the wrong scope, expired or replayed (section 2.6, rule B3). */
-export class InvalidBotProof extends Schema.TaggedError<InvalidBotProof>()("InvalidBotProof", {}) {
+export class InvalidBotProof extends Schema.TaggedError<InvalidBotProof, EdgeErrorBrand>()(
+  "InvalidBotProof",
+  {},
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("BadRequest")); // 400
 }
 
-export class OriginRejected extends Schema.TaggedError<OriginRejected>()("OriginRejected", {}) {
+export class OriginRejected extends Schema.TaggedError<OriginRejected, EdgeErrorBrand>()(
+  "OriginRejected",
+  {},
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("Forbidden")); // 403
 }
 
-export class PreconditionFailed extends Schema.TaggedError<PreconditionFailed>()(
+export class PreconditionFailed extends Schema.TaggedError<PreconditionFailed, EdgeErrorBrand>()(
   "PreconditionFailed",
   { currentRevision: Schema.NullOr(Schema.Int) },
 ) {
   static readonly schema = this.pipe(HttpApiSchema.status("PreconditionFailed")); // 412
 }
 
-export class PayloadTooLarge extends Schema.TaggedError<PayloadTooLarge>()("PayloadTooLarge", {
-  limitBytes: Schema.Int,
-}) {
+export class PayloadTooLarge extends Schema.TaggedError<PayloadTooLarge, EdgeErrorBrand>()(
+  "PayloadTooLarge",
+  {
+    limitBytes: Schema.Int,
+  },
+) {
   static readonly schema = this.pipe(HttpApiSchema.status("PayloadTooLarge")); // 413
 }
 
-export class PreconditionRequired extends Schema.TaggedError<PreconditionRequired>()(
-  "PreconditionRequired",
-  {},
-) {
+export class PreconditionRequired extends Schema.TaggedError<
+  PreconditionRequired,
+  EdgeErrorBrand
+>()("PreconditionRequired", {}) {
   static readonly schema = this.pipe(HttpApiSchema.status(428));
 }
 
-export class RateLimited extends Schema.TaggedError<RateLimited>()("RateLimited", {
+export class RateLimited extends Schema.TaggedError<RateLimited, EdgeErrorBrand>()("RateLimited", {
   retryAfterSeconds: Schema.Int,
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("TooManyRequests")); // 429
@@ -73,13 +92,6 @@ export const EdgeError = Schema.Union([
   RateLimited,
 ]);
 
-/** Errors every authenticated endpoint can return besides its own (section 3.5 preamble). */
-export const AuthenticatedEdgeErrors = [
-  Unauthorized.schema,
-  OriginRejected.schema,
-  RateLimited.schema,
-  PayloadTooLarge.schema,
-] as const;
 /** Errors of every endpoint that requires `If-Match`. */
 export const RevisionedEdgeErrors = [
   PreconditionFailed.schema,

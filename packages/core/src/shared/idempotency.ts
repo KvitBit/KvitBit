@@ -2,14 +2,20 @@
  * Request-key retry safety (rule C3). Run the policy check first (rule R1a), then wrap the
  * method body:
  *
- *   yield* authorizeInWorkspace("document.draft")
+ *   yield* authorizeInWorkspace(caller, "document.draft")
  *   return yield* withIdempotency({ scope, key: opts?.requestKey, method: "Documents.createDraft",
  *     payload: { schema: DocumentInput, value: input }, result: DocumentView }, body)
  */
+
 import type { RequestKey } from "@kvitbit/domain/contract";
 import { Conflict } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Clock, Effect, Option, Schema } from "effect";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { RequestScope, StoreUnavailable } from "../store/CoreStore";
 import { CoreStore } from "../store/CoreStore";
 import { canonicalJson } from "./canonicalJson";
@@ -30,7 +36,7 @@ export interface IdempotencyOptions<A, P> {
   readonly result: Schema.Codec<A, unknown>;
 }
 
-const fingerprintOf = (method: string, encodedPayload: unknown) =>
+const fingerprintOf = <P>(method: string, encodedPayload: P) =>
   sha256Hex(canonicalJson([method, encodedPayload]));
 
 /**
@@ -43,11 +49,22 @@ const fingerprintOf = (method: string, encodedPayload: unknown) =>
  * payload must carry every input that shapes the result (target ids, options). The caller gets
  * exactly what is stored, first time and on replay alike: never enrich a result after the body.
  */
-export const withIdempotency = <A, P, E, R>(
-  options: IdempotencyOptions<A, P>,
-  body: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | Conflict | StoreUnavailable, R | CoreStore> =>
-  Effect.gen(function* () {
+export const withIdempotency: {
+  <A, E, R>(
+    body: Effect.Effect<A, E, R>,
+  ): <P>(
+    options: IdempotencyOptions<A, P>,
+  ) => Effect.Effect<A, E | Conflict | StoreUnavailable, R | CoreStore>;
+  <A, P, E, R>(
+    options: IdempotencyOptions<A, P>,
+    body: Effect.Effect<A, E, R>,
+  ): Effect.Effect<A, E | Conflict | StoreUnavailable, R | CoreStore>;
+} = Fn.dual(
+  2,
+  Effect.fnUntraced(function* <A, P, E, R>(
+    options: IdempotencyOptions<A, P>,
+    body: Effect.Effect<A, E, R>,
+  ) {
     const store = yield* CoreStore;
     const key = options.key;
     if (key === undefined) return yield* store.transaction(body);
@@ -60,17 +77,17 @@ export const withIdempotency = <A, P, E, R>(
     return yield* store.transaction(
       Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
-        const nowIso = new Date(now).toISOString();
+        const nowIso = DateTime.formatIso(DateTime.makeUnsafe(now));
         const claim = yield* store.requestLog.claim(options.scope, key, nowIso);
         if (claim._tag === "Existing") {
           const entry = claim.entry;
           if (entry.method !== options.method || entry.fingerprint !== fingerprint) {
-            return yield* new Conflict({ reason: "idempotency_mismatch" });
+            return yield* Conflict.make({ reason: "idempotency_mismatch" });
           }
           // A stored result that no longer decodes is a bug, never a miss.
-          const replayed = (yield* Schema.decodeUnknownEffect(resultJson)(entry.result).pipe(
+          const replayed = yield* Schema.decodeUnknownEffect(resultJson)(entry.result).pipe(
             Effect.orDie,
-          )) as A;
+          );
           const outcome = yield* Effect.serviceOption(RequestOutcome);
           if (Option.isSome(outcome)) yield* outcome.value.markReplayed;
           return replayed;
@@ -84,9 +101,10 @@ export const withIdempotency = <A, P, E, R>(
           fingerprint,
           result: encoded,
           createdAt: nowIso,
-          expiresAt: new Date(now + REQUEST_KEY_TTL_MILLIS).toISOString(),
+          expiresAt: DateTime.formatIso(DateTime.makeUnsafe(now + REQUEST_KEY_TTL_MILLIS)),
         });
         return result;
       }),
     );
-  });
+  }),
+);

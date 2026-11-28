@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { ALL_SCOPES, type GrantedAccess, READ_SCOPES, type Scope } from "@kvitbit/api-contract";
-import { Option } from "effect";
+import { ALL_SCOPES, type GrantedAccess, READ_SCOPES } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
+import * as Option from "effect/Option";
+
 import {
   consentDiff,
   describeAccess,
@@ -33,8 +35,10 @@ describe("role ceiling", () => {
     expect(effectiveScopes(s)).toEqual(["documents:read"]);
     expect(ScopePicker.toggle(s, "contacts:write")).toBe(s);
     const rows = ScopePicker.rows(s);
-    expect(rows.every((r) => !r.writeEnabled && r.readEnabled)).toBe(true);
-    expect(rows.find((r) => r.area === "documents")?.level).toBe("read");
+    expect(Arr.every(rows, (r) => !r.writeEnabled && r.readEnabled)).toBe(true);
+    expect(Option.getOrUndefined(Arr.findFirst(rows, (r) => r.area === "documents"))?.level).toBe(
+      "read",
+    );
   });
 });
 
@@ -48,7 +52,7 @@ describe("matrix reducer", () => {
     s = ScopePicker.toggle(s, "payments:write");
     s = ScopePicker.toggle(s, "payments:read");
     expect(effectiveScopes(s)).toEqual([]);
-    expect(Option.isNone(toAccessRequest(s))).toBe(true);
+    toAccessRequest(s).pipe(Option.isNone, expect).toBe(true);
   });
 
   test("presets and switching to custom keeps the preset's scopes", () => {
@@ -97,7 +101,7 @@ describe("contract scope strings", () => {
       "kvitbit:read",
     ]);
     expect(toOAuthScopes(ScopePicker.init(owner))).toEqual([]);
-    expect(Option.isNone(fromOAuthScopes(["offline_access"]))).toBe(true);
+    fromOAuthScopes(["offline_access"]).pipe(Option.isNone, expect).toBe(true);
   });
 
   test("describeAccess renders one row per area", () => {
@@ -106,7 +110,7 @@ describe("contract scope strings", () => {
       scopes: ["documents:read", "documents:write", "share:read"],
     });
     expect(rows).toHaveLength(10);
-    expect(rows.filter((r) => r.level !== "none")).toEqual([
+    expect(Arr.filter(rows, (r) => r.level !== "none")).toEqual([
       { area: "documents", level: "write" },
       { area: "share", level: "read" },
     ]);
@@ -136,7 +140,7 @@ describe("MCP consent", () => {
     let s = ScopePicker.forConsent(requested, owner);
     expect(s.mode).toBe("read");
     expect(presetAvailable(s, "read_write")).toBe(false);
-    s = ScopePicker.toggle(s, "documents:write" as Scope); // not offerable
+    s = ScopePicker.toggle(s, "documents:write"); // not offerable
     expect(effectiveScopes(s)).toEqual(READ_SCOPES);
     s = ScopePicker.setArea(s, "members", "none");
     expect(consentDiff(requested, s)).toMatchObject({
@@ -150,8 +154,8 @@ describe("MCP consent", () => {
     const s = ScopePicker.forConsent({ access: "read_write", scopes: ALL_SCOPES }, accountant);
     expect(s.mode).toBe("custom");
     expect(effectiveScopes(s)).toEqual(READ_SCOPES);
-    expect(toAccessRequest(s)).toEqual(
-      Option.some({ access: "custom", scopes: [...READ_SCOPES] as [Scope, ...Scope[]] }),
-    );
+    const [first, ...rest] = READ_SCOPES;
+    if (first === undefined) throw new Error("expected read scopes");
+    expect(toAccessRequest(s)).toEqual(Option.some({ access: "custom", scopes: [first, ...rest] }));
   });
 });

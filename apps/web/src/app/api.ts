@@ -3,16 +3,28 @@
  * same-origin session cookie, ui-port-contracts 7.1). `request` runs one endpoint call and turns
  * every failure into a Schema-typed `Failure`, so Commands never fail and Messages stay codecs.
  */
-import { Api } from "@kvitbit/ui-port";
-import { Context, Effect, Layer, Option, Schema } from "effect";
 
-export const TextSchema = Schema.Struct({
+import { ALTCHA_HEADER } from "@kvitbit/api-contract";
+import { Api } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import type * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { browserOrigin, fetchBrowser } from "./browser";
+
+const TextSchema = Schema.Struct({
   key: Schema.String,
   params: Schema.optionalKey(
-    Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Number])),
+    Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Finite])),
   ),
 });
-export type TextValue = typeof TextSchema.Type;
 
 /** What a screen needs to show a failed request (from ui-port `describeError`). */
 export const Failure = Schema.Struct({
@@ -27,13 +39,16 @@ export const Failure = Schema.Struct({
 });
 export type Failure = typeof Failure.Type;
 
-export const failureOf = (error: Api.UiError): Failure => {
+const failureOf = (error: Api.UiError): Failure => {
   const v = Api.describeError(error);
   return {
     tag: error._tag,
     surface: v.surface,
     text: v.text,
-    issues: v.issues.map((i) => ({ path: i.path.join("."), text: i.text })),
+    issues: Arr.map(v.issues, (i) => ({
+      path: Arr.join(Arr.map(i.path, String), "."),
+      text: i.text,
+    })),
     retryable: v.retryable,
     staleRevision: v.staleRevision,
     freshBotProof: v.freshBotProof,
@@ -41,28 +56,23 @@ export const failureOf = (error: Api.UiError): Failure => {
   };
 };
 
-export const failureFromUnknown = (error: unknown): Failure => failureOf(Api.toUiError(error));
+export const failureFromUnknown = Fn.flow(Api.toUiError, failureOf);
 
 const currentLanguage = (): string => {
-  if (typeof document === "undefined") return "cs";
+  if (globalThis.document === undefined) return "cs";
   return (
     document.querySelector<HTMLElement>(".kb-root")?.lang || document.documentElement.lang || "cs"
   );
 };
 
-const origin = (): string =>
-  typeof location === "undefined" || location.origin === "null"
-    ? "http://localhost"
-    : location.origin;
-
-export type WebServices = Api.KvitbitApi;
+export type WebServices = Api.KvitbitApi | HttpClient.HttpClient;
 
 export const WebServicesLive: Layer.Layer<WebServices> = Layer.suspend(() =>
-  Api.layerFetch({
-    baseUrl: origin(),
+  Api.layer({
+    baseUrl: browserOrigin(),
     credentials: Api.sessionCookie,
     acceptLanguage: currentLanguage,
-  }),
+  }).pipe(Layer.provideMerge(FetchHttpClient.layer)),
 );
 
 export type Client = Api.KvitbitApiClient;
@@ -70,7 +80,7 @@ export type Client = Api.KvitbitApiClient;
 const fetchConfig = (client: Client) => client.config.getConfig();
 
 export class StartupConfig extends Context.Service<StartupConfig, ReturnType<typeof fetchConfig>>()(
-  "@kvitbit/web/StartupConfig",
+  "@kvitbit/web/app/api/StartupConfig",
 ) {
   static readonly layer = Layer.effect(this)(
     Effect.flatMap(Api.KvitbitApi, (client) => Effect.cached(fetchConfig(client))),
@@ -88,7 +98,7 @@ export const getPublicConfig = (client: Client) =>
  * One API call as a never-failing Effect: `onSuccess` and `onFailure` build the result Message.
  * Defects and transport errors are mapped through ui-port `toUiError`.
  */
-export const request = <A, E, M>(
+const requestImpl = <A, E, M>(
   call: (client: Client) => Effect.Effect<A, E>,
   onSuccess: (a: A) => M,
   onFailure: (f: Failure) => M,
@@ -98,34 +108,85 @@ export const request = <A, E, M>(
     return yield* call(client);
   }).pipe(
     Effect.map(onSuccess),
-    Effect.catchCause((cause) => Effect.succeed(onFailure(failureOf(Api.fromCause(cause))))),
+    Effect.catchCause((cause) => cause.pipe(Api.fromCause, failureOf, onFailure, Effect.succeed)),
   );
 
-/** Same-origin JSON call outside the typed contract (Better Auth routes under /api/auth). */
-export const authFetch = <M>(
-  path: string,
-  init: { readonly method?: "GET" | "POST"; readonly body?: unknown },
-  onSuccess: (json: unknown) => M,
-  onFailure: (f: Failure) => M,
-): Effect.Effect<M> =>
-  Effect.tryPromise({
-    try: async (signal) => {
-      const res = await fetch(`${origin()}/api/auth${path}`, {
-        method: init.method ?? "GET",
-        credentials: "same-origin",
-        signal,
-        headers: init.body === undefined ? {} : { "content-type": "application/json" },
-        ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
-      });
-      const json: unknown = res.headers.get("content-type")?.includes("json")
-        ? await res.json()
-        : null;
-      if (!res.ok)
-        throw Object.assign(new Error(`auth ${res.status}`), { status: res.status, json });
-      return json;
-    },
-    catch: (e) => e,
-  }).pipe(
-    Effect.map(onSuccess),
-    Effect.catch((e) => Effect.succeed(onFailure(failureFromUnknown(e)))),
+export const request: {
+  <A, E, M>(
+    onSuccess: (a: A) => M,
+    onFailure: (f: Failure) => M,
+  ): (call: (client: Client) => Effect.Effect<A, E>) => Effect.Effect<M, never, WebServices>;
+  <A, E, M>(
+    call: (client: Client) => Effect.Effect<A, E>,
+    onSuccess: (a: A) => M,
+    onFailure: (f: Failure) => M,
+  ): Effect.Effect<M, never, WebServices>;
+} = Fn.dual(3, requestImpl);
+
+class AuthResponseError extends Schema.TaggedError<
+  AuthResponseError,
+  { readonly brand: unique symbol }
+>()("AuthResponseError", {
+  status: Schema.Int,
+  json: Schema.Json,
+}) {}
+
+interface AuthRequest {
+  readonly method?: "GET" | "POST";
+  readonly body?: Schema.Json;
+  readonly altchaHeader?: string | undefined;
+}
+
+interface AuthCall extends AuthRequest {
+  readonly path: string;
+}
+
+const decodeAuthJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Json));
+
+export const sendAuthRequest = Effect.fn("sendAuthRequest")(function* (init: AuthCall) {
+  const authRequest = HttpClientRequest.make(init.method ?? "GET")(
+    `${browserOrigin()}/api/auth${init.path}`,
   );
+  const requestWithProof =
+    init.altchaHeader === undefined
+      ? authRequest
+      : HttpClientRequest.setHeader(authRequest, ALTCHA_HEADER, init.altchaHeader);
+  const prepared =
+    init.body === undefined
+      ? requestWithProof
+      : yield* HttpClientRequest.bodyJson(requestWithProof, init.body);
+  const response = yield* fetchBrowser({ request: prepared });
+  const type = response.headers["content-type"] ?? "";
+  const json = Str.includes("json")(type)
+    ? yield* response.text.pipe(Effect.flatMap(decodeAuthJson))
+    : null;
+  if (response.status < 200 || response.status >= 300) {
+    return yield* AuthResponseError.make({ status: response.status, json });
+  }
+  return json;
+});
+
+/** Same-origin JSON call outside the typed contract (Better Auth routes under /api/auth). */
+const authFetchImpl = <M, F = M>(
+  path: string,
+  init: AuthRequest,
+  onSuccess: (json: Schema.Json) => M,
+  onFailure: (failure: Failure) => F,
+): Effect.Effect<M | F, never, HttpClient.HttpClient> =>
+  sendAuthRequest({ ...init, path }).pipe(
+    Effect.match({ onSuccess, onFailure: (error) => onFailure(failureFromUnknown(error)) }),
+  );
+
+export const authFetch: {
+  <M, F = M>(
+    init: AuthRequest,
+    onSuccess: (json: Schema.Json) => M,
+    onFailure: (failure: Failure) => F,
+  ): (path: string) => Effect.Effect<M | F, never, HttpClient.HttpClient>;
+  <M, F = M>(
+    path: string,
+    init: AuthRequest,
+    onSuccess: (json: Schema.Json) => M,
+    onFailure: (failure: Failure) => F,
+  ): Effect.Effect<M | F, never, HttpClient.HttpClient>;
+} = Fn.dual(4, authFetchImpl);

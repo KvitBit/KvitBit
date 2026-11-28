@@ -2,16 +2,17 @@
  * The Document → Contact → Workspace override chain (core-ports 4.2) and the effective reminder
  * policy (rule D16). Pure: modules load the three levels and call these.
  */
+
 import type {
   ContactDefaults,
   CurrencyCode,
-  DocumentKind,
   Locale,
   NumberingSeriesId,
   PaymentMethod,
   ReminderPolicy,
 } from "@kvitbit/domain/contract";
-import { resolveDefault } from "@kvitbit/domain/contract";
+import { DocumentKind, resolveDefault } from "@kvitbit/domain/contract";
+import * as Fn from "effect/Function";
 
 /** A per-kind series map; a kind left out has no series at that level. */
 export type SeriesByKind = { readonly [K in DocumentKind]?: NumberingSeriesId };
@@ -48,18 +49,17 @@ export interface ResolvedDocumentDefaults {
 }
 
 /** Contact `preferredSeriesByKind` merged over the Workspace map, kind by kind. */
-export const mergeSeriesByKind = (
-  contact: SeriesByKind | undefined,
-  workspace: SeriesByKind,
-): SeriesByKind => {
-  const merged: { [K in DocumentKind]?: NumberingSeriesId } = { ...workspace };
-  for (const [kind, series] of Object.entries(contact ?? {}) as Array<
-    [DocumentKind, NumberingSeriesId | undefined]
-  >) {
+export const mergeSeriesByKind: {
+  (workspace: SeriesByKind): (contact: SeriesByKind | undefined) => SeriesByKind;
+  (contact: SeriesByKind | undefined, workspace: SeriesByKind): SeriesByKind;
+} = Fn.dual(2, (contact: SeriesByKind | undefined, workspace: SeriesByKind) => {
+  const merged = { ...workspace };
+  for (const kind of DocumentKind.literals) {
+    const series = contact?.[kind];
     if (series !== undefined) merged[kind] = series;
   }
   return merged;
-};
+});
 
 export const resolveDocumentDefaults = (input: {
   readonly kind: DocumentKind;
@@ -127,16 +127,10 @@ export const resolveReminders = (input: {
   const { kind, choice, workspace } = input;
   if (kind !== "invoice" && kind !== "proforma") return NONE;
   if (choice === "off") return NONE;
-  const contact = input.contact ?? { mode: "inherit" };
-  switch (contact.mode) {
-    case "custom":
-      return armed(contact.offsetsDays);
-    case "disabled":
-      return choice === "on" ? armed(workspace.offsetsDays) : NONE;
-    case "inherit":
-      if (choice === "on") return armed(workspace.offsetsDays);
-      if (!workspace.enabled) return NONE;
-      if (kind === "proforma" && !workspace.proformas) return NONE;
-      return armed(workspace.offsetsDays);
-  }
+  const { contact } = input;
+  if (contact?.mode === "custom") return armed(contact.offsetsDays);
+  if (contact?.mode === "disabled") return choice === "on" ? armed(workspace.offsetsDays) : NONE;
+  return choice === "on" || (workspace.enabled && (kind === "invoice" || workspace.proformas))
+    ? armed(workspace.offsetsDays)
+    : NONE;
 };

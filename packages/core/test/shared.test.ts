@@ -1,9 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import type { AuditEntryId, RequestKey } from "@kvitbit/domain/contract";
-import { Conflict, NotFound, Unavailable } from "@kvitbit/domain/contract";
+import {
+  AuditEntryId,
+  Conflict,
+  DeliveryId,
+  NotFound,
+  RequestKey,
+  Unavailable,
+  UserId,
+} from "@kvitbit/domain/contract";
 import { RatesUnavailable, RequestOutcome } from "@kvitbit/domain/ports";
-import { BigDecimal, Cause, Effect, Exit, Layer, Ref, Schema } from "effect";
-import { TestClock } from "effect/testing";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { appendAudit } from "../src/shared/audit";
 import { canonicalJson } from "../src/shared/canonicalJson";
 import { orUnavailable } from "../src/shared/errors";
@@ -13,12 +28,12 @@ import { makeRequestOutcome } from "../src/shared/requestOutcome";
 import { checkRevision } from "../src/shared/revision";
 import { CoreStore, StoreUnavailable } from "../src/store/CoreStore";
 import { CoreStoreMemory } from "../src/store/memory";
-import { account, member, runTest, system, TEST_NOW, WORKSPACE_A } from "./helpers";
+import { account, member, runTest, system, TEST_NOW, WORKSPACE_A, WORKSPACE_B } from "./helpers";
 
 const Payload = Schema.Struct({ amount: Schema.BigDecimal, note: Schema.optional(Schema.String) });
 const Result = Schema.Struct({ id: Schema.String, total: Schema.BigDecimal });
 const scope = { _tag: "Workspace", workspaceId: WORKSPACE_A } as const;
-const key = "key-1" as RequestKey;
+const key = RequestKey.make("key-1");
 
 /** A body that counts its runs and returns a fresh id. */
 const counted = (runs: Ref.Ref<number>) =>
@@ -112,7 +127,7 @@ describe("withIdempotency (rule C3)", () => {
         return { payload, method, runs: yield* Ref.get(runs) };
       }),
     );
-    const mismatch = new Conflict({ reason: "idempotency_mismatch" });
+    const mismatch = Conflict.make({ reason: "idempotency_mismatch" });
     expect(exit).toEqual(Exit.succeed({ payload: mismatch, method: mismatch, runs: 1 }));
   });
 
@@ -129,11 +144,14 @@ describe("withIdempotency (rule C3)", () => {
           result: Result,
         };
         yield* withIdempotency(
-          { ...base, scope: { _tag: "Workspace", workspaceId: "other" as never } },
+          { ...base, scope: { _tag: "Workspace", workspaceId: WORKSPACE_B } },
           counted(runs),
         );
         yield* withIdempotency(
-          { ...base, scope: { _tag: "User", userId: "u" as never } },
+          {
+            ...base,
+            scope: { _tag: "User", userId: UserId.make("01900000-0000-7000-8000-000000000001") },
+          },
           counted(runs),
         );
         return yield* Ref.get(runs);
@@ -218,8 +236,8 @@ describe("withIdempotency (rule C3)", () => {
           ...real,
           requestLog: {
             ...real.requestLog,
-            claim: (scope, k, now) =>
-              Effect.map(real.requestLog.claim(scope, k, now), (claim) =>
+            claim: (requestScope, k, now) =>
+              Effect.map(real.requestLog.claim(requestScope, k, now), (claim) =>
                 claim._tag === "Existing"
                   ? { _tag: "Existing", entry: { ...claim.entry, result: { id: 1 } } }
                   : claim,
@@ -243,7 +261,10 @@ describe("withIdempotency (rule C3)", () => {
           Array.from({ length: 4 }, () => call(runs, { amount: amount("1") })),
           { concurrency: "unbounded" },
         );
-        return { ids: new Set(results.map((r) => r.id)).size, runs: yield* Ref.get(runs) };
+        return {
+          ids: new Set(EffectArray.map(results, (r) => r.id)).size,
+          runs: yield* Ref.get(runs),
+        };
       }),
     );
     expect(exit).toEqual(Exit.succeed({ ids: 1, runs: 1 }));
@@ -260,11 +281,16 @@ describe("appendAudit (rule C5)", () => {
       Effect.gen(function* () {
         const store = yield* CoreStore;
         yield* store.transaction(
-          appendAudit({ workspaceId: WORKSPACE_A, subject, action: "document.draft", revision: 1 }),
+          appendAudit(caller, {
+            workspaceId: WORKSPACE_A,
+            subject,
+            action: "document.draft",
+            revision: 1,
+          }),
         );
         yield* TestClock.adjust(1000);
         yield* store.transaction(
-          appendAudit({
+          appendAudit(caller, {
             workspaceId: WORKSPACE_A,
             subject,
             action: "document.edit",
@@ -278,8 +304,8 @@ describe("appendAudit (rule C5)", () => {
     expect(exit).toEqual(
       Exit.succeed([
         {
-          id: "01900000-0000-7000-8000-000000000001" as AuditEntryId,
-          at: new Date(TEST_NOW).toISOString(),
+          id: AuditEntryId.make("01900000-0000-7000-8000-000000000001"),
+          at: DateTime.makeUnsafe(TEST_NOW).pipe(DateTime.formatIso),
           actor: { _tag: "Member", userId: caller.userId, channel: "api", client: caller.client },
           subject,
           action: "document.draft",
@@ -288,8 +314,8 @@ describe("appendAudit (rule C5)", () => {
           reason: null,
         },
         {
-          id: "01900000-0000-7000-8000-000000000002" as AuditEntryId,
-          at: new Date(TEST_NOW + 1000).toISOString(),
+          id: AuditEntryId.make("01900000-0000-7000-8000-000000000002"),
+          at: DateTime.makeUnsafe(TEST_NOW + 1000).pipe(DateTime.formatIso),
           actor: { _tag: "Member", userId: caller.userId, channel: "api", client: caller.client },
           subject,
           action: "document.edit",
@@ -302,13 +328,21 @@ describe("appendAudit (rule C5)", () => {
   });
 
   test("a System entry names the job; an Account caller writes nothing", async () => {
-    const job = { _tag: "DocumentDelivery", deliveryId: "d" as never } as const;
+    const job = {
+      _tag: "DocumentDelivery",
+      deliveryId: DeliveryId.make("01900000-0000-7000-8000-00000000000d"),
+    } as const;
     const systemExit = await runTest(
       system(job),
       Effect.gen(function* () {
         const store = yield* CoreStore;
         const entry = yield* store.transaction(
-          appendAudit({ workspaceId: WORKSPACE_A, subject, action: "document.send", revision: 3 }),
+          appendAudit(system(job), {
+            workspaceId: WORKSPACE_A,
+            subject,
+            action: "document.send",
+            revision: 3,
+          }),
         );
         return entry?.actor;
       }),
@@ -319,7 +353,7 @@ describe("appendAudit (rule C5)", () => {
       Effect.gen(function* () {
         const store = yield* CoreStore;
         const entry = yield* store.transaction(
-          appendAudit({
+          appendAudit(account(), {
             workspaceId: WORKSPACE_A,
             subject,
             action: "workspace.create",
@@ -333,25 +367,27 @@ describe("appendAudit (rule C5)", () => {
   });
 });
 
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
 describe("small helpers", () => {
   test("checkRevision", () => {
-    expect(Effect.runSyncExit(checkRevision({ revision: 3 }, 3))).toEqual(
-      Exit.succeed({ revision: 3 }),
-    );
-    expect(Effect.runSyncExit(checkRevision({ revision: 3 }, 2))).toEqual(
-      Exit.fail(new Conflict({ reason: "revision_changed", currentRevision: 3 })),
+    const current = checkRevision({ revision: 3 }, 3).pipe(Effect.runSyncExit);
+    const stale = checkRevision({ revision: 3 }, 2).pipe(Effect.runSyncExit);
+    expect(current).toEqual(Exit.succeed({ revision: 3 }));
+    expect(stale).toEqual(
+      Exit.fail(Conflict.make({ reason: "revision_changed", currentRevision: 3 })),
     );
   });
 
   test("orUnavailable maps port failures and keeps domain errors", () => {
-    expect(Effect.runSyncExit(orUnavailable(Effect.fail(new StoreUnavailable({}))))).toEqual(
-      Exit.fail(new Unavailable({ dependency: "database" })),
-    );
-    expect(Effect.runSyncExit(orUnavailable(Effect.fail(new RatesUnavailable({}))))).toEqual(
-      Exit.fail(new Unavailable({ dependency: "exchange_rates" })),
-    );
-    const notFound = new NotFound({ entity: "Document", id: "x" });
-    expect(Effect.runSyncExit(orUnavailable(Effect.fail(notFound)))).toEqual(Exit.fail(notFound));
+    const database = StoreUnavailable.make({}).pipe(Effect.fail, orUnavailable, Effect.runSyncExit);
+    const rates = RatesUnavailable.make({}).pipe(Effect.fail, orUnavailable, Effect.runSyncExit);
+    expect(database).toEqual(Exit.fail(Unavailable.make({ dependency: "database" })));
+    expect(rates).toEqual(Exit.fail(Unavailable.make({ dependency: "exchange_rates" })));
+    const notFound = NotFound.make({ entity: "Document", id: "x" });
+    notFound
+      .pipe(Effect.fail, orUnavailable, Effect.runSyncExit, expect)
+      .toEqual(Exit.fail(notFound));
   });
 
   test("canonicalJson sorts keys and drops undefined", () => {
@@ -369,7 +405,7 @@ describe("small helpers", () => {
       }).pipe(Effect.provide(Layer.merge(IdGeneratorLive, TestClock.layer()))),
     );
     for (const id of ids) {
-      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(id).toMatch(UUID_V7);
     }
     const [a, b] = ids;
     expect(a !== undefined && b !== undefined && a < b).toBe(true);

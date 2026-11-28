@@ -3,6 +3,7 @@
  * rules that need no handler code (ETag on `Revisioned` endpoints, `Idempotent-Replayed`, error
  * headers) live in `./edge/response.ts`.
  */
+
 import {
   type Disposition,
   type EntityTag,
@@ -18,8 +19,15 @@ import {
   type RequestOptions,
 } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Effect, Option, type Stream } from "effect";
-import { HttpEffect, HttpServerResponse } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as HttpEffect from "effect/http/HttpEffect";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Option from "effect/Option";
+import * as Record from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import type * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 
 export const requestWasReplayed = Effect.flatMap(
   Effect.serviceOption(RequestOutcome),
@@ -30,28 +38,23 @@ export const requestWasReplayed = Effect.flatMap(
  * Rule of section 3.2: a missing `If-Match` is 428; core's `Conflict{revision_changed}` becomes
  * 412 with the current revision. Every other Conflict stays 409.
  */
-export const withRevision = <A, E, R>(
+export const withRevision = Effect.fnUntraced(function* <A, E, R>(
   ifMatch: EntityTag | undefined,
   run: (expectedRevision: number) => Effect.Effect<A, E, R>,
-): Effect.Effect<
-  A,
-  Exclude<E, Conflict> | Conflict | PreconditionRequired | PreconditionFailed,
-  R
-> =>
-  ifMatch === undefined
-    ? Effect.fail(new PreconditionRequired({}))
-    : (run(parseEntityTag(ifMatch)).pipe(
-        Effect.catchIf(
-          (e): e is Extract<E, Conflict> =>
-            e instanceof Conflict && e.reason === "revision_changed",
-          (e) =>
-            Effect.fail(new PreconditionFailed({ currentRevision: e.currentRevision ?? null })),
-        ),
-      ) as Effect.Effect<
-        A,
-        Exclude<E, Conflict> | Conflict | PreconditionRequired | PreconditionFailed,
-        R
-      >);
+) {
+  if (ifMatch === undefined) return yield* PreconditionRequired.make({});
+  const isConflict = Schema.is(Conflict);
+  return yield* run(parseEntityTag(ifMatch)).pipe(
+    Effect.catchFilter(
+      (error) =>
+        isConflict(error) && error.reason === "revision_changed"
+          ? Result.succeed(error)
+          : Result.fail(error),
+      (error) =>
+        Effect.fail(PreconditionFailed.make({ currentRevision: error.currentRevision ?? null })),
+    ),
+  );
+});
 
 /** `Idempotency-Key` -> `RequestOptions.requestKey` (section 3.2). */
 export const requestOptions = (headers: {
@@ -68,8 +71,8 @@ export const setLocation = (path: string) =>
   );
 
 /** RFC 6266 `Content-Disposition` with an ASCII fallback and the UTF-8 `filename*`. */
-export const contentDisposition = (disposition: Disposition, filename: string): string => {
-  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "_");
+const contentDisposition = (disposition: Disposition, filename: string): string => {
+  const ascii = Str.replace(/["\\]/g, "_")(Str.replace(/[^\x20-\x7e]/g, "_")(filename));
   return `${disposition}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
 };
 
@@ -84,35 +87,44 @@ export interface DownloadOptions {
  * A streamed download (section 3.4): Content-Type, Content-Disposition (attachment unless
  * `inline` was asked), Content-Length when known, `nosniff`, `private, no-store`.
  */
-export const downloadResponse = (
-  file: {
+export const downloadResponse =
+  (options: DownloadOptions) =>
+  (file: {
     readonly filename: string;
     readonly contentType: string;
     readonly sizeBytes?: number | null | undefined;
     readonly bytes: Stream.Stream<Uint8Array, unknown>;
-  },
-  options: DownloadOptions = {},
-): HttpServerResponse.HttpServerResponse =>
-  HttpServerResponse.stream(file.bytes, {
-    contentType: file.contentType,
-    ...(file.sizeBytes === undefined || file.sizeBytes === null
-      ? {}
-      : { contentLength: file.sizeBytes }),
-    headers: {
+  }): HttpServerResponse.HttpServerResponse => {
+    const headers = {
       "content-disposition": contentDisposition(options.disposition ?? "attachment", file.filename),
       "x-content-type-options": "nosniff",
       "cache-control": options.cacheControl ?? "private, no-store",
-      ...(options.etag === undefined ? {} : { etag: options.etag }),
-    },
-  });
+    };
+    return HttpServerResponse.stream(file.bytes, {
+      contentType: file.contentType,
+      contentLength: file.sizeBytes ?? undefined,
+      headers: options.etag === undefined ? headers : { ...headers, etag: options.etag },
+    });
+  };
 
 /** `downloadResponse` for a core `FileDownload`. */
-export const fileDownload = (file: FileDownload, options: DownloadOptions = {}) =>
-  downloadResponse(file, options);
+export const fileDownload = (file: FileDownload) => downloadResponse({})(file);
 
 /** Optional keys without `undefined` values (decoded query and header structs under exactOptionalPropertyTypes). */
 export type Compact<T> = { readonly [K in keyof T]?: Exclude<T[K], undefined> };
 
 /** Drops the keys whose value is `undefined`. */
-export const compact = <T extends object>(value: T): Compact<T> =>
-  Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as Compact<T>;
+export const compact = <T extends object>(value: T): Compact<T> => {
+  const result: Compact<T> = {};
+  for (const [key, field] of Record.toEntries(value)) {
+    if (field !== undefined) {
+      Object.defineProperty(result, key, {
+        value: field,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+  }
+  return result;
+};

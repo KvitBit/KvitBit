@@ -1,11 +1,15 @@
-import type {
+import {
   CurrencyCode,
-  Locale,
-  PaymentMethod,
+  type Locale,
+  type PaymentMethod,
   WorkspaceSettingsPatch,
 } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
-import { useEffect, useState } from "react";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
+import { useCallback, useEffect, useState } from "react";
 import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -22,6 +26,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import { canEditWorkspaceSettings } from "./permissions";
 import {
   type FormErrorState,
@@ -31,7 +36,9 @@ import {
 } from "./settings-feedback";
 import { type PaymentRounding, parseWorkspaceView } from "./workspace-data";
 
-const CURRENCIES: ReadonlyArray<CurrencyCode> = ["CZK", "EUR", "USD", "GBP"] as CurrencyCode[];
+const CURRENCIES: ReadonlyArray<CurrencyCode> = Arr.map(["CZK", "EUR", "USD", "GBP"], (code) =>
+  CurrencyCode.make(code),
+);
 const LOCALES: ReadonlyArray<Locale> = ["cs", "en"];
 const PAYMENT_METHODS: ReadonlyArray<PaymentMethod> = ["bank_transfer", "cash", "card", "other"];
 const ROUNDINGS: ReadonlyArray<PaymentRounding> = ["none", "whole_unit"];
@@ -46,11 +53,13 @@ export function DocumentDefaultsSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.workspace.current({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) => client.workspace.current({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
 
-  const [currency, setCurrency] = useState<CurrencyCode>("CZK" as CurrencyCode);
+  const [currency, setCurrency] = useState<CurrencyCode>(CurrencyCode.make("CZK"));
   const [language, setLanguage] = useState<Locale>("cs");
   const [dueDays, setDueDays] = useState("14");
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>("bank_transfer");
@@ -75,15 +84,15 @@ export function DocumentDefaultsSection() {
     setErrorState(noFormError);
   }, [remote.state]);
 
-  const parsedDueDays = Number.parseInt(dueDays.trim(), 10);
+  const parsedDueDays = Number.parseInt(Str.trim(dueDays), 10);
   const validDueDays =
     Number.isInteger(parsedDueDays) && parsedDueDays >= 0 && parsedDueDays <= 365;
 
-  const handleSave = async () => {
-    if (!editable || !validDueDays) return;
+  const handleSave = Effect.fn("document-defaults-section.handleSave")(function* () {
+    if (!(editable && validDueDays)) return;
     setSaving(true);
     setErrorState(noFormError);
-    const payload = {
+    const payload = WorkspaceSettingsPatch.make({
       defaults: {
         currency,
         language,
@@ -91,16 +100,18 @@ export function DocumentDefaultsSection() {
         paymentMethod,
         paymentRounding,
         paymentTaxDocumentAutoSend: ptdAutoSend,
-        defaultNote: defaultNote.trim() || null,
+        defaultNote: Str.trim(defaultNote) || null,
       },
-    } as unknown as WorkspaceSettingsPatch;
+    });
 
-    const result = await api.run((client) =>
-      client.workspace.updateSettings({
-        params: inWorkspace(workspace.id),
-        headers: ifMatchHeaders(revision),
-        payload,
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.updateSettings({
+          params: inWorkspace(workspace.id),
+          headers: ifMatchHeaders(revision),
+          payload,
+        }),
+      ),
     );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -110,7 +121,7 @@ export function DocumentDefaultsSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
@@ -136,7 +147,7 @@ export function DocumentDefaultsSection() {
               <SegmentedChoice<CurrencyCode>
                 label={t("common.field.currency")}
                 value={currency}
-                choices={CURRENCIES.map((c) => ({ value: c, label: c }))}
+                choices={Arr.map(CURRENCIES, (c) => ({ value: c, label: c }))}
                 onChange={(c) => {
                   if (editable) setCurrency(c);
                 }}
@@ -144,7 +155,7 @@ export function DocumentDefaultsSection() {
               <SegmentedChoice<Locale>
                 label={t("settings.documentDefaults.language")}
                 value={language}
-                choices={LOCALES.map((l) => ({ value: l, label: t(`enum.locale.${l}`) }))}
+                choices={Arr.map(LOCALES, (l) => ({ value: l, label: t(`enum.locale.${l}`) }))}
                 onChange={(l) => {
                   if (editable) setLanguage(l);
                 }}
@@ -167,7 +178,7 @@ export function DocumentDefaultsSection() {
               <SegmentedChoice<PaymentMethod>
                 label={t("settings.documentDefaults.paymentMethod")}
                 value={paymentMethod}
-                choices={PAYMENT_METHODS.map((pm) => ({
+                choices={Arr.map(PAYMENT_METHODS, (pm) => ({
                   value: pm,
                   label: t(`enum.paymentMethod.${pm}`),
                 }))}
@@ -178,7 +189,7 @@ export function DocumentDefaultsSection() {
               <SegmentedChoice<PaymentRounding>
                 label={local({ cs: "Zaokrouhlení celkové částky", en: "Total rounding" })}
                 value={paymentRounding}
-                choices={ROUNDINGS.map((r) => ({
+                choices={Arr.map(ROUNDINGS, (r) => ({
                   value: r,
                   label:
                     r === "none"
@@ -216,7 +227,7 @@ export function DocumentDefaultsSection() {
               label={t("common.action.saveChanges")}
               busy={saving}
               disabled={!validDueDays}
-              onPress={() => void handleSave()}
+              onPress={() => forkFeatureEffect(handleSave())}
             />
           ) : null}
         </View>

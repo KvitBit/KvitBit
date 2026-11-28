@@ -1,23 +1,46 @@
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { Command } from "./command";
 import { claimedLabel, feedbackLabel, type IssueTracker, PoolError } from "./pool";
 import { workerBranch } from "./t3";
 
 export const defaultRepository = "KvitBit/KvitBit";
+
 const repoSlug = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,38}\/(?!\.{1,2}$)[a-zA-Z0-9_.-]{1,100}$/;
+const githubSshOrigin = /^(?:[^@/:]+@)?github\.com:([^?#]+)$/i;
+const pathSlashes = /^\/|\/$/g;
+const gitSuffix = /\.git$/i;
 
-interface Repository {
-  id: number;
-  full_name: string;
-  owner: { id: number };
-}
+const Repository = Schema.Struct({
+  id: Schema.Int,
+  full_name: Schema.String,
+  owner: Schema.Struct({ id: Schema.Int }),
+});
+type Repository = typeof Repository.Type;
 
-interface RestIssue {
-  number: number;
-  state: string;
-  labels: { name: string }[];
-  assignees: unknown[];
-  pull_request?: object;
-}
+const Label = Schema.Struct({ name: Schema.String });
+const RestIssue = Schema.Struct({
+  number: Schema.Int,
+  state: Schema.String,
+  labels: Schema.Array(Label),
+  assignees: Schema.Array(Schema.Unknown),
+  pull_request: Schema.optionalKey(Schema.JsonObject),
+});
+type RestIssue = typeof RestIssue.Type;
+
+const ClosingReferences = Schema.Struct({
+  data: Schema.Struct({
+    repository: Schema.Struct({
+      issue: Schema.Struct({
+        closedByPullRequestsReferences: Schema.Struct({
+          nodes: Schema.Array(Schema.Struct({ state: Schema.String })),
+        }),
+      }),
+    }),
+  }),
+});
 
 const closingPullRequests = `query ($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
@@ -27,92 +50,120 @@ const closingPullRequests = `query ($owner: String!, $name: String!, $number: In
   }
 }`;
 
-function api(run: Command, ...args: string[]): Promise<string> {
-  return run("gh", ["api", "--hostname", "github.com", ...args]);
-}
+const api = (run: Command, ...args: string[]) =>
+  run({ executable: "gh", args: ["api", "--hostname", "github.com", ...args] });
 
-export async function resolveRepository(run: Command, slug: string): Promise<Repository> {
-  if (!repoSlug.test(slug)) throw new PoolError("--repo must be a GitHub owner/name");
-  const repository: Repository = JSON.parse(await api(run, `repos/${slug}`));
-  if (
-    !Number.isSafeInteger(repository.id) ||
-    repository.id < 1 ||
-    !repoSlug.test(repository.full_name) ||
-    !Number.isSafeInteger(repository.owner?.id)
-  ) {
-    throw new PoolError("Unexpected GitHub repository identity");
+const decode =
+  <A>(schema: Schema.Codec<A, unknown, never, never>, message: string) =>
+  (body: string) =>
+    Schema.decodeEffect(Schema.fromJsonString(schema))(body).pipe(
+      Effect.mapError(() => PoolError.make({ message })),
+    );
+
+const decodeRepository = decode(Repository, "Unexpected GitHub repository identity");
+const decodeIssue = decode(RestIssue, "Unexpected GitHub issue response");
+const decodeLabels = decode(Schema.Array(Label), "Unexpected GitHub label response");
+const decodeClosingReferences = decode(
+  ClosingReferences,
+  "Unexpected GitHub closing reference response",
+);
+const decodePullRequests = decode(
+  Schema.Array(Schema.Unknown),
+  "Unexpected GitHub pull request response",
+);
+
+export const resolveRepository = Effect.fn("IssuePool.resolveRepository")(function* ({
+  run,
+  slug,
+}: {
+  readonly run: Command;
+  readonly slug: string;
+}) {
+  if (!repoSlug.test(slug))
+    return yield* PoolError.make({ message: "--repo must be a GitHub owner/name" });
+  const repository = yield* api(run, `repos/${slug}`).pipe(Effect.flatMap(decodeRepository));
+  if (repository.id < 1 || !repoSlug.test(repository.full_name)) {
+    return yield* PoolError.make({ message: "Unexpected GitHub repository identity" });
   }
   return repository;
-}
+});
 
-async function matchesRepository(
+const matchesRepository = Effect.fn("IssuePool.matchesRepository")(function* (
   run: Command,
   repository: Repository,
   slug: string,
-): Promise<boolean> {
+) {
   if (!repoSlug.test(slug)) return false;
-  if (slug.toLowerCase() === repository.full_name.toLowerCase()) return true;
-  try {
-    return (await resolveRepository(run, slug)).id === repository.id;
-  } catch {
-    return false;
-  }
-}
-
-export async function verifyProjectOrigin(
-  run: Command,
-  project: string,
-  repository: Repository,
-): Promise<void> {
-  const origin = (await run("git", ["-C", project, "remote", "get-url", "origin"])).trim();
-  const sshPath = /^(?:[^@/:]+@)?github\.com:([^?#]+)$/i.exec(origin)?.[1];
-  const url = URL.parse(sshPath ? `ssh://github.com/${sshPath}` : origin);
-  const slug = url?.pathname.replace(/^\/|\/$/g, "").replace(/\.git$/i, "");
-  if (
-    !url ||
-    !["https:", "ssh:", "git:"].includes(url.protocol) ||
-    !["github.com", "ssh.github.com"].includes(url.hostname) ||
-    !slug ||
-    !(await matchesRepository(run, repository, slug))
-  ) {
-    throw new PoolError("The project origin does not match the resolved GitHub repository");
-  }
-}
-
-function isFeedbackIssue(issue: RestIssue): boolean {
-  return (
-    !issue.pull_request &&
-    issue.state === "open" &&
-    issue.labels.some(({ name }) => name === feedbackLabel)
+  if (Str.toLowerCase(slug) === Str.toLowerCase(repository.full_name)) return true;
+  return yield* resolveRepository({ run, slug }).pipe(
+    Effect.map((candidate) => candidate.id === repository.id),
+    Effect.orElseSucceed(() => false),
   );
-}
+});
 
-function isClaimed(issue: RestIssue): boolean {
-  return issue.labels.some(({ name }) => name === claimedLabel);
-}
-
-export function githubIssueTracker(repository: Repository, run: Command): IssueTracker {
-  const base = `repos/${repository.full_name}`;
-  const [owner, name] = repository.full_name.split("/");
-  let claimLabelReady: Promise<void> | undefined;
-
-  async function pages<T>(path: string): Promise<T[]> {
-    const response = await api(run, "--paginate", "--slurp", path);
-    const result: T[][] = JSON.parse(response);
-    if (!Array.isArray(result) || !result.every(Array.isArray)) {
-      throw new PoolError("Unexpected GitHub pagination response");
-    }
-    return result.flat();
+export const verifyProjectOrigin = Effect.fn("IssuePool.verifyProjectOrigin")(function* ({
+  run,
+  project,
+  repository,
+}: {
+  readonly run: Command;
+  readonly project: string;
+  readonly repository: Repository;
+}) {
+  const origin = yield* run({
+    executable: "git",
+    args: ["-C", project, "remote", "get-url", "origin"],
+  }).pipe(Effect.map(Str.trim));
+  const sshPath = githubSshOrigin.exec(origin)?.[1];
+  const url = URL.parse(sshPath === undefined ? origin : `ssh://github.com/${sshPath}`);
+  if (
+    url === null ||
+    !Arr.some(["https:", "ssh:", "git:"], (protocol) => protocol === url.protocol) ||
+    !Arr.some(["github.com", "ssh.github.com"], (host) => host === url.hostname)
+  )
+    return yield* PoolError.make({
+      message: "The project origin does not match the resolved GitHub repository",
+    });
+  const slug = Str.replace(gitSuffix, "")(Str.replace(pathSlashes, "")(url.pathname));
+  if (!(yield* matchesRepository(run, repository, slug))) {
+    return yield* PoolError.make({
+      message: "The project origin does not match the resolved GitHub repository",
+    });
   }
+});
 
-  async function ensureClaimLabel(): Promise<void> {
-    const exists = async () =>
-      (await pages<{ name: string }>(`${base}/labels?per_page=100`)).some(
-        ({ name }) => name === claimedLabel,
-      );
-    if (await exists()) return;
-    try {
-      await api(
+const isFeedbackIssue = (issue: RestIssue): boolean =>
+  issue.pull_request === undefined &&
+  issue.state === "open" &&
+  Arr.some(issue.labels, ({ name }) => name === feedbackLabel);
+
+const isClaimed = (issue: RestIssue): boolean =>
+  Arr.some(issue.labels, ({ name }) => name === claimedLabel);
+
+export const githubIssueTracker = Effect.fn("IssuePool.githubIssueTracker")(function* ({
+  repository,
+  run,
+}: {
+  readonly repository: Repository;
+  readonly run: Command;
+}) {
+  const base = `repos/${repository.full_name}`;
+  const [owner, name] = Str.split(repository.full_name, "/");
+  const pages = <A>(path: string, schema: Schema.Codec<A, unknown, never, never>) =>
+    api(run, "--paginate", "--slurp", path).pipe(
+      Effect.flatMap(
+        decode(schema.pipe(Schema.Array, Schema.Array), "Unexpected GitHub pagination response"),
+      ),
+      Effect.map(Arr.flatten),
+    );
+
+  const claimLabelExists = pages(`${base}/labels?per_page=100`, Label).pipe(
+    Effect.map((labels) => Arr.some(labels, ({ name: labelName }) => labelName === claimedLabel)),
+  );
+  const ensureClaimLabel = yield* Effect.cached(
+    Effect.gen(function* () {
+      if (yield* claimLabelExists) return;
+      yield* api(
         run,
         "--method",
         "POST",
@@ -123,22 +174,32 @@ export function githubIssueTracker(repository: Repository, run: Command): IssueT
         "color=5319e7",
         "-f",
         "description=Assigned to the Kvitbit issue pool",
+      ).pipe(
+        Effect.asVoid,
+        Effect.catch((error) =>
+          claimLabelExists.pipe(
+            Effect.flatMap((found) => (found ? Effect.void : Effect.fail(error))),
+          ),
+        ),
       );
-    } catch (error) {
-      if (!(await exists())) throw error;
-    }
-  }
+    }),
+  );
+  return {
+    list: Effect.gen(function* () {
+      const issues = yield* pages(
+        `${base}/issues?state=open&labels=${feedbackLabel}&per_page=100`,
+        RestIssue,
+      );
+      return Arr.map(Arr.filter(issues, isFeedbackIssue), ({ number, labels }) => ({
+        number,
+        claimed: Arr.some(labels, ({ name: labelName }) => labelName === claimedLabel),
+      }));
+    }),
+    isAvailable: Effect.fn("IssuePool.isIssueAvailable")(function* (number: number) {
+      const issue = yield* api(run, `${base}/issues/${number}`).pipe(Effect.flatMap(decodeIssue));
+      if (!isFeedbackIssue(issue) || isClaimed(issue) || issue.assignees.length > 0) return false;
 
-  async function isAvailable(number: number): Promise<boolean> {
-    const issue: RestIssue = JSON.parse(await api(run, `${base}/issues/${number}`));
-    if (!isFeedbackIssue(issue) || isClaimed(issue) || issue.assignees.length > 0) return false;
-
-    const references: {
-      data: {
-        repository: { issue: { closedByPullRequestsReferences: { nodes: { state: string }[] } } };
-      };
-    } = JSON.parse(
-      await api(
+      const references = yield* api(
         run,
         "graphql",
         "-f",
@@ -149,48 +210,29 @@ export function githubIssueTracker(repository: Repository, run: Command): IssueT
         `name=${name}`,
         "-F",
         `number=${number}`,
-      ),
-    );
-    if (references.data.repository.issue.closedByPullRequestsReferences.nodes.length > 0) {
-      return false;
-    }
+      ).pipe(Effect.flatMap(decodeClosingReferences));
+      if (references.data.repository.issue.closedByPullRequestsReferences.nodes.length > 0)
+        return false;
 
-    const head = encodeURIComponent(`${owner}:${workerBranch(number)}`);
-    const branchPRs: unknown[] = JSON.parse(
-      await api(run, `${base}/pulls?state=open&head=${head}&per_page=1`),
-    );
-    if (!Array.isArray(branchPRs)) throw new PoolError("Unexpected GitHub pull request response");
-    return branchPRs.length === 0;
-  }
-
-  return {
-    async list() {
-      const issues = await pages<RestIssue>(
-        `${base}/issues?state=open&labels=${feedbackLabel}&per_page=100`,
+      const head = encodeURIComponent(`${owner}:${workerBranch(number)}`);
+      const branchPRs = yield* api(run, `${base}/pulls?state=open&head=${head}&per_page=1`).pipe(
+        Effect.flatMap(decodePullRequests),
       );
-      return issues.filter(isFeedbackIssue).map(({ number, labels }) => ({
-        number,
-        claimed: labels.some(({ name }) => name === claimedLabel),
-      }));
-    },
-    isAvailable,
-    async ensureClaimLabel() {
-      claimLabelReady ??= ensureClaimLabel();
-      await claimLabelReady;
-    },
-    async claim(number) {
-      const response = await api(
+      return branchPRs.length === 0;
+    }),
+    ensureClaimLabel,
+    claim: Effect.fn("IssuePool.claimIssue")(function* (number: number) {
+      const labels = yield* api(
         run,
         "--method",
         "POST",
         `${base}/issues/${number}/labels`,
         "-f",
         `labels[]=${claimedLabel}`,
-      );
-      const labels: { name: string }[] = JSON.parse(response);
-      if (!labels.some(({ name }) => name === claimedLabel)) {
-        throw new PoolError("GitHub did not confirm the issue claim label");
+      ).pipe(Effect.flatMap(decodeLabels));
+      if (!Arr.some(labels, ({ name: labelName }) => labelName === claimedLabel)) {
+        return yield* PoolError.make({ message: "GitHub did not confirm the issue claim label" });
       }
-    },
-  };
-}
+    }),
+  } satisfies IssueTracker;
+});

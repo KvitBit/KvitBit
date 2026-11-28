@@ -1,5 +1,7 @@
 import type { TemplateId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { formatDate } from "@kvitbit/ui-port/format";
+import * as Arr from "effect/Array";
 import { CalendarClock, FileText, Plus } from "lucide-react-native";
 import { useCallback, useMemo, useState } from "react";
 import { View } from "react-native";
@@ -47,8 +49,11 @@ export function TemplatesListScreen() {
   const [filter, setFilter] = useState<TemplateFilter>("all");
 
   const remote = useRemote(
-    (client) => client.templates.list({ params: { workspaceId: workspace.id } }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.templates.list({ params: { workspaceId: workspace.id } }),
+      [workspace.id],
+    ),
   );
 
   const openNew = useCallback(() => {
@@ -86,7 +91,10 @@ export function TemplatesListScreen() {
 
       <RemoteView state={remote.state} onRetry={remote.reload}>
         {(rawItems) => {
-          const all = rawItems.map(decodeTemplate);
+          const all = Arr.flatMap(rawItems, (raw) => {
+            const template = decodeTemplate(raw);
+            return template === null ? [] : [template];
+          });
           if (all.length === 0) {
             return (
               <EmptyState
@@ -109,7 +117,7 @@ export function TemplatesListScreen() {
 
           return (
             <Section>
-              {visible.map((tpl) => {
+              {Arr.map(visible, (tpl) => {
                 const state = scheduleStateOf(tpl.schedule);
                 const metaParts: Array<string> = [t(`enum.documentKind.${tpl.kind}`)];
                 if (tpl.currency !== null) metaParts.push(tpl.currency);
@@ -119,7 +127,7 @@ export function TemplatesListScreen() {
                   if (tpl.schedule.nextOccurrence !== null) {
                     metaParts.push(
                       t("templates.list.nextRun", {
-                        date: formatDate(locale, tpl.schedule.nextOccurrence),
+                        date: formatDate({ locale, date: tpl.schedule.nextOccurrence }),
                       }),
                     );
                   }
@@ -139,7 +147,7 @@ export function TemplatesListScreen() {
                     testID={`template-row-${tpl.id}`}
                     leading={tpl.schedule !== null ? CalendarClock : FileText}
                     title={tpl.name}
-                    subtitle={metaParts.join(" · ")}
+                    subtitle={Arr.join(metaParts, " · ")}
                     badge={badge}
                     onPress={() => openDetail(tpl.id)}
                   />

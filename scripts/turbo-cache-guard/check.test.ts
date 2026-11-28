@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
+import * as Path from "effect/Path";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   checkFormalManifestCoverage,
   checkRootScriptTests,
@@ -12,22 +19,30 @@ import {
   parseBunTestTargets,
 } from "./check";
 
-const REPO_ROOT = resolve(import.meta.dir, "../..");
+const encodePrettyJsonValue = Schema.encodeResult(
+  Schema.fromJsonString(Schema.Unknown, { space: 2 }),
+);
+const encodePrettyJson = Fn.flow(encodePrettyJsonValue, Result.getOrThrow);
+
+const REPO_ROOT = new URL("../../", import.meta.url).pathname;
 
 const tempDirs: Array<string> = [];
 
-const makeTempRepo = (files: Readonly<Record<string, string>>): string => {
-  const dir = mkdtempSync(join(tmpdir(), "kvitbit-turbo-guard-"));
-  tempDirs.push(dir);
-  for (const [relPath, content] of Object.entries(files)) {
-    const absPath = join(dir, relPath);
-    mkdirSync(dirname(absPath), { recursive: true });
-    writeFileSync(absPath, content, "utf8");
-  }
-  return dir;
-};
+const makeTempRepo = (files: Readonly<Record<string, string>>) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const dir = yield* fs.makeTempDirectory({ prefix: "kvitbit-turbo-guard-" });
+    tempDirs.push(dir);
+    for (const [relPath, content] of EffectRecord.toEntries(files)) {
+      const absPath = path.join(dir, relPath);
+      yield* fs.makeDirectory(path.dirname(absPath), { recursive: true });
+      yield* fs.writeFileString(absPath, content);
+    }
+    return dir;
+  }).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
 
-const json = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
+const json = (value: Schema.Json): string => `${encodePrettyJson(value)}\n`;
 
 const baseFixture = (): Record<string, string> => ({
   "package.json": json({
@@ -161,18 +176,21 @@ const baseFixture = (): Record<string, string> => ({
   "scripts/demo/demo.test.ts": "export {};\n",
 });
 
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop();
-    if (dir !== undefined) {
-      rmSync(dir, { recursive: true, force: true });
+afterEach(() =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    for (const dir of tempDirs.splice(0)) {
+      yield* fs.remove(dir, { recursive: true, force: true });
     }
-  }
-});
+  }).pipe(Effect.provide(BunServices.layer), Effect.runPromise),
+);
 
 describe("repository turbo cache graph", () => {
-  test("covers every workspace unit test, root script test, and active formal check without drift", () => {
-    const report = checkTurboCacheGraph(REPO_ROOT);
+  test("covers every workspace unit test, root script test, and active formal check without drift", async () => {
+    const report = await checkTurboCacheGraph(REPO_ROOT).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
 
     expect(report.stats.workspacesChecked).toBeGreaterThan(0);
     expect(report.stats.workspaceTestFiles).toBeGreaterThan(0);
@@ -229,18 +247,24 @@ describe("helpers", () => {
 });
 
 describe("drift detection on synthetic fixtures", () => {
-  test("passes a clean fixture while ignoring e2e, integration, and contention suites", () => {
-    const dir = makeTempRepo(baseFixture());
-    const report = checkTurboCacheGraph(dir);
+  test("passes a clean fixture while ignoring e2e, integration, and contention suites", async () => {
+    const dir = await makeTempRepo(baseFixture());
+    const report = await checkTurboCacheGraph(dir).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
     expect(report.issues, formatGuardReport(report)).toEqual([]);
   });
 
-  test("catches an uncovered unit test file in a workspace", () => {
+  test("catches an uncovered unit test file in a workspace", async () => {
     const files = baseFixture();
     files["packages/alpha/test/orphan.test.ts"] = "export {};\n";
-    const dir = makeTempRepo(files);
+    const dir = await makeTempRepo(files);
 
-    const result = checkWorkspaceTestCoverage(dir);
+    const result = await checkWorkspaceTestCoverage(dir).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
     expect(result.issues).toEqual([
       {
         scope: "workspace-tests",
@@ -250,7 +274,7 @@ describe("drift detection on synthetic fixtures", () => {
     ]);
   });
 
-  test("catches duplicate test coverage across two tasks in test:suite", () => {
+  test("catches duplicate test coverage across two tasks in test:suite", async () => {
     const files = baseFixture();
     files["packages/alpha/package.json"] = json({
       name: "@fixture/alpha",
@@ -268,9 +292,12 @@ describe("drift detection on synthetic fixtures", () => {
         "test:b": { inputs: ["package.json", "test/sub/**"], outputs: [] },
       },
     });
-    const dir = makeTempRepo(files);
+    const dir = await makeTempRepo(files);
 
-    const result = checkWorkspaceTestCoverage(dir);
+    const result = await checkWorkspaceTestCoverage(dir).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
     expect(result.issues).toContainEqual({
       scope: "workspace-tests",
       message:
@@ -278,7 +305,7 @@ describe("drift detection on synthetic fixtures", () => {
     });
   });
 
-  test("catches a test file executed by package.json but missing from turbo.json inputs", () => {
+  test("catches a test file executed by package.json but missing from turbo.json inputs", async () => {
     const files = baseFixture();
     files["packages/alpha/turbo.json"] = json({
       extends: ["//"],
@@ -288,9 +315,12 @@ describe("drift detection on synthetic fixtures", () => {
         "test:b": { inputs: ["package.json", "src/**", "test/sub/**"], outputs: [] },
       },
     });
-    const dir = makeTempRepo(files);
+    const dir = await makeTempRepo(files);
 
-    const result = checkWorkspaceTestCoverage(dir);
+    const result = await checkWorkspaceTestCoverage(dir).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
     expect(result.issues).toContainEqual({
       scope: "workspace-tests",
       message:
@@ -298,12 +328,15 @@ describe("drift detection on synthetic fixtures", () => {
     });
   });
 
-  test("catches an uncovered unit test under scripts/", () => {
+  test("catches an uncovered unit test under scripts/", async () => {
     const files = baseFixture();
     files["scripts/other/unwired.test.ts"] = "export {};\n";
-    const dir = makeTempRepo(files);
+    const dir = await makeTempRepo(files);
 
-    const result = checkRootScriptTests(dir);
+    const result = await checkRootScriptTests(dir).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
     expect(result.issues).toContainEqual({
       scope: "root-script-tests",
       message:
@@ -311,7 +344,7 @@ describe("drift detection on synthetic fixtures", () => {
     });
   });
 
-  test("catches missing TLC/replay checks, missing wide tasks, stale tasks, and missing digest inputs", () => {
+  test("catches missing TLC/replay checks, missing wide tasks, stale tasks, and missing digest inputs", async () => {
     const files = baseFixture();
     files["formal/manifest.json"] = json({
       schemaVersion: 1,
@@ -342,10 +375,13 @@ describe("drift detection on synthetic fixtures", () => {
         },
       ],
     });
-    const dir = makeTempRepo(files);
+    const dir = await makeTempRepo(files);
 
-    const result = checkFormalManifestCoverage(dir);
-    const messages = result.issues.map((issue) => issue.message);
+    const result = await checkFormalManifestCoverage(dir).pipe(
+      Effect.provide(BunServices.layer),
+      Effect.runPromise,
+    );
+    const messages = Arr.map(result.issues, (issue) => issue.message);
 
     expect(messages).toContain(
       '//#formal:all: active tlc check "new.model" from formal/manifest.json is not wired in turbo.json',
@@ -359,6 +395,6 @@ describe("drift detection on synthetic fixtures", () => {
     expect(messages).toContain(
       '//#formal:digests: required input "packages/untracked/src/file.ts" is not matched by its turbo.json inputs',
     );
-    expect(messages.some((message) => message.includes("blocked.model"))).toBe(false);
+    expect(Arr.some(messages, (message) => Str.includes("blocked.model")(message))).toBe(false);
   });
 });

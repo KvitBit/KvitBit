@@ -1,0 +1,42 @@
+{
+  // Discover Bun tests and the entry points launched by Expo, Vite, Alchemy, Nix, and the formal runner.
+  "includeEntryExports": false,
+  "workspaces": {
+    ".": {
+      "entry": [
+        "lint/**/*.test.ts",
+        "scripts/**/*.test.ts",
+        "scripts/prepare-bun-tarball-cache.ts",
+        "scripts/issue-pool/service.ts",
+        "formal/**/*.replay.test.ts",
+        "formal/**/*.replay-fixture.ts"
+      ]
+    },
+    "apps/mobile": {
+      "expo": { "config": ["app.json"] },
+      "expo-router": { "config": ["app.json"] },
+      "entry": [
+        "app.config.ts",
+        "plugins/with-android-platform-modules.cjs",
+        "plugins/with-android-release-signing.cjs",
+        "app/**/*.{ts,tsx}",
+        "src/**/*.{web,native}.{ts,tsx}",
+        "**/*.test.{ts,tsx}"
+      ]
+    },
+    "apps/server": {
+      "entry": ["src/{main,migrate,worker}.ts", "test/**/*.{test,integration}.ts"]
+    },
+    "apps/web": {
+      "entry": ["test/**/*.test.ts", "e2e/**/*.spec.ts", "e2e/render.ts"],
+      "playwright": { "config": ["e2e/playwright.config.ts"] }
+    },
+    "infra/alchemy": {
+      "entry": ["alchemy.run.ts", "src/mail-forwarder/server.ts", "test/**/*.test.ts"]
+    },
+    "packages/ui-port": { "entry": ["test/**/*.test.ts", "test/theme/generate-default-theme.ts"] },
+    "packages/*": {
+      "entry": ["test/**/*.test.ts"]
+    }
+  }
+}

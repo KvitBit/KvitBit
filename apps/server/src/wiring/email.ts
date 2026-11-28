@@ -1,3 +1,6 @@
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 /**
  * Live `EmailSender` port wiring under the typed-mode contract:
  * - `production`: real transport (`resend`, `smtp`, or `resend+smtp`) + explicit `EMAIL_FROM`
@@ -8,6 +11,7 @@
  *   `KVITBIT_EMAIL_MODE=capture` or `KVITBIT_EMAIL_MODE=console` is explicitly declared.
  * - `development` / `test`: zero-config local DX (`console`/`capture`).
  */
+
 import {
   CONSOLE_PROVIDER,
   layerSmtp,
@@ -18,8 +22,14 @@ import {
   type SmtpTransportOptions,
 } from "@kvitbit/adapters/email";
 import { EmailRejected, EmailSender } from "@kvitbit/domain/ports";
-import { type Config, Context, Effect, Layer, Option, Redacted } from "effect";
-import { FetchHttpClient } from "effect/http";
+import type * as Config from "effect/Config";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Redacted from "effect/Redacted";
 import {
   type KvitbitEnv,
   liftValidation,
@@ -38,38 +48,42 @@ const emailKinds: Readonly<Record<string, string>> = {
 };
 
 const authEmailKind = (template: string | undefined): string | undefined =>
-  template !== undefined && Object.hasOwn(emailKinds, template) ? emailKinds[template] : undefined;
+  template !== undefined && EffectRecord.has(emailKinds, template)
+    ? emailKinds[template]
+    : undefined;
 
 const makeConsoleEmailSender = (): EmailSender["Service"] =>
   EmailSender.of({
-    send: (message, { idempotencyKey }) =>
+    send: Effect.fn("EmailSender.send")((message, { idempotencyKey }) =>
       Effect.logInfo("Email (not sent)").pipe(
         Effect.annotateLogs({
-          emailKind: authEmailKind(message.tags.template) ?? "other",
+          emailKind: authEmailKind(message.tags["template"]) ?? "other",
         }),
         Effect.as({ provider: CONSOLE_PROVIDER, providerMessageId: idempotencyKey }),
       ),
+    ),
   });
 
-const logDeliveryFailures = (sender: EmailSender["Service"]): EmailSender["Service"] =>
-  EmailSender.of({
-    send: (message, options) =>
-      sender.send(message, options).pipe(
-        Effect.tapError((error) => {
-          const emailKind = authEmailKind(message.tags.template);
-          if (emailKind === undefined) return Effect.void;
-          return Effect.logError(
-            error instanceof EmailRejected ? "Email delivery rejected" : "Email delivery failed",
-          ).pipe(
-            Effect.annotateLogs({
-              event: error._tag,
-              emailKind,
-              reason: "Email provider failed to deliver",
-            }),
-          );
-        }),
-      ),
-  });
+const logDeliveryFailures = (sender: EmailSender["Service"]): EmailSender["Service"] => {
+  const send: EmailSender["Service"]["send"] = Effect.fn("EmailSender.send")((message, options) =>
+    sender.send(message, options).pipe(
+      Effect.tapError((error) => {
+        const emailKind = authEmailKind(message.tags["template"]);
+        if (emailKind === undefined) return Effect.void;
+        return Effect.logError(
+          Schema.is(EmailRejected)(error) ? "Email delivery rejected" : "Email delivery failed",
+        ).pipe(
+          Effect.annotateLogs({
+            event: error._tag,
+            emailKind,
+            reason: "Email provider failed to deliver",
+          }),
+        );
+      }),
+    ),
+  );
+  return EmailSender.of({ send });
+};
 
 /** Parses `smtp://` or `smtps://` URL into nodemailer transport options. */
 export const parseSmtpUrl = (
@@ -88,13 +102,14 @@ export const parseSmtpUrl = (
           pass: decodeURIComponent(url.password),
         }
       : undefined;
+  const authFields = auth !== undefined ? { auth } : {};
   return {
     transport: {
       ...SMTP_DEFAULT_TIMEOUTS,
       host: url.hostname,
       port,
       secure,
-      ...(auth !== undefined ? { auth } : {}),
+      ...authFields,
     },
     domain: url.hostname || "kvitbit.local",
   };
@@ -111,7 +126,7 @@ const acquireSmtpSender = (rawUrl: string, from: string) => {
  * Builds an `EmailSender` layer from explicit config and environment (used by live wiring and
  * tests). Fails fast with `Config.ConfigError` whenever the typed-mode contract is violated.
  */
-export const makeEmailSenderLayer = (
+const makeEmailSenderLayerImpl = (
   config: EmailWiringConfig,
   envOrNodeEnv: KvitbitEnv | string = "development",
 ): Layer.Layer<EmailSender, Config.ConfigError> =>
@@ -138,26 +153,33 @@ export const makeEmailSenderLayer = (
           return makeConsoleEmailSender();
         case "capture":
           return yield* makeCaptureEmailSender;
-        case "resend":
-          return wrap(
-            yield* makeResendEmailSender({
-              apiKey: Redacted.make(resolved.resendApiKey ?? ""),
-              from: resolved.from,
-            }),
-          );
-        case "smtp":
-          return wrap(yield* acquireSmtpSender(resolved.smtpUrl ?? "", resolved.from));
+        case "resend": {
+          const resend = yield* makeResendEmailSender({
+            apiKey: Redacted.make(resolved.resendApiKey ?? ""),
+            from: resolved.from,
+          });
+          return wrap(resend);
+        }
+        case "smtp": {
+          const smtp = yield* acquireSmtpSender(resolved.smtpUrl ?? "", resolved.from);
+          return wrap(smtp);
+        }
         case "resend+smtp": {
           const resend = yield* makeResendEmailSender({
             apiKey: Redacted.make(resolved.resendApiKey ?? ""),
             from: resolved.from,
           });
           const smtp = yield* acquireSmtpSender(resolved.smtpUrl ?? "", resolved.from);
-          return wrap(makeFallbackEmailSender(resend, smtp));
+          return wrap(makeFallbackEmailSender({ primary: resend, secondary: smtp }));
         }
       }
     }),
   ).pipe(Layer.provide(FetchHttpClient.layer));
+
+export const makeEmailSenderLayer: {
+  (env?: string): (config: EmailWiringConfig) => ReturnType<typeof makeEmailSenderLayerImpl>;
+  (config: EmailWiringConfig, env?: string): ReturnType<typeof makeEmailSenderLayerImpl>;
+} = Fn.dual((args) => Predicate.isObject(args[0]), makeEmailSenderLayerImpl);
 
 /** Live `EmailSender` configured from `KVITBIT_ENV`/`NODE_ENV`, `KVITBIT_EMAIL_MODE`, `EMAIL_FROM`, `RESEND_API_KEY`, `KVITBIT_SMTP_URL`. */
 export const EmailSenderLive: Layer.Layer<EmailSender, Config.ConfigError> = Layer.unwrap(

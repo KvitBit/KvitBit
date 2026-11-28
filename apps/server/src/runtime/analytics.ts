@@ -1,12 +1,17 @@
-import { randomUUID } from "node:crypto";
 import { AccessMode, ExportFormat } from "@kvitbit/api-contract";
 import { DocumentKind, ReportKind, Role, UserId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Schema } from "effect";
+import * as Context from "effect/Context";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import { type EventMessage, PostHog } from "posthog-node";
 import { PostHogConfig, type PostHogSettings } from "../config";
 
 export type SignUpMethod = "email" | "invitation";
-export type SaveMode = "created" | "updated";
+type SaveMode = "created" | "updated";
 
 type AnalyticsEvent =
   | { readonly event: "share_link_opened" }
@@ -64,9 +69,11 @@ type AnalyticsEvent =
 export class Analytics extends Context.Service<
   Analytics,
   { readonly capture: (event: AnalyticsEvent) => Effect.Effect<void> }
->()("kvitbit/server/Analytics") {}
+>()("@kvitbit/server/runtime/analytics") {}
 
-export const AnalyticsNoop = Layer.succeed(Analytics, { capture: () => Effect.void });
+export const AnalyticsNoop = Layer.succeed(Analytics, {
+  capture: Effect.fn("Analytics.capture")(() => Effect.void),
+});
 
 const isUserId = Schema.is(UserId);
 const isWorkspaceId = Schema.is(WorkspaceId);
@@ -80,7 +87,11 @@ const isSaveMode = (value: string): value is SaveMode => value === "created" || 
 const toPostHogEvent = (input: AnalyticsEvent): EventMessage | undefined => {
   const event = input.event;
   if (event === "share_link_opened") {
-    return { event, distinctId: randomUUID(), options: { process_person_profile: false } };
+    return {
+      event,
+      distinctId: SecureRandom.uuidV4Unsafe(),
+      options: { process_person_profile: false },
+    };
   }
 
   const distinctId = input.userId;
@@ -170,7 +181,7 @@ const makePostHogClient = ({ apiKey, host }: PostHogSettings): AnalyticsClient =
 
 const warnCapture = Effect.logWarning("PostHog analytics capture failed");
 
-export const makeAnalyticsLayer = (
+const makeAnalyticsLayerImpl = (
   settings: PostHogSettings | null,
   makeClient: (settings: PostHogSettings) => AnalyticsClient = makePostHogClient,
 ): Layer.Layer<Analytics> => {
@@ -181,10 +192,11 @@ export const makeAnalyticsLayer = (
     Effect.gen(function* () {
       const client = yield* Effect.acquireRelease(
         Effect.sync(() => makeClient(settings)),
-        (client) =>
-          Effect.tryPromise(() => client.shutdown(5_000)).pipe(
-            Effect.catch(() => Effect.logWarning("PostHog analytics shutdown failed")),
-          ),
+        (activeClient) =>
+          Effect.tryPromise({
+            try: () => activeClient.shutdown(5_000),
+            catch: () => "PostHogShutdownFailed" as const,
+          }).pipe(Effect.catch(() => Effect.logWarning("PostHog analytics shutdown failed"))),
       );
       yield* Effect.withFiberSucceed((fiber) => {
         const runFork = Effect.runForkWith(fiber.context);
@@ -193,15 +205,29 @@ export const makeAnalyticsLayer = (
         });
       });
       return Analytics.of({
-        capture: (event) =>
-          Effect.try(() => {
-            const message = toPostHogEvent(event);
-            if (message !== undefined) client.capture(message);
+        capture: Effect.fn("Analytics.capture")((event) =>
+          Effect.try({
+            try: () => {
+              const message = toPostHogEvent(event);
+              if (message !== undefined) client.capture(message);
+            },
+            catch: () => "PostHogCaptureFailed" as const,
           }).pipe(Effect.catch(() => warnCapture)),
+        ),
       });
     }),
   );
 };
+
+export const makeAnalyticsLayer: {
+  (
+    makeClient?: (settings: PostHogSettings) => AnalyticsClient,
+  ): (settings: PostHogSettings | null) => Layer.Layer<Analytics>;
+  (
+    settings: PostHogSettings | null,
+    makeClient?: (settings: PostHogSettings) => AnalyticsClient,
+  ): Layer.Layer<Analytics>;
+} = Fn.dual((args) => args[0] === null || Predicate.isObject(args[0]), makeAnalyticsLayerImpl);
 
 export const AnalyticsLive = Layer.unwrap(
   Effect.map(PostHogConfig, (settings) => makeAnalyticsLayer(settings)),

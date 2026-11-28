@@ -2,6 +2,7 @@
  * Documents list screen (`app/w/[ws]/documents/index.tsx`): search, kind/status/settlement/overdue
  * filters, quick create (invoice, proforma, credit note), badges, and tabular currency amounts.
  */
+
 import type {
   DocumentKind,
   DocumentSettlement,
@@ -12,7 +13,10 @@ import { cleanFilters, describeError, filterHash } from "@kvitbit/ui-port/api";
 import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
 import { DocumentListQuery } from "@kvitbit/ui-port/view-models";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { router, useLocalSearchParams } from "expo-router";
 import { FilePlus2, Lock, Plus, Search } from "lucide-react-native";
 import { useMemo, useState } from "react";
@@ -90,7 +94,7 @@ function DocumentsList({
   );
 
   const canWrite = workspace.role !== "accountant";
-  const trimmedSearch = search.trim();
+  const trimmedSearch = Str.trim(search);
 
   const query = useMemo<DocumentListQuery>(
     () =>
@@ -104,8 +108,9 @@ function DocumentsList({
       }),
     [routeFilters, trimmedSearch, kind, status, settlement, overdue],
   );
-  const list = useDocumentPages(workspace.id, query);
-  const hasFilters = Object.keys(query).length > 0;
+  const list = useDocumentPages({ workspaceId: workspace.id, query });
+  const hasFilters =
+    EffectRecord.keys<string, DocumentListQuery[keyof DocumentListQuery]>(query).length > 0;
 
   const clearFilters = () => {
     setSearch("");
@@ -118,34 +123,37 @@ function DocumentsList({
 
   const kindChoices: ReadonlyArray<Choice<FilterValue<DocumentKind>>> = [
     { value: "all", label: t("common.state.all") },
-    { value: "invoice", label: t(enumKey("documentKindPlural", "invoice")) },
-    { value: "proforma", label: t(enumKey("documentKindPlural", "proforma")) },
+    { value: "invoice", label: t(enumKey({ name: "documentKindPlural", value: "invoice" })) },
+    { value: "proforma", label: t(enumKey({ name: "documentKindPlural", value: "proforma" })) },
     {
       value: "payment_tax_document",
-      label: t(enumKey("documentKindPlural", "payment_tax_document")),
+      label: t(enumKey({ name: "documentKindPlural", value: "payment_tax_document" })),
     },
-    { value: "credit_note", label: t(enumKey("documentKindPlural", "credit_note")) },
+    {
+      value: "credit_note",
+      label: t(enumKey({ name: "documentKindPlural", value: "credit_note" })),
+    },
   ];
 
   const statusChoices: ReadonlyArray<Choice<FilterValue<DocumentStatus>>> = [
     { value: "all", label: t("common.state.all") },
-    { value: "draft", label: t(enumKey("documentStatus", "draft")) },
-    { value: "issued", label: t(enumKey("documentStatus", "issued")) },
-    { value: "cancelled", label: t(enumKey("documentStatus", "cancelled")) },
+    { value: "draft", label: t(enumKey({ name: "documentStatus", value: "draft" })) },
+    { value: "issued", label: t(enumKey({ name: "documentStatus", value: "issued" })) },
+    { value: "cancelled", label: t(enumKey({ name: "documentStatus", value: "cancelled" })) },
   ];
 
   const settlementChoices: ReadonlyArray<Choice<FilterValue<DocumentSettlement>>> = [
     { value: "all", label: t("common.state.all") },
-    { value: "unpaid", label: t(enumKey("settlement", "unpaid")) },
-    { value: "partially_paid", label: t(enumKey("settlement", "partially_paid")) },
-    { value: "paid", label: t(enumKey("settlement", "paid")) },
-    { value: "overpaid", label: t(enumKey("settlement", "overpaid")) },
-    { value: "credited", label: t(enumKey("settlement", "credited")) },
+    { value: "unpaid", label: t(enumKey({ name: "settlement", value: "unpaid" })) },
+    { value: "partially_paid", label: t(enumKey({ name: "settlement", value: "partially_paid" })) },
+    { value: "paid", label: t(enumKey({ name: "settlement", value: "paid" })) },
+    { value: "overpaid", label: t(enumKey({ name: "settlement", value: "overpaid" })) },
+    { value: "credited", label: t(enumKey({ name: "settlement", value: "credited" })) },
   ];
 
   const openNew = (newKind: "invoice" | "proforma" | "credit_note") => {
     if (newKind === "credit_note") {
-      router.push(`/w/${workspace.slug}/documents/new/credit_note` as never);
+      router.push(`/w/${workspace.slug}/documents/new/credit_note`);
       return;
     }
     navigate({ _tag: "DocumentNew", ws: workspace.slug, kind: newKind });
@@ -267,12 +275,12 @@ function DocumentsList({
           return (
             <View className="gap-3">
               <Card className="px-2 py-1">
-                {items.map((doc) => {
+                {Arr.map(items, (doc) => {
                   const statusB = documentStatusBadge(doc.status, t);
                   const settleB = settlementBadge(doc.settlement, doc.overdue, t);
                   const kindB = kindBadge(doc.kind, t);
                   const numberLabel = doc.number ?? t("documents.list.draftNumber");
-                  const datePart = `${formatDate(locale, doc.issuedOn)} · ${t("documents.list.column.due")} ${formatDate(locale, doc.dueOn)}`;
+                  const datePart = `${formatDate({ locale, date: doc.issuedOn })} · ${t("documents.list.column.due")} ${formatDate({ locale, date: doc.dueOn })}`;
                   return (
                     <ListRow
                       key={doc.id}

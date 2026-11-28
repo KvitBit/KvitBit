@@ -20,7 +20,7 @@
   },
   "scripts": {
     "lint": "biome check --error-on-warnings .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "test:suite": ":",
     "test:altcha": "bun test test/altcha",
@@ -41,6 +41,7 @@
     "@better-auth/cimd": "1.7.27",
     "@better-auth/oauth-provider": "1.7.27",
     "@better-auth/passkey": "1.7.27",
+    "@effect/platform-bun": "4.1.4",
     "@effect/sql-pglite": "4.1.4",
     "@electric-sql/pglite": "0.6.0",
     "@kvitbit/api-contract": "workspace:*",

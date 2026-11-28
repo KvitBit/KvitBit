@@ -1,6 +1,6 @@
 import { UiSchema } from "@effect/ui";
 import { ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { Intent, PendingNavigation } from "./intent";
 import { Prefs } from "./prefs";
 import { SessionState } from "./session";

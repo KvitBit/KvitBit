@@ -1,4 +1,6 @@
 /** Seeded generator for property tests (fast-check is not a dependency). mulberry32. */
+import * as EffectArray from "effect/Array";
+import * as EffectString from "effect/String";
 export const rng = (seed: number) => {
   let a = seed >>> 0;
   const next = () => {
@@ -9,13 +11,16 @@ export const rng = (seed: number) => {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
   const int = (min: number, max: number) => min + Math.floor(next() * (max - min + 1));
-  const pick = <A>(items: ReadonlyArray<A>): A => items[int(0, items.length - 1)] as A;
+  const pick = <A>(items: ReadonlyArray<A>): A =>
+    EffectArray.getUnsafe(items, int(0, items.length - 1));
   /** A decimal string with up to `scale` decimals in [-max, max] (or [0, max]). */
   const decimal = (max: number, scale: number, signed = true): string => {
     const units = int(0, max * 10 ** scale);
     const sign = signed && next() < 0.3 ? "-" : "";
-    const s = String(units).padStart(scale + 1, "0");
-    return scale === 0 ? `${sign}${s}` : `${sign}${s.slice(0, -scale)}.${s.slice(-scale)}`;
+    const s = EffectString.padStart(scale + 1, "0")(String(units));
+    return scale === 0
+      ? `${sign}${s}`
+      : `${sign}${EffectString.slice(0, -scale)(s)}.${EffectString.slice(-scale)(s)}`;
   };
   return { next, int, pick, decimal };
 };

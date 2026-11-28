@@ -3,6 +3,6 @@
  */
 import { AresV3 } from "@kvitbit/adapters/registry";
 import type { CompanyRegistry } from "@kvitbit/domain/ports";
-import type { Layer } from "effect";
+import type * as Layer from "effect/Layer";
 
 export const CompanyRegistryLive: Layer.Layer<CompanyRegistry> = AresV3.layer;

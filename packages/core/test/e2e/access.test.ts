@@ -1,47 +1,55 @@
+import { TestCaller } from "../helpers/callerContext";
 /**
  * Cross-module access and request-safety scenarios on TestCore (all modules on real layers).
  * (h) workspace isolation and API-key scopes; (i) stale revision and requestKey replay.
  */
+
 import { describe, expect, test } from "bun:test";
-import type {
-  Caller,
-  ContactId,
-  DocumentId,
-  ExpenseId,
-  IsoDate,
-  MemberCaller,
-  RequestKey,
-  TemplateId,
-  UserId,
-} from "@kvitbit/domain/contract";
+import type { Caller, ContactView, DocumentInput, MemberCaller } from "@kvitbit/domain/contract";
 import {
+  ContactId,
   Contacts,
+  DocumentId,
   Documents,
+  ExpenseId,
   Expenses,
+  IsoDate,
   Payments,
   PublicShareLinks,
   Reports,
+  RequestKey,
+  TemplateId,
   Templates,
+  UserId,
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Effect, Exit } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Formatter from "effect/Formatter";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import { makeRequestOutcome } from "../../src/shared/requestOutcome";
 import { account, asCaller, runCore } from "../helpers";
 import { dec } from "../modules/documents/fixtures";
 import { templateInput } from "../modules/recurring/fixtures";
 
-const USER_B = "01900000-0000-7000-8000-00000000c002" as UserId;
-const NOV = { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate };
+const USER_B = UserId.make("01900000-0000-7000-8000-00000000c002");
+const NOV = { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") };
 
-const idOf = (view: unknown): string => (view as { readonly id: string }).id;
-const contactIdOf = (view: unknown) => idOf(view) as ContactId;
-const ids = (views: ReadonlyArray<unknown>) => views.map(idOf);
+const decodeId = Schema.decodeUnknownResult(Schema.Struct({ id: Schema.String }));
+const idOf = <A>(view: A): string => Result.getOrThrow(decodeId(view)).id;
+const contactIdOf = (view: ContactView) => ContactId.make(idOf(view));
+const ids = <A>(views: ReadonlyArray<A>) => EffectArray.map(views, idOf);
 
 /** The failure's tag and conflict reason, or "ok" when `effect` succeeds. */
-const outcome = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
+const outcome = <A, E extends { readonly _tag: string; readonly reason?: string }, R>(
+  effect: Effect.Effect<A, E, R>,
+) =>
   Effect.match(effect, {
-    onFailure: (e) => ({ _tag: e._tag, reason: (e as { readonly reason?: string }).reason }),
+    onFailure: (e) => ({ _tag: e._tag, reason: e.reason }),
     onSuccess: () => ({ _tag: "ok", reason: undefined }),
   });
 
@@ -49,68 +57,86 @@ const outcome = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effec
 const openWorkspace = (name: string, userId?: UserId) =>
   asCaller(
     account(userId === undefined ? {} : { userId, email: `${name}@example.cz` }),
-    Effect.flatMap(Workspaces, (ws) => ws.create({ name } as never)),
+    Effect.flatMap(Workspaces, (ws) =>
+      ws.create(account(userId === undefined ? {} : { userId, email: `${name}@example.cz` }), {
+        name,
+      }),
+    ),
   );
 
-const contactInput = (name: string) => ({ name, billingEmails: ["fakturace@acme.cz"] }) as never;
+const contactInput = (name: string) => ({ name, billingEmails: ["fakturace@acme.cz"] });
 
-const invoiceInput = (contact: ContactId) =>
-  ({
-    kind: "invoice",
-    contact,
-    lines: [{ description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") }],
-    issuedOn: "2026-11-23",
-  }) as never;
+const invoiceInput = (contact: ContactId): DocumentInput => ({
+  kind: "invoice",
+  contact,
+  lines: [{ description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") }],
+  issuedOn: IsoDate.make("2026-11-23"),
+});
 
-const expenseInput = (contact: ContactId) =>
-  ({
-    supplier: { contact },
-    supplierDocumentNumber: "FV-2026-001",
-    issuedOn: "2026-11-20",
-    taxableSupplyOn: "2026-11-19",
-    dueOn: "2026-12-04",
-    currency: "CZK",
-    total: "121.00",
-    vat: [{ treatment: "standard", base: "100.00", vat: "21.00" }],
-    category: "software",
-  }) as never;
+const expenseInput = (contact: ContactId) => ({
+  supplier: { contact },
+  supplierDocumentNumber: "FV-2026-001",
+  issuedOn: "2026-11-20",
+  taxableSupplyOn: "2026-11-19",
+  dueOn: "2026-12-04",
+  currency: "CZK",
+  total: "121.00",
+  vat: [{ treatment: "standard", base: "100.00", vat: "21.00" }],
+  category: "software",
+});
 
 /** Workspace B with one row in every module: contact, issued invoice + payment, expense, template. */
 const seedWorkspaceB = (ownerB: Caller) =>
   asCaller(
     ownerB,
     Effect.gen(function* () {
-      const contact = yield* Effect.flatMap(Contacts, (c) => c.save(contactInput("Beta s.r.o.")));
-      const doc = yield* Effect.flatMap(Documents, (d) =>
-        d.issue({ input: invoiceInput(contactIdOf(contact)) }),
+      const contact = yield* Effect.flatMap(Contacts, (c) =>
+        c.save(ownerB, contactInput("Beta s.r.o.")),
       );
-      yield* Effect.flatMap(Payments, (p) => p.record({ target: { document: doc.id } }));
+      const doc = yield* Effect.flatMap(Documents, (d) =>
+        d.issue(ownerB, { input: invoiceInput(contactIdOf(contact)) }),
+      );
+      yield* Effect.flatMap(Payments, (p) => p.record(ownerB, { target: { document: doc.id } }));
       const expense = yield* Effect.flatMap(Expenses, (e) =>
-        e.record(expenseInput(contactIdOf(contact))),
+        e.record(ownerB, expenseInput(contactIdOf(contact))),
       );
       const template = yield* Effect.flatMap(Templates, (t) =>
-        t.save(templateInput({ contact: contactIdOf(contact) })),
+        t.save(ownerB, templateInput({ contact: contactIdOf(contact) })),
       );
       return {
         contact: contactIdOf(contact),
         document: doc.id,
-        expense: idOf(expense) as ExpenseId,
-        template: idOf(template) as TemplateId,
+        expense: ExpenseId.make(idOf(expense)),
+        template: TemplateId.make(idOf(template)),
       };
     }),
   );
 
 /** What a caller of workspace A sees of every module's lists. */
 const listEverything = Effect.gen(function* () {
+  const contacts = yield* Effect.flatMap(Contacts, (c) =>
+    Effect.flatMap(TestCaller, (caller) => c.search(caller, {})),
+  );
+  const documents = yield* Effect.flatMap(Documents, (d) =>
+    Effect.flatMap(TestCaller, (caller) => d.list(caller, {})),
+  );
+  const expenses = yield* Effect.flatMap(Expenses, (e) =>
+    Effect.flatMap(TestCaller, (caller) => e.list(caller, {})),
+  );
+  const templates = yield* Effect.flatMap(Templates, (t) =>
+    Effect.flatMap(TestCaller, (caller) => t.list(caller)),
+  );
   return {
-    contacts: ids((yield* Effect.flatMap(Contacts, (c) => c.search({}))).items),
-    documents: ids((yield* Effect.flatMap(Documents, (d) => d.list({}))).items),
-    expenses: ids((yield* Effect.flatMap(Expenses, (e) => e.list({}))).items),
-    templates: ids(yield* Effect.flatMap(Templates, (t) => t.list)),
+    contacts: ids(contacts.items),
+    documents: ids(documents.items),
+    expenses: ids(expenses.items),
+    templates: ids(templates),
   };
 });
 
-const revenue = Effect.flatMap(Reports, (r) => r.run({ report: "revenue", period: NOV }));
+const revenue = Effect.flatMap(Reports, (r) =>
+  Effect.flatMap(TestCaller, (caller) => r.run(caller, { report: "revenue", period: NOV })),
+);
 
 describe("(h) workspace isolation", () => {
   test("a member of A gets NotFound for B's records in every module and lists never include B's rows", async () => {
@@ -125,9 +151,11 @@ describe("(h) workspace isolation", () => {
         const ownA = yield* asCaller(
           ownerA,
           Effect.gen(function* () {
-            const contact = yield* Effect.flatMap(Contacts, (c) => c.save(contactInput("Alfa")));
+            const contact = yield* Effect.flatMap(Contacts, (c) =>
+              c.save(ownerA, contactInput("Alfa")),
+            );
             const draft = yield* Effect.flatMap(Documents, (d) =>
-              d.createDraft(invoiceInput(contactIdOf(contact))),
+              d.createDraft(ownerA, invoiceInput(contactIdOf(contact))),
             );
             return { contact: contactIdOf(contact), document: draft.id };
           }),
@@ -140,29 +168,33 @@ describe("(h) workspace isolation", () => {
             const payments = yield* Payments;
             const expenses = yield* Expenses;
             const templates = yield* Templates;
+            const reads = {
+              contact: yield* outcome(contacts.get(ownerA, b.contact)),
+              document: yield* outcome(docs.get(ownerA, b.document)),
+              documentHistory: yield* outcome(docs.history(ownerA, b.document)),
+              payments: yield* outcome(payments.listFor(ownerA, { document: b.document })),
+              expense: yield* outcome(expenses.get(ownerA, b.expense)),
+              template: yield* outcome(templates.get(ownerA, b.template)),
+            };
+            const writes = {
+              contactSave: yield* outcome(
+                contacts.save(ownerA, {
+                  ...contactInput("Hijack"),
+                  id: b.contact,
+                  expectedRevision: 1,
+                }),
+              ),
+              paymentRecord: yield* outcome(
+                payments.record(ownerA, { target: { document: b.document } }),
+              ),
+            };
+            const lists = yield* listEverything;
+            const reportAfter = yield* revenue;
             return {
-              reads: {
-                contact: yield* outcome(contacts.get(b.contact)),
-                document: yield* outcome(docs.get(b.document)),
-                documentHistory: yield* outcome(docs.history(b.document)),
-                payments: yield* outcome(payments.listFor({ document: b.document })),
-                expense: yield* outcome(expenses.get(b.expense)),
-                template: yield* outcome(templates.get(b.template)),
-              },
-              writes: {
-                contactSave: yield* outcome(
-                  contacts.save({
-                    ...(contactInput("Hijack") as object),
-                    id: b.contact,
-                    expectedRevision: 1,
-                  } as never),
-                ),
-                paymentRecord: yield* outcome(
-                  payments.record({ target: { document: b.document } }),
-                ),
-              },
-              lists: yield* listEverything,
-              reportUnchanged: JSON.stringify(yield* revenue) === JSON.stringify(reportBefore),
+              reads,
+              writes,
+              lists,
+              reportUnchanged: Formatter.format(reportAfter) === Formatter.format(reportBefore),
               ownA,
             };
           }),
@@ -199,12 +231,14 @@ describe("(h) workspace isolation", () => {
         const seeded = yield* asCaller(
           owner,
           Effect.gen(function* () {
-            const contact = yield* Effect.flatMap(Contacts, (c) => c.save(contactInput("Acme")));
+            const contact = yield* Effect.flatMap(Contacts, (c) =>
+              c.save(owner, contactInput("Acme")),
+            );
             const doc = yield* Effect.flatMap(Documents, (d) =>
-              d.issue({ input: invoiceInput(contactIdOf(contact)) }),
+              d.issue(owner, { input: invoiceInput(contactIdOf(contact)) }),
             );
             // An active bearer share link: only share.read may see its URL (get_share_link).
-            const { url } = yield* Effect.flatMap(PublicShareLinks, (s) => s.create(doc.id));
+            const { url } = yield* Effect.flatMap(PublicShareLinks, (s) => s.create(owner, doc.id));
             return { contact, doc, url };
           }),
         );
@@ -218,36 +252,36 @@ describe("(h) workspace isolation", () => {
           apiKey,
           Effect.gen(function* () {
             const docs = yield* Documents;
-            const got = yield* docs.get(seeded.doc.id);
-            const listed = ids((yield* docs.list({})).items);
+            const got = yield* docs.get(apiKey, seeded.doc.id);
+            const listed = ids((yield* docs.list(apiKey, {})).items);
             return {
               read: { get: got.id, list: listed },
               share: got.share,
               writes: {
                 createDraft: yield* outcome(
-                  docs.createDraft(invoiceInput(contactIdOf(seeded.contact))),
+                  docs.createDraft(apiKey, invoiceInput(contactIdOf(seeded.contact))),
                 ),
                 issue: yield* outcome(
-                  docs.issue({ input: invoiceInput(contactIdOf(seeded.contact)) }),
+                  docs.issue(apiKey, { input: invoiceInput(contactIdOf(seeded.contact)) }),
                 ),
-                lock: yield* outcome(docs.lock(seeded.doc.id)),
+                lock: yield* outcome(docs.lock(apiKey, seeded.doc.id)),
                 contactSave: yield* outcome(
-                  Effect.flatMap(Contacts, (c) => c.save(contactInput("Nope"))),
+                  Effect.flatMap(Contacts, (c) => c.save(apiKey, contactInput("Nope"))),
                 ),
                 paymentRecord: yield* outcome(
                   Effect.flatMap(Payments, (p) =>
-                    p.record({ target: { document: seeded.doc.id } }),
+                    p.record(apiKey, { target: { document: seeded.doc.id } }),
                   ),
                 ),
                 expenseRecord: yield* outcome(
                   Effect.flatMap(Expenses, (e) =>
-                    e.record(expenseInput(contactIdOf(seeded.contact))),
+                    e.record(apiKey, expenseInput(contactIdOf(seeded.contact))),
                   ),
                 ),
               },
               // Read scopes are per area: documents:read does not open contacts.
               contactGet: yield* outcome(
-                Effect.flatMap(Contacts, (c) => c.get(contactIdOf(seeded.contact))),
+                Effect.flatMap(Contacts, (c) => c.get(apiKey, contactIdOf(seeded.contact))),
               ),
             };
           }),
@@ -257,11 +291,11 @@ describe("(h) workspace isolation", () => {
         const shareRead = {
           key: (yield* asCaller(
             shareKey,
-            Effect.flatMap(Documents, (d) => d.get(seeded.doc.id)),
+            Effect.flatMap(Documents, (d) => d.get(shareKey, seeded.doc.id)),
           )).share?.url,
           owner: (yield* asCaller(
             owner,
-            Effect.flatMap(Documents, (d) => d.get(seeded.doc.id)),
+            Effect.flatMap(Documents, (d) => d.get(owner, seeded.doc.id)),
           )).share?.url,
         };
         // No write landed: the owner still sees one document, unpaid, and one contact.
@@ -269,12 +303,12 @@ describe("(h) workspace isolation", () => {
           owner,
           Effect.gen(function* () {
             return {
-              documents: ids((yield* Effect.flatMap(Documents, (d) => d.list({}))).items),
+              documents: ids((yield* Effect.flatMap(Documents, (d) => d.list(owner, {}))).items),
               payments: (yield* Effect.flatMap(Payments, (p) =>
-                p.listFor({ document: seeded.doc.id }),
+                p.listFor(owner, { document: seeded.doc.id }),
               )).length,
-              contacts: ids((yield* Effect.flatMap(Contacts, (c) => c.search({}))).items),
-              expenses: (yield* Effect.flatMap(Expenses, (e) => e.list({}))).items.length,
+              contacts: ids((yield* Effect.flatMap(Contacts, (c) => c.search(owner, {}))).items),
+              expenses: (yield* Effect.flatMap(Expenses, (e) => e.list(owner, {}))).items.length,
             };
           }),
         );
@@ -292,7 +326,7 @@ describe("(h) workspace isolation", () => {
     expect(result.read).toEqual({ get: seeded.doc, list: [seeded.doc] });
     expect(result.share).toBeNull();
     expect(shareRead).toEqual({ key: seeded.url, owner: seeded.url });
-    for (const [name, o] of Object.entries(result.writes)) {
+    for (const [name, o] of EffectRecord.toEntries(result.writes)) {
       expect({ name, tag: o._tag }).toEqual({ name, tag: "Forbidden" });
     }
     expect(result.contactGet._tag).toBe("Forbidden");
@@ -315,7 +349,7 @@ const withOutcome = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 
 describe("(i) stale revision and requestKey on Documents.issue from a draft", () => {
   test("stale expectedRevision is revision_changed with no state change; same requestKey replays; another payload is idempotency_mismatch", async () => {
-    const key = "issue-draft-1" as RequestKey;
+    const key = RequestKey.make("issue-draft-1");
     const exit = await runCore(
       account(),
       Effect.gen(function* () {
@@ -324,33 +358,42 @@ describe("(i) stale revision and requestKey on Documents.issue from a draft", ()
           owner,
           Effect.gen(function* () {
             const docs = yield* Documents;
-            const contact = yield* Effect.flatMap(Contacts, (c) => c.save(contactInput("Acme")));
-            const draft = yield* docs.createDraft(invoiceInput(contactIdOf(contact)));
-            const edited = yield* docs.edit(draft.id, { note: "Edited" } as never, draft.revision);
+            const contact = yield* Effect.flatMap(Contacts, (c) =>
+              c.save(owner, contactInput("Acme")),
+            );
+            const draft = yield* docs.createDraft(owner, invoiceInput(contactIdOf(contact)));
+            const edited = yield* docs.edit(owner, draft.id, { note: "Edited" }, draft.revision);
             const staleRevision = draft.revision;
 
             const stale = yield* outcome(
-              docs.issue({ draft: draft.id, expectedRevision: staleRevision }, { requestKey: key }),
+              docs.issue(
+                owner,
+                { draft: draft.id, expectedRevision: staleRevision },
+                { requestKey: key },
+              ),
             );
-            const afterStale = yield* docs.get(draft.id);
+            const afterStale = yield* docs.get(owner, draft.id);
 
             const payload = { draft: draft.id, expectedRevision: edited.revision };
-            const first = yield* withOutcome(docs.issue(payload, { requestKey: key }));
-            const replay = yield* withOutcome(docs.issue(payload, { requestKey: key }));
+            const first = yield* withOutcome(docs.issue(owner, payload, { requestKey: key }));
+            const replay = yield* withOutcome(docs.issue(owner, payload, { requestKey: key }));
 
-            const other = yield* docs.createDraft(invoiceInput(contactIdOf(contact)));
+            const other = yield* docs.createDraft(owner, invoiceInput(contactIdOf(contact)));
             const mismatch = yield* outcome(
               docs.issue(
+                owner,
                 { draft: other.id, expectedRevision: other.revision },
                 { requestKey: key },
               ),
             );
-            const otherAfter = yield* docs.get(other.id);
+            const otherAfter = yield* docs.get(owner, other.id);
 
-            const issueAudits = (yield* docs.history(draft.id)).filter(
-              (e) => (e as { readonly action: string }).action === "document.issue",
+            const history = yield* docs.history(owner, draft.id);
+            const issueAudits = EffectArray.filter(
+              history,
+              (entry) => entry.action === "document.issue",
             ).length;
-            const issuedCount = (yield* docs.list({ status: "issued" } as never)).items.length;
+            const issuedCount = (yield* docs.list(owner, { status: "issued" })).items.length;
             return {
               stale,
               afterStale: {
@@ -376,7 +419,7 @@ describe("(i) stale revision and requestKey on Documents.issue from a draft", ()
               otherAfter: { status: otherAfter.status, number: otherAfter.number },
               issueAudits,
               issuedCount,
-              draftId: draft.id as DocumentId,
+              draftId: DocumentId.make(draft.id),
             };
           }),
         );

@@ -1,9 +1,10 @@
+import * as Arr from "effect/Array";
 import { escapeXmlText } from "./svg";
 import { brandColors } from "./tokens";
 
 /** N2 Dual-Bit Notch mark grid: 256×256 with 32 units of built-in padding. */
 export const MARK_VIEW_BOX = "0 0 256 256" as const;
-export const MARK_GRID_SIZE = 256 as const;
+export const MARK_GRID_SIZE = 256;
 
 export type MarkMaster = "light" | "dark";
 
@@ -76,7 +77,7 @@ export const markSvg = (options: MarkSvgOptions): string => {
   const allowed: readonly string[] = markFills[options.master];
   if (!allowed.includes(fill)) {
     throw new TypeError(
-      `Invalid fill "${fill}" for the ${options.master} master: expected one of ${allowed.join(", ")}`,
+      `Invalid fill "${fill}" for the ${options.master} master: expected one of ${Arr.join(allowed, ", ")}`,
     );
   }
   const size = options.size ?? MARK_GRID_SIZE;
@@ -84,11 +85,11 @@ export const markSvg = (options: MarkSvgOptions): string => {
     throw new RangeError(`Invalid mark size ${size}: expected a positive number`);
   }
   const title = escapeXmlText(options.title ?? "Kvitbit");
-  const paths = markMasters[options.master].paths.map((d) => `    <path d="${d}"/>`).join("\n");
+  const paths = Arr.map(markMasters[options.master].paths, (d) => `    <path d="${d}"/>`);
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${MARK_VIEW_BOX}" width="${size}" height="${size}" role="img" aria-labelledby="title">
   <title id="title">${title}</title>
   <g fill="${fill}">
-${paths}
+${Arr.join(paths, "\n")}
   </g>
 </svg>
 `;

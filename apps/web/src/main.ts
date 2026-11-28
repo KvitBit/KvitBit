@@ -1,6 +1,13 @@
 import { Command, type Component, Head, Router, Subscription } from "@effect/ui";
 import { Html, HtmlHead } from "@effect/ui/html";
-import { Array as Arr, Effect, Layer, Option, Schema, Stream } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { createPageviewTracker } from "./app/analytics";
 import { authFetch, StartupConfig } from "./app/api";
 import { apiCommand, browserCommand, type RunApi } from "./app/commands";
@@ -15,6 +22,8 @@ import { browserDates } from "./app/utc-date";
 import { feedbackSubscription } from "./runtime/feedback-subscription";
 import { matchesShortcut } from "./ui/sdk";
 
+const macIphoneIpadPattern = /Mac|iPhone|iPad|iPod/i;
+
 export { Flags, Message, Model } from "./app/root";
 
 export const browserAnalytics = (origin: string) =>
@@ -22,14 +31,15 @@ export const browserAnalytics = (origin: string) =>
     Effect.gen(function* () {
       const router = yield* Router.Router;
       const config = yield* StartupConfig;
-      const track = createPageviewTracker(origin, async () => {
-        const value = await Effect.runPromise(config);
-        return value.analytics;
+      const track = createPageviewTracker({
+        origin,
+        loadConfig: config.pipe(
+          Effect.map((value) => value.analytics),
+          Effect.orElseSucceed(() => undefined),
+        ),
       });
-      track(router.location().url);
-      yield* Stream.runForEach(router.changes, ({ url }) => Effect.sync(() => track(url))).pipe(
-        Effect.forkScoped,
-      );
+      yield* track(router.location().url);
+      yield* Stream.runForEach(router.changes, ({ url }) => track(url)).pipe(Effect.forkScoped);
     }),
   );
 
@@ -42,14 +52,17 @@ export class Navigate extends Command.Service<Navigate>()("@kvitbit/web/Navigate
       const router = yield* Router.Router;
       return ({ path, replace }) => {
         const origin = "https://kvitbit.invalid";
-        try {
-          const url = new URL(path, origin);
-          return path.startsWith("/") && url.origin === origin
-            ? router.navigate(url.pathname + url.search + url.hash, { replace })
-            : Effect.succeed("blocked" as const);
-        } catch {
-          return Effect.succeed("blocked" as const);
-        }
+        return Effect.try({
+          try: () => new URL(path, origin),
+          catch: () => "invalid-navigation-url" as const,
+        }).pipe(
+          Effect.flatMap((url) =>
+            Str.startsWith("/")(path) && url.origin === origin
+              ? router.navigate(url.pathname + url.search + url.hash, { replace })
+              : Effect.succeed("blocked" as const),
+          ),
+          Effect.orElseSucceed(() => "blocked" as const),
+        );
       };
     }),
   );
@@ -66,11 +79,12 @@ interface UpdateReturn {
 
 const loadSession = (seq: number) =>
   apiCommand(
+    Message,
     "LoadSession",
     Effect.map(fetchSession, (state) => Message.LoadedSession({ state, seq })),
   );
 
-export const contextOf = (model: Model): PageContext => ({
+const contextOf = (model: Model): PageContext => ({
   route: model.route,
   path: model.path,
   today: model.today,
@@ -213,7 +227,7 @@ export const init = (flags: Flags): UpdateReturn => {
     : initial;
 };
 
-export const update = (model: Model, message: Message): UpdateReturn => {
+const updateImpl = (model: Model, message: Message): UpdateReturn => {
   switch (message._tag) {
     case "ChangedUrl":
       return message.path === model.path
@@ -247,7 +261,8 @@ export const update = (model: Model, message: Message): UpdateReturn => {
       return {
         model,
         commands: [
-          browserCommand(
+          apiCommand(
+            Message,
             "SignOut",
             authFetch(
               "/sign-out",
@@ -261,18 +276,22 @@ export const update = (model: Model, message: Message): UpdateReturn => {
     case "CompletedSignOut":
       return signedOut(model);
     case "DismissedToast":
-      return { model: { ...model, toasts: model.toasts.filter((t) => t.id !== message.id) } };
+      return { model: { ...model, toasts: Arr.filter(model.toasts, (t) => t.id !== message.id) } };
   }
 };
 
+export const update: {
+  (message: Message): (model: Model) => UpdateReturn;
+  (model: Model, message: Message): UpdateReturn;
+} = Fn.dual(2, updateImpl);
 const isApplePlatform = (): boolean =>
-  typeof navigator !== "undefined" &&
-  /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent);
+  globalThis.navigator !== undefined &&
+  macIphoneIpadPattern.test(navigator.platform || navigator.userAgent);
 
 const shortcut = Subscription.make(
   "workspace-switcher",
   Stream.suspend(() =>
-    Stream.fromEventListener<KeyboardEvent>(window, "keydown").pipe(
+    Stream.fromEventListener<KeyboardEvent>(globalThis, "keydown").pipe(
       Stream.filter((event) => !event.repeat && matchesShortcut(event, "mod+k", isApplePlatform())),
       Stream.tap((event) => Effect.sync(() => event.preventDefault())),
       Stream.map(() => Message.PressedSwitcherShortcut()),
@@ -284,6 +303,8 @@ const changedDate = Subscription.make(
   "utc-date",
   browserDates.pipe(Stream.map((today) => Message.ChangedDate({ today }))),
 );
+
+// Effect UI defines the callable component and its additional runtime properties.
 
 export const App = Html.component({
   name: "Kvitbit",

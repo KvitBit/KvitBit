@@ -17,7 +17,7 @@
  *
  * Pair it with `TestClock.layer()` (test/helpers `runCore` does, at TEST_NOW).
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { CoreModulesLive } from "../compose/CoreLive";
 import { ContactsRepoMemory } from "../modules/contacts";
 import {

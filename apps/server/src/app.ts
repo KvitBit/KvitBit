@@ -1,16 +1,14 @@
+import { AltchaBotProtection } from "@kvitbit/adapters/altcha";
 /**
  * Complete HTTP application composition for `@kvitbit/server`:
  * merges REST (`/api/v1/*`), Auth (`/api/auth/*`, RFC 8414), Health (`/healthz`, `/readyz`),
  * MCP Streamable HTTP (`/mcp`, RFC 9728), Mobile OTA/APK/App Links (`/api/mobile/*`,
  * `/.well-known/assetlinks.json`), and static web/PWA mounts (`/app/*`, `/*`).
  */
-import { Effect, Layer, Redacted } from "effect";
-import {
-  AltchaBotProtection,
-  AuthServerLive,
-  NoopBotProtection,
-  PrincipalResolverLive,
-} from "./auth";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
+import { AuthServerLive, NoopBotProtection, PrincipalResolverLive } from "./auth";
 import { loadBotProtectionConfig } from "./config-contract";
 import { HttpConfigLive, HttpRoutesLive, RateLimiterSql } from "./http";
 import { MobileConfigLive, MobileRoutesLive, MobileStorageLive } from "./http/mobile";
@@ -35,7 +33,6 @@ export const AllRoutesLive = Layer.mergeAll(McpRoutesLive, MobileRoutesLive, Htt
 
 /** All edge dependencies (config, auth, principal resolver, rate limiter, bot protection, mobile storage). */
 export const EdgeServicesLive = Layer.mergeAll(
-  HttpConfigLive,
   McpConfigLive,
   MobileConfigLive,
   MobileStorageLive.pipe(Layer.provide(MobileConfigLive)),

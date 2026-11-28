@@ -18,17 +18,26 @@ import { ApiKeyId, type Principal, SESSION_COOKIE, Unauthorized } from "@kvitbit
 import { TestCore, type TestCoreOptions } from "@kvitbit/core/testing";
 import {
   Caller,
-  CurrentCaller,
-  type MemberCaller,
-  type Scope,
+  type NewWorkspace,
+  Scope,
   UserId,
   WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
 import type { EmailSender } from "@kvitbit/domain/ports";
-import { Effect, Layer, ManagedRuntime } from "effect";
-import { FetchHttpClient, HttpRouter } from "effect/http";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Layer from "effect/Layer";
+import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as TestClock from "effect/testing/TestClock";
+
 import {
   AuthServerLive,
   type AuthServerOverrides,
@@ -51,15 +60,20 @@ export interface TestUser {
   readonly name: string;
 }
 
-const cookieValue = (header: string | null, name: string) =>
-  header
-    ?.split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(`${name}=`))
-    ?.slice(name.length + 1);
+const cookieValue = (header: string | null, name: string) => {
+  if (header === null) return;
+  return Fn.pipe(
+    header,
+    Str.split(";"),
+    Arr.map(Str.trim),
+    Arr.findFirst(Str.startsWith(`${name}=`)),
+    Option.map(Str.slice(name.length + 1)),
+    Option.getOrUndefined,
+  );
+};
 
 /** Resolves the fake credentials described above against `users`. */
-export const FakePrincipalResolver = (users: Map<string, TestUser>) =>
+const FakePrincipalResolver = (users: Map<string, TestUser>) =>
   Layer.succeed(
     PrincipalResolver,
     PrincipalResolver.of({
@@ -70,10 +84,10 @@ export const FakePrincipalResolver = (users: Map<string, TestUser>) =>
           const bearer = bearerToken(request.headers.get("authorization") ?? undefined);
           const cookie = cookieValue(request.headers.get("cookie"), SESSION_COOKIE);
           const value = bearer ?? cookie;
-          if (value === undefined) return yield* new Unauthorized({ reason: "missing" });
-          const [kind, userId = "", workspaceId = "", scopes = ""] = value.split(":");
+          if (value === undefined) return yield* Unauthorized.make({ reason: "missing" });
+          const [kind, userId = "", workspaceId = "", ...scopes] = Str.split(":")(value);
           const user = users.get(userId);
-          if (user === undefined) return yield* new Unauthorized({ reason: "invalid" });
+          if (user === undefined) return yield* Unauthorized.make({ reason: "invalid" });
           if (kind === "session") {
             return {
               userId: user.id,
@@ -83,7 +97,7 @@ export const FakePrincipalResolver = (users: Map<string, TestUser>) =>
               credential: {
                 _tag: "Session",
                 sessionId: `s-${userId}`,
-                authenticatedAt: new Date(TEST_NOW).toISOString(),
+                authenticatedAt: DateTime.formatIso(DateTime.makeUnsafe(TEST_NOW)),
               },
             } satisfies Principal;
           }
@@ -98,13 +112,17 @@ export const FakePrincipalResolver = (users: Map<string, TestUser>) =>
                 keyId: ApiKeyId.make("01900000-0000-7000-8000-0000000000aa"),
                 keyName: "test key",
                 workspaceId: WorkspaceId.make(workspaceId),
-                scopes: scopes.split(",").filter((s) => s.length > 0) as Array<Scope>,
+                scopes: Fn.pipe(
+                  Arr.join(scopes, ":"),
+                  Str.split(","),
+                  Arr.filter(Schema.is(Scope)),
+                ),
               },
             } satisfies Principal;
           }
-          return yield* new Unauthorized({ reason: "invalid" });
+          return yield* Unauthorized.make({ reason: "invalid" });
         }),
-      fromMcpBearer: () => Effect.fail(new Unauthorized({ reason: "invalid" })),
+      fromMcpBearer: () => Effect.fail(Unauthorized.make({ reason: "invalid" })),
     }),
   );
 
@@ -173,33 +191,27 @@ export const makeHarness = (options: HarnessOptions = {}) => {
     web.handler(new Request(`${ORIGIN}${path}`, init));
 
   const addUser = (name: string): TestUser => {
-    const id = UserId.make(`01900000-0000-7000-8000-${String(users.size + 1).padStart(12, "0")}`);
-    const user = { id, name, email: `${name.toLowerCase()}@example.cz` };
+    const id = UserId.make(
+      `01900000-0000-7000-8000-${Str.padStart(12, "0")(String(users.size + 1))}`,
+    );
+    const user = { id, name, email: `${Str.toLowerCase(name)}@example.cz` };
     users.set(id, user);
     return user;
   };
 
   /** Creates a Workspace owned by `user` (as its Account caller) and returns the owner caller. */
-  const createWorkspace = (
-    user: TestUser,
-    input: Record<string, unknown> = { name: "Alfa s.r.o." },
-  ) =>
+  const createWorkspace = (user: TestUser, input: NewWorkspace = { name: "Alfa s.r.o." }) =>
     runtime.runPromise(
       Effect.gen(function* () {
         const ws = yield* Workspaces;
-        return yield* ws.create(input as never);
-      }).pipe(
-        Effect.provideService(
-          CurrentCaller,
+        return yield* ws.create(
           Caller.account({ userId: user.id, email: user.email, locale: "cs", channel: "web" }),
-        ),
-      ),
-    ) as Promise<MemberCaller>;
+          input,
+        );
+      }),
+    );
 
-  const dispose = async () => {
-    await web.dispose();
-    await runtime.dispose();
-  };
+  const dispose = () => web.dispose().then(() => runtime.dispose());
 
   return { fetch, addUser, createWorkspace, run: runtime.runPromise, runtime, dispose };
 };
@@ -220,11 +232,20 @@ export const as = {
     workspaceId: string,
     scopes: ReadonlyArray<string>,
   ): Record<string, string> => ({
-    authorization: `Bearer kvb_key:${user.id}:${workspaceId}:${scopes.join(",")}`,
+    authorization: `Bearer kvb_key:${user.id}:${workspaceId}:${Arr.join(scopes, ",")}`,
   }),
 };
 
-export const json = (body: unknown): RequestInit => ({
-  body: JSON.stringify(body),
-  headers: { "content-type": "application/json" },
-});
+const encodeJsonBody = Schema.encodeOption(Schema.fromJsonString(Schema.Unknown));
+
+export const json = <Body>(body: Body): RequestInit => {
+  // JSON serialization calls a top-level toJSON with the empty key and omits unrepresentable values.
+  const wrapped = Option.getOrThrowWith(
+    encodeJsonBody({ "": body }),
+    () => new TypeError("Expected a JSON body"),
+  );
+  return {
+    body: wrapped === "{}" ? undefined : Str.slice('{"":'.length, -1)(wrapped),
+    headers: { "content-type": "application/json" },
+  };
+};

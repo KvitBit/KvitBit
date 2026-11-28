@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
-import { Invalid } from "@kvitbit/domain/contract";
-import { Result } from "effect";
+import { Invalid, IsoDate } from "@kvitbit/domain/contract";
+import * as Result from "effect/Result";
+import * as EffectString from "effect/String";
 import type { NumberPattern } from "../../src/engines";
 import { Numbering } from "../../src/engines";
 
-const D = (s: string) => s as IsoDate;
+const D = (s: string) => IsoDate.make(s);
 const parse = (p: string): NumberPattern => Result.getOrThrow(Numbering.parsePattern(p));
 const invalid = (reason: string, path = "pattern") =>
   Result.fail(
-    new Invalid({
+    Invalid.make({
       issues: [{ path: [path], code: "numbering.pattern_invalid", params: { reason } }],
     }),
   );
@@ -52,7 +52,7 @@ describe("Numbering.parsePattern", () => {
   });
 
   test("20 rendered characters is the limit", () => {
-    expect(Result.isSuccess(Numbering.parsePattern("ABCDEFGHIJ-YYYY-NNNN"))).toBe(true); // 20
+    Numbering.parsePattern("ABCDEFGHIJ-YYYY-NNNN").pipe(Result.isSuccess, expect).toBe(true); // 20
     expect(Numbering.parsePattern("ABCDEFGHIJK-YYYY-NNNN")).toEqual(invalid("too_long")); // 21
   });
 });
@@ -93,7 +93,7 @@ describe("Numbering guards", () => {
     expect(Numbering.checkNextCounter(5, 900)).toEqual(Result.succeed(900));
     expect(Numbering.checkNextCounter(5, 4)).toEqual(
       Result.fail(
-        new Invalid({
+        Invalid.make({
           issues: [
             {
               path: ["nextNumber"],
@@ -104,12 +104,12 @@ describe("Numbering guards", () => {
         }),
       ),
     );
-    expect(Result.isFailure(Numbering.checkNextCounter(1, 0))).toBe(true);
+    Numbering.checkNextCounter(1, 0).pipe(Result.isFailure, expect).toBe(true);
     // The counter column is a Postgres integer and allocation stores sequence + 1.
-    expect(Result.isSuccess(Numbering.checkNextCounter(1, Numbering.MAX_COUNTER))).toBe(true);
+    Numbering.checkNextCounter(1, Numbering.MAX_COUNTER).pipe(Result.isSuccess, expect).toBe(true);
     expect(Numbering.checkNextCounter(1, Numbering.MAX_COUNTER + 1)).toEqual(
       Result.fail(
-        new Invalid({
+        Invalid.make({
           issues: [
             {
               path: ["nextNumber"],
@@ -120,12 +120,14 @@ describe("Numbering guards", () => {
         }),
       ),
     );
-    expect(Result.isFailure(Numbering.checkNextCounter(1, 1.5))).toBe(true);
+    Numbering.checkNextCounter(1, 1.5).pipe(Result.isFailure, expect).toBe(true);
   });
 
   test("checkManualNumber trims and bounds the number", () => {
     expect(Numbering.checkManualNumber("  2026-0099 ")).toEqual(Result.succeed("2026-0099"));
     expect(Numbering.checkManualNumber("  ")).toEqual(invalid("empty", "number"));
-    expect(Numbering.checkManualNumber("X".repeat(21))).toEqual(invalid("too_long", "number"));
+    expect(Numbering.checkManualNumber(EffectString.repeat(21)("X"))).toEqual(
+      invalid("too_long", "number"),
+    );
   });
 });

@@ -1,16 +1,8 @@
 /** Types shared by several modules: downloads, VAT breakdown views, schedule rules. */
-import type { Brand, Stream } from "effect";
-import { Schema } from "effect";
-import { IsoDate, Money, VatTreatment } from "./vocabulary";
 
-/**
- * A type that docs/design/core-ports.md references but does not define field by field. Each
- * placeholder is a runtime schema `Schema.Unknown.pipe(Schema.brand(Name))`: decoding accepts
- * any JSON value (the shape is undecided) and brands it, so the TypeScript type is opaque and
- * nothing can read guessed fields or construct one without a decode. Replace each placeholder
- * when the spec fixes its shape.
- */
-export type Unspecified<Name extends string> = Brand.Brand<Name>;
+import * as Schema from "effect/Schema";
+import type * as Stream from "effect/Stream";
+import { IsoDate, Money, VatTreatment } from "./vocabulary";
 
 /**
  * Runtime schema for a type the spec defines only partly: the specified fields are checked and

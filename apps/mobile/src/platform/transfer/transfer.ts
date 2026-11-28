@@ -5,6 +5,12 @@
  */
 
 import { UiError } from "@kvitbit/ui-port/api";
+import * as EffectArray from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as EffectString from "effect/String";
 import {
   cacheDirectory,
   createUploadTask,
@@ -15,6 +21,8 @@ import {
   readAsStringAsync,
 } from "expo-file-system/legacy";
 import { shareAsync } from "expo-sharing";
+import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
+import { tryPlatform } from "../platform-effect";
 import {
   apiUrl,
   authHeaders,
@@ -23,20 +31,23 @@ import {
   failed,
   isSuccess,
   parseJson,
+  type SavedFile,
   safeFileName,
   type TransferTarget,
 } from "./http";
-import type { Transfer } from "./port";
+import type { DownloadRequest, Transfer, UploadRequest } from "./port";
 
 const header = (headers: Record<string, string>, name: string): string | null => {
-  const key = Object.keys(headers).find((k) => k.toLowerCase() === name);
+  const key = Option.getOrUndefined(
+    EffectArray.findFirst(EffectRecord.keys(headers), (k) => EffectString.toLowerCase(k) === name),
+  );
   return key === undefined ? null : (headers[key] ?? null);
 };
 
-export const makeTransfer = (target: TransferTarget): Transfer => ({
-  upload: async (req) => {
-    try {
-      const task = createUploadTask(
+export const makeTransfer = (target: TransferTarget): Transfer => {
+  const upload = Effect.fn("NativeTransfer.upload")(function* (req: UploadRequest) {
+    const task = yield* tryPlatform(() =>
+      createUploadTask(
         apiUrl(target.origin, req.path),
         req.file.ref,
         {
@@ -54,61 +65,69 @@ export const makeTransfer = (target: TransferTarget): Transfer => ({
           if (progress.totalBytesExpectedToSend > 0)
             req.onProgress?.(progress.totalBytesSent / progress.totalBytesExpectedToSend);
         },
-      );
-      const response = await task.uploadAsync();
-      if (response === undefined || response === null) return failed(UiError.cancelled);
-      const body = parseJson(response.body);
-      if (isSuccess(response.status)) return done(body);
-      return failed(
-        errorFromResponse(response.status, body, header(response.headers, "x-request-id")),
-      );
-    } catch {
-      return failed(UiError.offline);
-    }
-  },
-  download: async (req) => {
-    const target_ = `${cacheDirectory ?? ""}${Date.now()}-${safeFileName(req.filename)}`;
-    try {
-      const response = await downloadAsync(apiUrl(target.origin, req.path, req.query), target_, {
+      ),
+    );
+    const response = yield* fromMobilePromise(() => task.uploadAsync());
+    if (response === undefined || response === null) return failed(UiError.cancelled);
+    const body = parseJson(response.body);
+    if (isSuccess(response.status)) return done(body);
+    return failed(
+      errorFromResponse({
+        status: response.status,
+        body,
+        requestId: header(response.headers, "x-request-id"),
+      }),
+    );
+  });
+
+  const download = Effect.fn("NativeTransfer.download")(function* (req: DownloadRequest) {
+    const now = yield* Clock.currentTimeMillis;
+    const uri = `${cacheDirectory ?? ""}${now}-${safeFileName(req.filename)}`;
+    const response = yield* fromMobilePromise(() =>
+      downloadAsync(apiUrl(target.origin, req.path, req.query), uri, {
         headers: authHeaders(target.credentials),
-      });
-      if (!isSuccess(response.status)) {
-        const text = await readAsStringAsync(response.uri).catch(() => "");
-        await deleteAsync(response.uri, { idempotent: true }).catch(() => undefined);
-        return failed(
-          errorFromResponse(
-            response.status,
-            parseJson(text),
-            header(response.headers, "x-request-id"),
-          ),
-        );
-      }
-      const info = await getInfoAsync(response.uri);
-      return done({
-        ref: response.uri,
-        name: req.filename,
-        contentType:
-          header(response.headers, "content-type") ?? req.contentType ?? "application/octet-stream",
-        size: info.exists ? info.size : 0,
-      });
-    } catch {
-      return failed(UiError.offline);
+      }),
+    );
+    if (!isSuccess(response.status)) {
+      const text = yield* fromMobilePromise(() => readAsStringAsync(response.uri)).pipe(
+        Effect.orElseSucceed(() => ""),
+      );
+      yield* Effect.ignore(
+        fromMobilePromise(() => deleteAsync(response.uri, { idempotent: true })),
+      );
+      return failed(
+        errorFromResponse({
+          status: response.status,
+          body: parseJson(text),
+          requestId: header(response.headers, "x-request-id"),
+        }),
+      );
     }
-  },
-  open: async (file) => {
-    try {
-      await shareAsync(file.ref, { mimeType: file.contentType, dialogTitle: file.name });
-      return done(undefined);
-    } catch {
-      return failed(UiError.unexpected());
-    }
-  },
-  share: async (file) => {
-    try {
-      await shareAsync(file.ref, { mimeType: file.contentType, dialogTitle: file.name });
-      return done(undefined);
-    } catch {
-      return failed(UiError.unexpected());
-    }
-  },
-});
+    const info = yield* fromMobilePromise(() => getInfoAsync(response.uri));
+    return done({
+      ref: response.uri,
+      name: req.filename,
+      contentType:
+        header(response.headers, "content-type") ?? req.contentType ?? "application/octet-stream",
+      size: info.exists ? info.size : 0,
+    });
+  });
+
+  const share = (file: SavedFile) =>
+    runMobileEffect(
+      fromMobilePromise(() =>
+        shareAsync(file.ref, { mimeType: file.contentType, dialogTitle: file.name }),
+      ).pipe(
+        Effect.map(done),
+        Effect.orElseSucceed(() => failed(UiError.unexpected())),
+      ),
+    );
+  return {
+    upload: (req) =>
+      runMobileEffect(upload(req).pipe(Effect.orElseSucceed(() => failed(UiError.offline)))),
+    download: (req) =>
+      runMobileEffect(download(req).pipe(Effect.orElseSucceed(() => failed(UiError.offline)))),
+    open: share,
+    share,
+  };
+};

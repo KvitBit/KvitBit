@@ -15,22 +15,21 @@
  * the same rule so tests catch a violation. A directory left empty by deletes is replaced when
  * its path is stored as a key.
  */
-import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import {
-  type FileHandle,
-  lstat,
-  mkdir,
-  open,
-  readdir,
-  realpath,
-  rename,
-  rmdir,
-  unlink,
-} from "node:fs/promises";
-import { join } from "node:path";
+
+import { rmdir } from "node:fs/promises"; // FileSystem.remove cannot remove only an empty directory.
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import * as BunPath from "@effect/platform-bun/BunPath";
 import { type BlobKey, BlobMissing, BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
-import { Config, Effect, Layer, Stream } from "effect";
+import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { checkKey, consumeBounded, partialDir } from "./common";
 
 export interface LocalDiskBlobStorageOptions {
@@ -38,211 +37,224 @@ export interface LocalDiskBlobStorageOptions {
   readonly root: string;
 }
 
-const unavailable = (cause: unknown) => new BlobUnavailable({ cause });
+class UnsafePath extends Schema.TaggedError<UnsafePath, { readonly brand: unique symbol }>()(
+  "UnsafePath",
+  {
+    path: Schema.String,
+    reason: Schema.Literals(["symlink", "not a directory", "not empty"]),
+  },
+) {}
 
-const attempt = <A>(f: () => Promise<A>) => Effect.tryPromise({ try: f, catch: unavailable });
-
-const errorCode = (error: unknown): string | undefined =>
-  typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
-    ? error.code
-    : undefined;
+const decodeErrno = Schema.decodeUnknownOption(Schema.Struct({ code: Schema.String }));
+const errorCode = (error: PlatformError.PlatformError) =>
+  Option.getOrUndefined(decodeErrno(error.reason.cause))?.code;
 
 /** Missing file, or a key whose parent is a file rather than a directory. */
-const isAbsent = (error: unknown) => {
+const isAbsent = (error: PlatformError.PlatformError) => {
   const code = errorCode(error);
   return code === "ENOENT" || code === "ENOTDIR";
 };
 
-/** A failure that names the path below root and why; never follows it. */
-class UnsafePath extends Error {
-  constructor(
-    readonly path: string,
-    readonly reason: "symlink" | "not a directory",
-  ) {
-    super(`${reason} at ${path}`);
-  }
-}
+const unavailable = (cause: PlatformError.PlatformError | UnsafePath) =>
+  BlobUnavailable.make({ cause });
 
-const writeAll = (handle: FileHandle, chunk: Uint8Array) =>
-  attempt(async () => {
-    let offset = 0;
-    while (offset < chunk.byteLength) {
-      const { bytesWritten } = await handle.write(chunk, offset, chunk.byteLength - offset);
-      offset += bytesWritten;
-    }
-  });
-
-/** Removes `dir` if it holds only empty directories; fails if it holds anything else. */
-const removeEmptyTree = async (dir: string): Promise<void> => {
-  for (const entry of await readdir(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) throw new Error(`not empty: ${dir}`);
-    await removeEmptyTree(join(dir, entry.name));
-  }
-  await rmdir(dir);
-};
-
-const make = (
+export const makeLocalDiskBlobStorage = Effect.fn("LocalDiskBlobStorage.make")(function* (
   options: LocalDiskBlobStorageOptions,
-): Effect.Effect<BlobStorage["Service"], BlobUnavailable> =>
-  Effect.gen(function* () {
-    const root = yield* attempt(async () => {
-      await mkdir(options.root, { recursive: true });
-      return realpath(options.root);
-    });
-    const partial = join(root, partialDir);
-    yield* attempt(async () => {
-      await mkdir(partial, { recursive: true });
-      const stats = await lstat(partial);
-      if (!stats.isDirectory()) throw new UnsafePath(partial, "not a directory");
-    });
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  yield* fs.makeDirectory(options.root, { recursive: true }).pipe(Effect.mapError(unavailable));
+  const root = yield* fs.realPath(options.root).pipe(Effect.mapError(unavailable));
+  const partial = path.join(root, partialDir);
+  yield* fs.makeDirectory(partial, { recursive: true }).pipe(Effect.mapError(unavailable));
+  const staging = yield* fs.lstat(partial).pipe(Effect.mapError(unavailable));
+  if (staging.type !== "Directory") {
+    return yield* unavailable(UnsafePath.make({ path: partial, reason: "not a directory" }));
+  }
 
-    /** The directories from root to the key's parent, and the key's own path. */
-    const pathsOf = (key: BlobKey) =>
-      Effect.map(checkKey(key), (segments) => {
+  /** The directories from root to the key's parent, and the key's own path. */
+  const pathsOf = (key: BlobKey) =>
+    checkKey(key).pipe(
+      Effect.map((segments) => {
         const dirs: Array<string> = [];
         let current = root;
         for (const segment of segments.slice(0, -1)) {
-          current = join(current, segment);
+          current = path.join(current, segment);
           dirs.push(current);
         }
-        return { dirs, target: join(current, segments.at(-1) ?? "") };
-      });
+        return { dirs, target: path.join(current, segments.at(-1) ?? "") };
+      }),
+    );
 
-    /**
-     * Checks each existing directory on the path without following it. `false` when one is
-     * missing or a file, i.e. the key cannot exist; throws on a symlink.
-     */
-    const ancestorsExist = async (dirs: ReadonlyArray<string>) => {
-      for (const dir of dirs) {
-        const stats = await lstat(dir).catch((error: unknown) => {
-          if (isAbsent(error)) return undefined;
-          throw error;
-        });
-        if (stats === undefined) return false;
-        if (stats.isSymbolicLink()) throw new UnsafePath(dir, "symlink");
-        if (!stats.isDirectory()) return false;
+  const statIfPresent = (target: string) =>
+    fs.lstat(target).pipe(
+      Effect.asSome,
+      Effect.catchIf(isAbsent, () => Effect.succeedNone),
+    );
+
+  /** Checks the existing parent directories without following a symlink. */
+  const ancestorsExist = Effect.fn("LocalDiskBlobStorage.ancestorsExist")(function* (
+    dirs: ReadonlyArray<string>,
+  ) {
+    for (const dir of dirs) {
+      const stats = yield* statIfPresent(dir);
+      if (Option.isNone(stats)) return false;
+      if (stats.value.type === "SymbolicLink") {
+        return yield* UnsafePath.make({ path: dir, reason: "symlink" });
       }
-      return true;
-    };
+      if (stats.value.type !== "Directory") return false;
+    }
+    return true;
+  });
 
-    /** Creates the directories one level at a time, refusing symlinks and files. */
-    const ensureAncestors = async (dirs: ReadonlyArray<string>) => {
-      for (const dir of dirs) {
-        await mkdir(dir).catch((error: unknown) => {
-          if (errorCode(error) !== "EEXIST") throw error;
-        });
-        const stats = await lstat(dir);
-        if (stats.isSymbolicLink()) throw new UnsafePath(dir, "symlink");
-        if (!stats.isDirectory()) throw new UnsafePath(dir, "not a directory");
+  /** Creates the directories one level at a time, refusing symlinks and files. */
+  const ensureAncestors = Effect.fn("LocalDiskBlobStorage.ensureAncestors")(function* (
+    dirs: ReadonlyArray<string>,
+  ) {
+    for (const dir of dirs) {
+      yield* fs.makeDirectory(dir).pipe(
+        Effect.asVoid,
+        Effect.catchIf(
+          (error) => errorCode(error) === "EEXIST",
+          () => Effect.void,
+        ),
+      );
+      const stats = yield* fs.lstat(dir);
+      if (stats.type === "SymbolicLink")
+        return yield* UnsafePath.make({ path: dir, reason: "symlink" });
+      if (stats.type !== "Directory")
+        return yield* UnsafePath.make({ path: dir, reason: "not a directory" });
+    }
+  });
+
+  /** Removes only empty directories, even if another writer adds an object under the prefix. */
+  const removeEmptyTree: (dir: string) => Effect.Effect<void, BlobUnavailable> = Effect.fn(
+    "LocalDiskBlobStorage.removeEmptyTree",
+  )(function* (dir: string) {
+    const entries = yield* fs.readDirectory(dir).pipe(Effect.mapError(unavailable));
+    for (const entry of entries) {
+      const child = path.join(dir, entry);
+      const stats = yield* fs.lstat(child).pipe(Effect.mapError(unavailable));
+      if (stats.type !== "Directory") {
+        return yield* unavailable(UnsafePath.make({ path: dir, reason: "not empty" }));
       }
-    };
-
-    /** Moves the finished temp file into place, replacing an empty former prefix. */
-    const commit = async (temp: string, dirs: ReadonlyArray<string>, target: string) => {
-      await ensureAncestors(dirs);
-      try {
-        await rename(temp, target);
-      } catch (error) {
-        const code = errorCode(error);
-        if (code !== "EISDIR" && code !== "ENOTEMPTY" && code !== "EEXIST") throw error;
-        const stats = await lstat(target);
-        if (!stats.isDirectory()) throw error;
-        await removeEmptyTree(target);
-        await rename(temp, target);
-      }
-    };
-
-    return BlobStorage.of({
-      put: (key, body, meta) =>
-        Effect.gen(function* () {
-          const { dirs, target } = yield* pathsOf(key);
-          const temp = join(partial, randomUUID());
-          const written = yield* Effect.acquireUseRelease(
-            attempt(() => open(temp, "wx")),
-            (handle) =>
-              consumeBounded(body, meta.maxBytes, (chunk) => writeAll(handle, chunk)).pipe(
-                Effect.tap(() => attempt(() => handle.sync())),
-              ),
-            (handle) => Effect.promise(() => handle.close().catch(() => undefined)),
-          ).pipe(
-            Effect.tap(() => attempt(() => commit(temp, dirs, target))),
-            // Any failure or interruption before the rename leaves no partial file behind.
-            Effect.onExit((exit) =>
-              exit._tag === "Success"
-                ? Effect.void
-                : Effect.promise(() => unlink(temp).catch(() => undefined)),
-            ),
-          );
-          return { key, bytes: written.bytes, sha256: written.sha256 };
-        }),
-      get: (key) =>
-        Effect.gen(function* () {
-          const { dirs, target } = yield* pathsOf(key);
-          const found = yield* Effect.tryPromise({
-            try: async () => {
-              if (!(await ancestorsExist(dirs))) return false;
-              const stats = await lstat(target);
-              if (stats.isSymbolicLink()) throw new UnsafePath(target, "symlink");
-              return stats.isFile();
-            },
-            catch: (error) => (isAbsent(error) ? new BlobMissing({ key }) : unavailable(error)),
-          });
-          if (!found) return yield* Effect.fail(new BlobMissing({ key }));
-          // Opened only when consumed, re-checking the path and refusing a symlinked file.
-          // Rename-based writes mean the file is always complete; a read error mid-stream is a
-          // defect, as the port's stream carries no error channel.
-          // The handle is acquired uninterruptibly with its release registered on the stream's
-          // scope, so a consumer cancelled mid-open never leaks the descriptor.
-          const handle = Effect.acquireRelease(
-            attempt(async () => {
-              if (!(await ancestorsExist(dirs))) throw new Error(`gone: ${target}`);
-              return openNoFollow(target);
-            }),
-            (file) => Effect.promise(() => file.close().catch(() => undefined)),
-          );
-          return Stream.unwrap(
-            Effect.map(handle, (file) =>
-              Stream.fromAsyncIterable(
-                file.createReadStream({ autoClose: false }) as AsyncIterable<Uint8Array>,
-                unavailable,
-              ),
-            ),
-          ).pipe(Stream.orDie);
-        }),
-      delete: (key) =>
-        Effect.gen(function* () {
-          const { dirs, target } = yield* pathsOf(key);
-          yield* attempt(async () => {
-            if (!(await ancestorsExist(dirs))) return;
-            try {
-              // Unlinking a symlink removes the link itself, never its target.
-              await unlink(target);
-            } catch (error) {
-              if (isAbsent(error)) return;
-              // A directory holds other keys under this prefix, never an object of its own.
-              const isDirectory = await lstat(target).then(
-                (stats) => stats.isDirectory(),
-                () => false,
-              );
-              if (!isDirectory) throw error;
-            }
-          });
-        }),
+      yield* removeEmptyTree(child);
+    }
+    yield* Effect.tryPromise({
+      try: () => rmdir(dir),
+      catch: (cause) => BlobUnavailable.make({ cause }),
     });
   });
 
-const openNoFollow = (path: string) => open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  /** Moves the finished temp file into place, replacing an empty former prefix. */
+  const commit = Effect.fn("LocalDiskBlobStorage.commit")(function* (
+    temp: string,
+    dirs: ReadonlyArray<string>,
+    target: string,
+  ) {
+    yield* ensureAncestors(dirs).pipe(Effect.mapError(unavailable));
+    yield* fs.rename(temp, target).pipe(
+      Effect.catchIf(
+        (error) => {
+          const code = errorCode(error);
+          return code === "EISDIR" || code === "ENOTEMPTY" || code === "EEXIST";
+        },
+        Effect.fnUntraced(function* (error) {
+          const stats = yield* fs.lstat(target).pipe(Effect.mapError(unavailable));
+          if (stats.type !== "Directory") return yield* unavailable(error);
+          yield* removeEmptyTree(target);
+          yield* fs.rename(temp, target).pipe(Effect.mapError(unavailable));
+        }),
+      ),
+      Effect.mapError((error) => (error._tag === "BlobUnavailable" ? error : unavailable(error))),
+    );
+  });
+
+  return BlobStorage.of({
+    put: Effect.fn("LocalDiskBlobStorage.put")(function* (key, body, meta) {
+      const { dirs, target } = yield* pathsOf(key);
+      const temporaryDir = yield* Effect.acquireRelease(
+        fs.makeTempDirectory({ directory: partial }).pipe(Effect.mapError(unavailable)),
+        (dir) => fs.remove(dir, { recursive: true, force: true }).pipe(Effect.ignore),
+      );
+      const temp = path.join(temporaryDir, "object");
+      const written = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const file = yield* fs.open(temp, { flag: "wx" }).pipe(Effect.mapError(unavailable));
+          // The platform callbacks cannot be cancelled. Wait for each I/O before closing the descriptor.
+          const bytes = yield* consumeBounded(body, meta.maxBytes, (chunk) =>
+            file.writeAll(chunk).pipe(Effect.uninterruptible, Effect.mapError(unavailable)),
+          );
+          yield* file.sync.pipe(Effect.uninterruptible, Effect.mapError(unavailable));
+          return bytes;
+        }),
+      );
+      // Wait for the rename before releasing the temporary directory on interruption.
+      yield* Effect.uninterruptible(commit(temp, dirs, target));
+      return { key, bytes: written.bytes, sha256: written.sha256 };
+    }, Effect.scoped),
+    get: Effect.fn("LocalDiskBlobStorage.get")(function* (key) {
+      const { dirs, target } = yield* pathsOf(key);
+      const parentsPresent = yield* ancestorsExist(dirs).pipe(Effect.mapError(unavailable));
+      if (!parentsPresent) return yield* BlobMissing.make({ key });
+      const stats = yield* statIfPresent(target).pipe(Effect.mapError(unavailable));
+      if (Option.isNone(stats)) return yield* BlobMissing.make({ key });
+      if (stats.value.type === "SymbolicLink") {
+        return yield* unavailable(UnsafePath.make({ path: target, reason: "symlink" }));
+      }
+      if (stats.value.type !== "File") return yield* BlobMissing.make({ key });
+
+      // Recheck the parents at consumption and open the file without following its last component.
+      const handle = Effect.gen(function* () {
+        if (!(yield* ancestorsExist(dirs))) return yield* BlobMissing.make({ key });
+        return yield* fs.open(target, { noFollow: true });
+      });
+      return Stream.unwrap(
+        handle.pipe(
+          Effect.map((file) =>
+            Stream.fromEffectRepeat(
+              file.readAlloc(64 * 1024).pipe(
+                Effect.uninterruptible,
+                Effect.flatMap((chunk) =>
+                  Option.isSome(chunk) ? Effect.succeed(chunk.value) : Cause.done(),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ).pipe(Stream.orDie);
+    }),
+    delete: Effect.fn("LocalDiskBlobStorage.delete")(function* (key) {
+      const { dirs, target } = yield* pathsOf(key);
+      const parentsPresent = yield* ancestorsExist(dirs).pipe(Effect.mapError(unavailable));
+      if (!parentsPresent) return;
+      // A symlink is removed by name. A directory belongs to other keys and is left alone.
+      yield* fs.remove(target).pipe(
+        Effect.catch(
+          Effect.fnUntraced(function* (error) {
+            if (isAbsent(error)) return;
+            const stats = yield* fs.lstat(target).pipe(Effect.option);
+            if (Option.isNone(stats) || stats.value.type !== "Directory") return yield* error;
+          }),
+        ),
+        Effect.mapError(unavailable),
+      );
+    }),
+  });
+});
+
+const platform = Layer.merge(BunFileSystem.layer, BunPath.layer);
 
 export const LocalDiskBlobStorage = {
-  make,
+  make: makeLocalDiskBlobStorage,
   layer: (options: LocalDiskBlobStorageOptions): Layer.Layer<BlobStorage, BlobUnavailable> =>
-    Layer.effect(BlobStorage, make(options)),
+    Layer.effect(BlobStorage, makeLocalDiskBlobStorage(options)).pipe(Layer.provide(platform)),
   /** Reads the root from `BLOB_LOCAL_ROOT`. */
   layerConfig: (
     root: Config.Config<string> = Config.NonEmptyString("BLOB_LOCAL_ROOT"),
   ): Layer.Layer<BlobStorage, BlobUnavailable | Config.ConfigError> =>
     Layer.effect(
       BlobStorage,
-      Effect.flatMap(root, (dir) => make({ root: dir })),
-    ),
+      Effect.flatMap(root, (dir) => makeLocalDiskBlobStorage({ root: dir })),
+    ).pipe(Layer.provide(platform)),
 } as const;

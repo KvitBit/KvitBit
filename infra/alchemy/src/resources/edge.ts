@@ -1,11 +1,13 @@
 import * as Compute from "@alchemy.run/gcp/Compute";
 import * as Logging from "@alchemy.run/gcp/Logging";
 import type { Input } from "alchemy/Input";
-import * as Output from "alchemy/Output";
+import type * as Output from "alchemy/Output";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import type { KvitbitEdgeConfig, KvitbitStackConfig } from "../config";
-import { EdgeBackendService } from "./edge-backend-service";
-import { EdgeSecurityPolicy, type EdgeSecurityPolicyProps } from "./edge-security-policy";
+import { declareEdgeBackendService } from "./edge-backend-service";
+import { declareEdgeSecurityPolicy, type EdgeSecurityPolicyProps } from "./edge-security-policy";
+import { declaredLink } from "./provider-inputs";
 
 /**
  * Immutable build-asset paths served by the static backend (with optional Cloud CDN).
@@ -13,7 +15,7 @@ import { EdgeSecurityPolicy, type EdgeSecurityPolicyProps } from "./edge-securit
  */
 export const edgeStaticAssetPaths = ["/assets/*", "/fonts/*", "/app/_expo/static/*"] as const;
 
-export const edgeResourceName = (config: KvitbitStackConfig, suffix: string) =>
+const edgeResourceName = (config: KvitbitStackConfig, suffix: string) =>
   `kvitbit-${config.stage}-${suffix}`;
 
 export const edgeObjectNames = (config: KvitbitStackConfig) => ({
@@ -46,15 +48,24 @@ export const tokenRoutePatterns = [
 const requestLogSources =
   '(resource.type="http_load_balancer" OR (resource.type="cloud_run_revision" AND log_id("run.googleapis.com/requests")))';
 
-export const tokenRouteExclusionFilter = [
-  requestLogSources,
-  `httpRequest.requestUrl=~"^https?://[^/]+(${tokenRoutePatterns.join("|")})([/?#].*|$)"`,
-].join(" AND ");
+export const tokenRouteExclusionFilter = Arr.join(
+  [
+    requestLogSources,
+    `httpRequest.requestUrl=~"^https?://[^/]+(${Arr.join(tokenRoutePatterns, "|")})([/?#].*|$)"`,
+  ],
+  " AND ",
+);
 
-export const edgeSecurityPolicyProps = (
-  config: KvitbitStackConfig,
-  edge: KvitbitEdgeConfig,
-): EdgeSecurityPolicyProps => ({
+const evaluateWaf = (ruleSet: string) =>
+  `evaluatePreconfiguredWaf('${ruleSet}', {'sensitivity': 1})`;
+
+export const edgeSecurityPolicyProps = ({
+  config,
+  edge,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly edge: KvitbitEdgeConfig;
+}): EdgeSecurityPolicyProps => ({
   project: config.projectId,
   name: edgeObjectNames(config).securityPolicy,
   description: `Kvitbit ${config.stage} Cloud Armor edge policy`,
@@ -67,7 +78,7 @@ export const edgeSecurityPolicyProps = (
       description: "Preconfigured SQL injection rules",
       match: {
         expr: {
-          expression: "evaluatePreconfiguredWaf('sqli-v33-stable', {'sensitivity': 1})",
+          expression: evaluateWaf("sqli-v33-stable"),
         },
       },
     },
@@ -78,7 +89,7 @@ export const edgeSecurityPolicyProps = (
       description: "Preconfigured cross-site scripting rules",
       match: {
         expr: {
-          expression: "evaluatePreconfiguredWaf('xss-v33-stable', {'sensitivity': 1})",
+          expression: evaluateWaf("xss-v33-stable"),
         },
       },
     },
@@ -113,7 +124,13 @@ export interface EdgeBackendLinks {
   readonly securityPolicy: Input<string>;
 }
 
-export const edgeDynamicBackendProps = (config: KvitbitStackConfig, links: EdgeBackendLinks) => ({
+export const edgeDynamicBackendProps = ({
+  config,
+  links,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly links: EdgeBackendLinks;
+}) => ({
   project: config.projectId,
   name: edgeObjectNames(config).dynamicBackend,
   loadBalancingScheme: "EXTERNAL_MANAGED" as const,
@@ -122,11 +139,15 @@ export const edgeDynamicBackendProps = (config: KvitbitStackConfig, links: EdgeB
   logConfig: { enable: false },
 });
 
-export const edgeStaticBackendProps = (
-  config: KvitbitStackConfig,
-  edge: KvitbitEdgeConfig,
-  links: EdgeBackendLinks,
-) => {
+export const edgeStaticBackendProps = ({
+  config,
+  edge,
+  links,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly edge: KvitbitEdgeConfig;
+  readonly links: EdgeBackendLinks;
+}) => {
   const props = {
     project: config.projectId,
     name: edgeObjectNames(config).staticBackend,
@@ -151,11 +172,15 @@ export const edgeStaticBackendProps = (
     : props;
 };
 
-export const edgeUrlMapProps = (
-  config: KvitbitStackConfig,
-  edge: KvitbitEdgeConfig,
-  backends: { readonly dynamic: Input<string>; readonly static: Input<string> },
-) => ({
+export const edgeUrlMapProps = ({
+  config,
+  edge,
+  backends,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly edge: KvitbitEdgeConfig;
+  readonly backends: { readonly dynamic: Input<string>; readonly static: Input<string> };
+}) => ({
   urlMapName: edgeObjectNames(config).urlMap,
   defaultService: backends.dynamic,
   hostRules: [
@@ -173,7 +198,7 @@ export const edgeUrlMapProps = (
   ],
 });
 
-export const edgeHttpsRedirectUrlMapProps = (config: KvitbitStackConfig): Compute.UrlMapProps => ({
+const edgeHttpsRedirectUrlMapProps = (config: KvitbitStackConfig): Compute.UrlMapProps => ({
   urlMapName: edgeResourceName(config, "https-redirect"),
   defaultUrlRedirect: {
     httpsRedirect: true,
@@ -182,17 +207,9 @@ export const edgeHttpsRedirectUrlMapProps = (config: KvitbitStackConfig): Comput
   },
 });
 
-const declaredLink = (resource: string) =>
-  Output.map((link: string | undefined) => {
-    if (link === undefined) {
-      throw new Error(`${resource} reported no self link`);
-    }
-    return link;
-  });
-
-export const declareTokenRouteLogExclusion = Effect.fn(
-  "KvitbitStack.declareTokenRouteLogExclusion",
-)(function* (config: KvitbitStackConfig) {
+export const declareTokenRouteLogExclusion = Effect.fn("KvitbitStack.excludeTokenLogs")(function* (
+  config: KvitbitStackConfig,
+) {
   const names = edgeObjectNames(config);
   const exclusion = yield* Logging.Exclusion("EdgeTokenRouteExclusion", {
     exclusionId: names.tokenRouteExclusion,
@@ -208,6 +225,10 @@ export const declareTokenRouteLogExclusion = Effect.fn(
  * EdgeBackendService (with optional Cloud CDN) + Managed SSL Certificate (kvitbit.cz /
  * kvitbit.app) + HTTPS redirect.
  */
+// These logical IDs key existing resources in Alchemy state.
+const edgeProtocolId = (protocol: "Http" | "Https", component: string) =>
+  `Edge${protocol}${component}`;
+
 export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(function* (
   config: KvitbitStackConfig,
   edge: KvitbitEdgeConfig,
@@ -226,9 +247,8 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
     cloudRun: { service: serverServiceId },
   });
 
-  const policy = yield* EdgeSecurityPolicy(
-    "EdgeSecurityPolicy",
-    edgeSecurityPolicyProps(config, edge),
+  const policy = yield* declareEdgeSecurityPolicy("EdgeSecurityPolicy")(
+    edgeSecurityPolicyProps({ config, edge }),
   );
 
   const links: EdgeBackendLinks = {
@@ -236,20 +256,22 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
     securityPolicy: policy.selfLink,
   };
 
-  const dynamicBackend = yield* EdgeBackendService(
-    "EdgeDynamicBackend",
-    edgeDynamicBackendProps(config, links),
+  const dynamicBackend = yield* declareEdgeBackendService("EdgeDynamicBackend")(
+    edgeDynamicBackendProps({ config, links }),
   );
-  const staticBackend = yield* EdgeBackendService(
-    "EdgeStaticBackend",
-    edgeStaticBackendProps(config, edge, links),
+  const staticBackend = yield* declareEdgeBackendService("EdgeStaticBackend")(
+    edgeStaticBackendProps({ config, edge, links }),
   );
 
   const urlMap = yield* Compute.UrlMap(
     "EdgeUrlMap",
-    edgeUrlMapProps(config, edge, {
-      dynamic: dynamicBackend.selfLink,
-      static: staticBackend.selfLink,
+    edgeUrlMapProps({
+      config,
+      edge,
+      backends: {
+        dynamic: dynamicBackend.selfLink,
+        static: staticBackend.selfLink,
+      },
     }),
   );
   const urlMapLink = urlMap.selfLink.pipe(declaredLink("EdgeUrlMap"));
@@ -262,37 +284,37 @@ export const declareKvitbitEdge = Effect.fn("KvitbitStack.declareKvitbitEdge")(f
       type: "MANAGED",
       managed: { domains: [...edge.domains] },
     });
-    const httpsProxy = yield* Compute.TargetHttpsProxy("EdgeHttpsProxy", {
+    const httpsProxy = yield* Compute.TargetHttpsProxy(edgeProtocolId("Https", "Proxy"), {
       targetHttpsProxyName: edgeResourceName(config, "edge-https"),
       urlMap: urlMapLink,
       sslCertificates: [certificate.selfLink.pipe(declaredLink("EdgeCertificate"))],
     });
-    const https = yield* Compute.GlobalForwardingRule("EdgeHttpsForwardingRule", {
+    const https = yield* Compute.GlobalForwardingRule(edgeProtocolId("Https", "ForwardingRule"), {
       forwardingRuleName: names.httpsForwardingRule,
       loadBalancingScheme: "EXTERNAL_MANAGED" as const,
       ipAddress: addressLink,
       portRange: "443",
-      target: httpsProxy.selfLink.pipe(declaredLink("EdgeHttpsProxy")),
+      target: httpsProxy.selfLink.pipe(declaredLink(edgeProtocolId("Https", "Proxy"))),
     });
     httpsForwardingRule = https.selfLink;
     const redirectMap = yield* Compute.UrlMap(
-      "EdgeHttpsRedirectUrlMap",
+      edgeProtocolId("Https", "RedirectUrlMap"),
       edgeHttpsRedirectUrlMapProps(config),
     );
     const redirectProxy = yield* Compute.TargetHttpProxy("EdgeHttpsRedirectProxy", {
       targetHttpProxyName: edgeResourceName(config, "https-redirect"),
-      urlMap: redirectMap.selfLink.pipe(declaredLink("EdgeHttpsRedirectUrlMap")),
+      urlMap: redirectMap.selfLink.pipe(declaredLink(edgeProtocolId("Https", "RedirectUrlMap"))),
     });
     httpTarget = redirectProxy.selfLink.pipe(declaredLink("EdgeHttpsRedirectProxy"));
   } else {
-    const httpProxy = yield* Compute.TargetHttpProxy("EdgeHttpProxy", {
+    const httpProxy = yield* Compute.TargetHttpProxy(edgeProtocolId("Http", "Proxy"), {
       targetHttpProxyName: names.httpProxy,
       urlMap: urlMapLink,
     });
-    httpTarget = httpProxy.selfLink.pipe(declaredLink("EdgeHttpProxy"));
+    httpTarget = httpProxy.selfLink.pipe(declaredLink(edgeProtocolId("Http", "Proxy")));
   }
 
-  yield* Compute.GlobalForwardingRule("EdgeHttpForwardingRule", {
+  yield* Compute.GlobalForwardingRule(edgeProtocolId("Http", "ForwardingRule"), {
     forwardingRuleName: names.httpForwardingRule,
     loadBalancingScheme: "EXTERNAL_MANAGED" as const,
     ipAddress: addressLink,

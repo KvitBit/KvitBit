@@ -3,23 +3,33 @@ import { MCP_RESOURCES, MCP_TOOLS } from "@kvitbit/api-contract";
 import { CoreStore } from "@kvitbit/core/ports";
 import { StartedDeliveries } from "@kvitbit/core/testing";
 import {
+  BankAccountInput,
   ContactId,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
+  DocumentId,
   Documents,
+  ExpenseId,
   Expenses,
   IsoDate,
   PriceList,
+  PriceListItemInput,
   PublicShareLinks,
   RequestKey,
   Templates,
   type WorkspaceId,
   Workspaces,
 } from "@kvitbit/domain/contract";
-import { BigDecimal, Duration, Effect, Option, Ref, Schema, Stream } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { RequestClaimCheck } from "../../src/persistence/CoreStoreSql";
 import { makeMcpHarness } from "./harness";
 
@@ -32,6 +42,27 @@ afterEach(async () => {
 });
 
 const SAMPLE_ICO = "27082440";
+const CONFIRMATION_TOKEN = /^mcpc_[A-Za-z0-9_-]{16,128}$/;
+const DOCUMENTS_FROM = /\bFROM\s+"?documents\b/i;
+const FOR_UPDATE = /\bFOR UPDATE\b/i;
+const UUID_V7_PREFIX = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+const IdField = Schema.Struct({ id: Schema.String });
+const decodeId = Schema.decodeUnknownPromise(IdField);
+const decodeRevisioned = Schema.decodeUnknownPromise(
+  Schema.Struct({ id: Schema.String, revision: Schema.Int }),
+);
+const decodeRevision = Schema.decodeUnknownPromise(Schema.Struct({ revision: Schema.Int }));
+const decodeConfirmationToken = Schema.decodeUnknownPromise(Schema.String);
+const decodeList = Schema.decodeUnknownPromise(Schema.Array(Schema.Unknown));
+const decodeIssues = Schema.decodeUnknownPromise(
+  Schema.Struct({ issues: Schema.Array(Schema.Struct({ code: Schema.String })) }),
+);
+const decodeResourceId = Schema.decodeUnknownPromise(Schema.fromJsonString(IdField));
+const decodeResourceList = Schema.decodeUnknownPromise(
+  Schema.fromJsonString(Schema.Array(Schema.Unknown)),
+);
 
 const setupSeededWorkspace = async () => {
   const h = makeMcpHarness({
@@ -84,53 +115,59 @@ const setupSeededWorkspace = async () => {
       const templates = yield* Templates;
       const expenses = yield* Expenses;
 
-      const supplierContact = yield* contacts.save({
+      const supplierContact = yield* contacts.save(ownerCaller, {
         name: "Office Depot s.r.o.",
         ico: "45274649",
         address: { city: "Praha", country: "CZ" },
         roles: ["supplier", "customer"],
       });
+      const supplierContactId = yield* Schema.decodeUnknownEffect(ContactId)(supplierContact["id"]);
 
-      const bankAccount = yield* ws.saveBankAccount({
-        name: "Main CZK",
-        currency: CurrencyCode.make("CZK"),
-        iban: "CZ6508000000192000145399",
-        bic: "GIBACZPX",
-        isDefault: true,
-      } as never);
+      yield* ws.saveBankAccount(
+        ownerCaller,
+        BankAccountInput.make({
+          name: "Main CZK",
+          currency: CurrencyCode.make("CZK"),
+          iban: "CZ6508000000192000145399",
+          bic: "GIBACZPX",
+          isDefault: true,
+        }),
+      );
 
-      const item = yield* priceList.save({
-        name: "Consulting hour",
-        unit: "hod",
-        unitPrice: BigDecimal.fromStringUnsafe("2000"),
-        currency: CurrencyCode.make("CZK"),
-        vat: "standard",
-      } as never);
+      yield* priceList.save(
+        ownerCaller,
+        PriceListItemInput.make({
+          name: "Consulting hour",
+          unit: "hod",
+          unitPrice: BigDecimal.fromStringUnsafe("2000"),
+          currency: CurrencyCode.make("CZK"),
+          vat: "standard",
+        }),
+      );
 
-      const expense = yield* expenses.record({
+      const expense = yield* expenses.record(ownerCaller, {
         status: "complete",
-        supplier: { contact: supplierContact.id },
+        supplier: { contact: supplierContactId },
         issuedOn: IsoDate.make("2026-11-10"),
         taxableSupplyOn: IsoDate.make("2026-11-10"),
         currency: CurrencyCode.make("CZK"),
         total: "1210.00",
         vat: [{ treatment: "standard", base: "1000.00", vat: "210.00" }],
         category: "office",
-      } as never);
+      });
+      const expenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense["id"]);
 
-      const attachment = yield* expenses.attach(
-        (expense as unknown as { readonly id: string }).id as never,
-        {
-          name: "receipt.pdf",
-          contentType: "application/pdf",
-          bytes: Stream.make(new TextEncoder().encode("%PDF-1.4 receipt")),
-        },
-      );
+      const attachment = yield* expenses.attach(ownerCaller, expenseId, {
+        name: "receipt.pdf",
+        contentType: "application/pdf",
+        bytes: Stream.make(new TextEncoder().encode("%PDF-1.4 receipt")),
+      });
+      const { id: attachmentId } = yield* Schema.decodeUnknownEffect(IdField)(attachment);
 
-      const template = yield* templates.save({
+      const template = yield* templates.save(ownerCaller, {
         name: "Monthly Retainer",
         kind: "invoice",
-        contact: supplierContact.id,
+        contact: supplierContactId,
         currency: CurrencyCode.make("CZK"),
         due: { inDays: 14 },
         lines: [
@@ -141,17 +178,18 @@ const setupSeededWorkspace = async () => {
             vat: "standard",
           },
         ],
-      } as never);
+      });
+      const { id: templateId } = yield* Schema.decodeUnknownEffect(IdField)(template);
 
-      return { supplierContact, bankAccount, item, expense, attachment, template };
-    }).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+      return { supplierContactId, expenseId, attachmentId, templateId };
+    }),
   );
 
   const rw = h.addReadWriteGrant(owner, ownerCaller.workspaceId, "en");
   const ro = h.addReadOnlyGrant(owner, ownerCaller.workspaceId, "en");
   const roCs = h.addReadOnlyGrant(owner, ownerCaller.workspaceId, "cs");
 
-  return { h, owner, ownerCaller, rw, ro, roCs, seeded };
+  return { h, ownerCaller, rw, ro, roCs, seeded };
 };
 
 describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcement", () => {
@@ -159,26 +197,34 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     const { h, rw, ro } = await setupSeededWorkspace();
 
     const rwList = await h.rpc(rw.token, "tools/list");
-    const rwTools = (
-      rwList.json.result as {
-        tools: Array<{ name: string; inputSchema: unknown; outputSchema: unknown }>;
-      }
-    ).tools;
-    expect(rwTools.map((t) => t.name)).toEqual(MCP_TOOLS.map((t) => t.name));
+    const { tools: rwTools } = await Schema.decodeUnknownPromise(
+      Schema.Struct({
+        tools: Schema.Array(
+          Schema.Struct({
+            name: Schema.String,
+            inputSchema: Schema.Unknown,
+            outputSchema: Schema.Unknown,
+          }),
+        ),
+      }),
+    )(rwList.json["result"]);
+    expect(Arr.map(rwTools, (t) => t.name)).toEqual(Arr.map(MCP_TOOLS, (t) => t.name));
     expect(rwTools).toHaveLength(28);
     for (const t of rwTools) {
-      expect(typeof t.inputSchema).toBe("object");
-      expect(typeof t.outputSchema).toBe("object");
+      expect(t.inputSchema).toEqual(expect.any(Object));
+      expect(t.outputSchema).toEqual(expect.any(Object));
     }
 
     const roList = await h.rpc(ro.token, "tools/list");
-    const roTools = (
-      roList.json.result as {
-        tools: Array<{ name: string; annotations: { readOnlyHint: boolean } }>;
-      }
-    ).tools;
+    const { tools: roTools } = await Schema.decodeUnknownPromise(
+      Schema.Struct({
+        tools: Schema.Array(
+          Schema.Struct({ annotations: Schema.Struct({ readOnlyHint: Schema.Boolean }) }),
+        ),
+      }),
+    )(roList.json["result"]);
     expect(roTools).toHaveLength(15);
-    expect(roTools.every((t) => t.annotations.readOnlyHint)).toBe(true);
+    expect(Arr.every(roTools, (t) => t.annotations.readOnlyHint)).toBe(true);
   });
 
   test("read-only grant calling a write tool gets Forbidden with read-only reconnect wording (en & cs)", async () => {
@@ -192,14 +238,14 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
           taxableSupplyOn: "2026-11-23",
           due: { inDays: 14 },
           currency: "CZK",
-          contact: seeded.supplierContact.id,
+          contact: seeded.supplierContactId,
           lines: [{ description: "Work", quantity: "1", unitPrice: "1000", vat: "standard" }],
         },
       },
     });
     expect(enRes.result?.isError).toBe(true);
-    expect((enRes.result?.structuredContent?.error as { _tag: string })?._tag).toBe("Forbidden");
-    expect((enRes.result?.content?.[0] as { text: string })?.text).toContain(
+    expect(enRes.result?.structuredContent?.["error"]).toMatchObject({ _tag: "Forbidden" });
+    expect(enRes.result?.content[0]?.["text"]).toContain(
       "This connection is read only. Reconnect Kvitbit with read and write access",
     );
 
@@ -209,11 +255,11 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       taxableSupplyOn: "2026-11-23",
       due: { inDays: 14 },
       currency: "CZK",
-      contact: seeded.supplierContact.id,
+      contact: seeded.supplierContactId,
       lines: [{ description: "Work", quantity: "1", unitPrice: "1000", vat: "standard" }],
     });
     expect(csRes.result?.isError).toBe(true);
-    expect((csRes.result?.content?.[0] as { text: string })?.text).toContain("pouze pro čtení");
+    expect(csRes.result?.content[0]?.["text"]).toContain("pouze pro čtení");
   });
 
   test("all 28 tools execute end-to-end including two-step confirmation, replay, mismatch, expiry, and stale revision", async () => {
@@ -222,14 +268,14 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     // 1. get_workspace
     const wsRes = await h.callTool(rw.token, "get_workspace");
     expect(wsRes.result?.isError).toBe(false);
-    expect((wsRes.result?.structuredContent?.series as unknown[])?.length).toBeGreaterThan(0);
+    expect((await decodeList(wsRes.result?.structuredContent?.["series"])).length).toBeGreaterThan(
+      0,
+    );
 
     // 2. lookup_ares
     const aresRes = await h.callTool(rw.token, "lookup_ares", { ico: SAMPLE_ICO });
     expect(aresRes.result?.isError).toBe(false);
-    expect((aresRes.result?.structuredContent as { name: string } | undefined)?.name).toBe(
-      "Alza.cz a.s.",
-    );
+    expect(aresRes.result?.structuredContent).toMatchObject({ name: "Alza.cz a.s." });
 
     // 3. upsert_contact (fromIco + create + update)
     const contactFromIco = await h.callTool(rw.token, "upsert_contact", {
@@ -237,10 +283,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       role: "customer",
     });
     expect(contactFromIco.result?.isError).toBe(false);
-    const contactId = (contactFromIco.result?.structuredContent?.contact as { id: string })?.id;
-    const contactRev = (
-      contactFromIco.result?.structuredContent?.contact as { revision: number } | undefined
-    )?.revision;
+    const { id: contactId, revision: contactRev } = await decodeRevisioned(
+      contactFromIco.result?.structuredContent?.["contact"],
+    );
 
     const contactUpdated = await h.callTool(rw.token, "upsert_contact", {
       contactId,
@@ -259,23 +304,22 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     // 4. list_contacts
     const listContacts = await h.callTool(rw.token, "list_contacts", { text: "Alza" });
     expect(listContacts.result?.isError).toBe(false);
-    expect((listContacts.result?.structuredContent?.items as unknown[])?.length).toBe(1);
+    expect(listContacts.result?.structuredContent?.["items"]).toHaveLength(1);
 
     // 5. list_price_list_items
     const priceList = await h.callTool(rw.token, "list_price_list_items");
     expect(priceList.result?.isError).toBe(false);
-    expect((priceList.result?.structuredContent?.items as unknown[])?.length).toBe(1);
+    expect(priceList.result?.structuredContent?.["items"]).toHaveLength(1);
 
     // 6. list_invoice_templates
     const templatesRes = await h.callTool(rw.token, "list_invoice_templates");
     expect(templatesRes.result?.isError).toBe(false);
-    expect((templatesRes.result?.structuredContent?.items as unknown[])?.length).toBe(1);
+    expect(templatesRes.result?.structuredContent?.["items"]).toHaveLength(1);
 
     // 7. list_expenses & 8. get_expense & 9. record_expense
     const listExp = await h.callTool(rw.token, "list_expenses", { incomplete: false });
     expect(listExp.result?.isError).toBe(false);
-    const seededExpenseId = (seeded.expense as unknown as { id: string }).id;
-    const getExp = await h.callTool(rw.token, "get_expense", { expenseId: seededExpenseId });
+    const getExp = await h.callTool(rw.token, "get_expense", { expenseId: seeded.expenseId });
     expect(getExp.result?.isError).toBe(false);
     const recExp = await h.callTool(rw.token, "record_expense", {
       expense: {
@@ -307,10 +351,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       idempotencyKey: "draft-key-00001",
     });
     expect(draftRes.result?.isError).toBe(false);
-    const draftDoc = draftRes.result?.structuredContent?.document as {
-      id: string;
-      revision: number;
-    };
+    const draftDoc = await decodeRevisioned(draftRes.result?.structuredContent?.["document"]);
 
     const updatedDraft = await h.callTool(rw.token, "update_draft", {
       documentId: draftDoc.id,
@@ -318,9 +359,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       patch: { note: "Updated via MCP" },
     });
     expect(updatedDraft.result?.isError).toBe(false);
-    const draftRev2 = (
-      updatedDraft.result?.structuredContent?.document as { revision: number } | undefined
-    )?.revision;
+    const { revision: draftRev2 } = await decodeRevision(
+      updatedDraft.result?.structuredContent?.["document"],
+    );
 
     // 13. issue_document (two-step: preview -> malformed -> mismatch -> invalid -> confirm -> replay)
     const issueArgs = { from: { draft: draftDoc.id, revision: draftRev2 } };
@@ -332,16 +373,17 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     });
     expect(malformed.result?.isError).toBe(true);
     expect(
-      (malformed.result?.structuredContent?.error as { issues: Array<{ code: string }> })?.issues[0]
-        ?.code,
+      (await decodeIssues(malformed.result?.structuredContent?.["error"])).issues[0]?.code,
     ).toBe("mcp.confirmation_required");
 
     // Preview step
     const issuePreview = await h.callTool(rw.token, "issue_document", issueArgs);
     expect(issuePreview.result?.isError).toBe(false);
-    expect(issuePreview.result?.structuredContent?._tag)?.toBe("ConfirmationRequired");
-    const issueToken = issuePreview.result?.structuredContent?.confirmationToken as string;
-    expect(issueToken).toMatch(/^mcpc_[A-Za-z0-9_-]{16,128}$/);
+    expect(issuePreview.result?.structuredContent?.["_tag"]).toBe("ConfirmationRequired");
+    const issueToken = await decodeConfirmationToken(
+      issuePreview.result?.structuredContent?.["confirmationToken"],
+    );
+    expect(issueToken).toMatch(CONFIRMATION_TOKEN);
 
     // Mismatch (changed args after preview)
     const mismatch = await h.callTool(rw.token, "issue_document", {
@@ -352,8 +394,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     });
     expect(mismatch.result?.isError).toBe(true);
     expect(
-      (mismatch.result?.structuredContent?.error as { issues: Array<{ code: string }> })?.issues[0]
-        ?.code,
+      (await decodeIssues(mismatch.result?.structuredContent?.["error"])).issues[0]?.code,
     ).toBe("mcp.confirmation_mismatch");
 
     // Invalid (wrong tool using issueToken)
@@ -364,8 +405,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     });
     expect(wrongTool.result?.isError).toBe(true);
     expect(
-      (wrongTool.result?.structuredContent?.error as { issues: Array<{ code: string }> })?.issues[0]
-        ?.code,
+      (await decodeIssues(wrongTool.result?.structuredContent?.["error"])).issues[0]?.code,
     ).toBe("mcp.confirmation_invalid");
 
     // Confirm step
@@ -375,15 +415,12 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirmationToken: issueToken,
     });
     expect(issueConfirmed.result?.isError).toBe(false);
-    expect(issueConfirmed.result?.structuredContent?._tag)?.toBe("Confirmed");
-    const issuedDoc = (
-      issueConfirmed.result?.structuredContent?.result as
-        | {
-            document: { id: string; status: string; number: string };
-          }
-        | undefined
-    )?.document;
-    if (!issuedDoc) throw new Error("expected issuedDoc");
+    expect(issueConfirmed.result?.structuredContent?.["_tag"]).toBe("Confirmed");
+    const { document: issuedDoc } = await Schema.decodeUnknownPromise(
+      Schema.Struct({
+        document: Schema.Struct({ id: DocumentId, status: Schema.String, number: Schema.String }),
+      }),
+    )(issueConfirmed.result?.structuredContent?.["result"]);
     expect(issuedDoc.status).toBe("issued");
     expect(issuedDoc.number).toBeTruthy();
 
@@ -401,9 +438,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       patch: { note: "Should fail" },
     });
     expect(editIssued.result?.isError).toBe(true);
-    expect(
-      editIssued.result?.structuredContent?.error as { _tag: string; reason: string } | undefined,
-    ).toMatchObject({
+    expect(editIssued.result?.structuredContent?.["error"]).toMatchObject({
       _tag: "Conflict",
       reason: "illegal_transition",
     });
@@ -411,9 +446,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     // 14. list_documents, 15. get_document, 16. get_document_history, 17. get_document_pdf, 18. get_share_link
     const listDocs = await h.callTool(rw.token, "list_documents", { status: "issued" });
     expect(listDocs.result?.isError).toBe(false);
-    expect((listDocs.result?.structuredContent?.items as unknown[])?.length).toBeGreaterThanOrEqual(
-      1,
-    );
+    expect(
+      (await decodeList(listDocs.result?.structuredContent?.["items"])).length,
+    ).toBeGreaterThanOrEqual(1);
 
     const getDoc = await h.callTool(rw.token, "get_document", { documentId: issuedDoc.id });
     expect(getDoc.result?.isError).toBe(false);
@@ -422,24 +457,28 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       documentId: issuedDoc.id,
     });
     expect(history.result?.isError).toBe(false);
-    expect((history.result?.structuredContent?.items as unknown[])?.length).toBeGreaterThan(0);
+    expect((await decodeList(history.result?.structuredContent?.["items"])).length).toBeGreaterThan(
+      0,
+    );
 
     const pdf = await h.callTool(rw.token, "get_document_pdf", { documentId: issuedDoc.id });
     expect(pdf.result?.isError).toBe(false);
-    expect(pdf.result?.structuredContent?.embedded)?.toBe(true);
-    expect(pdf.result?.content.some((c) => c.type === "resource_link")).toBe(true);
-    expect(pdf.result?.content.some((c) => c.type === "resource")).toBe(true);
+    expect(pdf.result?.structuredContent?.["embedded"]).toBe(true);
+    expect(Arr.some(pdf.result?.content ?? [], (c) => c["type"] === "resource_link")).toBe(true);
+    expect(Arr.some(pdf.result?.content ?? [], (c) => c["type"] === "resource")).toBe(true);
 
     // Create a share link in core and read via get_share_link
     await h.run(
       Effect.gen(function* () {
         const shareLinks = yield* PublicShareLinks;
-        return yield* shareLinks.create(issuedDoc.id as never);
-      }).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+        return yield* shareLinks.create(ownerCaller, issuedDoc.id);
+      }),
     );
     const shareRes = await h.callTool(rw.token, "get_share_link", { documentId: issuedDoc.id });
     expect(shareRes.result?.isError).toBe(false);
-    expect(shareRes.result?.structuredContent?.share)?.not.toBeNull();
+    expect(shareRes.result?.structuredContent).toMatchObject({
+      share: { url: expect.any(String) },
+    });
 
     // 19. send_document (two-step) & 20. send_reminder (two-step)
     const sendPreview = await h.callTool(rw.token, "send_document", {
@@ -447,7 +486,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       to: ["fakturace@alza.cz"],
     });
     expect(sendPreview.result?.isError).toBe(false);
-    const sendToken = sendPreview.result?.structuredContent?.confirmationToken as string;
+    const sendToken = await decodeConfirmationToken(
+      sendPreview.result?.structuredContent?.["confirmationToken"],
+    );
     const sendConfirm = await h.callTool(rw.token, "send_document", {
       documentId: issuedDoc.id,
       to: ["fakturace@alza.cz"],
@@ -455,14 +496,16 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirmationToken: sendToken,
     });
     expect(sendConfirm.result?.isError).toBe(false);
-    expect(sendConfirm.result?.structuredContent?._tag)?.toBe("Confirmed");
+    expect(sendConfirm.result?.structuredContent?.["_tag"]).toBe("Confirmed");
 
     const remPreview = await h.callTool(rw.token, "send_reminder", {
       documentId: issuedDoc.id,
       to: ["fakturace@alza.cz"],
     });
     expect(remPreview.result?.isError).toBe(false);
-    const remToken = remPreview.result?.structuredContent?.confirmationToken as string;
+    const remToken = await decodeConfirmationToken(
+      remPreview.result?.structuredContent?.["confirmationToken"],
+    );
     const remConfirm = await h.callTool(rw.token, "send_reminder", {
       documentId: issuedDoc.id,
       to: ["fakturace@alza.cz"],
@@ -479,13 +522,13 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       idempotencyKey: "pay-key-00001",
     });
     expect(payRes.result?.isError).toBe(false);
-    expect(payRes.result?.structuredContent?.settlement)?.toBe("paid");
+    expect(payRes.result?.structuredContent?.["settlement"]).toBe("paid");
 
     const listPay = await h.callTool(rw.token, "list_payments", {
       target: { document: issuedDoc.id },
     });
     expect(listPay.result?.isError).toBe(false);
-    expect((listPay.result?.structuredContent?.items as unknown[])?.length).toBe(1);
+    expect(listPay.result?.structuredContent?.["items"]).toHaveLength(1);
 
     // 23. create_credit_note (two-step) & 24. lock_document
     const cnPreview = await h.callTool(rw.token, "create_credit_note", {
@@ -495,7 +538,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       correctedOn: "2026-11-23",
     });
     expect(cnPreview.result?.isError).toBe(false);
-    const cnToken = cnPreview.result?.structuredContent?.confirmationToken as string;
+    const cnToken = await decodeConfirmationToken(
+      cnPreview.result?.structuredContent?.["confirmationToken"],
+    );
     const cnConfirm = await h.callTool(rw.token, "create_credit_note", {
       documentId: issuedDoc.id,
       reason: "Discount agreed",
@@ -505,7 +550,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirmationToken: cnToken,
     });
     expect(cnConfirm.result?.isError).toBe(false);
-    expect(cnConfirm.result?.structuredContent?._tag)?.toBe("Confirmed");
+    expect(cnConfirm.result?.structuredContent?.["_tag"]).toBe("Confirmed");
 
     // The request log must replay even when correction changes the source revision.
     const cnReplay = await h.callTool(rw.token, "create_credit_note", {
@@ -534,7 +579,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
         },
       },
     });
-    const proformaToken = proformaPreview.result?.structuredContent?.confirmationToken as string;
+    const proformaToken = await decodeConfirmationToken(
+      proformaPreview.result?.structuredContent?.["confirmationToken"],
+    );
     const proformaConfirm = await h.callTool(rw.token, "issue_document", {
       from: {
         input: {
@@ -550,9 +597,11 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirmationToken: proformaToken,
     });
     expect(proformaConfirm.result?.isError).toBe(false);
-    const proformaId = (
-      proformaConfirm.result?.structuredContent?.result as { document: { id: string } } | undefined
-    )?.document.id;
+    const {
+      document: { id: proformaId },
+    } = await Schema.decodeUnknownPromise(Schema.Struct({ document: IdField }))(
+      proformaConfirm.result?.structuredContent?.["result"],
+    );
 
     const settleRes = await h.callTool(rw.token, "settle_proforma", {
       proformaId,
@@ -561,21 +610,23 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       idempotencyKey: "settle-pf-001",
     });
     expect(settleRes.result?.isError).toBe(false);
-    expect((settleRes.result?.structuredContent?.issued as unknown[])?.length).toBe(1);
+    expect(settleRes.result?.structuredContent?.["issued"]).toHaveLength(1);
 
     const fiPreview = await h.callTool(rw.token, "create_final_invoice", { proformaId });
     expect(fiPreview.result?.isError).toBe(false);
-    const fiToken = fiPreview.result?.structuredContent?.confirmationToken as string;
+    const fiToken = await decodeConfirmationToken(
+      fiPreview.result?.structuredContent?.["confirmationToken"],
+    );
     const fiConfirm = await h.callTool(rw.token, "create_final_invoice", {
       proformaId,
       confirm: true,
       confirmationToken: fiToken,
     });
     expect(fiConfirm.result?.isError).toBe(false);
-    expect(fiConfirm.result?.structuredContent?._tag)?.toBe("Confirmed");
+    expect(fiConfirm.result?.structuredContent?.["_tag"]).toBe("Confirmed");
 
     // 27. create_from_template (single-call draft + two-step issued)
-    const templateId = (seeded.template as unknown as { id: string }).id;
+    const { templateId } = seeded;
     const tplDraft = await h.callTool(rw.token, "create_from_template", {
       templateId,
       as: "draft",
@@ -583,9 +634,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       idempotencyKey: "tpl-draft-001",
     });
     expect(tplDraft.result?.isError).toBe(false);
-    expect((tplDraft.result?.structuredContent?.document as { status: string })?.status).toBe(
-      "draft",
-    );
+    expect(tplDraft.result?.structuredContent?.["document"]).toMatchObject({ status: "draft" });
 
     const tplIssueArgs = {
       templateId,
@@ -600,18 +649,20 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     };
     const tplIssuePreview = await h.callTool(rw.token, "create_from_template", tplIssueArgs);
     expect(tplIssuePreview.result?.isError).toBe(false);
-    expect(tplIssuePreview.result?.structuredContent?._tag)?.toBe("ConfirmationRequired");
-    expect(tplIssuePreview.result?.structuredContent?.summary).toMatchObject({
+    expect(tplIssuePreview.result?.structuredContent?.["_tag"]).toBe("ConfirmationRequired");
+    expect(tplIssuePreview.result?.structuredContent?.["summary"]).toMatchObject({
       document: { contact: "Alza.cz a.s.", currency: "CZK", total: "2420", dueOn: "2026-11-30" },
     });
-    const tplToken = tplIssuePreview.result?.structuredContent?.confirmationToken as string;
+    const tplToken = await decodeConfirmationToken(
+      tplIssuePreview.result?.structuredContent?.["confirmationToken"],
+    );
     const tplIssueConfirm = await h.callTool(rw.token, "create_from_template", {
       ...tplIssueArgs,
       confirm: true,
       confirmationToken: tplToken,
     });
     expect(tplIssueConfirm.result?.isError).toBe(false);
-    expect(tplIssueConfirm.result?.structuredContent?._tag)?.toBe("Confirmed");
+    expect(tplIssueConfirm.result?.structuredContent?.["_tag"]).toBe("Confirmed");
 
     // 28. get_report (including `vat` alias -> `vat_summary`)
     const reportRes = await h.callTool(rw.token, "get_report", {
@@ -620,17 +671,17 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       to: "2026-11-30",
     });
     expect(reportRes.result?.isError).toBe(false);
-    expect(reportRes.result?.structuredContent?.report)?.toBe("vat_summary");
+    expect(reportRes.result?.structuredContent?.["report"]).toBe("vat_summary");
   });
 
   test("confirming a Payment Tax Document credit locks its Proforma first", async () => {
     const { h, rw, ownerCaller, seeded } = await setupSeededWorkspace();
     const proforma = await h.run(
       Effect.flatMap(Documents, (documents) =>
-        documents.issue({
+        documents.issue(ownerCaller, {
           input: {
             kind: "proforma",
-            contact: Schema.decodeUnknownSync(ContactId)(seeded.supplierContact.id),
+            contact: seeded.supplierContactId,
             lines: [
               {
                 description: "Advance",
@@ -640,7 +691,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
             ],
           },
         }),
-      ).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+      ),
     );
     const settled = await h.callTool(rw.token, "settle_proforma", {
       proformaId: proforma.id,
@@ -648,27 +699,31 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       method: "bank_transfer",
     });
     expect(settled.result?.isError).toBe(false);
-    const issued = settled.result?.structuredContent?.issued as ReadonlyArray<{ id: string }>;
+    const issued = await Schema.decodeUnknownPromise(Schema.Array(IdField))(
+      settled.result?.structuredContent?.["issued"],
+    );
     const ptdId = issued[0]?.id;
     expect(ptdId).toBeDefined();
 
     const args = { documentId: ptdId, lines: "full", reason: "Refund agreed" };
     const preview = await h.callTool(rw.token, "create_credit_note", args);
-    expect(preview.result?.structuredContent?._tag).toBe("ConfirmationRequired");
+    expect(preview.result?.structuredContent?.["_tag"]).toBe("ConfirmationRequired");
     const locked: unknown[] = [];
     const instance = h.createInstance((statement) => {
       const [query, params] = statement.compile();
-      if (/\bFROM\s+"?documents\b/i.test(query) && /\bFOR UPDATE\b/i.test(query)) {
-        locked.push(params.find((id) => id === proforma.id || id === ptdId));
+      if (DOCUMENTS_FROM.test(query) && FOR_UPDATE.test(query)) {
+        locked.push(
+          Option.getOrUndefined(Arr.findFirst(params, (id) => id === proforma.id || id === ptdId)),
+        );
       }
       return Effect.succeed(statement);
     });
     const confirmed = await instance.callTool(rw.token, "create_credit_note", {
       ...args,
-      confirmationToken: preview.result?.structuredContent?.confirmationToken,
+      confirmationToken: preview.result?.structuredContent?.["confirmationToken"],
       confirm: true,
     });
-    expect(confirmed.result?.structuredContent?._tag).toBe("Confirmed");
+    expect(confirmed.result?.structuredContent?.["_tag"]).toBe("Confirmed");
     expect(locked.slice(0, 2)).toEqual([proforma.id, ptdId]);
   });
 
@@ -679,7 +734,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       from: {
         input: {
           kind: "invoice",
-          contact: seeded.supplierContact.id,
+          contact: seeded.supplierContactId,
           currency: "EUR",
           lines: [{ description: "Consulting", quantity: "1", unitPrice: "100", vat: "standard" }],
         },
@@ -687,11 +742,11 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       send: { to: ["recipient@example.cz"], language: "cs" },
     };
     const preview = await h.callTool(rw.token, "issue_document", args);
-    expect(preview.result?.structuredContent?.warnings).toEqual([
+    expect(preview.result?.structuredContent?.["warnings"]).toEqual([
       "document.no_bank_account_for_currency",
     ]);
-    const token = preview.result?.structuredContent?.confirmationToken;
-    expect(typeof token).toBe("string");
+    const token = preview.result?.structuredContent?.["confirmationToken"];
+    expect(token).toEqual(expect.any(String));
 
     const inspect = () =>
       h.run(
@@ -713,8 +768,8 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       );
 
     const before = await inspect();
-    expect(before.confirmation?.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/);
-    expect(before.confirmation?.token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(before.confirmation?.id).toMatch(UUID_V7_PREFIX);
+    expect(before.confirmation?.token_hash).toMatch(SHA256_HEX);
     expect(before.confirmation?.token_hash).not.toBe(token);
     expect(before.confirmation?.consumed_at).toBeNull();
     expect(before.writes).toEqual({ documents: 0, deliveries: 0, requests: 0 });
@@ -722,14 +777,14 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     // Object key order does not change the canonical approval hash.
     const confirm = { confirmationToken: token, confirm: true, send: args.send, from: args.from };
     const wrongGrant = await second.callTool(ro.token, "issue_document", confirm);
-    expect(wrongGrant.result?.structuredContent?.error).toMatchObject({
+    expect(wrongGrant.result?.structuredContent?.["error"]).toMatchObject({
       issues: [{ code: "mcp.confirmation_invalid" }],
     });
     const [first, concurrent] = await Promise.all([
       h.callTool(rw.token, "issue_document", confirm),
       second.callTool(rw.token, "issue_document", confirm),
     ]);
-    expect(first.result?.structuredContent?._tag).toBe("Confirmed");
+    expect(first.result?.structuredContent?.["_tag"]).toBe("Confirmed");
     expect(concurrent.result).toEqual(first.result);
     const committed = await inspect();
     expect(committed.confirmation?.consumed_at).toBeInstanceOf(Date);
@@ -743,14 +798,14 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     expect(replay.result).toEqual(first.result);
     const reducedGrant = h.addGrant({ ...rw, scopes: ro.scopes, token: "reduced-scopes" });
     const forbiddenReplay = await restarted.callTool(reducedGrant.token, "issue_document", confirm);
-    expect(forbiddenReplay.result?.structuredContent?.error).toMatchObject({
+    expect(forbiddenReplay.result?.structuredContent?.["error"]).toMatchObject({
       _tag: "Forbidden",
       action: "document.issue",
     });
 
     await h.run(TestClock.adjust(Duration.hours(24)));
     const expired = await restarted.callTool(rw.token, "issue_document", confirm);
-    expect(expired.result?.structuredContent?.error).toMatchObject({
+    expect(expired.result?.structuredContent?.["error"]).toMatchObject({
       issues: [{ code: "mcp.confirmation_expired" }],
     });
     expect(await inspect()).toEqual(committed);
@@ -773,18 +828,18 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       from: {
         input: {
           kind: "invoice",
-          contact: seeded.supplierContact.id,
+          contact: seeded.supplierContactId,
           lines: [{ description: "Consulting", quantity: "1", unitPrice: "100", vat: "standard" }],
         },
       },
       send: { to: ["recipient@example.cz"] },
     };
     const preview = await h.callTool(rw.token, "issue_document", args);
-    expect(preview.result?.structuredContent?.warnings).toEqual([]);
+    expect(preview.result?.structuredContent?.["warnings"]).toEqual([]);
     const confirm = {
       ...args,
       confirm: true,
-      confirmationToken: preview.result?.structuredContent?.confirmationToken,
+      confirmationToken: preview.result?.structuredContent?.["confirmationToken"],
     };
 
     await h.run(
@@ -806,7 +861,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     );
 
     const failed = await h.callTool(rw.token, "issue_document", confirm);
-    expect(failed.result?.structuredContent?.error).toMatchObject({ _tag: "Unavailable" });
+    expect(failed.result?.structuredContent?.["error"]).toMatchObject({ _tag: "Unavailable" });
     const rollback = await h.run(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
@@ -829,7 +884,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     );
 
     const retry = await h.createInstance().callTool(rw.token, "issue_document", confirm);
-    expect(retry.result?.structuredContent?._tag).toBe("Confirmed");
+    expect(retry.result?.structuredContent?.["_tag"]).toBe("Confirmed");
     expect(await h.run(Effect.flatMap(StartedDeliveries, Ref.get))).toHaveLength(1);
   });
 
@@ -905,7 +960,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       ico: SAMPLE_ICO,
       role: "customer",
     });
-    const contactId = (contact.result?.structuredContent?.contact as { id: string })?.id;
+    const { id: contactId } = await decodeId(contact.result?.structuredContent?.["contact"]);
 
     // Issue a document first so we can test send_document stale revision + token expiry
     const preview1 = await h.callTool(rw.token, "issue_document", {
@@ -921,7 +976,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
         },
       },
     });
-    const tok1 = preview1.result?.structuredContent?.confirmationToken as string;
+    const tok1 = await decodeConfirmationToken(
+      preview1.result?.structuredContent?.["confirmationToken"],
+    );
     const confirmed1 = await h.callTool(rw.token, "issue_document", {
       from: {
         input: {
@@ -937,25 +994,24 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirm: true,
       confirmationToken: tok1,
     });
-    const doc = (
-      confirmed1.result?.structuredContent?.result as
-        | { document: { id: string; revision: number } }
-        | undefined
-    )?.document;
-    if (!doc) throw new Error("expected doc");
+    const { document: doc } = await Schema.decodeUnknownPromise(
+      Schema.Struct({ document: Schema.Struct({ id: DocumentId, revision: Schema.Int }) }),
+    )(confirmed1.result?.structuredContent?.["result"]);
 
     // Preview send_document, then edit document in core (bumping revision), then confirm -> Conflict{revision_changed}
     const sendPrev = await h.callTool(rw.token, "send_document", {
       documentId: doc.id,
       to: ["buyer@example.cz"],
     });
-    const sendTok = sendPrev.result?.structuredContent?.confirmationToken as string;
+    const sendTok = await decodeConfirmationToken(
+      sendPrev.result?.structuredContent?.["confirmationToken"],
+    );
 
     await h.run(
       Effect.gen(function* () {
         const docs = yield* Documents;
-        return yield* docs.edit(doc.id as never, { note: "Concurrent edit" }, doc.revision);
-      }).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+        return yield* docs.edit(ownerCaller, doc.id, { note: "Concurrent edit" }, doc.revision);
+      }),
     );
 
     const staleConfirm = await h.callTool(rw.token, "send_document", {
@@ -965,7 +1021,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       confirmationToken: sendTok,
     });
     expect(staleConfirm.result?.isError).toBe(true);
-    expect(staleConfirm.result?.structuredContent?.error)?.toMatchObject({
+    expect(staleConfirm.result?.structuredContent?.["error"]).toMatchObject({
       _tag: "Conflict",
       reason: "revision_changed",
     });
@@ -975,7 +1031,9 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       documentId: doc.id,
       to: ["buyer@example.cz"],
     });
-    const expTok = freshPrev.result?.structuredContent?.confirmationToken as string;
+    const expTok = await decodeConfirmationToken(
+      freshPrev.result?.structuredContent?.["confirmationToken"],
+    );
     await h.run(TestClock.adjust(Duration.minutes(11)));
 
     const expiredConfirm = await h.callTool(rw.token, "send_document", {
@@ -986,11 +1044,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     });
     expect(expiredConfirm.result?.isError).toBe(true);
     expect(
-      (
-        expiredConfirm.result?.structuredContent?.error as
-          | { issues: Array<{ code: string }> }
-          | undefined
-      )?.issues[0]?.code,
+      (await decodeIssues(expiredConfirm.result?.structuredContent?.["error"])).issues[0]?.code,
     ).toBe("mcp.confirmation_expired");
   });
 
@@ -999,27 +1053,35 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
 
     // List 4 static resources
     const staticList = await h.rpc(rw.token, "resources/list");
-    const statics = (
-      staticList.json.result as { resources: Array<{ uri: string; mimeType: string }> }
-    ).resources;
-    expect(statics.map((r) => r.uri)).toEqual(
-      MCP_RESOURCES.filter((r) => r.kind === "static").map((r) => r.uri),
+    const { resources: statics } = await Schema.decodeUnknownPromise(
+      Schema.Struct({ resources: Schema.Array(Schema.Struct({ uri: Schema.String })) }),
+    )(staticList.json["result"]);
+    expect(Arr.map(statics, (r) => r.uri)).toEqual(
+      Arr.map(
+        Arr.filter(MCP_RESOURCES, (r) => r.kind === "static"),
+        (r) => r.uri,
+      ),
     );
     expect(statics).toHaveLength(4);
 
     // List 5 resource templates
     const tmplList = await h.rpc(rw.token, "resources/templates/list");
-    const templates = (
-      tmplList.json.result as { resourceTemplates: Array<{ uriTemplate: string }> }
-    ).resourceTemplates;
-    expect(templates.map((r) => r.uriTemplate)).toEqual(
-      MCP_RESOURCES.filter((r) => r.kind === "template").map((r) => r.uri),
+    const { resourceTemplates: templates } = await Schema.decodeUnknownPromise(
+      Schema.Struct({
+        resourceTemplates: Schema.Array(Schema.Struct({ uriTemplate: Schema.String })),
+      }),
+    )(tmplList.json["result"]);
+    expect(Arr.map(templates, (r) => r.uriTemplate)).toEqual(
+      Arr.map(
+        Arr.filter(MCP_RESOURCES, (r) => r.kind === "template"),
+        (r) => r.uri,
+      ),
     );
     expect(templates).toHaveLength(5);
 
     // Seed contact and document to read template URIs
     const contactRes = await h.callTool(rw.token, "upsert_contact", { ico: SAMPLE_ICO });
-    const contactId = (contactRes.result?.structuredContent?.contact as { id: string })?.id;
+    const { id: contactId } = await decodeId(contactRes.result?.structuredContent?.["contact"]);
     const draftRes = await h.callTool(rw.token, "create_draft", {
       kind: "invoice",
       issuedOn: "2026-11-23",
@@ -1029,58 +1091,60 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
       contact: contactId,
       lines: [{ description: "Service", quantity: "1", unitPrice: "500", vat: "standard" }],
     });
-    const docId = (draftRes.result?.structuredContent?.document as { id: string })?.id;
-    const expenseId = (seeded.expense as unknown as { id: string }).id;
-    const attachmentId = (seeded.attachment as unknown as { id: string }).id;
+    const { id: docId } = await decodeId(draftRes.result?.structuredContent?.["document"]);
+    const { expenseId, attachmentId } = seeded;
 
     // 1. kvitbit://workspace
     const r1 = await h.readResource(rw.token, "kvitbit://workspace");
-    expect(r1.contents?.[0]?.mimeType).toBe("application/json");
-    expect(JSON.parse(String(r1.contents?.[0]?.text ?? "{}"))?.name).toBe("Kvitbit Studio s.r.o.");
+    expect(r1.contents?.[0]?.["mimeType"]).toBe("application/json");
+    const workspace = await Schema.decodeUnknownPromise(
+      Schema.fromJsonString(Schema.Struct({ name: Schema.String })),
+    )(r1.contents?.[0]?.["text"]);
+    expect(workspace.name).toBe("Kvitbit Studio s.r.o.");
 
     // 2. kvitbit://templates
     const r2 = await h.readResource(rw.token, "kvitbit://templates");
-    expect(r2.contents?.[0]?.mimeType).toBe("application/json");
-    expect(JSON.parse(String(r2.contents?.[0]?.text ?? "[]"))).toHaveLength(1);
+    expect(r2.contents?.[0]?.["mimeType"]).toBe("application/json");
+    expect(await decodeResourceList(r2.contents?.[0]?.["text"])).toHaveLength(1);
 
     // 3. kvitbit://price-list
     const r3 = await h.readResource(rw.token, "kvitbit://price-list");
-    expect(r3.contents?.[0]?.mimeType).toBe("application/json");
-    expect(JSON.parse(String(r3.contents?.[0]?.text ?? "[]"))).toHaveLength(1);
+    expect(r3.contents?.[0]?.["mimeType"]).toBe("application/json");
+    expect(await decodeResourceList(r3.contents?.[0]?.["text"])).toHaveLength(1);
 
     // 4. kvitbit://guide
     const r4 = await h.readResource(rw.token, "kvitbit://guide");
-    expect(r4.contents?.[0]?.mimeType).toBe("text/markdown");
-    expect(String(r4.contents?.[0]?.text ?? "")).toContain("VatTreatment");
+    expect(r4.contents?.[0]?.["mimeType"]).toBe("text/markdown");
+    expect(String(r4.contents?.[0]?.["text"] ?? "")).toContain("VatTreatment");
 
     // 5. kvitbit://documents/{documentId}
     const r5 = await h.readResource(rw.token, `kvitbit://documents/${docId}`);
-    expect(r5.contents?.[0]?.mimeType).toBe("application/json");
-    expect(JSON.parse(String(r5.contents?.[0]?.text ?? "{}"))?.id).toBe(docId);
+    expect(r5.contents?.[0]?.["mimeType"]).toBe("application/json");
+    expect((await decodeResourceId(r5.contents?.[0]?.["text"])).id).toBe(docId);
 
     // 6. kvitbit://documents/{documentId}/pdf{?template,language}
     const r6 = await h.readResource(rw.token, `kvitbit://documents/${docId}/pdf?language=en`);
-    expect(r6.contents?.[0]?.mimeType).toBe("application/pdf");
-    expect(typeof r6.contents?.[0]?.blob).toBe("string");
-    expect(String(r6.contents?.[0]?.blob ?? "").length).toBeGreaterThan(0);
+    expect(r6.contents?.[0]?.["mimeType"]).toBe("application/pdf");
+    expect(r6.contents?.[0]?.["blob"]).toEqual(expect.any(String));
+    expect(String(r6.contents?.[0]?.["blob"] ?? "").length).toBeGreaterThan(0);
 
     // 7. kvitbit://contacts/{contactId}
     const r7 = await h.readResource(rw.token, `kvitbit://contacts/${contactId}`);
-    expect(r7.contents?.[0]?.mimeType).toBe("application/json");
-    expect(JSON.parse(String(r7.contents?.[0]?.text ?? "{}"))?.id).toBe(contactId);
+    expect(r7.contents?.[0]?.["mimeType"]).toBe("application/json");
+    expect((await decodeResourceId(r7.contents?.[0]?.["text"])).id).toBe(contactId);
 
     // 8. kvitbit://expenses/{expenseId}
     const r8 = await h.readResource(rw.token, `kvitbit://expenses/${expenseId}`);
-    expect(r8.contents?.[0]?.mimeType).toBe("application/json");
-    expect(JSON.parse(String(r8.contents?.[0]?.text ?? "{}"))?.id).toBe(expenseId);
+    expect(r8.contents?.[0]?.["mimeType"]).toBe("application/json");
+    expect((await decodeResourceId(r8.contents?.[0]?.["text"])).id).toBe(expenseId);
 
     // 9. kvitbit://expenses/{expenseId}/attachments/{attachmentId}
     const r9 = await h.readResource(
       rw.token,
       `kvitbit://expenses/${expenseId}/attachments/${attachmentId}`,
     );
-    expect(r9.contents?.[0]?.mimeType).toBe("application/pdf");
-    expect(Buffer.from(String(r9.contents?.[0]?.blob ?? ""), "base64").toString("utf8")).toBe(
+    expect(r9.contents?.[0]?.["mimeType"]).toBe("application/pdf");
+    expect(Buffer.from(String(r9.contents?.[0]?.["blob"] ?? ""), "base64").toString("utf8")).toBe(
       "%PDF-1.4 receipt",
     );
 

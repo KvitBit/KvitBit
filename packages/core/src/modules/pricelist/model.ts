@@ -2,13 +2,13 @@
  * Price List Item rows, the concrete view and the save input (core-ports 4.3). The domain leaves
  * the input and view open; the fields follow the `price_list_items` table of packages/db.
  */
-import type { PriceListItemId, WorkspaceId } from "@kvitbit/domain/contract";
 import {
   CurrencyCode,
   PriceListItemId as PriceListItemIdSchema,
   VatTreatment,
+  WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 const OptionalText = Schema.NullOr(Schema.String);
 const Name = Schema.Trimmed.pipe(Schema.check(Schema.isMinLength(1)));
@@ -25,19 +25,15 @@ const ItemFields = {
 };
 
 export const PriceListItemRowSchema = Schema.Struct({
-  id: Schema.String,
-  workspaceId: Schema.String,
+  id: PriceListItemIdSchema,
+  workspaceId: WorkspaceId,
   revision: Schema.Int,
   ...ItemFields,
   archivedAt: OptionalText,
   createdAt: Schema.String,
   updatedAt: Schema.String,
 });
-export interface PriceListItemRow
-  extends Omit<typeof PriceListItemRowSchema.Type, "id" | "workspaceId"> {
-  readonly id: PriceListItemId;
-  readonly workspaceId: WorkspaceId;
-}
+export type PriceListItemRow = typeof PriceListItemRowSchema.Type;
 
 /** The concrete `PriceListItemView`. */
 export const PriceListItemViewSchema = Schema.Struct({
@@ -71,7 +67,7 @@ export const PriceListItemSaveFields = Schema.Struct({
   unit: Schema.optional(OptionalText),
   unitPrice: Schema.optional(Schema.BigDecimal),
   currency: Schema.optional(CurrencyCode),
-  vat: Schema.optional(Schema.NullOr(VatTreatment)),
+  vat: VatTreatment.pipe(Schema.NullOr, Schema.optional),
 });
 export type PriceListItemSaveFields = typeof PriceListItemSaveFields.Type;
 

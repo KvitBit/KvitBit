@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { IsoDate } from "@kvitbit/domain/contract";
+import { IsoDate } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
 import { ReportCompute } from "../../../src/modules/reports";
+import type { VatSummaryView } from "../../../src/modules/reports/views";
 import { regimeOn as workspaceRegimeOn } from "../../../src/modules/workspaces";
 import {
   bucket,
@@ -16,23 +20,16 @@ import {
   s,
 } from "./fixtures";
 
-const NOV = { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate };
-const PAYER = [{ effectiveFrom: "2020-01-01" as IsoDate, regime: "vat_payer" as const }];
+const NOV = { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") };
+const PAYER = [{ effectiveFrom: IsoDate.make("2020-01-01"), regime: "vat_payer" as const }];
 
-const line = (l: {
-  month: string;
-  treatment: string;
-  ratePercent: unknown;
-  base: { amount: never } | unknown;
-  vat: unknown;
-  documents: ReadonlyArray<{ readonly id: string }>;
-}) => ({
+const line = (l: VatSummaryView["output"][number]) => ({
   month: l.month,
   treatment: l.treatment,
-  rate: s(l.ratePercent as never),
-  base: s(l.base as never),
-  vat: s(l.vat as never),
-  documents: l.documents.map((ref) => ref.id),
+  rate: s(l.ratePercent),
+  base: s(l.base),
+  vat: s(l.vat),
+  documents: EffectArray.map(l.documents, (ref) => ref.id),
 });
 
 describe("vatSummary", () => {
@@ -45,37 +42,37 @@ describe("vatSummary", () => {
     document(2, {
       currency: EUR,
       fx: fx("25.125"),
-      taxPoint: "2026-11-10" as IsoDate,
+      taxPoint: IsoDate.make("2026-11-10"),
       buckets: [bucket("standard", "21", "100", "21", "527.63")],
     }),
     // Credit Note: signed negative
     document(3, {
       kind: "credit_note",
-      taxPoint: "2026-11-12" as IsoDate,
+      taxPoint: IsoDate.make("2026-11-12"),
       buckets: [bucket("standard", "21", "-200", "-42")],
     }),
     // reverse charge: base only
     document(4, {
-      taxPoint: "2026-11-15" as IsoDate,
+      taxPoint: IsoDate.make("2026-11-15"),
       buckets: [bucket("reverse_charge", "0", "3000", "0")],
     }),
     // Final Invoice: full totals minus the advance already taxed on the PTD
     document(5, {
       finalInvoice: true,
-      taxPoint: "2026-11-20" as IsoDate,
+      taxPoint: IsoDate.make("2026-11-20"),
       buckets: [bucket("standard", "21", "2000", "420")],
       advanceDeductions: [bucket("standard", "21", "1000", "210")],
     }),
     // the Payment Tax Document for that advance
     document(6, {
       kind: "payment_tax_document",
-      taxPoint: "2026-11-03" as IsoDate,
+      taxPoint: IsoDate.make("2026-11-03"),
       buckets: [bucket("standard", "21", "1000", "210")],
     }),
     // excluded: Proforma, cancelled, outside the period
     document(7, { kind: "proforma", taxPoint: null }),
     document(8, { status: "cancelled" }),
-    document(9, { taxPoint: "2026-12-01" as IsoDate }),
+    document(9, { taxPoint: IsoDate.make("2026-12-01") }),
   ];
   const expenses = [
     expense(1),
@@ -93,13 +90,13 @@ describe("vatSummary", () => {
       deductiblePercent: 50,
       buckets: [bucket("reduced", "12", "102.75", "12.33")],
     }),
-    expense(5, { taxPoint: "2026-10-31" as IsoDate }),
+    expense(5, { taxPoint: IsoDate.make("2026-10-31") }),
   ];
 
   const view = ReportCompute.vatSummary(documents, expenses, PAYER, NOV);
 
   test("output VAT per rate bucket in CZK, credit notes and final-invoice advances netted", () => {
-    expect(view.output.map(line)).toEqual([
+    expect(EffectArray.map(view.output, line)).toEqual([
       {
         month: "2026-11",
         treatment: "standard",
@@ -108,7 +105,10 @@ describe("vatSummary", () => {
         base: "7812.5",
         // 210 + 527.63 - 42 + (420 - 210) + 210 + 525
         vat: "1640.63",
-        documents: [docId(1), docId(2), docId(3), docId(5), docId(6), expenseId(2)].sort(),
+        documents: EffectArray.sort(
+          [docId(1), docId(2), docId(3), docId(5), docId(6), expenseId(2)],
+          Order.String,
+        ),
       },
       {
         month: "2026-11",
@@ -130,7 +130,7 @@ describe("vatSummary", () => {
   });
 
   test("input VAT from expenses, deductible share rounded per bucket", () => {
-    expect(view.input.map(line)).toEqual([
+    expect(EffectArray.map(view.input, line)).toEqual([
       {
         month: "2026-11",
         treatment: "standard",
@@ -160,14 +160,14 @@ describe("vatSummary", () => {
   });
 
   test("groups by tax point month, oldest first", () => {
-    const q = { from: "2026-10-01" as IsoDate, to: "2026-11-30" as IsoDate };
+    const q = { from: IsoDate.make("2026-10-01"), to: IsoDate.make("2026-11-30") };
     const v = ReportCompute.vatSummary(
-      [document(1), document(2, { taxPoint: "2026-10-31" as IsoDate })],
+      [document(1), document(2, { taxPoint: IsoDate.make("2026-10-31") })],
       [],
       PAYER,
       q,
     );
-    expect(v.output.map((l) => [l.month, s(l.vat)])).toEqual([
+    expect(EffectArray.map(v.output, (l) => [l.month, s(l.vat)])).toEqual([
       ["2026-10", "210"],
       ["2026-11", "210"],
     ]);
@@ -187,7 +187,7 @@ describe("vatSummary", () => {
       NOV,
     );
     // 2.1 x 24.5 = 51.45; base 245
-    expect(v.output.map((l) => [s(l.base), s(l.vat)])).toEqual([["245", "51.45"]]);
+    expect(EffectArray.map(v.output, (l) => [s(l.base), s(l.vat)])).toEqual([["245", "51.45"]]);
   });
 
   test("rates differing within a treatment stay separate buckets, higher rate first", () => {
@@ -200,14 +200,14 @@ describe("vatSummary", () => {
       PAYER,
       NOV,
     );
-    expect(v.output.map((l) => s(l.ratePercent))).toEqual(["15", "10"]);
+    expect(EffectArray.map(v.output, (l) => s(l.ratePercent))).toEqual(["15", "10"]);
   });
 });
 
 describe("receivables aging", () => {
-  const asOf = "2026-11-23" as IsoDate;
+  const asOf = IsoDate.make("2026-11-23");
   const due = (n: number, dueOn: string | null) =>
-    document(n, { dueOn: dueOn as IsoDate | null, outstanding: d("100") });
+    document(n, { dueOn: dueOn === null ? null : IsoDate.make(dueOn), outstanding: d("100") });
 
   test("bucket boundaries: 0 not due, 1-30, 31-60, 61-90, over 90", () => {
     const cases: ReadonlyArray<[string | null, string]> = [
@@ -223,14 +223,16 @@ describe("receivables aging", () => {
       ["2026-08-24", "over_90"], // 91
     ];
     const view = ReportCompute.receivables(
-      cases.map(([dueOn], i) => due(i + 1, dueOn)),
+      EffectArray.map(cases, ([dueOn], i) => due(i + 1, dueOn)),
       NOV,
       asOf,
     );
     const placed = new Map<string, string>();
     for (const b of view.buckets) for (const r of b.documents) placed.set(r.id, b.bucket);
-    expect(cases.map((_, i) => placed.get(docId(i + 1)))).toEqual(cases.map(([, b]) => b));
-    expect(view.buckets.map((b) => [b.bucket, b.count])).toEqual([
+    expect(EffectArray.map(cases, (_, i) => placed.get(docId(i + 1)))).toEqual(
+      EffectArray.map(cases, ([, b]) => b),
+    );
+    expect(EffectArray.map(view.buckets, (b) => [b.bucket, b.count])).toEqual([
       ["not_due", 3],
       ["1_30", 2],
       ["31_60", 2],
@@ -243,20 +245,24 @@ describe("receivables aging", () => {
   test("foreign outstanding in CZK at the document rate; most overdue first", () => {
     const view = ReportCompute.receivables(
       [
-        document(1, { dueOn: "2026-11-20" as IsoDate, outstanding: d("50") }),
+        document(1, { dueOn: IsoDate.make("2026-11-20"), outstanding: d("50") }),
         document(2, {
           currency: EUR,
           fx: fx("25.3"),
-          dueOn: "2026-11-10" as IsoDate,
+          dueOn: IsoDate.make("2026-11-10"),
           outstanding: d("10.01"),
         }),
-        document(3, { dueOn: "2026-11-20" as IsoDate, outstanding: d("0") }),
+        document(3, { dueOn: IsoDate.make("2026-11-20"), outstanding: d("0") }),
       ],
       NOV,
       asOf,
     );
-    const rows = view.buckets.find((b) => b.bucket === "1_30")?.documents ?? [];
-    expect(rows.map((r) => [r.id, r.daysOverdue, s(r.outstanding), s(r.outstandingCzk)])).toEqual([
+    const rows =
+      Option.getOrUndefined(EffectArray.findFirst(view.buckets, (b) => b.bucket === "1_30"))
+        ?.documents ?? [];
+    expect(
+      EffectArray.map(rows, (r) => [r.id, r.daysOverdue, s(r.outstanding), s(r.outstandingCzk)]),
+    ).toEqual([
       [docId(2), 13, "10.01", "253.25"], // 10.01 x 25.3 = 253.253
       [docId(1), 3, "50", "50"],
     ]);
@@ -265,24 +271,27 @@ describe("receivables aging", () => {
 
 describe("revenue", () => {
   const documents = [
-    document(1, { issuedOn: "2026-11-02" as IsoDate, contact: { id: contactId(2), name: "Beta" } }),
+    document(1, {
+      issuedOn: IsoDate.make("2026-11-02"),
+      contact: { id: contactId(2), name: "Beta" },
+    }),
     document(2, {
       currency: EUR,
       fx: fx("25"),
-      issuedOn: "2026-11-03" as IsoDate,
+      issuedOn: IsoDate.make("2026-11-03"),
       buckets: [bucket("standard", "21", "100", "21", "525")],
     }),
     document(3, { kind: "credit_note", buckets: [bucket("standard", "21", "-100", "-21")] }),
     document(4, { kind: "proforma" }),
     document(5, { kind: "payment_tax_document" }),
-    document(6, { finalInvoice: true, issuedOn: "2026-10-30" as IsoDate }),
+    document(6, { finalInvoice: true, issuedOn: IsoDate.make("2026-10-30") }),
     document(7, { status: "cancelled" }),
   ];
 
   test("by currency: Credit Notes subtract, Proformas and PTDs excluded", () => {
     const view = ReportCompute.revenue(documents, NOV, "currency");
     expect(
-      view.rows.map((r) => [
+      EffectArray.map(view.rows, (r) => [
         r.key,
         r.count,
         s(r.net),
@@ -299,22 +308,22 @@ describe("revenue", () => {
 
   test("by contact, sorted by key", () => {
     const view = ReportCompute.revenue(documents, NOV, "contact");
-    expect(view.rows.map((r) => [r.key, r.label, r.count])).toEqual([
+    expect(EffectArray.map(view.rows, (r) => [r.key, r.label, r.count])).toEqual([
       [contactId(1), "Odběratel s.r.o.", 2],
       [contactId(2), "Beta", 1],
     ]);
   });
 
   test("Final Invoices count once, in full, by issue date", () => {
-    const oct = { from: "2026-10-01" as IsoDate, to: "2026-10-31" as IsoDate };
+    const oct = { from: IsoDate.make("2026-10-01"), to: IsoDate.make("2026-10-31") };
     const view = ReportCompute.revenue(documents, oct, "month");
-    expect(view.rows.map((r) => [r.key, s(r.net)])).toEqual([["2026-10", "1000"]]);
+    expect(EffectArray.map(view.rows, (r) => [r.key, s(r.net)])).toEqual([["2026-10", "1000"]]);
   });
 });
 
 describe("cashflow", () => {
   test("payments in vs out per month by payment date, CZK at the target's rate, empty months zero", () => {
-    const q = { from: "2026-09-15" as IsoDate, to: "2026-11-30" as IsoDate };
+    const q = { from: IsoDate.make("2026-09-15"), to: IsoDate.make("2026-11-30") };
     const view = ReportCompute.cashflow(
       [
         payment(1, "in", "2026-09-15", "1000"),
@@ -324,7 +333,7 @@ describe("cashflow", () => {
       ],
       q,
     );
-    expect(view.points.map((p) => [p.month, s(p.in), s(p.out), s(p.net)])).toEqual([
+    expect(EffectArray.map(view.points, (p) => [p.month, s(p.in), s(p.out), s(p.net)])).toEqual([
       ["2026-09", "1000", "0", "1000"],
       ["2026-10", "0", "0", "0"],
       ["2026-11", "251", "300", "-49"],
@@ -340,16 +349,18 @@ describe("expenses and profit", () => {
       expense(2, { category: null, buckets: [bucket("outside_scope", "0", "50", "0")] }),
     ];
     const byCategory = ReportCompute.expenses(records, NOV, "category", 2);
-    expect(byCategory.rows.map((r) => [r.key, r.label, s(r.net)])).toEqual([
+    expect(EffectArray.map(byCategory.rows, (r) => [r.key, r.label, s(r.net)])).toEqual([
       ["", null, "50"],
       ["software", "software", "400"],
     ]);
     expect(byCategory.incomplete).toBe(2);
     const p = ReportCompute.profit([document(1)], records, PAYER, {
-      from: "2026-10-01" as IsoDate,
-      to: "2026-11-30" as IsoDate,
+      from: IsoDate.make("2026-10-01"),
+      to: IsoDate.make("2026-11-30"),
     });
-    expect(p.rows.map((r) => [r.month, s(r.revenue), s(r.expenses), s(r.profit)])).toEqual([
+    expect(
+      EffectArray.map(p.rows, (r) => [r.month, s(r.revenue), s(r.expenses), s(r.profit)]),
+    ).toEqual([
       ["2026-10", "0", "0", "0"],
       ["2026-11", "1000", "450", "550"],
     ]);
@@ -358,7 +369,7 @@ describe("expenses and profit", () => {
 
 describe("months", () => {
   test("twelve months ending at period.to, oldest first", () => {
-    const w = ReportCompute.twelveMonthsEnding("2026-02-10" as IsoDate);
+    const w = ReportCompute.twelveMonthsEnding(IsoDate.make("2026-02-10"));
     if (w === null) throw new Error("window");
     expect([w.from, w.months[0], w.months[11], w.months.length]).toEqual([
       "2025-03-01",
@@ -371,27 +382,28 @@ describe("months", () => {
 
 describe("regimeOn (W2, same resolution as Workspaces)", () => {
   const periods = [
-    { effectiveFrom: "2026-11-23" as IsoDate, regime: "vat_payer" as const },
-    { effectiveFrom: "2027-01-01" as IsoDate, regime: "non_vat_payer" as const },
+    { effectiveFrom: IsoDate.make("2026-11-23"), regime: "vat_payer" as const },
+    { effectiveFrom: IsoDate.make("2027-01-01"), regime: "non_vat_payer" as const },
   ];
   test("latest period on or before the date; before the first, the first period's regime", () => {
-    expect(ReportCompute.regimeOn(periods, "2026-11-01" as IsoDate)).toBe("vat_payer");
-    expect(ReportCompute.regimeOn(periods, "2026-12-31" as IsoDate)).toBe("vat_payer");
-    expect(ReportCompute.regimeOn(periods, "2027-01-01" as IsoDate)).toBe("non_vat_payer");
-    expect(ReportCompute.regimeOn([], "2026-11-01" as IsoDate)).toBe("non_vat_payer");
+    expect(ReportCompute.regimeOn(periods, IsoDate.make("2026-11-01"))).toBe("vat_payer");
+    expect(ReportCompute.regimeOn(periods, IsoDate.make("2026-12-31"))).toBe("vat_payer");
+    expect(ReportCompute.regimeOn(periods, IsoDate.make("2027-01-01"))).toBe("non_vat_payer");
+    expect(ReportCompute.regimeOn([], IsoDate.make("2026-11-01"))).toBe("non_vat_payer");
   });
   test("two entries effective the same day: the last in stored order wins, before and on it", () => {
     // A regime changed on the Workspace's creation day keeps the creation baseline first.
     const tie = [
-      { effectiveFrom: "2026-11-23" as IsoDate, regime: "non_vat_payer" as const },
-      { effectiveFrom: "2026-11-23" as IsoDate, regime: "vat_payer" as const },
-      { effectiveFrom: "2027-01-01" as IsoDate, regime: "identified_person" as const },
+      { effectiveFrom: IsoDate.make("2026-11-23"), regime: "non_vat_payer" as const },
+      { effectiveFrom: IsoDate.make("2026-11-23"), regime: "vat_payer" as const },
+      { effectiveFrom: IsoDate.make("2027-01-01"), regime: "identified_person" as const },
     ];
-    for (const date of ["2026-11-01", "2026-11-23", "2026-12-31", "2027-01-01"] as IsoDate[]) {
-      expect(ReportCompute.regimeOn(tie, date)).toBe(workspaceRegimeOn(tie, date));
+    for (const date of ["2026-11-01", "2026-11-23", "2026-12-31", "2027-01-01"]) {
+      const day = IsoDate.make(date);
+      expect(ReportCompute.regimeOn(tie, day)).toBe(workspaceRegimeOn(tie, day));
     }
-    expect(ReportCompute.regimeOn(tie, "2026-11-23" as IsoDate)).toBe("vat_payer");
+    expect(ReportCompute.regimeOn(tie, IsoDate.make("2026-11-23"))).toBe("vat_payer");
     // Before the first day: the first stored entry's regime, as in Workspaces.
-    expect(ReportCompute.regimeOn(tie, "2026-11-01" as IsoDate)).toBe("non_vat_payer");
+    expect(ReportCompute.regimeOn(tie, IsoDate.make("2026-11-01"))).toBe("non_vat_payer");
   });
 });

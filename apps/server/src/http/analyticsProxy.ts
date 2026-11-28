@@ -1,19 +1,17 @@
-/**
- * First-party reverse proxy for browser PostHog ingestion (`/_kvb/*`).
- *
- * Keeps browser pageview ingestion on the active Kvitbit origin so ad/tracker blockers do not
- * block third-party `*.posthog.com` requests, while enforcing strict privacy and abuse controls:
- * - Only forwards allowlisted PostHog ingestion POST paths (`/e`, `/i/v0/e`, `/batch`) and query params.
- * - Strips all Kvitbit credentials (`cookie`, `authorization`, `x-api-key`) and referrer/origin headers.
- * - Forwards the validated visitor IP via `x-forwarded-for` for EU cookieless daily hashing.
- * - Enforces same-host/trusted Origin, 64 KB body cap, per-IP rate limiting, no redirects, and a 5 s timeout.
- */
-import { ByteSize, Clock, Effect } from "effect";
-import { FetchHttpClient, HttpIncomingMessage, HttpRouter, HttpServerResponse } from "effect/http";
-import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import * as ByteSize from "effect/ByteSize";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpIncomingMessage from "effect/http/HttpIncomingMessage";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServerRequest from "effect/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Str from "effect/String";
 import { HttpConfig, type HttpConfigShape } from "./config";
 import { RATE_LIMITS, RateLimiter } from "./edge/RateLimiter";
 import { clientIp } from "./edge/request";
+
+const upstreamBasePattern = /\/+$/;
 
 export const POSTHOG_PROXY_PATH = "/_kvb";
 
@@ -49,11 +47,11 @@ const isAllowedOrigin = (
   if (config.trustedOrigins.has(parsed.origin) || config.corsOrigins.includes(parsed.origin)) {
     return true;
   }
-  return hostHeader !== undefined && parsed.host.toLowerCase() === hostHeader.toLowerCase();
+  return hostHeader !== undefined && Str.toLowerCase(parsed.host) === Str.toLowerCase(hostHeader);
 };
 
-export const AnalyticsProxyRoutesLive = HttpRouter.use((router) =>
-  Effect.gen(function* () {
+export const AnalyticsProxyRoutesLive = HttpRouter.use(
+  Effect.fn("AnalyticsProxy.register")(function* (router) {
     const config = yield* HttpConfig;
     const limiter = yield* RateLimiter;
     const clock = yield* Clock.Clock;
@@ -65,15 +63,18 @@ export const AnalyticsProxyRoutesLive = HttpRouter.use((router) =>
       Effect.gen(function* () {
         if (config.posthog === null) return notFound;
 
-        const request = yield* HttpServerRequest;
+        const request = yield* HttpServerRequest.HttpServerRequest;
         const incomingUrl = URL.parse(request.url, config.appOrigin);
-        if (incomingUrl === null || !incomingUrl.pathname.startsWith(`${POSTHOG_PROXY_PATH}/`)) {
+        if (
+          incomingUrl === null ||
+          !Str.startsWith(`${POSTHOG_PROXY_PATH}/`)(incomingUrl.pathname)
+        ) {
           return notFound;
         }
-        const subpath = incomingUrl.pathname.slice(POSTHOG_PROXY_PATH.length);
+        const subpath = Str.slice(POSTHOG_PROXY_PATH.length)(incomingUrl.pathname);
         if (!ALLOWED_INGESTION_PATHS.has(subpath)) return notFound;
 
-        if (!isAllowedOrigin(request.headers.origin, request.headers.host, config)) {
+        if (!isAllowedOrigin(request.headers["origin"], request.headers["host"], config)) {
           return forbidden;
         }
 
@@ -104,7 +105,7 @@ export const AnalyticsProxyRoutesLive = HttpRouter.use((router) =>
             : malformed;
         }
 
-        const upstreamBase = config.posthog.host.replace(/\/+$/, "");
+        const upstreamBase = Str.replace(upstreamBasePattern, "")(config.posthog.host);
         const upstreamUrl = new URL(`${upstreamBase}${subpath}`);
         for (const key of ALLOWED_QUERY_PARAMS) {
           const value = incomingUrl.searchParams.get(key);
@@ -120,29 +121,36 @@ export const AnalyticsProxyRoutesLive = HttpRouter.use((router) =>
           headers.set("x-forwarded-for", ip);
         }
 
-        const upstream = yield* Effect.tryPromise(() =>
-          fetch(upstreamUrl.toString(), {
-            method: "POST",
-            headers,
-            body: new Uint8Array(bodyResult.success),
-            redirect: "manual",
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-          }),
-        ).pipe(Effect.orElseSucceed(() => null));
+        const upstream = yield* Effect.tryPromise({
+          try: () =>
+            fetch(upstreamUrl.toString(), {
+              method: "POST",
+              headers,
+              body: new Uint8Array(bodyResult.success),
+              redirect: "manual",
+              signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+            }),
+          catch: () => "PostHogRequestFailed" as const,
+        }).pipe(Effect.orElseSucceed(() => null));
         if (upstream === null || (upstream.status >= 300 && upstream.status < 400)) {
           return badGateway;
         }
 
-        const responseBytes = yield* Effect.tryPromise(
-          async () => new Uint8Array(await upstream.arrayBuffer()),
-        ).pipe(Effect.orElseSucceed(() => null));
+        const responseBytes = yield* Effect.tryPromise({
+          try: () => upstream.arrayBuffer(),
+          catch: () => "PostHogResponseBodyFailed" as const,
+        }).pipe(
+          Effect.map((bytes) => new Uint8Array(bytes)),
+          Effect.orElseSucceed(() => null),
+        );
         if (responseBytes === null) return badGateway;
 
         const contentType = upstream.headers.get("content-type");
+        const contentTypeFields = contentType === null ? {} : { "content-type": contentType };
         return HttpServerResponse.uint8Array(responseBytes, {
           status: upstream.status,
           headers: {
-            ...(contentType === null ? {} : { "content-type": contentType }),
+            ...contentTypeFields,
             "cache-control": "no-store",
             "x-content-type-options": "nosniff",
           },

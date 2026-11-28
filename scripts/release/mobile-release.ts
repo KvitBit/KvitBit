@@ -11,13 +11,31 @@
  *   verify       Verify a live origin or local storage directory (manifest multipart + RSA signature).
  */
 
-import { createHash, generateKeyPairSync, randomUUID, X509Certificate } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { chmod, link, mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { generateKeyPairSync, X509Certificate } from "node:crypto";
 import { parseArgs } from "node:util";
+import * as BunRuntime from "@effect/platform-bun/BunRuntime";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
+import * as Predicate from "effect/Predicate";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import {
   buildManifestResponse,
   parseMultipartMixed,
@@ -55,16 +73,45 @@ import {
   type ReleaseInfo,
   releaseInfoObjectKey,
   releasePrefix,
+  type StoredPublication,
   type StoredRollback,
   type StoredUpdate,
   type StoredUpdateAsset,
 } from "../../apps/mobile/release/storage-layout";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const DEFAULT_MOBILE_DIR = join(REPO_ROOT, "apps/mobile");
+const decodeJson = Schema.decodeResult(Schema.fromJsonString(Schema.Unknown));
+const parseJson = (text: string) =>
+  Result.getOrThrowWith(decodeJson(text), () => new SyntaxError("Invalid release JSON"));
+
+const compactJson = Fn.flow(
+  Schema.encodeResult(Schema.fromJsonString(Schema.Unknown)),
+  Result.getOrThrow,
+);
+const prettyJson = Fn.flow(
+  Schema.encodeResult(Schema.fromJsonString(Schema.Unknown, { space: 2 })),
+  Result.getOrThrow,
+);
+
 const DEFAULT_ORIGIN = "https://kvitbit.cz";
 const DEFAULT_MIN_ANDROID_SDK = 28;
 const RELEASE_TAG_PREFIX = "mobile-v";
+const TRAILING_SLASHES = /\/+$/u;
+
+const hasText = (value: string | undefined): value is string =>
+  value !== undefined && value.length > 0;
+
+class ReleaseError extends Schema.TaggedError<ReleaseError, { readonly brand: unique symbol }>()(
+  "ReleaseError",
+  { message: Schema.String },
+) {}
+
+const readDirectoryIfPresent = (fs: FileSystem.FileSystem, directory: string) =>
+  fs.readDirectory(directory).pipe(
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed([]),
+    ),
+  );
 
 const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
   png: "image/png",
@@ -92,11 +139,11 @@ const ASSET_CONTENT_TYPES: Readonly<Record<string, string>> = {
 };
 
 const writeStdout = (text: string): void => {
-  process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
+  process.stdout.write(Str.endsWith("\n")(text) ? text : `${text}\n`);
 };
 
 const writeStderr = (text: string): void => {
-  process.stderr.write(text.endsWith("\n") ? text : `${text}\n`);
+  process.stderr.write(Str.endsWith("\n")(text) ? text : `${text}\n`);
 };
 
 const HELP_TEXT = `Usage: bun run scripts/release/mobile-release.ts <command> [options]
@@ -123,11 +170,11 @@ Common options:
 
 // --- Pure helpers (adapted from DeskoHub release scripts) ---
 
-export const releaseTagVersion = (tag: string): string => {
-  if (!tag.startsWith(RELEASE_TAG_PREFIX)) {
-    throw new Error(`Release tag ${JSON.stringify(tag)} must start with ${RELEASE_TAG_PREFIX}.`);
+const releaseTagVersion = (tag: string): string => {
+  if (!Str.startsWith(RELEASE_TAG_PREFIX)(tag)) {
+    throw new Error(`Release tag ${compactJson(tag)} must start with ${RELEASE_TAG_PREFIX}.`);
   }
-  const version = tag.slice(RELEASE_TAG_PREFIX.length);
+  const version = Str.slice(RELEASE_TAG_PREFIX.length)(tag);
   parseAppVersion(version);
   return version;
 };
@@ -136,86 +183,119 @@ const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 const SIGNER_DIGEST_RE =
   /^(?:Signer #\d+|V\d+(?:\.\d+)? Signer(?: #\d+)?:) certificate SHA-256 digest: ([0-9a-fA-F]+)$/;
 
-export const normalizeCertificateSha256 = (digest: string): string => {
-  const hex = digest.replaceAll(":", "").toLowerCase();
+const normalizeCertificateSha256 = (digest: string): string => {
+  const hex = Str.toLowerCase(Str.replaceAll(":", "")(digest));
   if (!SHA256_HEX_RE.test(hex)) {
-    throw new Error(`${JSON.stringify(digest)} is not a SHA-256 digest.`);
+    throw new Error(`${compactJson(digest)} is not a SHA-256 digest.`);
   }
   return hex;
 };
 
-export const formatCertificateSha256 = (digest: string): string =>
-  (normalizeCertificateSha256(digest).match(/../g) ?? []).join(":").toUpperCase();
+const formatCertificateSha256 = (digest: string): string =>
+  Fn.pipe(
+    normalizeCertificateSha256(digest),
+    Str.match(/../g),
+    Option.map(Arr.join(":")),
+    Option.getOrElse(() => ""),
+    Str.toUpperCase,
+  );
 
-export const parseApkSignerDigests = (apksignerOutput: string): string[] =>
-  apksignerOutput
-    .split("\n")
-    .map((line) => SIGNER_DIGEST_RE.exec(line.trim())?.[1])
-    .filter((digest): digest is string => digest !== undefined)
-    .map(normalizeCertificateSha256);
+const parseApkSignerDigests = (apksignerOutput: string): string[] =>
+  Fn.pipe(
+    apksignerOutput,
+    Str.split("\n"),
+    Arr.map((line) => SIGNER_DIGEST_RE.exec(Str.trim(line))?.[1]),
+    Arr.filter(Predicate.isNotUndefined),
+    Arr.map(normalizeCertificateSha256),
+  );
 
-const findAndroidBuildTool = (tool: "apksigner" | "aapt2"): string | undefined => {
+const findAndroidBuildTool = Effect.fn("MobileRelease.findAndroidBuildTool")(function* (
+  tool: "apksigner" | "aapt2",
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join } = yield* Path.Path;
   const sdk = readEnv("ANDROID_HOME") ?? readEnv("ANDROID_SDK_ROOT");
-  if (sdk) {
+  if (sdk !== undefined) {
     const buildToolsDir = join(sdk, "build-tools");
-    if (existsSync(buildToolsDir)) {
-      const versions = readdirSync(buildToolsDir)
-        .filter((version) => existsSync(join(buildToolsDir, version, tool)))
-        .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
-      const newest = versions[0];
-      if (newest) return join(buildToolsDir, newest, tool);
-    }
+    const versions = yield* readDirectoryIfPresent(fs, buildToolsDir);
+    const found = yield* Effect.filter(versions, (version) =>
+      fs.exists(join(buildToolsDir, version, tool)),
+    );
+    const sorted = Arr.sort(
+      found,
+      Order.make((left: string, right: string) =>
+        Str.localeCompare(left, undefined, { numeric: true })(right),
+      ),
+    );
+    const newest = sorted[0];
+    if (newest !== undefined) return join(buildToolsDir, newest, tool);
   }
   return Bun.which(tool) ?? undefined;
-};
+});
 
-const inspectApkSignerSha256s = async (apkPath: string): Promise<string[]> => {
-  const apksigner = findAndroidBuildTool("apksigner");
-  if (!apksigner) throw new Error("Android build-tools apksigner is required to verify APKs.");
-  const res = await runProcess([apksigner, "verify", "--print-certs", apkPath]);
+const inspectApkSignerSha256s = Effect.fn("MobileRelease.inspectApkSignerSha256s")(function* (
+  apkPath: string,
+) {
+  const apksigner = yield* findAndroidBuildTool("apksigner");
+  if (apksigner === undefined)
+    return yield* ReleaseError.make({
+      message: "Android build-tools apksigner is required to verify APKs.",
+    });
+  const res = yield* runProcess([apksigner, "verify", "--print-certs", apkPath]);
   if (res.exitCode !== 0) {
-    throw new Error(`apksigner verification failed for ${apkPath}:\n${res.stderr || res.stdout}`);
+    return yield* ReleaseError.make({
+      message: `apksigner verification failed for ${apkPath}:\n${res.stderr || res.stdout}`,
+    });
   }
   const digests = parseApkSignerDigests(res.stdout);
   if (digests.length === 0) {
-    throw new Error(`apksigner reported no signer certificates for ${apkPath}.`);
+    return yield* ReleaseError.make({
+      message: `apksigner reported no signer certificates for ${apkPath}.`,
+    });
   }
   return digests;
-};
+});
 
-const verifyApkArtifact = async (
+const verifyApkArtifact = Effect.fn("MobileRelease.verifyApkArtifact")(function* (
   apkPath: string,
   expected: {
     readonly packageName: string;
     readonly versionCode: number;
     readonly versionName: string;
-    readonly expectedSignerSha256?: string;
+    readonly expectedSignerSha256: string | undefined;
   },
-): Promise<{ readonly signingCertSha256: string }> => {
-  const signers = await inspectApkSignerSha256s(apkPath);
+) {
+  const signers = yield* inspectApkSignerSha256s(apkPath);
   const uniqueSigners = [...new Set(signers)];
   if (uniqueSigners.length !== 1) {
-    throw new Error(`APK ${apkPath} must have exactly one current signer.`);
+    return yield* ReleaseError.make({
+      message: `APK ${apkPath} must have exactly one current signer.`,
+    });
   }
-  if (expected.expectedSignerSha256) {
+  if (hasText(expected.expectedSignerSha256)) {
     const expectedHex = normalizeCertificateSha256(expected.expectedSignerSha256);
-    const unexpected = uniqueSigners.filter((digest) => digest !== expectedHex);
+    const unexpected = Arr.filter(uniqueSigners, (digest) => digest !== expectedHex);
     if (unexpected.length > 0) {
-      throw new Error(
-        `APK signer certificate ${unexpected.map(formatCertificateSha256).join(", ")} does not match expected ${formatCertificateSha256(expectedHex)}.`,
-      );
+      return yield* ReleaseError.make({
+        message: `APK signer certificate ${Arr.join(Arr.map(unexpected, formatCertificateSha256), ", ")} does not match expected ${formatCertificateSha256(expectedHex)}.`,
+      });
     }
   }
   const primarySigner = uniqueSigners[0];
-  if (!primarySigner) {
-    throw new Error(`APK ${apkPath} has no signer certificate.`);
+  if (primarySigner === undefined) {
+    return yield* ReleaseError.make({ message: `APK ${apkPath} has no signer certificate.` });
   }
 
-  const aapt2 = findAndroidBuildTool("aapt2");
-  if (!aapt2) throw new Error("Android build-tools aapt2 is required to verify APK identity.");
-  const badging = await runProcess([aapt2, "dump", "badging", apkPath]);
+  const aapt2 = yield* findAndroidBuildTool("aapt2");
+  if (aapt2 === undefined)
+    return yield* ReleaseError.make({
+      message: "Android build-tools aapt2 is required to verify APK identity.",
+    });
+  const badging = yield* runProcess([aapt2, "dump", "badging", apkPath]);
   if (badging.exitCode !== 0) {
-    throw new Error(`aapt2 dump badging failed for ${apkPath}:\n${badging.stderr}`);
+    return yield* ReleaseError.make({
+      message: `aapt2 dump badging failed for ${apkPath}:\n${badging.stderr}`,
+    });
   }
   const actual = parseApkBadgingIdentity(badging.stdout);
   if (
@@ -223,93 +303,101 @@ const verifyApkArtifact = async (
     actual.versionCode !== expected.versionCode ||
     actual.versionName !== expected.versionName
   ) {
-    throw new Error(
-      `APK identity mismatch: got ${actual.packageName} (${actual.versionName} / ${actual.versionCode}), expected ${expected.packageName} (${expected.versionName} / ${expected.versionCode}).`,
-    );
+    return yield* ReleaseError.make({
+      message: `APK identity mismatch: got ${actual.packageName} (${actual.versionName} / ${actual.versionCode}), expected ${expected.packageName} (${expected.versionName} / ${expected.versionCode}).`,
+    });
   }
 
   return { signingCertSha256: formatCertificateSha256(primarySigner) };
-};
+});
 
-const withOtaCodeSigningEnv = async <T>(
+const withOtaCodeSigningEnv = Effect.fn("MobileRelease.withOtaCodeSigningEnv")(function* <T, E, R>(
   projectDir: string,
   env: Record<string, string | undefined>,
-  fn: (resolvedEnv: Record<string, string | undefined>) => Promise<T>,
-): Promise<T> => {
-  const pemContent = env.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM?.trim();
-  if (!pemContent) {
-    return fn(env);
+  fn: (resolvedEnv: Record<string, string | undefined>) => Effect.Effect<T, E, R>,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join, dirname } = yield* Path.Path;
+  const pemContent = Str.trim(env["MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE_PEM"] ?? "");
+  if (!hasText(pemContent)) {
+    return yield* fn(env);
   }
   const certificate = new X509Certificate(pemContent);
   // Expo uses a project-relative path. The same certificate must have the same
   // path in the APK build and in the OTA job's independent checkout.
-  const fileName = `${certificate.fingerprint256.replaceAll(":", "").toLowerCase()}.pem`;
+  const fileName = `${Str.toLowerCase(Str.replaceAll(":", "")(certificate.fingerprint256))}.pem`;
   const certPath = join(projectDir, ".expo", "release-signing", fileName);
-  await Bun.write(certPath, `${certificate.toString().trim()}\n`, { createPath: true });
-  return fn({
+  yield* fs.makeDirectory(dirname(certPath), { recursive: true });
+  yield* fs.writeFileString(certPath, `${Str.trim(certificate.toString())}\n`);
+  return yield* fn({
     ...env,
     MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE: certPath,
   });
-};
+});
 
-export const parseApkBadgingIdentity = (
+const parseApkBadgingIdentity = (
   badging: string,
 ): { readonly packageName: string; readonly versionCode: number; readonly versionName: string } => {
-  const line = badging.split("\n").find((entry) => entry.startsWith("package:"));
+  const line = Option.getOrUndefined(
+    Arr.findFirst(Str.split("\n")(badging), Str.startsWith("package:")),
+  );
   const attr = (name: string) =>
-    line ? new RegExp(`\\b${name}='([^']*)'`).exec(line)?.[1] : undefined;
+    line === undefined ? undefined : new RegExp(`\\b${name}='([^']*)'`, "u").exec(line)?.[1];
   const packageName = attr("name");
   const versionCode = attr("versionCode");
   const versionName = attr("versionName");
-  if (!packageName || !versionCode || !versionName) {
+  if (!(hasText(packageName) && hasText(versionCode) && hasText(versionName))) {
     throw new Error("aapt2 badging has no package name and version.");
   }
   return { packageName, versionCode: Number(versionCode), versionName };
 };
 
-interface AppJsonMeta {
-  readonly version: string;
-  readonly versionCode: number;
-  readonly packageName: string;
-  readonly minAndroidSdk: number;
-  readonly apkName: string;
-  readonly expoConfig: Record<string, unknown>;
-}
+const isExpoAppConfig = Schema.is(
+  Schema.Struct({
+    version: Schema.String,
+    android: Schema.optional(Schema.Unknown),
+    plugins: Schema.optional(Schema.Unknown),
+  }),
+);
 
-const readAppMeta = async (projectDir: string, tag?: string): Promise<AppJsonMeta> => {
-  const raw = await readFile(join(projectDir, "app.json"), "utf8");
-  const parsed = JSON.parse(raw) as { expo?: Record<string, unknown> };
-  const expo = parsed.expo;
-  if (!expo || typeof expo.version !== "string") {
-    throw new Error(`Missing expo.version in ${join(projectDir, "app.json")}`);
+const readAppMeta = Effect.fn("MobileRelease.readAppMeta")(function* (
+  projectDir: string,
+  tag?: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join } = yield* Path.Path;
+  const path = join(projectDir, "app.json");
+  const raw = yield* fs.readFileString(path);
+  const parsed = parseJson(raw);
+  const expo = Predicate.isObject(parsed) ? parsed["expo"] : undefined;
+  if (!isExpoAppConfig(expo)) {
+    return yield* ReleaseError.make({ message: `Missing expo.version in ${path}` });
   }
   const version = expo.version;
   const versionCode = androidVersionCode(version);
-  if (tag && tag.trim().length > 0) {
-    const tagVer = releaseTagVersion(tag.trim());
+  const trimmedTag = Str.trim(tag ?? "");
+  if (hasText(trimmedTag)) {
+    const tagVer = releaseTagVersion(trimmedTag);
     if (tagVer !== version) {
-      throw new Error(`Release tag ${tag} (${tagVer}) does not match app.json version ${version}.`);
+      return yield* ReleaseError.make({
+        message: `Release tag ${tag} (${tagVer}) does not match app.json version ${version}.`,
+      });
     }
   }
-  const android =
-    typeof expo.android === "object" && expo.android !== null
-      ? (expo.android as Record<string, unknown>)
-      : {};
-  const packageName =
-    typeof android.package === "string" ? android.package : KVITBIT_ANDROID_PACKAGE;
+  const androidPackage = Predicate.isObject(expo.android) ? expo.android["package"] : undefined;
+  const packageName = Predicate.isString(androidPackage) ? androidPackage : KVITBIT_ANDROID_PACKAGE;
   let minAndroidSdk = DEFAULT_MIN_ANDROID_SDK;
-  if (Array.isArray(expo.plugins)) {
+  if (Arr.isArray(expo.plugins)) {
     for (const plugin of expo.plugins) {
+      if (!Arr.isArray(plugin)) continue;
+      const [name, config] = plugin;
       if (
-        Array.isArray(plugin) &&
-        plugin[0] === "expo-build-properties" &&
-        typeof plugin[1] === "object" &&
-        plugin[1] !== null
+        name === "expo-build-properties" &&
+        Predicate.isObject(config) &&
+        Predicate.isObject(config["android"])
       ) {
-        const cfg = plugin[1] as { android?: { minSdkVersion?: unknown } };
-        if (typeof cfg.android?.minSdkVersion === "number") {
-          minAndroidSdk = cfg.android.minSdkVersion;
-        }
+        const { minSdkVersion } = config["android"];
+        if (Predicate.isNumber(minSdkVersion)) minAndroidSdk = minSdkVersion;
       }
     }
   }
@@ -321,27 +409,30 @@ const readAppMeta = async (projectDir: string, tag?: string): Promise<AppJsonMet
     apkName: apkFileName(version),
     expoConfig: expo,
   };
-};
+});
 
 // --- Subprocess runner ---
 
-const runProcess = async (
+const runProcess = Effect.fn("MobileRelease.runProcess")(function* (
   cmd: readonly string[],
   options: { readonly cwd?: string; readonly env?: Record<string, string | undefined> } = {},
-): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
-  const proc = Bun.spawn([...cmd], {
-    cwd: options.cwd,
-    env: options.env ?? process.env,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
-};
+) {
+  const [command, ...args] = cmd;
+  if (command === undefined)
+    return yield* ReleaseError.make({ message: "Missing subprocess command" });
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const handle = yield* spawner.spawn(
+    ChildProcess.make(command, args, { ...options, stdin: "ignore" }),
+  );
+  return yield* Effect.all(
+    {
+      stdout: handle.stdout.pipe(Stream.decodeText, Stream.mkString),
+      stderr: handle.stderr.pipe(Stream.decodeText, Stream.mkString),
+      exitCode: handle.exitCode,
+    },
+    { concurrency: "unbounded" },
+  );
+}, Effect.scoped);
 
 // --- Storage backend (create-only: local disk `wx` or GCS `--if-generation-match=0`) ---
 
@@ -351,29 +442,34 @@ type StorageTarget =
   | { readonly kind: "none" };
 
 const readEnv = (name: string): string | undefined => {
-  const value = process.env[name]?.trim();
-  return value && value.length > 0 ? value : undefined;
+  const value = Str.trim(Bun.env[name] ?? "");
+  return hasText(value) ? value : undefined;
 };
 
 const resolveStorageTarget = (
+  path: Path.Path,
   storageDirArg: string | undefined,
   bucketArg: string | undefined,
   dryRun: boolean,
 ): StorageTarget => {
-  const dir = storageDirArg?.trim() || readEnv("KVITBIT_MOBILE_STORAGE_DIR");
-  const bucket = bucketArg?.trim() || readEnv("KVITBIT_MOBILE_STORAGE_BUCKET");
-  if (dir && bucket) {
+  const trimmedDirArg = Str.trim(storageDirArg ?? "");
+  const trimmedBucketArg = Str.trim(bucketArg ?? "");
+  const dir = hasText(trimmedDirArg) ? trimmedDirArg : readEnv("KVITBIT_MOBILE_STORAGE_DIR");
+  const bucket = hasText(trimmedBucketArg)
+    ? trimmedBucketArg
+    : readEnv("KVITBIT_MOBILE_STORAGE_BUCKET");
+  if (dir !== undefined && bucket !== undefined) {
     throw new Error("Specify either --storage-dir or --bucket, not both.");
   }
-  if (dir) return { kind: "dir", root: resolve(dir) };
-  if (bucket) return { kind: "gcs", bucket };
+  if (dir !== undefined) return { kind: "dir", root: path.resolve(dir) };
+  if (bucket !== undefined) return { kind: "gcs", bucket };
   if (dryRun) return { kind: "none" };
   throw new Error(
     "No storage target configured. Pass --storage-dir (KVITBIT_MOBILE_STORAGE_DIR) or --bucket (KVITBIT_MOBILE_STORAGE_BUCKET), or use --dry-run.",
   );
 };
 
-const writeCreateOnly = async (
+const writeCreateOnly = Effect.fn("MobileRelease.writeCreateOnly")(function* (
   target: StorageTarget,
   key: string,
   bytes: Uint8Array,
@@ -382,86 +478,93 @@ const writeCreateOnly = async (
     readonly cacheControl?: string;
     readonly allowExisting: boolean;
   },
-): Promise<"written" | "exists"> => {
+): Effect.fn.Return<
+  "written" | "exists",
+  ReleaseError | PlatformError.PlatformError,
+  | FileSystem.FileSystem
+  | Path.Path
+  | ChildProcessSpawner.ChildProcessSpawner
+  | import("effect/Scope").Scope
+> {
+  const fs = yield* FileSystem.FileSystem;
+  const { join, dirname } = yield* Path.Path;
   if (target.kind === "none") {
-    throw new Error("Cannot write without a storage target.");
+    return yield* ReleaseError.make({ message: "Cannot write without a storage target." });
   }
   if (target.kind === "dir") {
     const fullPath = join(target.root, key);
-    await mkdir(dirname(fullPath), { recursive: true });
-    const stagingDir = await mkdtemp(join(dirname(fullPath), ".staging-"));
+    const directory = dirname(fullPath);
+    yield* fs.makeDirectory(directory, { recursive: true });
+    const stagingDir = yield* fs.makeTempDirectoryScoped({ directory, prefix: ".staging-" });
     const stagedPath = join(stagingDir, "payload");
-    try {
-      await Bun.write(stagedPath, bytes);
-      // Same-filesystem link publishes the complete file atomically and fails if it exists.
-      await link(stagedPath, fullPath);
-      return "written";
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      if (options.allowExisting) return "exists";
-      throw new Error(`Object ${key} already exists (create-only storage refuses overwrite).`);
-    } finally {
-      await rm(stagingDir, { recursive: true, force: true });
-    }
+    yield* fs.writeFile(stagedPath, bytes);
+    // Same-filesystem link publishes the complete file atomically and fails if it exists.
+    return yield* fs.link(stagedPath, fullPath).pipe(
+      Effect.as("written" as const),
+      Effect.catchIf(
+        (error) => error.reason._tag === "AlreadyExists",
+        () =>
+          options.allowExisting
+            ? Effect.succeed("exists" as const)
+            : ReleaseError.make({
+                message: `Object ${key} already exists (create-only storage refuses overwrite).`,
+              }),
+      ),
+    );
   }
 
-  // GCS via gcloud storage cp --if-generation-match=0
-  const tempDir = await mkdtemp(join(tmpdir(), "kvitbit-gcs-"));
+  const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-gcs-" });
   const tempFile = join(tempDir, "payload");
-  try {
-    await Bun.write(tempFile, bytes);
-    const args = [
-      "gcloud",
-      "storage",
-      "cp",
-      "--if-generation-match=0",
-      `--content-type=${options.contentType}`,
-    ];
-    if (options.cacheControl) {
-      args.push(`--cache-control=${options.cacheControl}`);
-    }
-    args.push(tempFile, `gs://${target.bucket}/${key}`);
-    const result = await runProcess(args);
-    if (result.exitCode === 0) return "written";
-    if (
-      options.allowExisting &&
-      (result.stderr.includes("PreconditionException") ||
-        result.stderr.includes("412") ||
-        result.stderr.includes("conditionNotMet"))
-    ) {
-      return "exists";
-    }
-    throw new Error(`gcloud storage cp failed for ${key}: ${result.stderr.trim()}`);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-};
+  yield* fs.writeFile(tempFile, bytes);
+  const args = [
+    "gcloud",
+    "storage",
+    "cp",
+    "--if-generation-match=0",
+    `--content-type=${options.contentType}`,
+  ];
+  if (hasText(options.cacheControl)) args.push(`--cache-control=${options.cacheControl}`);
+  args.push(tempFile, `gs://${target.bucket}/${key}`);
+  const result = yield* runProcess(args);
+  if (result.exitCode === 0) return "written";
+  if (
+    options.allowExisting &&
+    (Str.includes("PreconditionException")(result.stderr) ||
+      Str.includes("412")(result.stderr) ||
+      Str.includes("conditionNotMet")(result.stderr))
+  )
+    return "exists";
+  return yield* ReleaseError.make({
+    message: `gcloud storage cp failed for ${key}: ${Str.trim(result.stderr)}`,
+  });
+}, Effect.scoped);
 
-const readStorageObject = async (target: StorageTarget, key: string): Promise<Uint8Array> => {
+const readStorageObject = Effect.fn("MobileRelease.readStorageObject")(function* (
+  target: StorageTarget,
+  key: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join } = yield* Path.Path;
   if (target.kind === "none") {
-    throw new Error("Cannot read without a storage target.");
+    return yield* ReleaseError.make({ message: "Cannot read without a storage target." });
   }
-  if (target.kind === "dir") {
-    return new Uint8Array(await readFile(join(target.root, key)));
-  }
-  const tempDir = await mkdtemp(join(tmpdir(), "kvitbit-gcs-read-"));
+  if (target.kind === "dir") return yield* fs.readFile(join(target.root, key));
+  const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-gcs-read-" });
   const tempFile = join(tempDir, "payload");
-  try {
-    const result = await runProcess([
-      "gcloud",
-      "storage",
-      "cp",
-      `gs://${target.bucket}/${key}`,
-      tempFile,
-    ]);
-    if (result.exitCode !== 0) {
-      throw new Error(`gcloud storage cp failed reading ${key}: ${result.stderr.trim()}`);
-    }
-    return new Uint8Array(await readFile(tempFile));
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
+  const result = yield* runProcess([
+    "gcloud",
+    "storage",
+    "cp",
+    `gs://${target.bucket}/${key}`,
+    tempFile,
+  ]);
+  if (result.exitCode !== 0) {
+    return yield* ReleaseError.make({
+      message: `gcloud storage cp failed reading ${key}: ${Str.trim(result.stderr)}`,
+    });
   }
-};
+  return yield* fs.readFile(tempFile);
+}, Effect.scoped);
 
 // --- Exported update reader ---
 
@@ -477,9 +580,9 @@ const describeAssetBytes = (
   contentType: string,
   fileExtension?: string,
 ): ExportedAssetFile => {
-  const sha256Hex = createHash("sha256").update(bytes).digest("hex");
-  const hashBase64Url = createHash("sha256").update(bytes).digest("base64url");
-  const keyMd5 = createHash("md5").update(bytes).digest("hex");
+  const sha256Hex = Bun.CryptoHasher.hash("sha256", bytes, "hex");
+  const hashBase64Url = Bun.CryptoHasher.hash("sha256", bytes, "base64url");
+  const keyMd5 = Bun.CryptoHasher.hash("md5", bytes, "hex");
   const asset: StoredUpdateAsset =
     fileExtension === undefined
       ? { sha256: sha256Hex, hash: hashBase64Url, key: keyMd5, contentType }
@@ -493,68 +596,74 @@ const describeAssetBytes = (
   return { sha256: sha256Hex, bytes, asset, meta };
 };
 
-interface ExpoExportMetadata {
-  readonly fileMetadata: Readonly<
-    Record<
-      string,
-      {
-        readonly bundle: string;
-        readonly assets: readonly { readonly path: string; readonly ext: string }[];
-      }
-    >
-  >;
-}
+const isExpoPlatformExport = Schema.is(
+  Schema.Struct({ bundle: Schema.String, assets: Schema.optional(Schema.Unknown) }),
+);
+const isExpoAsset = Schema.is(Schema.Struct({ path: Schema.String, ext: Schema.String }));
 
-const readExpoExport = async (
+const readExpoExport = Effect.fn("MobileRelease.readExpoExport")(function* (
   exportDir: string,
   platform: MobilePlatform,
-): Promise<{
-  readonly launchAsset: ExportedAssetFile;
-  readonly assets: readonly ExportedAssetFile[];
-}> => {
-  const metaRaw = await readFile(join(exportDir, "metadata.json"), "utf8");
-  const parsed = JSON.parse(metaRaw) as ExpoExportMetadata;
-  const platformFiles = parsed.fileMetadata?.[platform];
-  if (!platformFiles) {
-    throw new Error(`Export directory ${exportDir} has no ${platform} bundle in metadata.json`);
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join } = yield* Path.Path;
+  const metaRaw = yield* fs.readFileString(join(exportDir, "metadata.json"));
+  const parsed: unknown = parseJson(metaRaw);
+  const fileMetadata = Predicate.isObject(parsed) ? parsed["fileMetadata"] : undefined;
+  const platformFiles = Predicate.isObject(fileMetadata) ? fileMetadata[platform] : undefined;
+  if (!isExpoPlatformExport(platformFiles)) {
+    return yield* ReleaseError.make({
+      message: `Export directory ${exportDir} has no ${platform} bundle in metadata.json`,
+    });
   }
-  const bundleBytes = new Uint8Array(await readFile(join(exportDir, platformFiles.bundle)));
+  const bundleBytes = yield* fs.readFile(join(exportDir, platformFiles.bundle));
   const launchAsset = describeAssetBytes(bundleBytes, "application/javascript");
-  const assets: ExportedAssetFile[] = [];
-  for (const item of platformFiles.assets) {
-    const bytes = new Uint8Array(await readFile(join(exportDir, item.path)));
-    const ext = item.ext.toLowerCase();
-    const contentType = ASSET_CONTENT_TYPES[ext] ?? "application/octet-stream";
-    assets.push(describeAssetBytes(bytes, contentType, `.${item.ext}`));
+  if (!Arr.isArray(platformFiles.assets)) {
+    return yield* ReleaseError.make({
+      message: `Export directory ${exportDir} has no ${platform} assets array in metadata.json`,
+    });
   }
+  const assets: ExportedAssetFile[] = [];
+  yield* Effect.forEach(
+    platformFiles.assets,
+    Effect.fnUntraced(function* (item) {
+      if (!isExpoAsset(item)) {
+        return yield* ReleaseError.make({
+          message: `Invalid ${platform} asset in ${exportDir}/metadata.json`,
+        });
+      }
+      const bytes = yield* fs.readFile(join(exportDir, item.path));
+      const ext = Str.toLowerCase(item.ext);
+      const contentType = ASSET_CONTENT_TYPES[ext] ?? "application/octet-stream";
+      assets.push(describeAssetBytes(bytes, contentType, `.${item.ext}`));
+    }),
+    { concurrency: 1, discard: true },
+  );
   return { launchAsset, assets };
-};
+});
 
 // --- Subcommands ---
 
-const cmdMetadata = async (argv: readonly string[]): Promise<void> => {
+const cmdMetadata = Effect.fn("MobileRelease.cmdMetadata")(function* (argv: readonly string[]) {
+  const { resolve } = yield* Path.Path;
   const { values } = parseArgs({
     args: [...argv],
     options: {
-      project: { type: "string", default: DEFAULT_MOBILE_DIR },
+      project: { type: "string", default: resolve(import.meta.dir, "../../apps/mobile") },
       tag: { type: "string" },
       json: { type: "boolean", default: false },
     },
   });
-  const meta = await readAppMeta(resolve(values.project), values.tag);
+  const meta = yield* readAppMeta(resolve(values.project), values.tag);
   if (values.json) {
     writeStdout(
-      JSON.stringify(
-        {
-          version: meta.version,
-          versionCode: meta.versionCode,
-          packageName: meta.packageName,
-          minAndroidSdk: meta.minAndroidSdk,
-          apkName: meta.apkName,
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        version: meta.version,
+        versionCode: meta.versionCode,
+        packageName: meta.packageName,
+        minAndroidSdk: meta.minAndroidSdk,
+        apkName: meta.apkName,
+      }),
     );
     return;
   }
@@ -562,13 +671,15 @@ const cmdMetadata = async (argv: readonly string[]): Promise<void> => {
   writeStdout(`version-code=${meta.versionCode}`);
   writeStdout(`apk-name=${meta.apkName}`);
   writeStdout(`package-name=${meta.packageName}`);
-};
+});
 
-const cmdBuild = async (argv: readonly string[]): Promise<void> => {
+const cmdBuild = Effect.fn("MobileRelease.cmdBuild")(function* (argv: readonly string[]) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join, resolve } = yield* Path.Path;
   const { values } = parseArgs({
     args: [...argv],
     options: {
-      project: { type: "string", default: DEFAULT_MOBILE_DIR },
+      project: { type: "string", default: resolve(import.meta.dir, "../../apps/mobile") },
       tag: { type: "string" },
       signing: { type: "string", default: "release" },
       origin: { type: "string", default: DEFAULT_ORIGIN },
@@ -577,13 +688,15 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
     },
   });
   if (values.signing !== "release" && values.signing !== "debug") {
-    throw new Error(
-      `--signing must be "release" or "debug", got ${JSON.stringify(values.signing)}`,
-    );
+    return yield* ReleaseError.make({
+      message: `--signing must be "release" or "debug", got ${compactJson(values.signing)}`,
+    });
   }
   const projectDir = resolve(values.project);
-  const meta = await readAppMeta(projectDir, values.tag);
-  const outDir = values["out-dir"] ? resolve(values["out-dir"]) : join(projectDir, "dist/release");
+  const meta = yield* readAppMeta(projectDir, values.tag);
+  const outDir = hasText(values["out-dir"])
+    ? resolve(values["out-dir"])
+    : join(projectDir, "dist/release");
   const apkOutPath = join(outDir, meta.apkName);
 
   if (values["dry-run"]) {
@@ -610,7 +723,7 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
         "apksigner verify --print-certs <apk> -> verify certificate SHA-256",
       ],
     };
-    writeStdout(JSON.stringify(plan, null, 2));
+    writeStdout(prettyJson(plan));
     return;
   }
 
@@ -620,35 +733,41 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
   const keyAlias = readEnv("ANDROID_KEY_ALIAS") ?? "kvitbit-release";
   const keyPassword = readEnv("ANDROID_KEY_PASSWORD") ?? keystorePassword;
 
-  if (values.signing === "release") {
-    if ((!keystoreBase64 && !keystorePathEnv) || !keystorePassword) {
-      throw new Error(
+  if (
+    values.signing === "release" &&
+    ((keystoreBase64 === undefined && keystorePathEnv === undefined) ||
+      keystorePassword === undefined)
+  ) {
+    return yield* ReleaseError.make({
+      message:
         "Release build requires ANDROID_KEYSTORE_PASSWORD and ANDROID_KEYSTORE_BASE64 (or ANDROID_KEYSTORE_PATH), or pass --signing debug / --dry-run.",
-      );
-    }
+    });
   }
 
-  await mkdir(outDir, { recursive: true });
-  let tempKeystoreDir: string | undefined;
+  yield* fs.makeDirectory(outDir, { recursive: true });
   let resolvedKeystorePath = keystorePathEnv === undefined ? undefined : resolve(keystorePathEnv);
-  try {
-    if (values.signing === "release" && keystoreBase64) {
-      tempKeystoreDir = await mkdtemp(join(tmpdir(), "kvitbit-android-keystore-"));
-      resolvedKeystorePath = join(tempKeystoreDir, "release.keystore");
-      await Bun.write(resolvedKeystorePath, Buffer.from(keystoreBase64, "base64"));
-      await chmod(resolvedKeystorePath, 0o600);
-    }
+  if (values.signing === "release" && keystoreBase64 !== undefined) {
+    const tempKeystoreDir = yield* fs.makeTempDirectoryScoped({
+      prefix: "kvitbit-android-keystore-",
+    });
+    resolvedKeystorePath = join(tempKeystoreDir, "release.keystore");
+    yield* fs.writeFile(resolvedKeystorePath, Buffer.from(keystoreBase64, "base64"));
+    yield* fs.chmod(resolvedKeystorePath, 0o600);
+  }
 
-    const baseBuildEnv: Record<string, string | undefined> = {
-      ...process.env,
-      EXPO_PUBLIC_API_ORIGIN: values.origin,
-      MOBILE_UPDATES_CODE_SIGNING: values.signing === "release" ? "required" : "",
-      EXPO_UPDATES_WORKFLOW_OVERRIDE: "managed",
-    };
+  const baseBuildEnv = {
+    ...Bun.env,
+    EXPO_PUBLIC_API_ORIGIN: values.origin,
+    MOBILE_UPDATES_CODE_SIGNING: values.signing === "release" ? "required" : "",
+    EXPO_UPDATES_WORKFLOW_OVERRIDE: "managed",
+  };
 
-    const androidDir = join(projectDir, "android");
-    await withOtaCodeSigningEnv(projectDir, baseBuildEnv, async (prebuildEnv) => {
-      const prebuild = await runProcess(
+  const androidDir = join(projectDir, "android");
+  yield* withOtaCodeSigningEnv(
+    projectDir,
+    baseBuildEnv,
+    Effect.fnUntraced(function* (prebuildEnv) {
+      const prebuild = yield* runProcess(
         [
           process.execPath,
           "x",
@@ -665,7 +784,7 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
         },
       );
       if (prebuild.exitCode !== 0) {
-        throw new Error(`expo prebuild failed:\n${prebuild.stderr}`);
+        return yield* ReleaseError.make({ message: `expo prebuild failed:\n${prebuild.stderr}` });
       }
 
       const gradleTask = values.signing === "release" ? "assembleRelease" : "assembleDebug";
@@ -680,61 +799,59 @@ const cmdBuild = async (argv: readonly string[]): Promise<void> => {
               KVITBIT_REQUIRE_RELEASE_SIGNING: "true",
             }
           : prebuildEnv;
-      const gradle = await runProcess(["./gradlew", gradleTask, "--no-daemon", "--console=plain"], {
-        cwd: androidDir,
-        env: gradleEnv,
-      });
-      if (gradle.exitCode !== 0) {
-        throw new Error(
-          `Gradle ${gradleTask} failed:\n${gradle.stderr}\n${gradle.stdout.slice(-8000)}`,
-        );
-      }
-    });
-
-    const builtApk = join(
-      androidDir,
-      "app/build/outputs/apk",
-      values.signing === "release" ? "release/app-release.apk" : "debug/app-debug.apk",
-    );
-    const verified = await verifyApkArtifact(builtApk, {
-      packageName: meta.packageName,
-      versionCode: meta.versionCode,
-      versionName: meta.version,
-      expectedSignerSha256:
-        values.signing === "release" ? readEnv("KVITBIT_ANDROID_SIGNING_CERT_SHA256") : undefined,
-    });
-
-    const apkBytes = new Uint8Array(await readFile(builtApk));
-    await Bun.write(apkOutPath, apkBytes);
-
-    const apkSha256 = createHash("sha256").update(apkBytes).digest("hex");
-    writeStdout(
-      JSON.stringify(
+      const gradle = yield* runProcess(
+        ["./gradlew", gradleTask, "--no-daemon", "--console=plain"],
         {
-          command: "build",
-          version: meta.version,
-          versionCode: meta.versionCode,
-          apkPath: apkOutPath,
-          apkSha256,
-          signingCertSha256: verified.signingCertSha256,
-          sizeBytes: apkBytes.byteLength,
+          cwd: androidDir,
+          env: gradleEnv,
         },
-        null,
-        2,
-      ),
-    );
-  } finally {
-    if (tempKeystoreDir) {
-      await rm(tempKeystoreDir, { recursive: true, force: true });
-    }
-  }
-};
+      );
+      if (gradle.exitCode !== 0) {
+        return yield* ReleaseError.make({
+          message: `Gradle ${gradleTask} failed:\n${gradle.stderr}\n${Str.slice(-8000)(gradle.stdout)}`,
+        });
+      }
+    }),
+  );
 
-const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
+  const builtApk = join(
+    androidDir,
+    "app/build/outputs/apk",
+    values.signing === "release" ? "release/app-release.apk" : "debug/app-debug.apk",
+  );
+  const verified = yield* verifyApkArtifact(builtApk, {
+    packageName: meta.packageName,
+    versionCode: meta.versionCode,
+    versionName: meta.version,
+    expectedSignerSha256:
+      values.signing === "release" ? readEnv("KVITBIT_ANDROID_SIGNING_CERT_SHA256") : undefined,
+  });
+
+  const apkBytes = yield* fs.readFile(builtApk);
+  yield* fs.writeFile(apkOutPath, apkBytes);
+
+  const apkSha256 = Bun.CryptoHasher.hash("sha256", apkBytes, "hex");
+  writeStdout(
+    prettyJson({
+      command: "build",
+      version: meta.version,
+      versionCode: meta.versionCode,
+      apkPath: apkOutPath,
+      apkSha256,
+      signingCertSha256: verified.signingCertSha256,
+      sizeBytes: apkBytes.byteLength,
+    }),
+  );
+});
+
+const cmdPublishApk = Effect.fn("MobileRelease.cmdPublishApk")(function* (argv: readonly string[]) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const { join, resolve } = path;
   const { values } = parseArgs({
     args: [...argv],
     options: {
-      project: { type: "string", default: DEFAULT_MOBILE_DIR },
+      project: { type: "string", default: resolve(import.meta.dir, "../../apps/mobile") },
       apk: { type: "string" },
       version: { type: "string" },
       origin: { type: "string", default: DEFAULT_ORIGIN },
@@ -748,54 +865,52 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
 
   const dryRun = values["dry-run"];
   const projectDir = resolve(values.project);
-  const meta = await readAppMeta(projectDir);
+  const meta = yield* readAppMeta(projectDir);
   const version = values.version ?? meta.version;
   const versionCode = androidVersionCode(version);
-  const target = resolveStorageTarget(values["storage-dir"], values.bucket, dryRun);
-  const releasedAt = values["released-at"] ?? new Date().toISOString();
+  const target = resolveStorageTarget(path, values["storage-dir"], values.bucket, dryRun);
+  const releasedAt = values["released-at"] ?? DateTime.formatIso(DateTime.nowUnsafe());
 
   let apkPath: string | undefined;
   let apkBytes: Uint8Array | undefined;
   let apkSha256: string;
   let sizeBytes: number;
 
-  if (values.apk) {
+  if (hasText(values.apk)) {
     apkPath = resolve(values.apk);
-    apkBytes = new Uint8Array(await readFile(apkPath));
-    apkSha256 = createHash("sha256").update(apkBytes).digest("hex");
+    apkBytes = yield* fs.readFile(apkPath);
+    apkSha256 = Bun.CryptoHasher.hash("sha256", apkBytes, "hex");
     sizeBytes = apkBytes.byteLength;
   } else if (dryRun) {
-    apkSha256 = "0".repeat(64);
+    apkSha256 = Str.repeat(64)("0");
     sizeBytes = 0;
   } else {
-    throw new Error("publish-apk requires --apk <path> (or --dry-run).");
+    return yield* ReleaseError.make({
+      message: "publish-apk requires --apk <path> (or --dry-run).",
+    });
   }
 
   const expectedCertSha =
     values["signing-cert-sha256"] ?? readEnv("KVITBIT_ANDROID_SIGNING_CERT_SHA256");
 
   let signingCertSha256: string;
-  if (apkPath && apkBytes) {
-    const staging = await mkdtemp(join(tmpdir(), "kvitbit-apk-verify-"));
+  if (apkPath !== undefined && apkBytes !== undefined) {
+    const staging = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-apk-verify-" });
     const snapshot = join(staging, "candidate.apk");
-    try {
-      await Bun.write(snapshot, apkBytes);
-      const verified = await verifyApkArtifact(snapshot, {
-        packageName: meta.packageName,
-        versionCode,
-        versionName: version,
-        expectedSignerSha256: expectedCertSha,
-      });
-      signingCertSha256 = verified.signingCertSha256;
-    } finally {
-      await rm(staging, { recursive: true, force: true });
-    }
+    yield* fs.writeFile(snapshot, apkBytes);
+    const verified = yield* verifyApkArtifact(snapshot, {
+      packageName: meta.packageName,
+      versionCode,
+      versionName: version,
+      expectedSignerSha256: expectedCertSha,
+    });
+    signingCertSha256 = verified.signingCertSha256;
   } else if (dryRun) {
-    signingCertSha256 = expectedCertSha
+    signingCertSha256 = hasText(expectedCertSha)
       ? formatCertificateSha256(expectedCertSha)
-      : formatCertificateSha256("0".repeat(64));
+      : formatCertificateSha256(Str.repeat(64)("0"));
   } else {
-    throw new Error("Missing APK path.");
+    return yield* ReleaseError.make({ message: "Missing APK path." });
   }
 
   const releaseInfo: ReleaseInfo = {
@@ -815,43 +930,39 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
 
   if (dryRun) {
     writeStdout(
-      JSON.stringify(
-        {
-          dryRun: true,
-          command: "publish-apk",
-          target,
-          objects: [apkKey, infoKey],
-          releaseInfo,
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        dryRun: true,
+        command: "publish-apk",
+        target,
+        objects: [apkKey, infoKey],
+        releaseInfo,
+      }),
     );
     return;
   }
 
-  if (!apkBytes) {
-    throw new Error("Missing APK bytes.");
+  if (apkBytes === undefined) {
+    return yield* ReleaseError.make({ message: "Missing APK bytes." });
   }
 
-  const apkOutcome = await writeCreateOnly(target, apkKey, apkBytes, {
+  const apkOutcome = yield* writeCreateOnly(target, apkKey, apkBytes, {
     contentType: APK_CONTENT_TYPE,
     cacheControl: ASSET_CACHE_CONTROL,
     allowExisting: true,
   });
   if (apkOutcome === "exists") {
-    const existingBytes = await readStorageObject(target, apkKey);
-    const existingSha = createHash("sha256").update(existingBytes).digest("hex");
+    const existingBytes = yield* readStorageObject(target, apkKey);
+    const existingSha = Bun.CryptoHasher.hash("sha256", existingBytes, "hex");
     if (existingSha !== apkSha256 || existingBytes.byteLength !== apkBytes.byteLength) {
-      throw new Error(
-        `Object ${apkKey} already exists with different bytes (existing sha256=${existingSha}, local sha256=${apkSha256}); create-only storage refuses overwrite.`,
-      );
+      return yield* ReleaseError.make({
+        message: `Object ${apkKey} already exists with different bytes (existing sha256=${existingSha}, local sha256=${apkSha256}); create-only storage refuses overwrite.`,
+      });
     }
   }
-  const infoOutcome = await writeCreateOnly(
+  const infoOutcome = yield* writeCreateOnly(
     target,
     infoKey,
-    new TextEncoder().encode(`${JSON.stringify(releaseInfo, null, 2)}\n`),
+    new TextEncoder().encode(`${prettyJson(releaseInfo)}\n`),
     {
       contentType: "application/json; charset=utf-8",
       allowExisting: true,
@@ -860,79 +971,79 @@ const cmdPublishApk = async (argv: readonly string[]): Promise<void> => {
 
   let publishedReleaseInfo = releaseInfo;
   if (infoOutcome === "exists") {
-    const existing = parseReleaseInfo(
-      new TextDecoder().decode(await readStorageObject(target, infoKey)),
-    );
-    const compatible = Object.entries(releaseInfo).every(
-      ([key, value]) =>
-        (key === "releasedAt" && values["released-at"] === undefined) ||
-        existing[key as keyof ReleaseInfo] === value,
+    const existingBytes = yield* readStorageObject(target, infoKey);
+    const existing = parseReleaseInfo(new TextDecoder().decode(existingBytes));
+    const compatible = Rec.every(
+      releaseInfo,
+      (value, key) =>
+        (key === "releasedAt" && values["released-at"] === undefined) || existing[key] === value,
     );
     if (!compatible) {
-      throw new Error(`Object ${infoKey} already exists with different release metadata.`);
+      return yield* ReleaseError.make({
+        message: `Object ${infoKey} already exists with different release metadata.`,
+      });
     }
     publishedReleaseInfo = existing;
   }
 
   writeStdout(
-    JSON.stringify(
-      {
-        command: "publish-apk",
-        target,
-        apkKey,
-        infoKey,
-        releaseInfo: publishedReleaseInfo,
-      },
-      null,
-      2,
-    ),
+    prettyJson({
+      command: "publish-apk",
+      target,
+      apkKey,
+      infoKey,
+      releaseInfo: publishedReleaseInfo,
+    }),
   );
-};
+});
 
-const resolveRuntimeVersionFromExpo = async (
-  projectDir: string,
-  platform: MobilePlatform,
-  origin: string,
-): Promise<string> =>
-  withOtaCodeSigningEnv(
-    projectDir,
-    {
-      ...process.env,
-      EXPO_PUBLIC_API_ORIGIN: origin,
-    },
-    async (env) => {
-      const result = await runProcess(
-        [
-          process.execPath,
-          "x",
-          "--no-install",
-          "expo-updates",
-          "runtimeversion:resolve",
-          "--platform",
-          platform,
-          "--workflow",
-          "managed",
-        ],
-        {
-          cwd: projectDir,
-          env,
-        },
-      );
-      if (result.exitCode !== 0) {
-        throw new Error(
-          `expo-updates runtimeversion:resolve failed for ${platform}:\n${result.stderr}`,
+const hasRuntimeVersion = Schema.is(Schema.Struct({ runtimeVersion: Schema.NonEmptyString }));
+
+const resolveRuntimeVersionFromExpo = Effect.fn("MobileRelease.resolveRuntimeVersionFromExpo")(
+  function* (projectDir: string, platform: MobilePlatform, origin: string) {
+    return yield* withOtaCodeSigningEnv(
+      projectDir,
+      {
+        ...Bun.env,
+        EXPO_PUBLIC_API_ORIGIN: origin,
+      },
+      Effect.fnUntraced(function* (env) {
+        const result = yield* runProcess(
+          [
+            process.execPath,
+            "x",
+            "--no-install",
+            "expo-updates",
+            "runtimeversion:resolve",
+            "--platform",
+            platform,
+            "--workflow",
+            "managed",
+          ],
+          {
+            cwd: projectDir,
+            env,
+          },
         );
-      }
-      const parsed = JSON.parse(result.stdout) as { runtimeVersion?: unknown };
-      if (typeof parsed.runtimeVersion !== "string" || parsed.runtimeVersion.length === 0) {
-        throw new Error(`Unexpected runtimeversion:resolve output: ${result.stdout}`);
-      }
-      return assertRuntimeVersion(parsed.runtimeVersion);
-    },
-  );
+        if (result.exitCode !== 0) {
+          return yield* ReleaseError.make({
+            message: `expo-updates runtimeversion:resolve failed for ${platform}:\n${result.stderr}`,
+          });
+        }
+        const parsed: unknown = parseJson(result.stdout);
+        if (!hasRuntimeVersion(parsed)) {
+          return yield* ReleaseError.make({
+            message: `Unexpected runtimeversion:resolve output: ${result.stdout}`,
+          });
+        }
+        return assertRuntimeVersion(parsed.runtimeVersion);
+      }),
+    );
+  },
+);
 
 const parsePlatforms = (raw: readonly string[] | undefined): readonly MobilePlatform[] => {
-  const input = raw && raw.length > 0 ? raw : ["android"];
+  const input = raw !== undefined && raw.length > 0 ? raw : ["android"];
   const out: MobilePlatform[] = [];
   for (const item of input) {
     if (item === "all") {
@@ -942,18 +1053,21 @@ const parsePlatforms = (raw: readonly string[] | undefined): readonly MobilePlat
       continue;
     }
     if (!isMobilePlatform(item)) {
-      throw new Error(`Invalid platform ${JSON.stringify(item)}; expected android, ios, or all.`);
+      throw new Error(`Invalid platform ${compactJson(item)}; expected android, ios, or all.`);
     }
     if (!out.includes(item)) out.push(item);
   }
   return out;
 };
 
-const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
+const cmdPublishOta = Effect.fn("MobileRelease.cmdPublishOta")(function* (argv: readonly string[]) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const { resolve } = path;
   const { values } = parseArgs({
     args: [...argv],
     options: {
-      project: { type: "string", default: DEFAULT_MOBILE_DIR },
+      project: { type: "string", default: resolve(import.meta.dir, "../../apps/mobile") },
       "export-dir": { type: "string" },
       channel: { type: "string", default: DEFAULT_UPDATE_CHANNEL },
       platform: { type: "string", multiple: true },
@@ -969,14 +1083,13 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
   const projectDir = resolve(values.project);
   const channel = assertChannel(values.channel);
   const platforms = parsePlatforms(values.platform);
-  const target = resolveStorageTarget(values["storage-dir"], values.bucket, dryRun);
-  const meta = await readAppMeta(projectDir);
+  const target = resolveStorageTarget(path, values["storage-dir"], values.bucket, dryRun);
+  const meta = yield* readAppMeta(projectDir);
 
-  let exportDir = values["export-dir"] ? resolve(values["export-dir"]) : undefined;
-  let tempExportDir: string | undefined;
+  let exportDir = hasText(values["export-dir"]) ? resolve(values["export-dir"]) : undefined;
 
-  if (!exportDir && !dryRun) {
-    tempExportDir = await mkdtemp(join(tmpdir(), "kvitbit-ota-export-"));
+  if (exportDir === undefined && !dryRun) {
+    const tempExportDir = yield* fs.makeTempDirectoryScoped({ prefix: "kvitbit-ota-export-" });
     const exportArgs = [
       process.execPath,
       "x",
@@ -985,46 +1098,50 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
       "export",
       "--output-dir",
       tempExportDir,
-      ...platforms.flatMap((p) => ["--platform", p]),
+      ...Arr.flatMap(platforms, (p) => ["--platform", p]),
     ];
-    const exported = await withOtaCodeSigningEnv(
+    const exported = yield* withOtaCodeSigningEnv(
       projectDir,
-      { ...process.env, EXPO_PUBLIC_API_ORIGIN: values.origin },
+      { ...Bun.env, EXPO_PUBLIC_API_ORIGIN: values.origin },
       (env) => runProcess(exportArgs, { cwd: projectDir, env }),
     );
     if (exported.exitCode !== 0) {
-      await rm(tempExportDir, { recursive: true, force: true });
-      throw new Error(`expo export failed:\n${exported.stderr}`);
+      return yield* ReleaseError.make({ message: `expo export failed:\n${exported.stderr}` });
     }
     exportDir = tempExportDir;
   }
 
-  try {
-    const published: Array<{
-      readonly platform: MobilePlatform;
-      readonly runtimeVersion: string;
-      readonly publicationKey: string;
-      readonly id: string;
-      readonly assetCount: number;
-    }> = [];
+  const published: Array<{
+    readonly platform: MobilePlatform;
+    readonly runtimeVersion: string;
+    readonly publicationKey: string;
+    readonly id: string;
+    readonly assetCount: number;
+  }> = [];
 
-    for (const platform of platforms) {
-      const runtimeVersion = values["runtime-version"]
-        ? assertRuntimeVersion(values["runtime-version"])
-        : dryRun
-          ? `dry-run-${meta.version}`
-          : await resolveRuntimeVersionFromExpo(projectDir, platform, values.origin);
-
-      const id = randomUUID();
-      const createdAt = new Date().toISOString();
-      const pubKey = publicationObjectKey({ channel, platform, runtimeVersion, createdAt, id });
-
-      if (!exportDir) {
-        published.push({ platform, runtimeVersion, publicationKey: pubKey, id, assetCount: 0 });
-        continue;
+  const requestedRuntime = values["runtime-version"];
+  const explicitRuntime = hasText(requestedRuntime)
+    ? assertRuntimeVersion(requestedRuntime)
+    : undefined;
+  yield* Effect.forEach(
+    platforms,
+    Effect.fnUntraced(function* (platform) {
+      let runtimeVersion = explicitRuntime ?? `dry-run-${meta.version}`;
+      if (explicitRuntime === undefined && !dryRun) {
+        runtimeVersion = yield* resolveRuntimeVersionFromExpo(projectDir, platform, values.origin);
       }
 
-      const exported = await readExpoExport(exportDir, platform);
+      const id = yield* SecureRandom.SecureRandom.use((random) => random.uuidV4());
+      const createdAt = DateTime.formatIso(DateTime.nowUnsafe());
+      const pubKey = publicationObjectKey({ channel, platform, runtimeVersion, createdAt, id });
+
+      const platformExportDir = exportDir;
+      if (platformExportDir === undefined) {
+        published.push({ platform, runtimeVersion, publicationKey: pubKey, id, assetCount: 0 });
+        return;
+      }
+
+      const exported = yield* readExpoExport(platformExportDir, platform);
       const allFiles = [exported.launchAsset, ...exported.assets];
       const record: StoredUpdate = {
         schema: 1,
@@ -1035,35 +1152,39 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
         platform,
         runtimeVersion,
         launchAsset: exported.launchAsset.asset,
-        assets: exported.assets.map((a) => a.asset),
+        assets: Arr.map(exported.assets, (a) => a.asset),
         metadata: {},
         extra: { expoClient: meta.expoConfig },
       };
 
       if (!dryRun) {
         const seen = new Set<string>();
-        for (const file of allFiles) {
-          if (seen.has(file.sha256)) continue;
-          seen.add(file.sha256);
-          await writeCreateOnly(target, assetObjectKey(file.sha256), file.bytes, {
-            contentType: file.meta.contentType,
-            cacheControl: ASSET_CACHE_CONTROL,
-            allowExisting: true,
-          });
-          await writeCreateOnly(
-            target,
-            assetMetaObjectKey(file.sha256),
-            new TextEncoder().encode(`${JSON.stringify(file.meta)}\n`),
-            {
-              contentType: "application/json; charset=utf-8",
+        yield* Effect.forEach(
+          allFiles,
+          Effect.fnUntraced(function* (file) {
+            if (seen.has(file.sha256)) return;
+            seen.add(file.sha256);
+            yield* writeCreateOnly(target, assetObjectKey(file.sha256), file.bytes, {
+              contentType: file.meta.contentType,
+              cacheControl: ASSET_CACHE_CONTROL,
               allowExisting: true,
-            },
-          );
-        }
-        await writeCreateOnly(
+            });
+            yield* writeCreateOnly(
+              target,
+              assetMetaObjectKey(file.sha256),
+              new TextEncoder().encode(`${compactJson(file.meta)}\n`),
+              {
+                contentType: "application/json; charset=utf-8",
+                allowExisting: true,
+              },
+            );
+          }),
+          { concurrency: 1, discard: true },
+        );
+        yield* writeCreateOnly(
           target,
           pubKey,
-          new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`),
+          new TextEncoder().encode(`${prettyJson(record)}\n`),
           {
             contentType: "application/json; charset=utf-8",
             allowExisting: false,
@@ -1078,29 +1199,23 @@ const cmdPublishOta = async (argv: readonly string[]): Promise<void> => {
         id,
         assetCount: allFiles.length,
       });
-    }
+    }),
+    { concurrency: 1, discard: true },
+  );
 
-    writeStdout(
-      JSON.stringify(
-        {
-          dryRun,
-          command: "publish-ota",
-          channel,
-          target,
-          published,
-        },
-        null,
-        2,
-      ),
-    );
-  } finally {
-    if (tempExportDir) {
-      await rm(tempExportDir, { recursive: true, force: true });
-    }
-  }
-};
+  writeStdout(
+    prettyJson({
+      dryRun,
+      command: "publish-ota",
+      channel,
+      target,
+      published,
+    }),
+  );
+});
 
-const cmdRollback = async (argv: readonly string[]): Promise<void> => {
+const cmdRollback = Effect.fn("MobileRelease.cmdRollback")(function* (argv: readonly string[]) {
+  const path = yield* Path.Path;
   const { values } = parseArgs({
     args: [...argv],
     options: {
@@ -1116,12 +1231,12 @@ const cmdRollback = async (argv: readonly string[]): Promise<void> => {
   const dryRun = values["dry-run"];
   const channel = assertChannel(values.channel);
   const platforms = parsePlatforms(values.platform);
-  const runtimeVersion = values["runtime-version"]
+  const runtimeVersion = hasText(values["runtime-version"])
     ? assertRuntimeVersion(values["runtime-version"])
     : (() => {
         throw new Error("rollback requires --runtime-version <version>.");
       })();
-  const target = resolveStorageTarget(values["storage-dir"], values.bucket, dryRun);
+  const target = resolveStorageTarget(path, values["storage-dir"], values.bucket, dryRun);
 
   const records: Array<{
     readonly platform: MobilePlatform;
@@ -1129,62 +1244,70 @@ const cmdRollback = async (argv: readonly string[]): Promise<void> => {
     readonly record: StoredRollback;
   }> = [];
 
-  for (const platform of platforms) {
-    const id = randomUUID();
-    const createdAt = new Date().toISOString();
-    const record: StoredRollback = {
-      schema: 1,
-      type: "rollBackToEmbedded",
-      id,
-      createdAt,
-      channel,
-      platform,
-      runtimeVersion,
-    };
-    const key = publicationObjectKey({ channel, platform, runtimeVersion, createdAt, id });
-    if (!dryRun) {
-      await writeCreateOnly(
-        target,
-        key,
-        new TextEncoder().encode(`${JSON.stringify(record, null, 2)}\n`),
-        {
+  yield* Effect.forEach(
+    platforms,
+    Effect.fnUntraced(function* (platform) {
+      const id = yield* SecureRandom.SecureRandom.use((random) => random.uuidV4());
+      const createdAt = DateTime.formatIso(DateTime.nowUnsafe());
+      const record: StoredRollback = {
+        schema: 1,
+        type: "rollBackToEmbedded",
+        id,
+        createdAt,
+        channel,
+        platform,
+        runtimeVersion,
+      };
+      const key = publicationObjectKey({ channel, platform, runtimeVersion, createdAt, id });
+      if (!dryRun) {
+        yield* writeCreateOnly(target, key, new TextEncoder().encode(`${prettyJson(record)}\n`), {
           contentType: "application/json; charset=utf-8",
           allowExisting: false,
-        },
-      );
-    }
-    records.push({ platform, publicationKey: key, record });
-  }
+        });
+      }
+      records.push({ platform, publicationKey: key, record });
+    }),
+    { concurrency: 1, discard: true },
+  );
 
   writeStdout(
-    JSON.stringify(
-      {
-        dryRun,
-        command: "rollback",
-        channel,
-        runtimeVersion,
-        target,
-        records,
-      },
-      null,
-      2,
-    ),
+    prettyJson({
+      dryRun,
+      command: "rollback",
+      channel,
+      runtimeVersion,
+      target,
+      records,
+    }),
   );
-};
+});
 
-const listLocalKeys = async (root: string, prefix: string): Promise<string[]> => {
+const listLocalKeys = Effect.fn("MobileRelease.listLocalKeys")(function* (
+  root: string,
+  prefix: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join } = yield* Path.Path;
   const dir = join(root, prefix);
-  let entries: string[];
-  try {
-    entries = await readdir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw err;
-  }
-  return entries.map((name) => `${prefix}${name}`);
-};
+  const entries = yield* readDirectoryIfPresent(fs, dir);
+  return Arr.map(entries, (name) => `${prefix}${name}`);
+});
 
-const cmdVerify = async (argv: readonly string[]): Promise<void> => {
+interface LocalVerificationChecks {
+  readonly mode: "storage-dir";
+  readonly root: string;
+  readonly dryRun: boolean;
+  update?: {
+    readonly latestKey: string | null;
+    readonly publicationType: StoredPublication["type"] | "noUpdateAvailable";
+    readonly signatureVerified: boolean;
+  };
+  latestRelease?: ReleaseInfo | null;
+}
+
+const cmdVerify = Effect.fn("MobileRelease.cmdVerify")(function* (argv: readonly string[]) {
+  const fs = yield* FileSystem.FileSystem;
+  const { join, resolve } = yield* Path.Path;
   const { values } = parseArgs({
     args: [...argv],
     options: {
@@ -1203,62 +1326,74 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
   const dryRun = values["dry-run"];
   const channel = assertChannel(values.channel);
   if (!isMobilePlatform(values.platform)) {
-    throw new Error(`Invalid platform: ${JSON.stringify(values.platform)}`);
+    return yield* ReleaseError.make({
+      message: `Invalid platform: ${compactJson(values.platform)}`,
+    });
   }
   const platform: MobilePlatform = values.platform;
-  const storageDir = values["storage-dir"]?.trim() || readEnv("KVITBIT_MOBILE_STORAGE_DIR");
+  const storageDirArg = Str.trim(values["storage-dir"] ?? "");
+  const storageDir = hasText(storageDirArg) ? storageDirArg : readEnv("KVITBIT_MOBILE_STORAGE_DIR");
 
-  if (storageDir) {
+  if (storageDir !== undefined) {
     const root = resolve(storageDir);
-    const checks: Record<string, unknown> = { mode: "storage-dir", root, dryRun };
+    const checks: LocalVerificationChecks = { mode: "storage-dir", root, dryRun };
 
-    if (values["runtime-version"]) {
+    if (hasText(values["runtime-version"])) {
       const runtimeVersion = assertRuntimeVersion(values["runtime-version"]);
       const prefix = publicationPrefix({ channel, platform, runtimeVersion });
-      const keys = await listLocalKeys(root, prefix);
+      const keys = yield* listLocalKeys(root, prefix);
       const latestKey = latestPublicationKey(keys);
-      const latest = latestKey
-        ? parsePublication(await readFile(join(root, latestKey), "utf8"))
-        : null;
+      const latestJson =
+        latestKey === undefined ? null : yield* fs.readFileString(join(root, latestKey));
+      const latest = latestJson === null ? null : parsePublication(latestJson);
 
       if (latest?.type === "update") {
-        for (const asset of [latest.launchAsset, ...latest.assets]) {
-          const assetBytes = new Uint8Array(
-            await readFile(join(root, assetObjectKey(asset.sha256))),
-          );
-          const actualSha = createHash("sha256").update(assetBytes).digest("hex");
-          if (actualSha !== asset.sha256) {
-            throw new Error(`Asset hash mismatch for ${asset.sha256}: got ${actualSha}`);
-          }
-          const meta = parseAssetMeta(
-            await readFile(join(root, assetMetaObjectKey(asset.sha256)), "utf8"),
-          );
-          if (meta.sha256 !== asset.sha256 || meta.size !== assetBytes.byteLength) {
-            throw new Error(`Asset metadata mismatch for ${asset.sha256}`);
-          }
-        }
+        yield* Effect.forEach(
+          [latest.launchAsset, ...latest.assets],
+          Effect.fnUntraced(function* (asset) {
+            const assetBytes = yield* fs.readFile(join(root, assetObjectKey(asset.sha256)));
+            const actualSha = Bun.CryptoHasher.hash("sha256", assetBytes, "hex");
+            if (actualSha !== asset.sha256) {
+              return yield* ReleaseError.make({
+                message: `Asset hash mismatch for ${asset.sha256}: got ${actualSha}`,
+              });
+            }
+            const metaJson = yield* fs.readFileString(join(root, assetMetaObjectKey(asset.sha256)));
+            const meta = parseAssetMeta(metaJson);
+            if (meta.sha256 !== asset.sha256 || meta.size !== assetBytes.byteLength) {
+              return yield* ReleaseError.make({
+                message: `Asset metadata mismatch for ${asset.sha256}`,
+              });
+            }
+          }),
+          { concurrency: 1, discard: true },
+        );
       }
 
       const req = readManifestRequest({
-        "expo-protocol-version": "1",
-        "expo-platform": platform,
-        "expo-runtime-version": runtimeVersion,
-        "expo-channel-name": channel,
-        "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
-        accept: "multipart/mixed",
+        headers: {
+          "expo-protocol-version": "1",
+          "expo-platform": platform,
+          "expo-runtime-version": runtimeVersion,
+          "expo-channel-name": channel,
+          "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
+          accept: "multipart/mixed",
+        },
       });
       if (req._tag !== "Request") {
-        throw new Error(`Internal manifest request rejected: ${req.message}`);
+        return yield* ReleaseError.make({
+          message: `Internal manifest request rejected: ${req.message}`,
+        });
       }
 
-      let signingKeyPem = values["signing-key"]
-        ? await readFile(resolve(values["signing-key"]), "utf8")
+      let signingKeyPem = hasText(values["signing-key"])
+        ? yield* fs.readFileString(resolve(values["signing-key"]))
         : readEnv("KVITBIT_MOBILE_UPDATES_SIGNING_KEY");
-      let verifyCertPem = values.certificate
-        ? await readFile(resolve(values.certificate), "utf8")
+      let verifyCertPem = hasText(values.certificate)
+        ? yield* fs.readFileString(resolve(values.certificate))
         : undefined;
 
-      if (!signingKeyPem && !verifyCertPem) {
+      if (!(hasText(signingKeyPem) || hasText(verifyCertPem))) {
         const ephemeral = generateKeyPairSync("rsa", {
           modulusLength: 2048,
           publicKeyEncoding: { type: "spki", format: "pem" },
@@ -1275,21 +1410,26 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
         signingKeyPem,
       });
       if (response._tag !== "Response") {
-        throw new Error(`Manifest response failed: ${response.message}`);
+        return yield* ReleaseError.make({
+          message: `Manifest response failed: ${response.message}`,
+        });
       }
-      const parts = parseMultipartMixed(response.headers["content-type"] ?? "", response.body);
+      const { "content-type": contentType = "" } = response.headers;
+      const parts = parseMultipartMixed(contentType, response.body);
       const mainPart = parts?.[0];
-      if (!mainPart) {
-        throw new Error("Multipart response had no main part.");
+      if (mainPart === undefined) {
+        return yield* ReleaseError.make({ message: "Multipart response had no main part." });
       }
-      if (verifyCertPem) {
-        const sigOk = verifyManifestSignature(
-          mainPart.body,
-          mainPart.headers.get("expo-signature"),
-          verifyCertPem,
-        );
+      if (hasText(verifyCertPem)) {
+        const sigOk = verifyManifestSignature({
+          body: mainPart.body,
+          expoSignatureHeader: mainPart.headers.get("expo-signature"),
+          publicKeyOrCert: verifyCertPem,
+        });
         if (!sigOk) {
-          throw new Error("Manifest RSA-v1_5-SHA256 signature verification failed.");
+          return yield* ReleaseError.make({
+            message: "Manifest RSA-v1_5-SHA256 signature verification failed.",
+          });
         }
       }
       checks.update = {
@@ -1301,124 +1441,127 @@ const cmdVerify = async (argv: readonly string[]): Promise<void> => {
 
     if (values["check-release"]) {
       const releaseDir = join(root, releasePrefix());
-      let versionDirs: string[] = [];
-      try {
-        versionDirs = await readdir(releaseDir);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-      }
+      const versionDirs = yield* readDirectoryIfPresent(fs, releaseDir);
       const releases: ReleaseInfo[] = [];
-      for (const ver of versionDirs) {
-        const infoPath = join(root, releaseInfoObjectKey(ver));
-        const infoStat = await stat(infoPath).catch(() => null);
-        if (!infoStat?.isFile()) continue;
-        const info = parseReleaseInfo(await readFile(infoPath, "utf8"));
-        const apkPath = join(root, apkObjectKey(info.version));
-        const apkBytes = new Uint8Array(await readFile(apkPath));
-        const actualSha = createHash("sha256").update(apkBytes).digest("hex");
-        if (actualSha !== info.apkSha256 || apkBytes.byteLength !== info.sizeBytes) {
-          throw new Error(`APK integrity mismatch for ${info.version}`);
-        }
-        releases.push(info);
-      }
+      yield* Effect.forEach(
+        versionDirs,
+        Effect.fnUntraced(function* (ver) {
+          const infoPath = join(root, releaseInfoObjectKey(ver));
+          const infoStat = yield* fs.stat(infoPath).pipe(Effect.orElseSucceed(() => null));
+          if (infoStat?.type !== "File") return;
+          const infoJson = yield* fs.readFileString(infoPath);
+          const info = parseReleaseInfo(infoJson);
+          const apkPath = join(root, apkObjectKey(info.version));
+          const apkBytes = yield* fs.readFile(apkPath);
+          const actualSha = Bun.CryptoHasher.hash("sha256", apkBytes, "hex");
+          if (actualSha !== info.apkSha256 || apkBytes.byteLength !== info.sizeBytes) {
+            return yield* ReleaseError.make({
+              message: `APK integrity mismatch for ${info.version}`,
+            });
+          }
+          releases.push(info);
+        }),
+        { concurrency: 1, discard: true },
+      );
       checks.latestRelease = latestRelease(releases) ?? null;
     }
 
-    writeStdout(JSON.stringify({ ok: true, ...checks }, null, 2));
+    writeStdout(prettyJson({ ok: true, ...checks }));
     return;
   }
 
+  const origin = Str.replace(TRAILING_SLASHES, "")(values.origin);
+  const manifestUrl = `${origin}/api/mobile/updates/manifest`;
   if (dryRun) {
     writeStdout(
-      JSON.stringify(
-        {
-          dryRun: true,
-          command: "verify",
-          mode: "http",
-          manifestUrl: `${values.origin.replace(/\/+$/, "")}/api/mobile/updates/manifest`,
-          releaseUrl: values["check-release"]
-            ? `${values.origin.replace(/\/+$/, "")}/api/mobile/releases/latest`
-            : null,
-          channel,
-          platform,
-          runtimeVersion: values["runtime-version"] ?? "<required>",
-        },
-        null,
-        2,
-      ),
+      prettyJson({
+        dryRun: true,
+        command: "verify",
+        mode: "http",
+        manifestUrl,
+        releaseUrl: values["check-release"] ? `${origin}/api/mobile/releases/latest` : null,
+        channel,
+        platform,
+        runtimeVersion: values["runtime-version"] ?? "<required>",
+      }),
     );
     return;
   }
 
-  const runtimeVersion = values["runtime-version"]
-    ? assertRuntimeVersion(values["runtime-version"])
-    : (() => {
-        throw new Error("HTTP verify requires --runtime-version <version> (or --storage-dir).");
-      })();
+  if (!hasText(values["runtime-version"])) {
+    return yield* ReleaseError.make({
+      message: "HTTP verify requires --runtime-version <version> (or --storage-dir).",
+    });
+  }
+  const runtimeVersion = assertRuntimeVersion(values["runtime-version"]);
 
-  const manifestUrl = `${values.origin.replace(/\/+$/, "")}/api/mobile/updates/manifest`;
-  const headers: Record<string, string> = {
+  const headers = {
     "expo-protocol-version": "1",
     "expo-platform": platform,
     "expo-runtime-version": runtimeVersion,
     "expo-channel-name": channel,
     accept: "multipart/mixed",
   };
-  if (values.certificate) {
-    headers["expo-expect-signature"] = 'sig, keyid="main", alg="rsa-v1_5-sha256"';
+  const manifestHeaders = hasText(values.certificate)
+    ? { ...headers, "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"' }
+    : headers;
+  const res = yield* HttpClient.get(manifestUrl, { headers: manifestHeaders });
+  if (res.status < 200 || res.status >= 300) {
+    return yield* ReleaseError.make({
+      message: `Manifest request failed with HTTP ${res.status}: ${yield* res.text}`,
+    });
   }
-  const res = await fetch(manifestUrl, { headers });
-  if (!res.ok) {
-    throw new Error(`Manifest request failed with HTTP ${res.status}: ${await res.text()}`);
-  }
-  const contentType = res.headers.get("content-type") ?? "";
-  const body = await res.text();
+  const contentType = res.headers["content-type"] ?? "";
+  const body = yield* res.text;
   const parts = parseMultipartMixed(contentType, body);
   const mainPart = parts?.[0];
-  if (!mainPart) {
-    throw new Error(`Invalid multipart/mixed manifest response from ${manifestUrl}`);
+  if (mainPart === undefined) {
+    return yield* ReleaseError.make({
+      message: `Invalid multipart/mixed manifest response from ${manifestUrl}`,
+    });
   }
-  if (values.certificate) {
-    const certPem = await readFile(resolve(values.certificate), "utf8");
-    const ok = verifyManifestSignature(
-      mainPart.body,
-      mainPart.headers.get("expo-signature"),
-      certPem,
-    );
+  if (hasText(values.certificate)) {
+    const certPem = yield* fs.readFileString(resolve(values.certificate));
+    const ok = verifyManifestSignature({
+      body: mainPart.body,
+      expoSignatureHeader: mainPart.headers.get("expo-signature"),
+      publicKeyOrCert: certPem,
+    });
     if (!ok) {
-      throw new Error("Live manifest signature failed verification against --certificate.");
+      return yield* ReleaseError.make({
+        message: "Live manifest signature failed verification against --certificate.",
+      });
     }
   }
   let latestReleaseInfo: ReleaseInfo | null = null;
   if (values["check-release"]) {
-    const relRes = await fetch(`${values.origin.replace(/\/+$/, "")}/api/mobile/releases/latest`);
-    if (!relRes.ok) {
-      throw new Error(`Release latest check failed with HTTP ${relRes.status}`);
+    const relRes = yield* HttpClient.get(`${origin}/api/mobile/releases/latest`);
+    if (relRes.status < 200 || relRes.status >= 300) {
+      return yield* ReleaseError.make({
+        message: `Release latest check failed with HTTP ${relRes.status}`,
+      });
     }
-    latestReleaseInfo = parseReleaseInfo(await relRes.text());
+    const releaseJson = yield* relRes.text;
+    latestReleaseInfo = parseReleaseInfo(releaseJson);
   }
 
   writeStdout(
-    JSON.stringify(
-      {
-        ok: true,
-        mode: "http",
-        manifestUrl,
-        partDisposition: mainPart.headers.get("content-disposition"),
-        signatureVerified: values.certificate !== undefined,
-        latestRelease: latestReleaseInfo,
-      },
-      null,
-      2,
-    ),
+    prettyJson({
+      ok: true,
+      mode: "http",
+      manifestUrl,
+      partDisposition: mainPart.headers.get("content-disposition"),
+      signatureVerified: values.certificate !== undefined,
+      latestRelease: latestReleaseInfo,
+    }),
   );
-};
+});
 
 // --- Entrypoint ---
 
-export const main = async (argv: readonly string[]): Promise<number> => {
+const main = Effect.fn("MobileRelease.main")(function* (argv: readonly string[]) {
   const [command, ...rest] = argv;
-  if (!command || command === "-h" || command === "--help" || command === "help") {
+  if (!hasText(command) || command === "-h" || command === "--help" || command === "help") {
     writeStdout(HELP_TEXT);
     return 0;
   }
@@ -1430,36 +1573,46 @@ export const main = async (argv: readonly string[]): Promise<number> => {
 
   switch (command) {
     case "metadata":
-      await cmdMetadata(rest);
+      yield* cmdMetadata(rest);
       return 0;
     case "build":
-      await cmdBuild(rest);
+      yield* cmdBuild(rest);
       return 0;
     case "publish-apk":
-      await cmdPublishApk(rest);
+      yield* cmdPublishApk(rest);
       return 0;
     case "publish-ota":
-      await cmdPublishOta(rest);
+      yield* cmdPublishOta(rest);
       return 0;
     case "rollback":
-      await cmdRollback(rest);
+      yield* cmdRollback(rest);
       return 0;
     case "verify":
-      await cmdVerify(rest);
+      yield* cmdVerify(rest);
       return 0;
     default:
       writeStderr(`Unknown command: ${command}\n\n${HELP_TEXT}`);
       return 1;
   }
-};
+});
 
 if (import.meta.main) {
-  main(process.argv.slice(2))
-    .then((code) => {
-      if (code !== 0) process.exit(code);
-    })
-    .catch((err: unknown) => {
-      writeStderr(err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    });
+  const program = main(Arr.drop(process.argv, 2)).pipe(
+    Effect.scoped,
+    Effect.matchCause({
+      onSuccess: (code) => {
+        process.exitCode = code;
+      },
+      onFailure: (cause) => {
+        const error = Cause.squash(cause);
+        writeStderr(error instanceof Error ? error.message : String(error));
+        process.exitCode = 1;
+      },
+    }),
+  );
+  BunRuntime.runMain(
+    program.pipe(
+      Effect.provide([BunServices.layer, FetchHttpClient.layer, SecureRandom.layerWebCrypto]),
+    ),
+  );
 }

@@ -3,14 +3,16 @@
  * - `GET /healthz`: liveness (200 `{ status: "ok" }` whenever the process can answer).
  * - `GET /readyz`: readiness (`SELECT 1` within 1s -> 200 `{ status: "ok" }`, else 503).
  */
-import { Duration, Effect } from "effect";
-import { HttpRouter, HttpServerResponse } from "effect/http";
-import { SqlClient } from "effect/sql";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as SqlClient from "effect/sql/SqlClient";
 
 const READY_TIMEOUT = Duration.seconds(1);
 
-export const HealthRoutesLive = HttpRouter.use((router) =>
-  Effect.gen(function* () {
+export const HealthRoutesLive = HttpRouter.use(
+  Effect.fnUntraced(function* (router) {
     const sql = yield* SqlClient.SqlClient;
 
     yield* router.add(

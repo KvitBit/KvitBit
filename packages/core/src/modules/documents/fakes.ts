@@ -3,14 +3,19 @@
  * (tests and stage-2 clones). Records are keyed by Workspace, so another Workspace's id is
  * `NotFound` exactly as the real ports behave.
  */
+
 import type {
   ContactId,
   DocumentView,
   PriceListItemId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, NotFound } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Ref } from "effect";
+import { type Caller, NotFound } from "@kvitbit/domain/contract";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import type {
   ContactForDocument,
   IssuerForDocument,
@@ -41,13 +46,19 @@ export class DocumentFixtures extends Context.Service<
     readonly putItem: (workspaceId: WorkspaceId, item: PriceListItemForLine) => Effect.Effect<void>;
     readonly putIssuer: (issuer: IssuerForDocument) => Effect.Effect<void>;
   }
->()("kvitbit/core/documents/testing/DocumentFixtures") {}
+>()("@kvitbit/core/modules/documents/fakes/DocumentFixtures") {}
 
 /** Fake renderer output: a recognisable byte string naming the document and options. */
-export const fakePdfBytes = (view: DocumentView, options: RenderOptions): Uint8Array =>
-  new TextEncoder().encode(
-    `%PDF-fake ${view.id} r${view.revision} ${options.template} ${options.language}`,
-  );
+export const fakePdfBytes: {
+  (options: RenderOptions): (view: DocumentView) => Uint8Array;
+  (view: DocumentView, options: RenderOptions): Uint8Array;
+} = Fn.dual(
+  2,
+  (view: DocumentView, options: RenderOptions): Uint8Array =>
+    new TextEncoder().encode(
+      `%PDF-fake ${view.id} r${view.revision} ${options.template} ${options.language}`,
+    ),
+);
 
 const fixtures = Layer.effect(
   DocumentFixtures,
@@ -61,14 +72,17 @@ const fixtures = Layer.effect(
       items,
       issuers,
       renders,
-      putContact: (workspaceId, contact) =>
+      putContact: Effect.fn("DocumentFixtures.putContact")((workspaceId, contact) =>
         Ref.update(contacts, (all) =>
           new Map(all).set(key(workspaceId, contact.party.contactId), contact),
         ),
-      putItem: (workspaceId, item) =>
+      ),
+      putItem: Effect.fn("DocumentFixtures.putItem")((workspaceId, item) =>
         Ref.update(items, (all) => new Map(all).set(key(workspaceId, item.id), item)),
-      putIssuer: (issuer) =>
+      ),
+      putIssuer: Effect.fn("DocumentFixtures.putIssuer")((issuer) =>
         Ref.update(issuers, (all) => new Map(all).set(issuer.party.workspaceId, issuer)),
+      ),
     });
   }),
 );
@@ -77,11 +91,12 @@ const renderer = Layer.effect(
   DocumentRenderer,
   Effect.map(DocumentFixtures, (f) =>
     DocumentRenderer.of({
-      render: (view, options) =>
+      render: Effect.fn("DocumentRenderer.render")((view, options) =>
         Effect.as(
           Ref.update(f.renders, (all) => [...all, { view, options }]),
           fakePdfBytes(view, options),
         ),
+      ),
     }),
   ),
 );
@@ -91,13 +106,15 @@ const ports = Layer.mergeAll(
     DocumentContacts,
     Effect.map(DocumentFixtures, (f) =>
       DocumentContacts.of({
-        forDocument: (workspaceId: WorkspaceId, id: ContactId) =>
-          Effect.flatMap(Ref.get(f.contacts), (all) => {
-            const found = all.get(key(workspaceId, id));
-            return found
-              ? Effect.succeed(found)
-              : Effect.fail(new NotFound({ entity: "Contact", id }));
-          }),
+        forDocument: Effect.fn("DocumentContacts.forDocument")(
+          (workspaceId: WorkspaceId, id: ContactId) =>
+            Effect.flatMap(Ref.get(f.contacts), (all) => {
+              const found = all.get(key(workspaceId, id));
+              return found !== undefined
+                ? Effect.succeed(found)
+                : Effect.fail(NotFound.make({ entity: "Contact", id }));
+            }),
+        ),
       }),
     ),
   ),
@@ -105,13 +122,15 @@ const ports = Layer.mergeAll(
     DocumentPriceList,
     Effect.map(DocumentFixtures, (f) =>
       DocumentPriceList.of({
-        forLine: (workspaceId: WorkspaceId, id: PriceListItemId) =>
-          Effect.flatMap(Ref.get(f.items), (all) => {
-            const found = all.get(key(workspaceId, id));
-            return found
-              ? Effect.succeed(found)
-              : Effect.fail(new NotFound({ entity: "PriceListItem", id }));
-          }),
+        forLine: Effect.fn("DocumentPriceList.forLine")(
+          (workspaceId: WorkspaceId, id: PriceListItemId) =>
+            Effect.flatMap(Ref.get(f.items), (all) => {
+              const found = all.get(key(workspaceId, id));
+              return found !== undefined
+                ? Effect.succeed(found)
+                : Effect.fail(NotFound.make({ entity: "PriceListItem", id }));
+            }),
+        ),
       }),
     ),
   ),
@@ -120,17 +139,18 @@ const ports = Layer.mergeAll(
     Effect.map(DocumentFixtures, (f) =>
       DocumentIssuers.of({
         // As agreed in #418: only the current Member/System caller's Workspace is visible.
-        forDocument: (workspaceId: WorkspaceId) =>
-          Effect.gen(function* () {
-            const caller = yield* CurrentCaller;
-            const found = (yield* Ref.get(f.issuers)).get(workspaceId);
-            const own =
-              (caller._tag === "Member" || caller._tag === "System") &&
-              caller.workspaceId === workspaceId;
-            return found && own
-              ? found
-              : yield* new NotFound({ entity: "Workspace", id: workspaceId });
-          }),
+        forDocument: Effect.fn("DocumentIssuers.forDocument")(function* (
+          caller: Caller,
+          workspaceId: WorkspaceId,
+        ) {
+          const found = (yield* Ref.get(f.issuers)).get(workspaceId);
+          const own =
+            (caller._tag === "Member" || caller._tag === "System") &&
+            caller.workspaceId === workspaceId;
+          return found !== undefined && own
+            ? found
+            : yield* NotFound.make({ entity: "Workspace", id: workspaceId });
+        }),
       }),
     ),
   ),

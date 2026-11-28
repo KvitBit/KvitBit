@@ -1,3 +1,4 @@
+import * as EffectArray from "effect/Array";
 import { Pressable, Switch as RNSwitch, View } from "react-native";
 import { useTheme } from "../theme/theme-provider";
 import { chipVariants } from "./styles";
@@ -23,7 +24,7 @@ export function SegmentedChoice<T extends string>(props: {
         </Text>
       )}
       <View accessibilityRole="radiogroup" className="flex-row flex-wrap gap-2">
-        {props.choices.map((choice) => {
+        {EffectArray.map(props.choices, (choice) => {
           const selected = choice.value === props.value;
           return (
             <Pressable

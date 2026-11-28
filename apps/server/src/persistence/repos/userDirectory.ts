@@ -3,9 +3,11 @@
  * (tombstoned, http-mcp-contracts G10) is hidden at once, so it is left out like an unknown id.
  */
 import { UserDirectory } from "@kvitbit/core";
-import type { UserId } from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
+import { UserId } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 import { unavailable } from "../errors";
 
 export const UserDirectorySql: Layer.Layer<UserDirectory, never, SqlClient.SqlClient> =
@@ -14,7 +16,7 @@ export const UserDirectorySql: Layer.Layer<UserDirectory, never, SqlClient.SqlCl
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       return {
-        lookup: (ids) =>
+        lookup: Effect.fn("UserDirectory.lookup")((ids) =>
           ids.length === 0
             ? Effect.succeed([])
             : Effect.map(
@@ -24,12 +26,13 @@ export const UserDirectorySql: Layer.Layer<UserDirectory, never, SqlClient.SqlCl
                     where id in ${sql.in([...new Set(ids)])} and deleted_at is null`,
                 ),
                 (rows) =>
-                  rows.map((row) => ({
-                    userId: row.id as UserId,
+                  Arr.map(rows, (row) => ({
+                    userId: UserId.make(row.id),
                     name: row.name,
                     email: row.email,
                   })),
               ),
+        ),
       };
     }),
   );

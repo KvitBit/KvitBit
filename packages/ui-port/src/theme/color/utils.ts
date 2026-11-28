@@ -4,7 +4,9 @@
  * kept zero-dependency so ui-port bundles no colour library.
  */
 
+import * as Fn from "effect/Function";
 /** Opaque sRGB colour as 0xRRGGBB (no alpha channel). */
+import * as Str from "effect/String";
 export type Rgb = number;
 
 const SRGB_TO_XYZ = [
@@ -23,9 +25,15 @@ export const WHITE_POINT_D65 = [95.047, 100.0, 108.883] as const;
 
 export type Vec3 = readonly [number, number, number];
 
-export const clamp = (lo: number, hi: number, x: number): number => Math.min(hi, Math.max(lo, x));
+export const clamp: {
+  (hi: number, x: number): (lo: number) => number;
+  (lo: number, hi: number, x: number): number;
+} = Fn.dual(3, (lo: number, hi: number, x: number): number => Math.min(hi, Math.max(lo, x)));
 
-export const lerp = (a: number, b: number, t: number): number => (1 - t) * a + t * b;
+export const lerp: {
+  (b: number, t: number): (a: number) => number;
+  (a: number, b: number, t: number): number;
+} = Fn.dual(3, (a: number, b: number, t: number): number => (1 - t) * a + t * b);
 
 export const signum = (x: number): number => (x < 0 ? -1 : x > 0 ? 1 : 0);
 
@@ -35,10 +43,15 @@ export const sanitizeDegrees = (deg: number): number => {
 };
 
 /** Shortest angular distance between two hues, 0..180. */
-export const differenceDegrees = (a: number, b: number): number =>
-  180 - Math.abs(Math.abs(a - b) - 180);
+export const differenceDegrees: {
+  (b: number): (a: number) => number;
+  (a: number, b: number): number;
+} = Fn.dual(2, (a: number, b: number): number => 180 - Math.abs(Math.abs(a - b) - 180));
 
-export const matrixMultiply = (v: Vec3, m: readonly (readonly number[])[]): Vec3 => {
+export const matrixMultiply: {
+  (m: readonly (readonly number[])[]): (v: Vec3) => Vec3;
+  (v: Vec3, m: readonly (readonly number[])[]): Vec3;
+} = Fn.dual(2, (v: Vec3, m: readonly (readonly number[])[]): Vec3 => {
   const r0 = m[0] ?? [];
   const r1 = m[1] ?? [];
   const r2 = m[2] ?? [];
@@ -48,14 +61,19 @@ export const matrixMultiply = (v: Vec3, m: readonly (readonly number[])[]): Vec3
     v[0] * at(r1, 0) + v[1] * at(r1, 1) + v[2] * at(r1, 2),
     v[0] * at(r2, 0) + v[1] * at(r2, 1) + v[2] * at(r2, 2),
   ];
-};
+});
 
 export const redOf = (rgb: Rgb): number => (rgb >> 16) & 0xff;
 export const greenOf = (rgb: Rgb): number => (rgb >> 8) & 0xff;
 export const blueOf = (rgb: Rgb): number => rgb & 0xff;
 
-export const rgbFromComponents = (r: number, g: number, b: number): Rgb =>
-  ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff);
+export const rgbFromComponents: {
+  (g: number, b: number): (r: number) => Rgb;
+  (r: number, g: number, b: number): Rgb;
+} = Fn.dual(
+  3,
+  (r: number, g: number, b: number): Rgb => ((r & 0xff) << 16) | ((g & 0xff) << 8) | (b & 0xff),
+);
 
 /** 8-bit sRGB channel to linear RGB on 0..100. */
 export const linearized = (channel: number): number => {
@@ -64,7 +82,7 @@ export const linearized = (channel: number): number => {
 };
 
 /** Linear RGB on 0..100 to a rounded, clamped 8-bit sRGB channel. */
-export const delinearized = (linear: number): number => {
+const delinearized = (linear: number): number => {
   const n = linear / 100;
   const d = n <= 0.0031308 ? n * 12.92 : 1.055 * n ** (1 / 2.4) - 0.055;
   return clamp(0, 255, Math.round(d * 255));
@@ -78,8 +96,6 @@ export const xyzFromRgb = (rgb: Rgb): Vec3 =>
     [linearized(redOf(rgb)), linearized(greenOf(rgb)), linearized(blueOf(rgb))],
     SRGB_TO_XYZ,
   );
-
-export const rgbFromXyz = (xyz: Vec3): Rgb => rgbFromLinrgb(matrixMultiply(xyz, XYZ_TO_SRGB));
 
 const labF = (t: number): number => {
   const e = 216 / 24389;
@@ -113,11 +129,12 @@ const HEX = /^#[0-9A-Fa-f]{6}$/;
 export const isHex = (s: string): boolean => HEX.test(s);
 
 /** "#RRGGBB" (any case) to Rgb. Callers validate with `isHex` or a Hex schema first. */
-export const rgbFromHex = (hex: string): Rgb => Number.parseInt(hex.slice(1, 7), 16) & 0xffffff;
+export const rgbFromHex = (hex: string): Rgb =>
+  Number.parseInt(Fn.pipe(hex, Str.slice(1, 7)), 16) & 0xffffff;
 
 /** Rgb to upper-case "#RRGGBB". */
 export const hexFromRgb = (rgb: Rgb): string =>
-  `#${(rgb & 0xffffff).toString(16).padStart(6, "0").toUpperCase()}`;
+  `#${Str.toUpperCase(Fn.pipe((rgb & 0xffffff).toString(16), Str.padStart(6, "0")))}`;
 
 /** CIELAB (D65) of an sRGB colour: L* 0..100, a*, b*. sRGB greys have a* = b* = 0. */
 export const labFromRgb = (rgb: Rgb): Vec3 => {

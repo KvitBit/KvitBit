@@ -5,98 +5,31 @@
  */
 import type { CoreExternalPorts, UserDirectory } from "@kvitbit/core";
 import type { BlobUnavailable } from "@kvitbit/domain/ports";
-import { type Config, Layer } from "effect";
-import type { SqlClient } from "effect/sql";
+import type * as Config from "effect/Config";
+import * as Layer from "effect/Layer";
+import type * as SqlClient from "effect/sql/SqlClient";
 import type * as WorkflowEngine from "effect/workflow/WorkflowEngine";
-import { BlobStorageLive, makeBlobStorageLayer } from "./blob";
-import {
-  type BlobDriver,
-  type BlobWiringConfig,
-  BlobWiringConfigSchema,
-  type EmailMode,
-  type EmailWiringConfig,
-  EmailWiringConfigSchema,
-  type PdfWiringConfig,
-  PdfWiringConfigSchema,
-  type ShareSecretsConfig,
-  ShareSecretsConfigSchema,
-} from "./config";
-import { EmailSenderLive, makeEmailSenderLayer, parseSmtpUrl } from "./email";
+import { BlobStorageLive } from "./blob";
+import { EmailSenderLive } from "./email";
 import { ExchangeRatesLive } from "./fx";
-import {
-  BrandingPreviewLive,
-  brandingPreviewToRenderModel,
-  type DocumentRenderContext,
-  DocumentRendererLive,
-  documentViewToRenderModel,
-  makePdfRenderersLayer,
-  PdfEngineLive,
-  PdfRenderersLive,
-  ReportPdfRendererLive,
-  type ReportRenderContext,
-  reportPdfInputToRenderModel,
-} from "./pdf";
+import { PdfRenderersLive } from "./pdf";
 import { CompanyRegistryLive } from "./registry";
-import {
-  deriveInvitationTokenKey,
-  deriveShareLinkKey,
-  InvitationTokensLive,
-  makeInvitationTokensLayer,
-  makeShareLinkKeysLayer,
-  ShareLinkKeysLive,
-} from "./secrets";
-import {
-  DeliveryJobsLive,
-  ExportWorkflowLive,
-  InvitationDeliveryLive,
-  WorkflowStartersLive,
-} from "./workflows";
+import { InvitationTokensLive, type KeyDerivationError, ShareLinkKeysLive } from "./secrets";
+import { WorkflowStartersLive } from "./workflows";
 
-export type {
-  BlobDriver,
-  BlobWiringConfig,
-  DocumentRenderContext,
-  EmailMode,
-  EmailWiringConfig,
-  PdfWiringConfig,
-  ReportRenderContext,
-  ShareSecretsConfig,
-};
+export { makeBlobStorageLayer } from "./blob";
+export type { EmailWiringConfig } from "./config";
+export { EmailWiringConfigSchema } from "./config";
+export { EmailSenderLive, makeEmailSenderLayer, parseSmtpUrl } from "./email";
+export { documentViewToRenderModel, makePdfRenderersLayer } from "./pdf";
 export {
-  BlobStorageLive,
-  BlobWiringConfigSchema,
-  BrandingPreviewLive,
-  brandingPreviewToRenderModel,
-  CompanyRegistryLive,
-  DeliveryJobsLive,
-  DocumentRendererLive,
   deriveInvitationTokenKey,
   deriveShareLinkKey,
-  documentViewToRenderModel,
-  EmailSenderLive,
-  EmailWiringConfigSchema,
-  ExchangeRatesLive,
-  ExportWorkflowLive,
-  InvitationDeliveryLive,
-  InvitationTokensLive,
-  makeBlobStorageLayer,
-  makeEmailSenderLayer,
   makeInvitationTokensLayer,
-  makePdfRenderersLayer,
   makeShareLinkKeysLayer,
-  PdfEngineLive,
-  PdfRenderersLive,
-  PdfWiringConfigSchema,
-  parseSmtpUrl,
-  ReportPdfRendererLive,
-  reportPdfInputToRenderModel,
-  ShareLinkKeysLive,
-  ShareSecretsConfigSchema,
-  WorkflowStartersLive,
-};
+} from "./secrets";
 
-/** Every external port `CoreLive` needs besides `UserDirectory` (provided by `PersistenceLive`). */
-export type ServerExternalPorts = Exclude<CoreExternalPorts, UserDirectory>;
+type ServerExternalPorts = Exclude<CoreExternalPorts, UserDirectory>;
 
 const PdfSupportingPortsLive = Layer.mergeAll(BlobStorageLive, ShareLinkKeysLive);
 
@@ -106,7 +39,7 @@ const PdfSupportingPortsLive = Layer.mergeAll(BlobStorageLive, ShareLinkKeysLive
  */
 export const CoreExternalPortsLive: Layer.Layer<
   ServerExternalPorts,
-  Config.ConfigError | BlobUnavailable,
+  Config.ConfigError | BlobUnavailable | KeyDerivationError,
   SqlClient.SqlClient | WorkflowEngine.WorkflowEngine
 > = Layer.mergeAll(
   CompanyRegistryLive,
@@ -117,5 +50,3 @@ export const CoreExternalPortsLive: Layer.Layer<
   PdfRenderersLive.pipe(Layer.provide(PdfSupportingPortsLive)),
   WorkflowStartersLive,
 );
-
-export const makeCoreExternalPortsLayer = () => CoreExternalPortsLive;

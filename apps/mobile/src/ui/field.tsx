@@ -26,10 +26,10 @@ export function TextField({
   ...input
 }: TextFieldProps) {
   const theme = useTheme();
-  const [focused, setFocused] = useState(false);
+  const [focused, setFocused] = useState<boolean>(false);
   const c = theme.colors;
-  const hasError = error !== undefined && error !== null && error !== "";
-  const state = hasError ? "error" : focused ? "focused" : "idle";
+  const hasError: boolean = (error ?? "").length > 0;
+  const state = hasError ? "error" : focused === true ? "focused" : "idle";
   return (
     <View className="gap-1">
       <Text variant="labelMedium" color={hasError ? "error" : "onSurfaceVariant"}>

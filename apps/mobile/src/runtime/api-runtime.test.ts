@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { UiError } from "@kvitbit/ui-port/api";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { credentialsFor, makeApiRunner } from "./api-runtime";
 
 test("disposing a session runtime resolves an in-flight call as cancelled", async () => {

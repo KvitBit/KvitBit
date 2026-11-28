@@ -7,6 +7,10 @@ import * as Storage from "@alchemy.run/gcp/Storage";
 import type { Input } from "alchemy/Input";
 import * as Output from "alchemy/Output";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { KvitbitStackConfig, KvitbitTurboCacheConfig } from "../config";
 import {
   KVITBIT_TURBO_CACHE_DEFAULTS,
@@ -15,13 +19,19 @@ import {
   serviceAccountEmail,
   stackLabels,
 } from "../config";
+import { afterResources } from "./provider-inputs";
 
-export const turboCacheBucketProps = (
+const encodePrettyJsonValue = Schema.encodeResult(
+  Schema.fromJsonString(Schema.Unknown, { space: 2 }),
+);
+const encodePrettyJson = Fn.flow(encodePrettyJsonValue, Result.getOrThrow);
+
+const turboCacheBucketPropsImpl = (
   config: KvitbitStackConfig,
   turboCache: KvitbitTurboCacheConfig,
 ): BucketProps => ({
   bucketName: turboCache.bucket,
-  location: config.region.toUpperCase(),
+  location: Str.toUpperCase(config.region),
   storageClass: "STANDARD",
   versioning: false,
   uniformBucketLevelAccess: true,
@@ -32,6 +42,11 @@ export const turboCacheBucketProps = (
   },
 });
 
+export const turboCacheBucketProps: {
+  (turboCache: KvitbitTurboCacheConfig): (config: KvitbitStackConfig) => BucketProps;
+  (config: KvitbitStackConfig, turboCache: KvitbitTurboCacheConfig): BucketProps;
+} = Fn.dual(2, turboCacheBucketPropsImpl);
+
 export const turboCacheServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
   project: config.projectId,
   accountId: resourceNames(config).turboCacheServiceAccountId,
@@ -41,25 +56,21 @@ export const turboCacheServiceAccountProps = (config: KvitbitStackConfig): Servi
 });
 
 export const turboCacheLifecycleJson = (ttlDays: number): string =>
-  `${JSON.stringify(
-    {
-      rule: [
-        {
-          action: { type: "Delete" },
-          condition: { age: ttlDays },
-        },
-      ],
-    },
-    null,
-    2,
-  )}\n`;
+  `${encodePrettyJson({
+    rule: [
+      {
+        action: { type: "Delete" },
+        condition: { age: ttlDays },
+      },
+    ],
+  })}\n`;
 
 export interface TurboCacheServiceDeps {
   readonly bucketName: string;
   readonly serviceAccountEmail?: string;
 }
 
-export const turboCacheServiceProps = (
+const turboCacheServicePropsImpl = (
   config: KvitbitStackConfig,
   turboCache: KvitbitTurboCacheConfig,
   deps: TurboCacheServiceDeps,
@@ -67,7 +78,10 @@ export const turboCacheServiceProps = (
   const names = resourceNames(config);
   const saEmail =
     deps.serviceAccountEmail ??
-    serviceAccountEmail(config.projectId, names.turboCacheServiceAccountId);
+    serviceAccountEmail({
+      projectId: config.projectId,
+      accountId: names.turboCacheServiceAccountId,
+    });
   const tokenSecretId = `${names.prefix}-turbo-cache-token`;
 
   return {
@@ -124,18 +138,17 @@ export const turboCacheServiceProps = (
   };
 };
 
-const afterResources = <A>(
-  value: Input<A>,
-  dependencies: ReadonlyArray<unknown>,
-): Output.Output<A> => {
-  if (dependencies.length === 0) {
-    return Output.asOutput(value as A);
-  }
-  return Output.all(
-    Output.asOutput(value as A),
-    ...dependencies.map((dep) => Output.asOutput(dep)),
-  ).pipe(Output.map(([resolved]) => resolved as A));
-};
+export const turboCacheServiceProps: {
+  (
+    turboCache: KvitbitTurboCacheConfig,
+    deps: TurboCacheServiceDeps,
+  ): (config: KvitbitStackConfig) => ServiceProps;
+  (
+    config: KvitbitStackConfig,
+    turboCache: KvitbitTurboCacheConfig,
+    deps: TurboCacheServiceDeps,
+  ): ServiceProps;
+} = Fn.dual(3, turboCacheServicePropsImpl);
 
 export const declareTurboCache = Effect.fn("KvitbitStack.declareTurboCache")(function* (
   config: KvitbitStackConfig,
@@ -162,7 +175,9 @@ export const declareTurboCache = Effect.fn("KvitbitStack.declareTurboCache")(fun
   const tokenSecretId = `${resourceNames(config).prefix}-turbo-cache-token`;
   const tokenSecretAccess = yield* IAM.Member(`SecretAccess-${tokenSecretId}-turbo-cache`, {
     kind: "secretmanager.secret",
-    name: deps.tokenSecretName ?? secretResourceName(config.projectId, tokenSecretId),
+    name:
+      deps.tokenSecretName ??
+      secretResourceName({ projectId: config.projectId, secretId: tokenSecretId }),
     role: "roles/secretmanager.secretAccessor",
     member: Output.interpolate`serviceAccount:${serviceAccount.email}`,
   });
@@ -175,10 +190,9 @@ export const declareTurboCache = Effect.fn("KvitbitStack.declareTurboCache")(fun
     ...baseProps,
     template: {
       ...baseProps.template,
-      serviceAccount: afterResources(serviceAccount.email, [
-        bucketAdmin.member,
-        tokenSecretAccess.member,
-      ]),
+      serviceAccount: afterResources([bucketAdmin.member, tokenSecretAccess.member])(
+        serviceAccount.email,
+      ),
     },
   });
 

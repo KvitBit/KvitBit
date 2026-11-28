@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 import type {
   AddressProps,
@@ -12,17 +12,29 @@ import type { ServiceAccountProps } from "@alchemy.run/gcp/IAM";
 import * as IAM from "@alchemy.run/gcp/IAM";
 import type { BucketProps } from "@alchemy.run/gcp/Storage";
 import * as Storage from "@alchemy.run/gcp/Storage";
-import type { Input } from "alchemy/Input";
 import * as Output from "alchemy/Output";
-import * as Data from "effect/Data";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { KvitbitMailConfig, KvitbitStackConfig } from "../config";
 import { resourceNames, secretResourceName, serviceAccountEmail, stackLabels } from "../config";
 import { COS_STABLE_IMAGE } from "./network";
+import { afterResources } from "./provider-inputs";
 
-export class MailBundleError extends Data.TaggedError("MailBundleError")<{
-  readonly reason: string;
-}> {
+const encodePrettyJsonValue = Schema.encodeResult(
+  Schema.fromJsonString(Schema.Unknown, { space: 2 }),
+);
+const encodePrettyJson = Fn.flow(encodePrettyJsonValue, Result.getOrThrow);
+
+export class MailBundleError extends Schema.TaggedError<
+  MailBundleError,
+  { readonly brand: unique symbol }
+>()("MailBundleError", {
+  reason: Schema.String,
+}) {
   override get message() {
     return `Failed to bundle mail-forwarder Effect script: ${this.reason}`;
   }
@@ -38,8 +50,8 @@ export const MAIL_FORWARDER_BUN_IMAGE_DIGEST =
 
 export const MAIL_FORWARDER_BUN_IMAGE_REF = `oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`;
 
-export const MAIL_FORWARDER_INTERNAL_PORT = 2525;
-export const MAIL_FORWARDER_HEALTH_PORT = 8081;
+const MAIL_FORWARDER_INTERNAL_PORT = 2525;
+const MAIL_FORWARDER_HEALTH_PORT = 8081;
 
 export interface MailForwarderRuntimeConfig {
   readonly version: 1;
@@ -56,7 +68,7 @@ export interface MailForwarderRuntimeConfig {
   readonly resendSecretId: string | undefined;
 }
 
-export const buildMailForwarderConfig = (
+const buildMailForwarderConfigImpl = (
   config: KvitbitStackConfig,
   mail: KvitbitMailConfig,
 ): MailForwarderRuntimeConfig => ({
@@ -75,8 +87,13 @@ export const buildMailForwarderConfig = (
     mail.relayMode === "resend" ? `${resourceNames(config).prefix}-resend-api-key` : undefined,
 });
 
+const buildMailForwarderConfig: {
+  (mail: KvitbitMailConfig): (config: KvitbitStackConfig) => MailForwarderRuntimeConfig;
+  (config: KvitbitStackConfig, mail: KvitbitMailConfig): MailForwarderRuntimeConfig;
+} = Fn.dual(2, buildMailForwarderConfigImpl);
+
 export const serializeMailForwarderConfig = (runtimeConfig: MailForwarderRuntimeConfig): string =>
-  JSON.stringify(runtimeConfig, null, 2);
+  encodePrettyJson(runtimeConfig);
 
 export const sha256Prefixed = (content: string): string =>
   `sha256:${createHash("sha256").update(content).digest("hex")}`;
@@ -88,7 +105,7 @@ export const bundleMailForwarderScript: Effect.Effect<
   MailBundleError
 > = Effect.gen(function* () {
   if (cachedBundle !== undefined) return cachedBundle;
-  const entrypoint = resolve(import.meta.dir, "../mail-forwarder/server.ts");
+  const entrypoint = fileURLToPath(new URL("../mail-forwarder/server.ts", import.meta.url));
   const buildResult = yield* Effect.tryPromise({
     try: () =>
       Bun.build({
@@ -99,19 +116,22 @@ export const bundleMailForwarderScript: Effect.Effect<
         sourcemap: "none",
       }),
     catch: (error) =>
-      new MailBundleError({
+      MailBundleError.make({
         reason: error instanceof Error ? error.message : String(error),
       }),
   });
   const output = buildResult.outputs[0];
   if (!buildResult.success || output === undefined) {
-    const messages = buildResult.logs.map((log) => log.message).join("; ");
-    return yield* new MailBundleError({ reason: messages || "no output" });
+    const messages = Arr.join(
+      Arr.map(buildResult.logs, (log) => log.message),
+      "; ",
+    );
+    return yield* MailBundleError.make({ reason: messages || "no output" });
   }
   const script = yield* Effect.tryPromise({
     try: () => output.text(),
     catch: (error) =>
-      new MailBundleError({
+      MailBundleError.make({
         reason: error instanceof Error ? error.message : String(error),
       }),
   });
@@ -128,7 +148,7 @@ export const bundleMailForwarderScript: Effect.Effect<
   return cachedBundle;
 });
 
-export const mailServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
+const mailServiceAccountProps = (config: KvitbitStackConfig): ServiceAccountProps => ({
   project: config.projectId,
   accountId: resourceNames(config).mailServiceAccountId,
   displayName: `Kvitbit ${config.stage} inbound mail forwarder`,
@@ -136,12 +156,12 @@ export const mailServiceAccountProps = (config: KvitbitStackConfig): ServiceAcco
     "Least-privilege runtime identity for the Kvitbit Always-Free inbound SMTP forwarder VM.",
 });
 
-export const mailArchiveBucketProps = (
+const mailArchiveBucketPropsImpl = (
   config: KvitbitStackConfig,
   mail: KvitbitMailConfig,
 ): BucketProps => ({
   bucketName: mail.archiveBucket,
-  location: mail.region.toUpperCase(),
+  location: Str.toUpperCase(mail.region),
   storageClass: "STANDARD",
   versioning: false,
   uniformBucketLevelAccess: true,
@@ -152,7 +172,12 @@ export const mailArchiveBucketProps = (
   },
 });
 
-export const mailSubnetworkProps = (
+const mailArchiveBucketProps: {
+  (mail: KvitbitMailConfig): (config: KvitbitStackConfig) => BucketProps;
+  (config: KvitbitStackConfig, mail: KvitbitMailConfig): BucketProps;
+} = Fn.dual(2, mailArchiveBucketPropsImpl);
+
+const mailSubnetworkPropsImpl = (
   config: KvitbitStackConfig,
   mail: KvitbitMailConfig,
   network: string,
@@ -165,7 +190,12 @@ export const mailSubnetworkProps = (
   description: `Kvitbit ${config.stage} subnet in ${mail.region} for the Always-Free inbound mail forwarder.`,
 });
 
-export const mailAddressProps = (
+const mailSubnetworkProps: {
+  (mail: KvitbitMailConfig, network: string): (config: KvitbitStackConfig) => SubnetworkProps;
+  (config: KvitbitStackConfig, mail: KvitbitMailConfig, network: string): SubnetworkProps;
+} = Fn.dual(3, mailSubnetworkPropsImpl);
+
+const mailAddressPropsImpl = (
   config: KvitbitStackConfig,
   mail: KvitbitMailConfig,
 ): AddressProps => ({
@@ -182,7 +212,12 @@ export const mailAddressProps = (
   },
 });
 
-export const mailFirewallProps = (config: KvitbitStackConfig, network: string): FirewallProps => {
+const mailAddressProps: {
+  (mail: KvitbitMailConfig): (config: KvitbitStackConfig) => AddressProps;
+  (config: KvitbitStackConfig, mail: KvitbitMailConfig): AddressProps;
+} = Fn.dual(2, mailAddressPropsImpl);
+
+const mailFirewallPropsImpl = (config: KvitbitStackConfig, network: string): FirewallProps => {
   const names = resourceNames(config);
   return {
     firewallName: names.mailFirewallName,
@@ -195,6 +230,11 @@ export const mailFirewallProps = (config: KvitbitStackConfig, network: string): 
     targetTags: [names.mailTag],
   };
 };
+
+const mailFirewallProps: {
+  (network: string): (config: KvitbitStackConfig) => FirewallProps;
+  (config: KvitbitStackConfig, network: string): FirewallProps;
+} = Fn.dual(2, mailFirewallPropsImpl);
 
 /**
  * Container-Optimized OS startup + reconcile script for the Kvitbit inbound mail forwarder.
@@ -571,7 +611,7 @@ systemctl enable --now kvitbit-mail-reconcile.timer
 systemctl start kvitbit-mail-reconcile.service
 `;
 
-export const mailInstanceProps = (
+const mailInstancePropsImpl = (
   config: KvitbitStackConfig,
   mail: KvitbitMailConfig,
   deps: {
@@ -607,7 +647,8 @@ export const mailInstanceProps = (
     natIP: deps.natIP,
     automaticRestart: true,
     serviceAccount:
-      deps.serviceAccountEmail ?? serviceAccountEmail(config.projectId, names.mailServiceAccountId),
+      deps.serviceAccountEmail ??
+      serviceAccountEmail({ projectId: config.projectId, accountId: names.mailServiceAccountId }),
     oauthScopes: ["https://www.googleapis.com/auth/cloud-platform"],
     shieldedInstanceConfig: {
       enableSecureBoot: true,
@@ -628,26 +669,40 @@ export const mailInstanceProps = (
   };
 };
 
-const declaredString = (resource: string, field: string) =>
-  Output.map((value: string | undefined) => {
-    if (value === undefined || value.length === 0) {
-      throw new Error(`${resource} reported no ${field}`);
-    }
-    return value;
-  });
+const mailInstanceProps: {
+  (
+    mail: KvitbitMailConfig,
+    deps: {
+      readonly network: string;
+      readonly subnetwork: string;
+      readonly natIP: string;
+      readonly serviceAccountEmail?: string;
+      readonly scriptB64Gz: string;
+      readonly scriptSha: string;
+      readonly startupScript?: string;
+    },
+  ): (config: KvitbitStackConfig) => InstanceProps;
+  (
+    config: KvitbitStackConfig,
+    mail: KvitbitMailConfig,
+    deps: {
+      readonly network: string;
+      readonly subnetwork: string;
+      readonly natIP: string;
+      readonly serviceAccountEmail?: string;
+      readonly scriptB64Gz: string;
+      readonly scriptSha: string;
+      readonly startupScript?: string;
+    },
+  ): InstanceProps;
+} = Fn.dual(3, mailInstancePropsImpl);
 
-const afterResources = <A>(
-  value: Input<A>,
-  dependencies: ReadonlyArray<unknown>,
-): Output.Output<A> => {
-  if (dependencies.length === 0) {
-    return Output.asOutput(value as A);
-  }
-  return Output.all(
-    Output.asOutput(value as A),
-    ...dependencies.map((dep) => Output.asOutput(dep)),
-  ).pipe(Output.map(([resolved]) => resolved as A));
-};
+const declaredString = (resource: string, field: string) =>
+  Output.mapEffect((value: string | undefined) =>
+    value === undefined || value.length === 0
+      ? Effect.die(new Error(`${resource} reported no ${field}`))
+      : Effect.succeed(value),
+  );
 
 export const declareMailForwarder = Effect.fn("KvitbitStack.declareMailForwarder")(function* (
   config: KvitbitStackConfig,
@@ -680,7 +735,10 @@ export const declareMailForwarder = Effect.fn("KvitbitStack.declareMailForwarder
           kind: "secretmanager.secret",
           name:
             deps.resendSecretName ??
-            secretResourceName(config.projectId, `${resourceNames(config).prefix}-resend-api-key`),
+            secretResourceName({
+              projectId: config.projectId,
+              secretId: `${resourceNames(config).prefix}-resend-api-key`,
+            }),
           role: "roles/secretmanager.secretAccessor",
           member: Output.interpolate`serviceAccount:${mailSa.email}`,
         })
@@ -700,12 +758,12 @@ export const declareMailForwarder = Effect.fn("KvitbitStack.declareMailForwarder
     network: networkLink,
   });
 
-  const mailServiceAccount = afterResources(mailSa.email, [
+  const mailServiceAccount = afterResources([
     subnetworkLink,
     firewall.firewallName,
     archiveWriter.member,
-    ...(resendSecretAccessor ? [resendSecretAccessor.member] : []),
-  ]);
+    ...(resendSecretAccessor !== undefined ? [resendSecretAccessor.member] : []),
+  ])(mailSa.email);
 
   const baseInstance = mailInstanceProps(config, mail, {
     network: "",

@@ -1,9 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import type { RequestKey, WorkspaceId } from "@kvitbit/domain/contract";
-import { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "@kvitbit/domain/contract";
-import { Effect, Ref } from "effect";
+import type { NewWorkspace } from "@kvitbit/domain/contract";
+import {
+  Conflict,
+  Forbidden,
+  Invalid,
+  NotFound,
+  RequestKey,
+  Unavailable,
+  WorkspaceId,
+  WorkspaceSlug,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
+import * as EffectString from "effect/String";
 import { FakeCompanyRegistry } from "../../../src/testing";
 import { member } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import {
   accountOf,
   as,
@@ -20,18 +33,20 @@ import {
   seed,
   UNKNOWN_ICO,
   W,
+  workspaceView,
 } from "./harness";
 
-const key = (k: string) => k as RequestKey;
-const create = (input: object, requestKey?: string) =>
+const key = (k: string) => RequestKey.make(k);
+const create = (input: NewWorkspace, requestKey?: string) =>
   Effect.flatMap(W, (ws) =>
-    ws.create(
-      input as never,
-      requestKey === undefined ? undefined : { requestKey: key(requestKey) },
+    Effect.flatMap(TestCaller, (caller) =>
+      ws.create(
+        caller,
+        input,
+        requestKey === undefined ? undefined : { requestKey: key(requestKey) },
+      ),
     ),
   );
-// biome-ignore lint/suspicious/noExplicitAny: domain views are open structs; tests read their concrete fields
-const view = <A>(v: A) => v as unknown as Record<string, any>;
 
 describe("Workspaces.create", () => {
   test("makes the caller the owner and returns their MemberCaller", () =>
@@ -47,8 +62,9 @@ describe("Workspaces.create", () => {
           channel: "web",
           client: null,
         });
-        const current = view(yield* as(caller)(ws.current));
-        expect(current.slug).toBe("kavarna-skoda");
+        const result = yield* as(caller)(ws.current(caller));
+        const current = yield* workspaceView(result);
+        expect(current.slug).toBe(WorkspaceSlug.make("kavarna-skoda"));
         expect(current.revision).toBe(1);
         expect(current.taxRegime).toBe("non_vat_payer");
         expect(current.defaults).toMatchObject({ currency: "CZK", dueDays: 14, language: "cs" });
@@ -57,14 +73,14 @@ describe("Workspaces.create", () => {
           email: "owner@example.cz",
         });
         // Default series: invoice, proforma, credit note; no Payment Tax Document for non-payers.
-        const series = yield* as(caller)(ws.listSeries);
-        expect(series.map((s) => [s.kind, s.pattern, s.isDefault]).sort()).toEqual([
+        const series = yield* as(caller)(ws.listSeries(caller));
+        expect(EffectArray.map(series, (s) => [s.kind, s.pattern, s.isDefault]).sort()).toEqual([
           ["credit_note", "OD-YYYY-NNNN", true],
           ["invoice", "YYYY-NNNN", true],
           ["proforma", "ZF-YYYY-NNNN", true],
         ]);
         const entries = yield* history(caller.workspaceId);
-        expect(entries.map((e) => e.action)).toEqual(["workspace.create"]);
+        expect(EffectArray.map(entries, (e) => e.action)).toEqual(["workspace.create"]);
         expect(entries[0]?.actor).toEqual({
           _tag: "Member",
           userId: OWNER,
@@ -81,7 +97,8 @@ describe("Workspaces.create", () => {
         const caller = yield* as(accountOf(OWNER))(
           create({ name: "Plátce", taxRegime: "vat_payer" }),
         );
-        const kinds = (yield* as(caller)(ws.listSeries)).map((s) => s.kind).sort();
+        const series = yield* as(caller)(ws.listSeries(caller));
+        const kinds = EffectArray.map(series, (s) => s.kind).sort();
         expect(kinds).toEqual(["credit_note", "invoice", "payment_tax_document", "proforma"]);
       }),
     ));
@@ -92,13 +109,23 @@ describe("Workspaces.create", () => {
         const ws = yield* W;
         const a = yield* as(accountOf(OWNER))(create({ name: "Acme" }));
         const b = yield* as(accountOf(OWNER))(create({ name: "Acme" }));
-        expect(view(yield* as(a)(ws.current)).slug).toBe("acme");
-        expect(view(yield* as(b)(ws.current)).slug).toBe("acme-2");
-        expect(
-          yield* failure(as(accountOf(OWNER))(create({ name: "X", slug: "Bad Slug" }))),
-        ).toEqual(new Invalid({ issues: [{ path: ["slug"], code: "workspace.slug_invalid" }] }));
-        expect(yield* failure(as(accountOf(OWNER))(create({ name: "X", slug: "acme" })))).toEqual(
-          new Invalid({ issues: [{ path: ["slug"], code: "workspace.slug_taken" }] }),
+        const result = yield* as(a)(ws.current(a));
+        expect(result.slug).toBe(WorkspaceSlug.make("acme"));
+        const result2 = yield* as(b)(ws.current(b));
+        expect(result2.slug).toBe(WorkspaceSlug.make("acme-2"));
+        const failureResult = yield* create({
+          name: "X",
+          slug: WorkspaceSlug.make("Bad Slug", { disableChecks: true }),
+        }).pipe(as(accountOf(OWNER)), failure);
+        expect(failureResult).toEqual(
+          Invalid.make({ issues: [{ path: ["slug"], code: "workspace.slug_invalid" }] }),
+        );
+        const failureResult2 = yield* create({ name: "X", slug: WorkspaceSlug.make("acme") }).pipe(
+          as(accountOf(OWNER)),
+          failure,
+        );
+        expect(failureResult2).toEqual(
+          Invalid.make({ issues: [{ path: ["slug"], code: "workspace.slug_taken" }] }),
         );
       }),
     ));
@@ -108,7 +135,8 @@ describe("Workspaces.create", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const caller = yield* as(accountOf(OWNER))(create({ ico: ICO }));
-        const current = view(yield* as(caller)(ws.current));
+        const result = yield* as(caller)(ws.current(caller));
+        const current = yield* workspaceView(result);
         expect(current.name).toBe(RECORD.name);
         expect(current.issuingEntity).toMatchObject({
           name: RECORD.name,
@@ -123,24 +151,30 @@ describe("Workspaces.create", () => {
   test("checks the IČO checksum and surfaces a registry outage", () =>
     scenario(
       Effect.gen(function* () {
-        expect(yield* failure(as(accountOf(OWNER))(create({ name: "X", ico: BAD_ICO })))).toEqual(
-          new Invalid({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
+        const failureResult = yield* create({ name: "X", ico: BAD_ICO }).pipe(
+          as(accountOf(OWNER)),
+          failure,
+        );
+        expect(failureResult).toEqual(
+          Invalid.make({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
         );
         const registry = yield* FakeCompanyRegistry;
         yield* Ref.set(registry.unavailable, true);
-        expect(
-          yield* failure(as(accountOf(OWNER))(create({ name: "X", ico: UNKNOWN_ICO }))),
-        ).toEqual(new Unavailable({ dependency: "company_registry" }));
-        expect(yield* failure(as(accountOf(OWNER))(create({})))).toBeInstanceOf(Invalid);
+        const failureResult2 = yield* create({ name: "X", ico: UNKNOWN_ICO }).pipe(
+          as(accountOf(OWNER)),
+          failure,
+        );
+        expect(failureResult2).toEqual(Unavailable.make({ dependency: "company_registry" }));
+        const failureResult3 = yield* create({}).pipe(as(accountOf(OWNER)), failure);
+        expect(failureResult3).toBeInstanceOf(Invalid);
       }),
     ));
 
   test("only an Account caller may create", () =>
     scenario(
       Effect.gen(function* () {
-        expect(yield* failure(as(member("owner"))(create({ name: "X" })))).toEqual(
-          new Forbidden({ action: "workspace.create" }),
-        );
+        const failureResult = yield* create({ name: "X" }).pipe(as(member("owner")), failure);
+        expect(failureResult).toEqual(Forbidden.make({ action: "workspace.create" }));
       }),
     ));
 
@@ -151,11 +185,10 @@ describe("Workspaces.create", () => {
         const first = yield* as(accountOf(OWNER))(create({ name: "Acme" }, "k1"));
         const again = yield* as(accountOf(OWNER))(create({ name: "Acme" }, "k1"));
         expect(again).toEqual(first);
-        expect((yield* as(accountOf(OWNER))(ws.listMine)).length).toBe(1);
+        expect((yield* as(accountOf(OWNER))(ws.listMine(accountOf(OWNER)))).length).toBe(1);
         // The domain tag omits Conflict on create (reported gap); the method raises it.
-        expect(
-          (yield* failure(as(accountOf(OWNER))(create({ name: "Other" }, "k1")))) as unknown,
-        ).toEqual(new Conflict({ reason: "idempotency_mismatch" }));
+        const mismatch = yield* create({ name: "Other" }, "k1").pipe(as(accountOf(OWNER)), failure);
+        expect(mismatch).toEqual(Conflict.make({ reason: "idempotency_mismatch" }));
       }),
     ));
 });
@@ -166,11 +199,11 @@ describe("Workspaces.listMine and enter", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const { workspaceId } = yield* seed();
-        const mine = yield* as(accountOf(MEMBER))(ws.listMine);
+        const mine = yield* as(accountOf(MEMBER))(ws.listMine(accountOf(MEMBER)));
         expect(mine).toEqual([
           {
             id: workspaceId,
-            slug: "acme-s-r-o" as never,
+            slug: WorkspaceSlug.make("acme-s-r-o"),
             name: "Acme s.r.o.",
             role: "member",
             memberCount: 4,
@@ -178,7 +211,8 @@ describe("Workspaces.listMine and enter", () => {
             closed: false,
           },
         ]);
-        expect(yield* as(accountOf(OUTSIDER))(ws.listMine)).toEqual([]);
+        const result = yield* as(accountOf(OUTSIDER))(ws.listMine(accountOf(OUTSIDER)));
+        expect(result).toEqual([]);
       }),
     ));
 
@@ -189,7 +223,11 @@ describe("Workspaces.listMine and enter", () => {
         const { workspaceId } = yield* seed();
         const client = { kind: "mcp" as const, id: "grant-9", name: "Claude" };
         const caller = yield* as(accountOf(MEMBER))(
-          ws.enter(workspaceId, { scopes: ["documents:read"], channel: "mcp", client }),
+          ws.enter(accountOf(MEMBER), workspaceId, {
+            scopes: ["documents:read"],
+            channel: "mcp",
+            client,
+          }),
         );
         expect(caller).toEqual({
           _tag: "Member",
@@ -202,11 +240,14 @@ describe("Workspaces.listMine and enter", () => {
           client,
         });
         const session = yield* as(accountOf(MEMBER))(
-          ws.enter(workspaceId, { scopes: "all", channel: "web" }),
+          ws.enter(accountOf(MEMBER), workspaceId, { scopes: "all", channel: "web" }),
         );
         expect(session.client).toBeNull();
+        const entries = yield* history(workspaceId);
         // enter writes no audit entry.
-        expect((yield* history(workspaceId)).some((e) => e.action.includes("enter"))).toBe(false);
+        expect(EffectArray.some(entries, (e) => EffectString.includes("enter")(e.action))).toBe(
+          false,
+        );
       }),
     ));
 
@@ -215,17 +256,17 @@ describe("Workspaces.listMine and enter", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const { workspaceId } = yield* seed();
-        const enter = (id: WorkspaceId) => ws.enter(id, { scopes: "all", channel: "web" });
-        expect(yield* failure(as(accountOf(OUTSIDER))(enter(workspaceId)))).toEqual(
-          new NotFound({ entity: "Workspace", id: workspaceId }),
-        );
-        const unknown = "01900000-0000-7000-8000-0000000fffff" as WorkspaceId;
-        expect(yield* failure(as(accountOf(OWNER))(enter(unknown)))).toEqual(
-          new NotFound({ entity: "Workspace", id: unknown }),
-        );
-        expect(yield* failure(as(member("owner"))(enter(workspaceId)))).toEqual(
-          new Forbidden({ action: "workspace.enter" }),
-        );
+        const enter = (id: WorkspaceId) =>
+          Effect.flatMap(TestCaller, (caller) =>
+            ws.enter(caller, id, { scopes: "all", channel: "web" }),
+          );
+        const failureResult = yield* enter(workspaceId).pipe(as(accountOf(OUTSIDER)), failure);
+        expect(failureResult).toEqual(NotFound.make({ entity: "Workspace", id: workspaceId }));
+        const unknown = WorkspaceId.make("01900000-0000-7000-8000-0000000fffff");
+        const failureResult2 = yield* enter(unknown).pipe(as(accountOf(OWNER)), failure);
+        expect(failureResult2).toEqual(NotFound.make({ entity: "Workspace", id: unknown }));
+        const failureResult3 = yield* enter(workspaceId).pipe(as(member("owner")), failure);
+        expect(failureResult3).toEqual(Forbidden.make({ action: "workspace.enter" }));
       }),
     ));
 });
@@ -236,17 +277,22 @@ describe("Workspaces.lookupCompany", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const { workspaceId, accountant } = yield* seed();
-        const viaAccount = yield* as(accountOf(OUTSIDER))(ws.lookupCompany(ICO));
-        expect(viaAccount).toEqual({ ico: ICO, ...RECORD });
-        expect(yield* as(accountant)(ws.lookupCompany(ICO))).toEqual(viaAccount);
-        expect(yield* as(scoped(accountant, ["contacts:read"]))(ws.lookupCompany(ICO))).toEqual(
-          viaAccount,
+        const viaAccount = yield* as(accountOf(OUTSIDER))(
+          ws.lookupCompany(accountOf(OUTSIDER), ICO),
         );
-        expect(
-          yield* failure(as(scoped(accountant, ["documents:read"]))(ws.lookupCompany(ICO))),
-        ).toEqual(new Forbidden({ action: "contact.read" }));
+        expect(viaAccount).toEqual({ ico: ICO, ...RECORD });
+        const lookupCompanyResult = yield* as(accountant)(ws.lookupCompany(accountant, ICO));
+        expect(lookupCompanyResult).toEqual(viaAccount);
+        const lookupCompanyResult2 = yield* as(scoped(["contacts:read"])(accountant))(
+          ws.lookupCompany(scoped(["contacts:read"])(accountant), ICO),
+        );
+        expect(lookupCompanyResult2).toEqual(viaAccount);
+        const lookupCompanyFailure = yield* ws
+          .lookupCompany(scoped(["documents:read"])(accountant), ICO)
+          .pipe(as(scoped(["documents:read"])(accountant)), failure);
+        expect(lookupCompanyFailure).toEqual(Forbidden.make({ action: "contact.read" }));
         const before = (yield* history(workspaceId)).length;
-        yield* as(accountant)(ws.lookupCompany(ICO));
+        yield* as(accountant)(ws.lookupCompany(accountant, ICO));
         expect((yield* history(workspaceId)).length).toBe(before);
       }),
     ));
@@ -256,18 +302,19 @@ describe("Workspaces.lookupCompany", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const registry = yield* FakeCompanyRegistry;
-        const lookup = (ico: string) => as(accountOf(OWNER))(ws.lookupCompany(ico));
-        expect(yield* failure(lookup(BAD_ICO))).toEqual(
-          new Invalid({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
+        const lookup = (ico: string) =>
+          as(accountOf(OWNER))(ws.lookupCompany(accountOf(OWNER), ico));
+        const failureResult = yield* failure(lookup(BAD_ICO));
+        expect(failureResult).toEqual(
+          Invalid.make({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
         );
-        expect(yield* Ref.get(registry.lookups)).toEqual([]);
-        expect(yield* failure(lookup(UNKNOWN_ICO))).toEqual(
-          new NotFound({ entity: "Contact", id: UNKNOWN_ICO }),
-        );
+        const getResult = yield* Ref.get(registry.lookups);
+        expect(getResult).toEqual([]);
+        const failureResult2 = yield* failure(lookup(UNKNOWN_ICO));
+        expect(failureResult2).toEqual(NotFound.make({ entity: "Contact", id: UNKNOWN_ICO }));
         yield* Ref.set(registry.unavailable, true);
-        expect(yield* failure(lookup("45274649"))).toEqual(
-          new Unavailable({ dependency: "company_registry" }),
-        );
+        const failureResult3 = yield* failure(lookup("45274649"));
+        expect(failureResult3).toEqual(Unavailable.make({ dependency: "company_registry" }));
       }),
     ));
 });

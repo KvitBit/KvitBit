@@ -2,7 +2,7 @@
  * Numbering module: Numbering Series storage, number allocation (S3) and overrides (D4).
  * Core-internal (no domain tag): `Workspaces` and `Documents` call `NumberingSeries`.
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { NumberingSeriesRepoMemory } from "./repo";
 import { NumberingSeriesLive } from "./service";
 

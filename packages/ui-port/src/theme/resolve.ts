@@ -2,6 +2,7 @@
  * Pure theme resolution: preset, custom seed or Material Theme Builder file to a complete
  * `ResolvedTheme` (six schemes with harmonized extended colours), plus the contrast warnings.
  */
+
 import type {
   ExtendedRole,
   Hex,
@@ -11,6 +12,9 @@ import type {
   ThemeSource,
   ThemeWarning,
 } from "@kvitbit/api-contract";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Str from "effect/String";
 import { auditTheme } from "./contrast-check";
 import { DEFAULT_THEME_DATA } from "./default-theme.data";
 import { type ExtendedInput, extendedScheme } from "./extended";
@@ -18,7 +22,6 @@ import { PresetDefinitions } from "./presets";
 import {
   palettesOf,
   type RoleMap,
-  SCHEME_VARIANTS,
   type SchemeVariant,
   schemeRoles,
   type ThemeRecipe,
@@ -27,41 +30,67 @@ import {
 export type ResolvedSchemes = ResolvedTheme["schemes"];
 
 /** Attach `theme.low_contrast` when any checked pair fails AA. */
-export const withContrastWarnings = (
-  source: ThemeSource,
-  schemes: ResolvedSchemes,
-): ResolvedTheme => {
+export const withContrastWarnings: {
+  (schemes: ResolvedSchemes): (source: ThemeSource) => ResolvedTheme;
+  (source: ThemeSource, schemes: ResolvedSchemes): ResolvedTheme;
+} = Fn.dual(2, (source: ThemeSource, schemes: ResolvedSchemes): ResolvedTheme => {
   const warnings: ThemeWarning[] = auditTheme(schemes).length > 0 ? ["theme.low_contrast"] : [];
   return warnings.length > 0 ? { source, schemes, warnings } : { source, schemes };
-};
+});
 
 /**
  * All six schemes for a recipe; `rolesFor` lets a file supply its own role maps. Each scheme's
  * extended colours harmonize toward that scheme's own `primary` (DESIGN.md: "harmonized against
  * the active scheme's primary").
  */
-export const schemesOf = (
-  recipe: ThemeRecipe,
-  options: {
+export const schemesOf: {
+  (options?: {
     readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
     readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
-  } = {},
-): ResolvedSchemes => {
-  const palettes = palettesOf(recipe);
-  const scheme = (variant: SchemeVariant): ResolvedScheme => {
-    const roles = options.rolesFor?.(variant) ?? schemeRoles(recipe, variant, palettes);
-    return { roles, extended: extendedScheme(roles.primary, variant, options.extended) };
-  };
-  const out = {} as Record<SchemeVariant, ResolvedScheme>;
-  for (const v of SCHEME_VARIANTS) out[v] = scheme(v);
-  return out;
-};
+  }): (recipe: ThemeRecipe) => ResolvedSchemes;
+  (
+    recipe: ThemeRecipe,
+    options?: {
+      readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
+      readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
+    },
+  ): ResolvedSchemes;
+} = Fn.dual(
+  (args) => Predicate.isObjectOrArray(args[0]) && "seed" in args[0],
+  (
+    recipe: ThemeRecipe,
+    options: {
+      readonly rolesFor?: (variant: SchemeVariant) => RoleMap | undefined;
+      readonly extended?: Partial<Record<ExtendedRole, ExtendedInput>>;
+    } = {},
+  ): ResolvedSchemes => {
+    const palettes = palettesOf(recipe);
+    const scheme = (variant: SchemeVariant): ResolvedScheme => {
+      const roles = options.rolesFor?.(variant) ?? schemeRoles(recipe, variant, palettes);
+      return { roles, extended: extendedScheme(roles.primary, variant, options.extended) };
+    };
+    return {
+      light: scheme("light"),
+      dark: scheme("dark"),
+      lightMedium: scheme("lightMedium"),
+      lightHigh: scheme("lightHigh"),
+      darkMedium: scheme("darkMedium"),
+      darkHigh: scheme("darkHigh"),
+    };
+  },
+);
 
-export const resolveRecipe = (recipe: ThemeRecipe, source: ThemeSource): ResolvedTheme =>
-  withContrastWarnings(source, schemesOf(recipe));
+export const resolveRecipe: {
+  (source: ThemeSource): (recipe: ThemeRecipe) => ResolvedTheme;
+  (recipe: ThemeRecipe, source: ThemeSource): ResolvedTheme;
+} = Fn.dual(
+  2,
+  (recipe: ThemeRecipe, source: ThemeSource): ResolvedTheme =>
+    withContrastWarnings(source, schemesOf(recipe)),
+);
 
 /** Default recipe for a user's custom seed (tonal-spot-like with seed fidelity). */
-export const seedRecipe = (seed: Hex): ThemeRecipe => ({ seed: seed.toUpperCase() as Hex });
+export const seedRecipe = (seed: Hex): ThemeRecipe => ({ seed: Str.toUpperCase(seed) });
 
 export const resolvePreset = (id: ThemePresetId): ResolvedTheme =>
   resolveRecipe(PresetDefinitions[id], { _tag: "Preset", id });

@@ -10,7 +10,7 @@
   },
   "scripts": {
     "lint": "biome check --error-on-warnings .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "test:suite": ":",
     "test:money": "bun test test/money.test.ts test/money.property.test.ts",

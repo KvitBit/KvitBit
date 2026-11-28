@@ -1,16 +1,50 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { TestClock } from "effect/testing";
+import { BankAccountId, NumberingSeriesView, WorkspaceId } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
 let owner: TestUser;
-let workspaceId: string;
+let workspaceId: WorkspaceId;
 let base: string;
+
+const decodeWorkspace = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.Struct({
+      id: WorkspaceId,
+      name: Schema.String,
+      revision: Schema.Int,
+      closed: Schema.Boolean,
+      issuingEntity: Schema.Struct({ name: Schema.String }),
+      defaults: Schema.Struct({ dueDays: Schema.Int }),
+    }),
+  ),
+  Effect.runSync,
+);
+const BankAccount = Schema.Struct({
+  id: BankAccountId,
+  name: Schema.String,
+  isDefault: Schema.Boolean,
+});
+const decodeBankAccount = Fn.flow(Schema.decodeUnknownEffect(BankAccount), Effect.runSync);
+const decodeBankAccounts = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(BankAccount)),
+  Effect.runSync,
+);
+const decodeSeries = Fn.flow(Schema.decodeUnknownEffect(NumberingSeriesView), Effect.runSync);
+const decodeSeriesList = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(NumberingSeriesView)),
+  Effect.runSync,
+);
 
 const req = (
   path: string,
   method: string,
-  body?: unknown,
+  body?: Schema.Json,
   headers: Record<string, string> = {},
 ) => {
   const init = body === undefined ? {} : json(body);
@@ -18,7 +52,7 @@ const req = (
     ...init,
     method,
     headers: {
-      ...((init.headers as Record<string, string> | undefined) ?? {}),
+      ...(body === undefined ? undefined : { "content-type": "application/json" }),
       ...as.mobile(owner),
       ...headers,
     },
@@ -42,14 +76,14 @@ describe("workspace group", () => {
   test("current returns WorkspaceView with ETag", async () => {
     const res = await req("", "GET");
     expect(res.status).toBe(200);
-    const view = (await res.json()) as { id: string; name: string; revision: number };
+    const view = decodeWorkspace(await res.json());
     expect(view.id).toBe(workspaceId);
     expect(view.name).toBe("Alfa s.r.o.");
     expect(res.headers.get("etag")).toBe(`"${view.revision}"`);
   });
 
   test("updateIssuingEntity enforces If-Match (428 / 412 / 200)", async () => {
-    const cur = (await (await req("", "GET")).json()) as { revision: number };
+    const cur = decodeWorkspace(await (await req("", "GET")).json());
     const patch = {
       name: "Alfa Nová s.r.o.",
       address: { street: "Vodičkova 1", city: "Praha", postalCode: "11000", country: "CZ" },
@@ -71,16 +105,13 @@ describe("workspace group", () => {
 
     const ok = await req("/issuing-entity", "PATCH", patch, { "if-match": `"${cur.revision}"` });
     expect(ok.status).toBe(200);
-    const updated = (await ok.json()) as {
-      issuingEntity: { name: string };
-      revision: number;
-    };
+    const updated = decodeWorkspace(await ok.json());
     expect(updated.issuingEntity.name).toBe("Alfa Nová s.r.o.");
     expect(ok.headers.get("etag")).toBe(`"${updated.revision}"`);
   });
 
   test("updateSettings enforces If-Match and updates defaults", async () => {
-    const cur = (await (await req("", "GET")).json()) as { revision: number };
+    const cur = decodeWorkspace(await (await req("", "GET")).json());
     const missing = await req("/settings", "PATCH", { defaults: { dueDays: 30 } });
     expect(missing.status).toBe(428);
 
@@ -91,7 +122,7 @@ describe("workspace group", () => {
       { "if-match": `"${cur.revision}"` },
     );
     expect(ok.status).toBe(200);
-    const updated = (await ok.json()) as { defaults: { dueDays: number }; revision: number };
+    const updated = decodeWorkspace(await ok.json());
     expect(updated.defaults.dueDays).toBe(30);
     expect(ok.headers.get("etag")).toBe(`"${updated.revision}"`);
   });
@@ -108,7 +139,8 @@ describe("workspace group", () => {
       "idempotency-key": "bank-key-0001",
     });
     expect(create1.status).toBe(201);
-    const acc1 = (await create1.json()) as { id: string; name: string; isDefault: boolean };
+    const acc1Wire = await create1.json();
+    const acc1 = decodeBankAccount(acc1Wire);
     expect(create1.headers.get("location")).toBe(`${base}/bank-accounts/${acc1.id}`);
     expect(create1.headers.get("idempotent-replayed")).toBeNull();
 
@@ -118,7 +150,7 @@ describe("workspace group", () => {
     });
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await replay.json()).toEqual(acc1);
+    expect(await replay.json()).toEqual(acc1Wire);
 
     // Mismatch on same key -> 409
     const mismatch = await req(
@@ -132,7 +164,7 @@ describe("workspace group", () => {
     // List returns the created account
     const listed = await req("/bank-accounts", "GET");
     expect(listed.status).toBe(200);
-    expect(((await listed.json()) as Array<{ id: string }>).map((a) => a.id)).toContain(acc1.id);
+    expect(Arr.map(decodeBankAccounts(await listed.json()), (a) => a.id)).toContain(acc1.id);
 
     // Update account
     const updatedRes = await req(`/bank-accounts/${acc1.id}`, "PUT", {
@@ -140,7 +172,7 @@ describe("workspace group", () => {
       name: "Hlavní CZK",
     });
     expect(updatedRes.status).toBe(200);
-    expect(((await updatedRes.json()) as { name: string }).name).toBe("Hlavní CZK");
+    expect(decodeBankAccount(await updatedRes.json()).name).toBe("Hlavní CZK");
 
     // Removing the currency default without replacement fails 409
     const blocked = await req(`/bank-accounts/${acc1.id}`, "DELETE");
@@ -153,23 +185,20 @@ describe("workspace group", () => {
       currency: "CZK",
     });
     expect(create2.status).toBe(201);
-    const acc2 = (await create2.json()) as { id: string };
+    const acc2 = decodeBankAccount(await create2.json());
 
     const removed = await req(`/bank-accounts/${acc1.id}?replacement=${acc2.id}`, "DELETE");
     expect(removed.status).toBe(204);
 
-    const after = (await (await req("/bank-accounts", "GET")).json()) as Array<{
-      id: string;
-      isDefault: boolean;
-    }>;
-    expect(after.map((a) => a.id)).toEqual([acc2.id]);
+    const after = decodeBankAccounts(await (await req("/bank-accounts", "GET")).json());
+    expect(Arr.map(after, (a) => a.id)).toEqual([acc2.id]);
     expect(after[0]?.isDefault).toBe(true);
   });
 
   test("numbering series: list, create (201 + Location + Idempotency-Key), update", async () => {
     const listRes = await req("/numbering-series", "GET");
     expect(listRes.status).toBe(200);
-    const defaults = (await listRes.json()) as Array<{ id: string; kind: string }>;
+    const defaults = decodeSeriesList(await listRes.json());
     expect(defaults.length).toBeGreaterThanOrEqual(3);
 
     const seriesInput = {
@@ -183,7 +212,8 @@ describe("workspace group", () => {
       "idempotency-key": "series-key-001",
     });
     expect(createRes.status).toBe(201);
-    const created = (await createRes.json()) as { id: string; name: string; pattern: string };
+    const createdWire = await createRes.json();
+    const created = decodeSeries(createdWire);
     expect(createRes.headers.get("location")).toBe(`${base}/numbering-series/${created.id}`);
 
     const replay = await req("/numbering-series", "POST", seriesInput, {
@@ -191,14 +221,14 @@ describe("workspace group", () => {
     });
     expect(replay.status).toBe(201);
     expect(replay.headers.get("idempotent-replayed")).toBe("true");
-    expect(await replay.json()).toEqual(created);
+    expect(await replay.json()).toEqual(createdWire);
 
     const updateRes = await req(`/numbering-series/${created.id}`, "PUT", {
       ...seriesInput,
       name: "Exportní faktury EU",
     });
     expect(updateRes.status).toBe(200);
-    expect(((await updateRes.json()) as { name: string }).name).toBe("Exportní faktury EU");
+    expect(decodeSeries(await updateRes.json()).name).toBe("Exportní faktury EU");
   });
 
   test("close enforces A6 fresh session (API key 401, stale session 401, wrong name 422, fresh 204)", async () => {
@@ -234,7 +264,7 @@ describe("workspace group", () => {
     const closedRes = await req("/close", "POST", { confirmName: "Alfa s.r.o." });
     expect(closedRes.status).toBe(204);
 
-    const after = (await (await req("", "GET")).json()) as { closed: boolean };
+    const after = decodeWorkspace(await (await req("", "GET")).json());
     expect(after.closed).toBe(true);
   });
 });

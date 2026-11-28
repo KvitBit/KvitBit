@@ -6,8 +6,11 @@
  * `deliveries_reminder_step`), never touching the document's reminder choice (as D14).
  * The DocumentDelivery claim re-checks once more before dispatch.
  */
-import type { DeliveryId, DocumentId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
-import { Effect, Option } from "effect";
+
+import type { Caller, DocumentId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { orUnavailable } from "../../../shared/errors";
 import { CoreStore } from "../../../store/CoreStore";
 import { DeliveriesRepo } from "../deliveries/repo";
@@ -32,53 +35,59 @@ export interface DueReminder {
 const PAGE = 200;
 
 /** The step `record` owes on `today`, or null (not armed or remindable, nothing due, covered). */
-export const dueReminderOf = (workspaceId: WorkspaceId, record: DocumentRecord, today: IsoDate) =>
-  Effect.gen(function* () {
-    const state = yield* reminderState(workspaceId, record, today);
-    if (state.block !== null) return null;
-    const step = dueStep(record.dueOn, state.effective, today);
-    if (step === null) return null;
-    const candidate = { dueOn: record.dueOn, offsetDays: step.offsetDays, armedBy: state.arm };
-    if (stepBlock(state, record, candidate, today) !== null) return null;
-    return {
-      documentId: record.id,
-      dueOn: record.dueOn,
-      step: step.step,
-      offsetDays: step.offsetDays,
-      date: step.date,
-      armedBy: state.arm,
-    } satisfies DueReminder;
-  });
+export const dueReminderOf = Effect.fn("dueReminderOf")(function* (
+  caller: Caller,
+  workspaceId: WorkspaceId,
+  record: DocumentRecord,
+  today: IsoDate,
+) {
+  const state = yield* reminderState(caller, workspaceId, record, today);
+  if (state.block !== null) return null;
+  const step = dueStep(record.dueOn, state.effective, today);
+  if (step === null) return null;
+  const candidate = { dueOn: record.dueOn, offsetDays: step.offsetDays, armedBy: state.arm };
+  if (Option.isSome(Option.fromNullishOr(stepBlock(state, record, candidate, today)))) return null;
+  return {
+    documentId: record.id,
+    dueOn: record.dueOn,
+    step: step.step,
+    offsetDays: step.offsetDays,
+    date: step.date,
+    armedBy: state.arm,
+  } satisfies DueReminder;
+});
 
 /** Every reminder due on `today` in the Workspace (the sweep a PaymentReminders cron runs). */
-export const selectDueReminders = (workspaceId: WorkspaceId, today: IsoDate) =>
-  Effect.gen(function* () {
+export const selectDueReminders = Effect.fn("selectDueReminders")(
+  function* (caller: Caller, workspaceId: WorkspaceId, today: IsoDate) {
     const repo = yield* DocumentsRepo;
     const due: Array<DueReminder> = [];
     let after: readonly [IsoDate, DocumentId] | undefined;
-    for (;;) {
+    do {
       const page = yield* repo.search(
         workspaceId,
         { status: "issued" },
         after === undefined ? { limit: PAGE } : { after, limit: PAGE },
       );
       for (const record of page.rows) {
-        const reminder = yield* dueReminderOf(workspaceId, record, today);
+        const reminder = yield* dueReminderOf(caller, workspaceId, record, today);
         if (reminder !== null) due.push(reminder);
       }
       const last = page.rows.at(-1);
-      if (!page.more || last === undefined) return due;
-      after = [last.issuedOn, last.id];
-    }
-  }).pipe(orUnavailable);
+      after = page.more && last !== undefined ? [last.issuedOn, last.id] : undefined;
+    } while (after !== undefined);
+    return due;
+  },
+  (_) => orUnavailable(_),
+);
 
 /**
  * Queues `reminder` when it is still the step due now (re-checked under the row lock); returns
  * the delivery id, the existing one when that step was already queued, or null when it no
  * longer applies. The job starts after commit.
  */
-export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder) =>
-  Effect.gen(function* () {
+export const enqueueReminder = Effect.fn("enqueueReminder")(
+  function* (caller: Caller, workspaceId: WorkspaceId, reminder: DueReminder) {
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -86,8 +95,8 @@ export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder)
         const record = yield* (yield* DocumentsRepo).lock(workspaceId, reminder.documentId);
         const { today } = yield* now;
         const existing = yield* deliveries.reminderStep(workspaceId, reminder);
-        if (Option.isSome(existing)) return existing.value.id as DeliveryId | null;
-        const current = yield* dueReminderOf(workspaceId, record, today);
+        if (Option.isSome(existing)) return existing.value.id;
+        const current = yield* dueReminderOf(caller, workspaceId, record, today);
         if (
           current === null ||
           current.dueOn !== reminder.dueOn ||
@@ -96,12 +105,11 @@ export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder)
         ) {
           return null;
         }
-        const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
+        const issuer = yield* (yield* DocumentIssuers).forDocument(caller, workspaceId, today);
+        const value_1 = yield* deliveries.byDocument(workspaceId, record.id);
         // Recipients: those the document was last sent to while it had its current buyer, else
         // the current Contact's billing emails (a buyer change never reuses the old buyer's).
-        const lastSend = (yield* deliveries.byDocument(workspaceId, record.id))
-          .filter((d) => d.purpose === "document")
-          .at(-1);
+        const lastSend = EffectArray.filter(value_1, (d) => d.purpose === "document").at(-1);
         const to =
           lastSend !== undefined && lastSend.contactId === record.contactId
             ? lastSend.to
@@ -109,6 +117,7 @@ export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder)
                 .billingEmails;
         if (to.length === 0) return null;
         const delivery = yield* queueDelivery(
+          caller,
           workspaceId,
           {
             record,
@@ -121,7 +130,9 @@ export const enqueueReminder = (workspaceId: WorkspaceId, reminder: DueReminder)
           },
           { dueOn: reminder.dueOn, offsetDays: reminder.offsetDays, armedBy: reminder.armedBy },
         );
-        return delivery.id as DeliveryId | null;
+        return delivery.id;
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);

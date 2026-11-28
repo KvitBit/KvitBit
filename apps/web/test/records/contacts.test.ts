@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { HtmlScene } from "@effect/ui/html/testing";
 import { Locator } from "@effect/ui/testing";
-import type { ContactId } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import { ContactId } from "@kvitbit/domain";
+import * as Effect from "effect/Effect";
 import { definePage } from "../../src/app/page";
 import * as Contacts from "../../src/page/records/contacts";
 import type { ContactRecord } from "../../src/page/records/shared";
@@ -34,7 +34,7 @@ const SAMPLE_CONTACT: ContactRecord = {
 describe("Contacts page TEA", () => {
   test("init loads contacts list and handles live search & role filters with stale-seq safety", () => {
     const route: Contacts.Route = { _tag: "Contacts", ws: WS, query: {} };
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     let { model, commands } = Contacts.init(route, ctx);
     expect(model.list._tag).toBe("Loading");
     expect(commands?.length).toBe(1);
@@ -64,15 +64,14 @@ describe("Contacts page TEA", () => {
       ctx,
     ).model;
     expect(model.list._tag).toBe("Loaded");
-    if (model.list._tag === "Loaded") {
-      expect(model.list.data).toHaveLength(1);
-      expect(model.list.data[0]?.name).toBe("Nordic Craft s.r.o.");
-    }
+    if (model.list._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(model.list.data).toHaveLength(1);
+    expect(model.list.data[0]?.name).toBe("Nordic Craft s.r.o.");
   });
 
   test("ARES IČO lookup validates checksum and populates contact editor", () => {
     const route: Contacts.Route = { _tag: "Contact", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Contacts.init(route, ctx);
 
     // Invalid IČO rejected client-side
@@ -107,10 +106,10 @@ describe("Contacts page TEA", () => {
     const route: Contacts.Route = {
       _tag: "Contact",
       ws: WS,
-      id: SAMPLE_CONTACT.id as ContactId,
+      id: ContactId.make(SAMPLE_CONTACT.id),
       mode: "edit",
     };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Contacts.init(route, ctx);
     model = Contacts.update(
       model,
@@ -138,31 +137,27 @@ describe("Contacts page TEA", () => {
 
   test("pasting a full address into the contact editor prefills empty address fields", async () => {
     const route: Contacts.Route = { _tag: "Contact", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const ContactsPage = definePage("Contacts", Contacts);
     const streetInput = Locator.attr("id", "contact-street");
     const cityInput = Locator.attr("id", "contact-city");
     const postalInput = Locator.attr("id", "contact-postal");
     const countryInput = Locator.attr("id", "contact-country");
 
-    await Effect.runPromise(
-      Effect.scoped(
-        Effect.gen(function* () {
-          const scene = yield* HtmlScene.make(ContactsPage, ctx);
-          scene.fire(streetInput, "paste", { text: "Jankovcova 1522/53" }).expectIgnored();
-          scene
-            .fire(streetInput, "paste", { text: "Štefánikova 12, 811 05 Bratislava, Slovensko" })
-            .expectDefaultPrevented()
-            .expect(streetInput)
-            .toHaveValue("Štefánikova 12")
-            .expect(cityInput)
-            .toHaveValue("Bratislava")
-            .expect(postalInput)
-            .toHaveValue("811 05")
-            .expect(countryInput)
-            .toHaveValue("SK");
-        }),
-      ),
-    );
+    await Effect.gen(function* () {
+      const scene = yield* HtmlScene.make(ContactsPage, ctx);
+      scene.fire(streetInput, "paste", { text: "Jankovcova 1522/53" }).expectIgnored();
+      scene
+        .fire(streetInput, "paste", { text: "Štefánikova 12, 811 05 Bratislava, Slovensko" })
+        .expectDefaultPrevented()
+        .expect(streetInput)
+        .toHaveValue("Štefánikova 12")
+        .expect(cityInput)
+        .toHaveValue("Bratislava")
+        .expect(postalInput)
+        .toHaveValue("811 05")
+        .expect(countryInput)
+        .toHaveValue("SK");
+    }).pipe(Effect.scoped, Effect.runPromise);
   });
 });

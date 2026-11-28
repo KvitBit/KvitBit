@@ -3,7 +3,9 @@
  * lock, unlock and cancel. Each follows the method shape of src/index.ts; the state checks
  * come from the transition table (transitions.ts).
  */
+
 import type {
+  Caller,
   DocumentId,
   DocumentPatch,
   DocumentView,
@@ -23,8 +25,14 @@ import {
   NotFound,
   VatBreakdown,
 } from "@kvitbit/domain/contract";
-import { Effect, Schema } from "effect";
-import { addDays, isCalendarDate, MAX_ISO_DATE } from "../../engines/calendar";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+import { addDaysWithinRange, daysBetween, isCalendarDate } from "../../engines/calendar";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { appendAudit } from "../../shared/audit";
 import { orUnavailable } from "../../shared/errors";
@@ -45,23 +53,21 @@ import { insertNumbered, newDraftRecord, now, viewOf } from "./support";
 import { guard, hasDependents, hasFinalInvoice, paymentsBlockCancel } from "./transitions";
 import { DocumentViewCodec } from "./view";
 
-const illegal = () => new Conflict({ reason: "illegal_transition" });
+const VARIABLE_SYMBOL = /^\d{1,10}$/;
+const illegal = () => Conflict.make({ reason: "illegal_transition" });
 
 const required = (path: string) =>
-  new Invalid({
+  Invalid.make({
     issues: [{ path: [path], code: "request.malformed", params: { reason: "required" } }],
   });
 
 /** A required free-text reason (unlock, cancel), trimmed. */
 const reasonOf = (reason: string) => {
-  const trimmed = reason.trim();
+  const trimmed = EffectString.trim(reason);
   return trimmed === "" ? Effect.fail(required("reason")) : Effect.succeed(trimmed);
 };
 
 // Issue -------------------------------------------------------------------------------------
-
-const daysBetween = (from: IsoDate, to: IsoDate) =>
-  Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 
 /**
  * Pins the defaults the draft left floating (today, Contact and Workspace defaults) as the
@@ -69,50 +75,56 @@ const daysBetween = (from: IsoDate, to: IsoDate) =>
  * parties; this freezes the defaults). The due date stays relative to `issuedOn` when it was
  * a default. The bank account is kept through the frozen issuer snapshot instead.
  */
-const pinDefaults = (c: Composed): GivenFields => ({
-  ...c.given,
-  currency: c.currency,
-  issuedOn: c.issuedOn,
-  ...(c.taxableSupplyOn === null ? {} : { taxableSupplyOn: c.taxableSupplyOn }),
-  due: c.given.due ?? { inDays: daysBetween(c.issuedOn, c.dueOn) },
-  language: c.language,
-  ...(c.seriesId === null ? {} : { series: c.seriesId }),
-  note: c.note,
-  paymentMethod: c.paymentMethod,
-});
+const pinDefaults = (c: Composed): GivenFields => {
+  const given = {
+    ...c.given,
+    currency: c.currency,
+    issuedOn: c.issuedOn,
+    due: c.given.due ?? { inDays: daysBetween(c.issuedOn, c.dueOn) },
+    language: c.language,
+    note: c.note,
+    paymentMethod: c.paymentMethod,
+  };
+  if (c.taxableSupplyOn !== null) given.taxableSupplyOn = c.taxableSupplyOn;
+  if (c.seriesId !== null) given.series = c.seriesId;
+  return given;
+};
 
 /**
  * Numbers a composed document (rules D1, S3, S4: after the caller's row lock): the series the
  * document resolved (else the kind's default). Exhaustion is
  * `Conflict{illegal_transition, numbering.pattern_invalid}` and rolls the issue back.
  */
-export const numbered = (workspaceId: WorkspaceId, documentId: DocumentId, composed: Composed) =>
-  Effect.gen(function* () {
-    const numbering = yield* NumberingSeries;
-    const series = yield* numbering.resolve(
-      workspaceId,
-      composed.kind,
-      composed.seriesId ?? undefined,
-    );
-    const allocation = yield* numbering.allocate({
-      workspaceId,
-      kind: composed.kind,
-      seriesId: series.id,
-      documentId,
-      issuedOn: composed.issuedOn,
-    });
-    const given = { ...pinDefaults(composed), series: allocation.seriesId };
-    return {
-      ...composed,
-      given,
-      seriesId: allocation.seriesId,
-      number: allocation.number,
-      variableSymbol: given.variableSymbol ?? digitsOf(allocation.number),
-    };
+export const numbered = Effect.fn("numbered")(function* (
+  workspaceId: WorkspaceId,
+  documentId: DocumentId,
+  composed: Composed,
+) {
+  const numbering = yield* NumberingSeries;
+  const series = yield* numbering.resolve(
+    workspaceId,
+    composed.kind,
+    composed.seriesId ?? undefined,
+  );
+  const allocation = yield* numbering.allocate({
+    workspaceId,
+    kind: composed.kind,
+    seriesId: series.id,
+    documentId,
+    issuedOn: composed.issuedOn,
   });
+  const given = { ...pinDefaults(composed), series: allocation.seriesId };
+  return {
+    ...composed,
+    given,
+    seriesId: allocation.seriesId,
+    number: allocation.number,
+    variableSymbol: given.variableSymbol ?? digitsOf(allocation.number),
+  };
+});
 
 const SendOptionsSchema = Schema.Struct({
-  to: Schema.optional(Schema.Array(Schema.String)),
+  to: Schema.String.pipe(Schema.Array, Schema.optional),
   language: Schema.optional(Locale),
   reminders: Schema.optional(Schema.Boolean),
   purpose: Schema.optional(DeliveryPurpose),
@@ -120,7 +132,7 @@ const SendOptionsSchema = Schema.Struct({
 
 const IssuePayload = Schema.Struct({
   from: Schema.Union([
-    Schema.Struct({ draft: DocumentIdSchema, expectedRevision: Schema.Number }),
+    Schema.Struct({ draft: DocumentIdSchema, expectedRevision: Schema.Finite }),
     Schema.Struct({ input: DocumentInput }),
   ]),
   send: Schema.optional(SendOptionsSchema),
@@ -130,7 +142,7 @@ export type IssueFrom =
   | { readonly draft: DocumentId; readonly expectedRevision: number }
   | { readonly input: DocumentInput };
 
-const numberTaken = () => new Conflict({ reason: "duplicate" });
+const numberTaken = () => Conflict.make({ reason: "duplicate" });
 
 /**
  * Issue (D1, D10): from a draft (row-locked; a document that is no longer a draft fails with
@@ -139,18 +151,25 @@ const numberTaken = () => new Conflict({ reason: "duplicate" });
  * numbers it, pins the defaults, audits `document.issue` and, with `send`, queues the
  * delivery in the same transaction.
  */
-export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?: SendOptions }) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.issue");
+export const issue = Effect.fn("issue")(
+  function* (
+    caller: Caller,
+    from: IssueFrom,
+    opts?: RequestOptions & { readonly send?: SendOptions },
+  ) {
+    const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+      caller,
+      "document.issue",
+    );
     // R1a: every policy check runs before a replay (`send` queues a delivery).
-    if (opts?.send !== undefined) yield* authorizeInWorkspace("document.send");
+    if (opts?.send !== undefined) yield* authorizeInWorkspace(workspaceCaller, "document.send");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
         key: opts?.requestKey,
         method: "Documents.issue",
         payload: {
-          schema: IssuePayload as unknown as Schema.Codec<typeof IssuePayload.Type, unknown>,
+          schema: IssuePayload,
           value: opts?.send === undefined ? { from } : { from, send: opts.send },
         },
         result: DocumentViewCodec,
@@ -163,12 +182,12 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
           const draft = yield* repo.lock(workspaceId, from.draft);
           yield* guard(draft, "issue");
           if (draft.revision !== from.expectedRevision) {
-            return yield* new Conflict({
+            return yield* Conflict.make({
               reason: "revision_changed",
               currentRevision: draft.revision,
             });
           }
-          const composed = yield* compose(workspaceId, specFromRecord(draft), { today });
+          const composed = yield* compose(caller, workspaceId, specFromRecord(draft), { today });
           const next = yield* numbered(workspaceId, draft.id, composed);
           row = yield* repo
             .update(
@@ -177,12 +196,9 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
             )
             .pipe(Effect.catchTag("UniqueViolation", numberTaken));
         } else {
-          const id = yield* newId<DocumentId>();
-          const composed = yield* compose(
-            workspaceId,
-            yield* specFromInput(workspaceId, from.input),
-            { today },
-          );
+          const id = yield* newId(DocumentIdSchema.make);
+          const value_1 = yield* specFromInput(workspaceId, from.input);
+          const composed = yield* compose(caller, workspaceId, value_1, { today });
           const draftRow = newDraftRecord(id, workspaceId, composed, at);
           row = yield* insertNumbered(
             draftRow,
@@ -194,7 +210,7 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
             })),
           );
         }
-        yield* appendAudit({
+        yield* appendAudit(workspaceCaller, {
           workspaceId,
           subject: { entity: "Document", id: row.id },
           action: "document.issue",
@@ -202,14 +218,16 @@ export const issue = (from: IssueFrom, opts?: RequestOptions & { readonly send?:
           changes: [{ path: "number", before: null, after: row.number }],
         });
         if (opts?.send !== undefined) {
-          yield* (yield* DocumentSender).send(row.id, opts.send);
+          yield* (yield* DocumentSender).send(workspaceCaller, row.id, opts.send);
           // The sender may have written the document (reminder choice, revision).
           row = yield* repo.get(workspaceId, row.id);
         }
         return yield* viewOf(row);
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 // Edit of an issued document ----------------------------------------------------------------
 
@@ -274,114 +292,136 @@ const GIVEN_DIFF_FIELDS = [
   "variableSymbol",
 ] as const satisfies ReadonlyArray<keyof GivenFields>;
 
-const encodeRecord = Schema.encodeUnknownSync(Schema.toCodecJson(DocumentRecordSchema));
+const encodeRecord = Schema.encodeOption(Schema.toCodecJson(DocumentRecordSchema));
+const encodeTotalsJson = Schema.encodeOption(Schema.toCodecJson(VatBreakdown));
+const encodeJson = Schema.encodeOption(Schema.fromJsonString(Schema.Json));
+const isJsonObject = Schema.is(Schema.JsonObject);
+const jsonRecord = (value: DocumentRecord) =>
+  Option.getOrThrow(encodeRecord(value).pipe(Option.filter(isJsonObject)));
 const encodeTotals = (totals: DocumentRecord["totals"]) =>
-  JSON.stringify(Schema.encodeUnknownSync(Schema.toCodecJson(VatBreakdown))(totals));
+  Option.getOrThrow(encodeTotalsJson(totals).pipe(Option.flatMap(encodeJson)));
+const jsonString = (value: Schema.Json | undefined) =>
+  value === undefined ? undefined : Option.getOrThrow(encodeJson(value));
 
 /** The field-level diff of two versions of a record, values in their JSON encoding. */
-export const diffRecords = (before: DocumentRecord, after: DocumentRecord) => {
-  const a = encodeRecord(before) as Record<string, unknown>;
-  const b = encodeRecord(after) as Record<string, unknown>;
-  const ga = (a.given ?? {}) as Record<string, unknown>;
-  const gb = (b.given ?? {}) as Record<string, unknown>;
-  const same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
+const diffRecordsImpl = (before: DocumentRecord, after: DocumentRecord) => {
+  const a = jsonRecord(before);
+  const b = jsonRecord(after);
+  const ga = isJsonObject(a["given"]) ? a["given"] : {};
+  const gb = isJsonObject(b["given"]) ? b["given"] : {};
+  const same = (x: Schema.Json | undefined, y: Schema.Json | undefined) =>
+    jsonString(x) === jsonString(y);
   return [
-    ...DIFF_FIELDS.flatMap((path) =>
+    ...EffectArray.flatMap(DIFF_FIELDS, (path) =>
       same(a[path], b[path]) ? [] : [{ path, before: a[path] ?? null, after: b[path] ?? null }],
     ),
-    ...GIVEN_DIFF_FIELDS.flatMap((field) =>
+    ...EffectArray.flatMap(GIVEN_DIFF_FIELDS, (field) =>
       same(ga[field], gb[field])
         ? []
         : [{ path: `given.${field}`, before: ga[field] ?? null, after: gb[field] ?? null }],
     ),
   ];
 };
+export const diffRecords: {
+  (after: DocumentRecord): (before: DocumentRecord) => ReturnType<typeof diffRecordsImpl>;
+  (before: DocumentRecord, after: DocumentRecord): ReturnType<typeof diffRecordsImpl>;
+} = Fn.dual(2, diffRecordsImpl);
 
 const patchKeys = (patch: DocumentPatch) =>
-  Object.entries(patch)
-    .filter(([k, v]) => v !== undefined && !(k === "refreshParties" && v === false))
-    .map(([k]) => k);
+  EffectArray.map(
+    EffectArray.filter(
+      EffectRecord.toEntries<string, DocumentPatch[keyof DocumentPatch]>(patch),
+      ([k, v]) => v !== undefined && !(k === "refreshParties" && v === false),
+    ),
+    ([k]) => k,
+  );
 
 const malformed = (path: string, reason: string) =>
-  new Invalid({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
 
 /** The light path: text, dates and payment fields on the stored record; amounts untouched. */
-const lightEdit = (row: DocumentRecord, patch: DocumentPatch, number: string | null) =>
-  Effect.gen(function* () {
-    const given: GivenFields = {
-      ...row.given,
-      ...(patch.note === undefined ? {} : { note: patch.note }),
-      ...(patch.language === undefined ? {} : { language: patch.language }),
-      ...(patch.paymentMethod === undefined ? {} : { paymentMethod: patch.paymentMethod }),
-      ...(patch.variableSymbol === undefined ? {} : { variableSymbol: patch.variableSymbol }),
-      ...(patch.due === undefined ? {} : { due: patch.due }),
-      ...(patch.issuedOn === undefined ? {} : { issuedOn: patch.issuedOn }),
-      ...(patch.bankAccount === undefined ? {} : { bankAccount: patch.bankAccount }),
+const lightEdit = Effect.fn("lightEdit")(function* (
+  caller: Caller,
+  row: DocumentRecord,
+  patch: DocumentPatch,
+  number: string | null,
+) {
+  const given = { ...row.given };
+  if (patch.note !== undefined) given.note = patch.note;
+  if (patch.language !== undefined) given.language = patch.language;
+  if (patch.paymentMethod !== undefined) given.paymentMethod = patch.paymentMethod;
+  if (patch.variableSymbol !== undefined) given.variableSymbol = patch.variableSymbol;
+  if (patch.due !== undefined) given.due = patch.due;
+  if (patch.issuedOn !== undefined) given.issuedOn = patch.issuedOn;
+  if (patch.bankAccount !== undefined) given.bankAccount = patch.bankAccount;
+  if (given.variableSymbol !== undefined && !VARIABLE_SYMBOL.test(given.variableSymbol)) {
+    return yield* malformed("variableSymbol", "variable_symbol_invalid");
+  }
+  // Another account of the Workspace in the document currency; its particulars as of now.
+  let issuerSnapshot = row.issuer;
+  if (patch.bankAccount !== undefined && patch.bankAccount !== row.issuer.bankAccount?.id) {
+    const workspace = yield* (yield* DocumentIssuers).forDocument(
+      caller,
+      row.workspaceId,
+      row.taxableSupplyOn ?? row.issuedOn,
+    );
+    const account = Option.getOrUndefined(
+      EffectArray.findFirst(workspace.bankAccounts, (a) => a.id === patch.bankAccount),
+    );
+    if (account === undefined) {
+      return yield* NotFound.make({ entity: "BankAccount", id: patch.bankAccount });
+    }
+    if (account.currency !== row.currency) {
+      return yield* Invalid.make({
+        issues: [
+          {
+            path: ["bankAccount"],
+            code: "request.malformed",
+            params: { reason: "currency_mismatch", currency: account.currency },
+          },
+        ],
+      });
+    }
+    issuerSnapshot = {
+      ...row.issuer,
+      bankAccount: {
+        id: account.id,
+        name: account.name,
+        currency: account.currency,
+        accountNumber: account.accountNumber,
+        iban: account.iban,
+        bic: account.bic,
+      },
     };
-    if (given.variableSymbol !== undefined && !/^\d{1,10}$/.test(given.variableSymbol)) {
-      return yield* malformed("variableSymbol", "variable_symbol_invalid");
+  }
+  const issuedOn = given.issuedOn ?? row.issuedOn;
+  let dueOn = row.dueOn;
+  if (patch.due !== undefined || patch.issuedOn !== undefined) {
+    const due = given.due ?? { inDays: daysBetween(row.issuedOn, row.dueOn) };
+    const nextDueOn = "on" in due ? due.on : addDaysWithinRange(issuedOn, due.inDays);
+    if (nextDueOn === null || !isCalendarDate(nextDueOn))
+      return yield* malformed("due", "out_of_range");
+    if (nextDueOn < issuedOn) {
+      return yield* Invalid.make({
+        issues: [{ path: ["due"], code: "document.due_before_issue" }],
+      });
     }
-    // Another account of the Workspace in the document currency; its particulars as of now.
-    let issuerSnapshot = row.issuer;
-    if (patch.bankAccount !== undefined && patch.bankAccount !== row.issuer.bankAccount?.id) {
-      const workspace = yield* (yield* DocumentIssuers).forDocument(
-        row.workspaceId,
-        row.taxableSupplyOn ?? row.issuedOn,
-      );
-      const account = workspace.bankAccounts.find((a) => a.id === patch.bankAccount);
-      if (account === undefined) {
-        return yield* new NotFound({ entity: "BankAccount", id: patch.bankAccount });
-      }
-      if (account.currency !== row.currency) {
-        return yield* new Invalid({
-          issues: [
-            {
-              path: ["bankAccount"],
-              code: "request.malformed",
-              params: { reason: "currency_mismatch", currency: account.currency },
-            },
-          ],
-        });
-      }
-      issuerSnapshot = {
-        ...row.issuer,
-        bankAccount: {
-          id: account.id,
-          name: account.name,
-          currency: account.currency,
-          accountNumber: account.accountNumber,
-          iban: account.iban,
-          bic: account.bic,
-        },
-      };
-    }
-    const issuedOn = given.issuedOn ?? row.issuedOn;
-    let dueOn = row.dueOn;
-    if (patch.due !== undefined || patch.issuedOn !== undefined) {
-      const due = given.due ?? { inDays: daysBetween(row.issuedOn, row.dueOn) };
-      dueOn = ("on" in due ? due.on : addDays(issuedOn, due.inDays)) as IsoDate;
-      if (!isCalendarDate(dueOn) || dueOn > MAX_ISO_DATE)
-        return yield* malformed("due", "out_of_range");
-      if (dueOn < issuedOn) {
-        return yield* new Invalid({
-          issues: [{ path: ["due"], code: "document.due_before_issue" }],
-        });
-      }
-    }
-    return {
-      ...row,
-      given,
-      issuer: issuerSnapshot,
-      note: patch.note ?? row.note,
-      language: patch.language ?? row.language,
-      paymentMethod: patch.paymentMethod ?? row.paymentMethod,
-      orderNumber: patch.orderNumber ?? row.orderNumber,
-      issuedOn,
-      dueOn,
-      number,
-      variableSymbol: given.variableSymbol ?? digitsOf(number),
-    } satisfies DocumentRecord;
-  });
+    dueOn = nextDueOn;
+  }
+  return {
+    ...row,
+    given,
+    issuer: issuerSnapshot,
+    note: patch.note ?? row.note,
+    language: patch.language ?? row.language,
+    paymentMethod: patch.paymentMethod ?? row.paymentMethod,
+    orderNumber: patch.orderNumber ?? row.orderNumber,
+    issuedOn,
+    dueOn,
+    number,
+    variableSymbol: given.variableSymbol ?? digitsOf(number),
+  } satisfies DocumentRecord;
+});
 
 /**
  * `edit` of an issued, unlocked document (row from `getForUpdate`, guarded by the caller).
@@ -392,108 +432,111 @@ const lightEdit = (row: DocumentRecord, patch: DocumentPatch, number: string | n
  * caller authorized `document.overrideNumber`). Every accepted edit bumps the revision and
  * writes one `document.edit` entry with the diff; the settlement follows a changed total.
  */
-export const editIssued = (row: DocumentRecord, patch: DocumentPatch) =>
-  Effect.gen(function* () {
-    const repo = yield* DocumentsRepo;
-    const { today, at } = yield* now;
-    const keys = patchKeys(patch);
-    const textOnly = row.kind === "payment_tax_document" || row.kind === "credit_note";
-    if (textOnly && keys.some((k) => !TEXT_FIELDS.has(k))) return yield* illegal();
-    // D3: the series never changes once a number is assigned.
-    if (patch.series !== undefined && patch.series !== row.seriesId) return yield* illegal();
-    const dependents = hasDependents(row);
-    if (
-      dependents &&
-      (patch.lines !== undefined ||
-        (patch.currency !== undefined && patch.currency !== row.currency) ||
-        (patch.taxableSupplyOn !== undefined && patch.taxableSupplyOn !== row.taxableSupplyOn) ||
-        patch.fx !== undefined)
-    ) {
-      return yield* illegal();
-    }
-    // Recorded payments are in the document currency.
-    if (row.payments > 0 && patch.currency !== undefined && patch.currency !== row.currency) {
-      return yield* illegal();
-    }
+export const editIssued = Effect.fn("editIssued")(function* (
+  caller: Caller,
+  row: DocumentRecord,
+  patch: DocumentPatch,
+) {
+  const repo = yield* DocumentsRepo;
+  const { today, at } = yield* now;
+  const keys = patchKeys(patch);
+  const textOnly = row.kind === "payment_tax_document" || row.kind === "credit_note";
+  if (textOnly && EffectArray.some(keys, (k) => !TEXT_FIELDS.has(k))) return yield* illegal();
+  // D3: the series never changes once a number is assigned.
+  if (patch.series !== undefined && patch.series !== row.seriesId) return yield* illegal();
+  const dependents = hasDependents(row);
+  if (
+    dependents &&
+    (patch.lines !== undefined ||
+      (patch.currency !== undefined && patch.currency !== row.currency) ||
+      (patch.taxableSupplyOn !== undefined && patch.taxableSupplyOn !== row.taxableSupplyOn) ||
+      patch.fx !== undefined)
+  ) {
+    return yield* illegal();
+  }
+  // Recorded payments are in the document currency.
+  if (row.payments > 0 && patch.currency !== undefined && patch.currency !== row.currency) {
+    return yield* illegal();
+  }
 
-    // D4: the new number is reserved for the document; the old one stays reserved.
-    let number = row.number;
-    if (patch.number !== undefined && patch.number.trim() !== row.number) {
-      number = yield* (yield* NumberingSeries).override({
-        workspaceId: row.workspaceId,
-        kind: row.kind,
-        documentId: row.id,
-        number: patch.number,
-      });
-    }
-
-    let next: DocumentRecord;
-    if (keys.every((k) => LIGHT_FIELDS.has(k))) {
-      next = yield* lightEdit(row, patch, number);
-    } else {
-      const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), {
-        ...patch,
-        series: undefined,
-      });
-      const refresh = patch.refreshParties === true;
-      const composed = yield* compose(row.workspaceId, spec, {
-        today,
-        // Tax results stay frozen even when the parties are refreshed (D6 eligibility,
-        // amounts owed); only the printed particulars follow `refreshParties`.
-        freeze: {
-          contact: !refresh && spec.contactId === row.contactId ? row.contact : undefined,
-          issuer: refresh ? undefined : row.issuer,
-          bankAccount: refresh ? undefined : row.issuer.bankAccount,
-          currency: row.currency,
-          taxableSupplyOn: row.taxableSupplyOn,
-          regime: row.issuer.regime,
-          fx: row.fx,
-          fxOverride: row.fxOverride,
-          paymentRounding: row.paymentRounding,
-        },
-      });
-      // D3a: whatever moved them (prices incl. VAT, rate, Contact, refreshed regime), the
-      // amounts another document relies on stay as issued.
-      if (dependents && encodeTotals(composed.totals) !== encodeTotals(row.totals)) {
-        return yield* illegal();
-      }
-      next = {
-        ...row,
-        ...composed,
-        seriesId: row.seriesId,
-        number,
-        variableSymbol: composed.given.variableSymbol ?? digitsOf(number),
-      };
-    }
-    // With a Credit Note the totals are frozen (D3a), so the stored settlement stands.
-    next = {
-      ...next,
-      settlement:
-        dependents && row.links.some((l) => l.relation === "corrected_by")
-          ? row.settlement
-          : settlementOf(next),
-      updatedAt: at,
-    };
-
-    const saved = yield* repo
-      .update(next, row.revision)
-      .pipe(Effect.catchTag("UniqueViolation", numberTaken));
-    yield* appendAudit({
+  // D4: the new number is reserved for the document; the old one stays reserved.
+  let number = row.number;
+  if (patch.number !== undefined && EffectString.trim(patch.number) !== row.number) {
+    number = yield* (yield* NumberingSeries).override({
       workspaceId: row.workspaceId,
-      subject: { entity: "Document", id: row.id },
-      action: "document.edit",
-      revision: saved.revision,
-      changes: diffRecords(row, saved),
+      kind: row.kind,
+      documentId: row.id,
+      number: patch.number,
     });
-    return yield* viewOf(saved);
+  }
+
+  let next: DocumentRecord;
+  if (EffectArray.every(keys, (k) => LIGHT_FIELDS.has(k))) {
+    next = yield* lightEdit(caller, row, patch, number);
+  } else {
+    const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), {
+      ...patch,
+      series: undefined,
+    });
+    const refresh = patch.refreshParties === true;
+    const composed = yield* compose(caller, row.workspaceId, spec, {
+      today,
+      // Tax results stay frozen even when the parties are refreshed (D6 eligibility,
+      // amounts owed); only the printed particulars follow `refreshParties`.
+      freeze: {
+        contact: !refresh && spec.contactId === row.contactId ? row.contact : undefined,
+        issuer: refresh ? undefined : row.issuer,
+        bankAccount: refresh ? undefined : row.issuer.bankAccount,
+        currency: row.currency,
+        taxableSupplyOn: row.taxableSupplyOn,
+        regime: row.issuer.regime,
+        fx: row.fx,
+        fxOverride: row.fxOverride,
+        paymentRounding: row.paymentRounding,
+      },
+    });
+    // D3a: whatever moved them (prices incl. VAT, rate, Contact, refreshed regime), the
+    // amounts another document relies on stay as issued.
+    if (dependents && encodeTotals(composed.totals) !== encodeTotals(row.totals)) {
+      return yield* illegal();
+    }
+    next = {
+      ...row,
+      ...composed,
+      seriesId: row.seriesId,
+      number,
+      variableSymbol: composed.given.variableSymbol ?? digitsOf(number),
+    };
+  }
+  // With a Credit Note the totals are frozen (D3a), so the stored settlement stands.
+  next = {
+    ...next,
+    settlement:
+      dependents && EffectArray.some(row.links, (l) => l.relation === "corrected_by")
+        ? row.settlement
+        : settlementOf(next),
+    updatedAt: at,
+  };
+
+  const saved = yield* repo
+    .update(next, row.revision)
+    .pipe(Effect.catchTag("UniqueViolation", numberTaken));
+  yield* appendAudit(caller, {
+    workspaceId: row.workspaceId,
+    subject: { entity: "Document", id: row.id },
+    action: "document.edit",
+    revision: saved.revision,
+    changes: diffRecords(row, saved),
   });
+  return yield* viewOf(saved);
+});
 
 // Lock / unlock -----------------------------------------------------------------------------
 
 /** Document Lock (D5). Idempotent: a locked or cancelled document is returned unchanged. */
-export const lock = (id: DocumentId) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.lock");
+export const lock = Effect.fn("lock")(
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.lock");
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -504,7 +547,7 @@ export const lock = (id: DocumentId) =>
         const next = yield* repo
           .update({ ...row, locked: true, lockedAt: at, updatedAt: at }, row.revision)
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.lock",
@@ -514,15 +557,17 @@ export const lock = (id: DocumentId) =>
         return yield* viewOf(next);
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /**
  * Unlock (D5, R1b): owner or admin, with a reason that goes into the audit entry. An issued
  * document that is not locked is returned unchanged; drafts and cancelled documents fail.
  */
-export const unlock = (id: DocumentId, reason: string) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.unlock");
+export const unlock = Effect.fn("unlock")(
+  function* (caller: Caller, id: DocumentId, reason: string) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.unlock");
     const why = yield* reasonOf(reason);
     const store = yield* CoreStore;
     return yield* store.transaction(
@@ -534,7 +579,7 @@ export const unlock = (id: DocumentId, reason: string) =>
         const next = yield* repo
           .update({ ...row, locked: false, lockedAt: null, updatedAt: at }, row.revision)
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.unlock",
@@ -545,7 +590,9 @@ export const unlock = (id: DocumentId, reason: string) =>
         return yield* viewOf(next);
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 // Cancel ------------------------------------------------------------------------------------
 
@@ -568,7 +615,7 @@ const CancelPayload = Schema.Struct({
 export const CancelResultCodec = Schema.Struct({
   document: DocumentViewCodec,
   creditNote: Schema.NullOr(DocumentViewCodec),
-}) as unknown as Schema.Codec<CancelResult, unknown>;
+});
 
 /**
  * Cancel (storno, D6). A tax document gets a full Credit Note for the uncorrected remainder
@@ -576,9 +623,9 @@ export const CancelResultCodec = Schema.Struct({
  * (always locked, number kept). Recorded payments, a Final Invoice on a Proforma, or a tax
  * document already fully credited fail with `Conflict{illegal_transition}`.
  */
-export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.cancel");
+export const cancel = Effect.fn("cancel")(
+  function* (caller: Caller, id: DocumentId, input: CancelInput, opts?: RequestOptions) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.cancel");
     const reason = yield* reasonOf(input.reason);
     return yield* withIdempotency(
       {
@@ -586,7 +633,7 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         key: opts?.requestKey,
         method: "Documents.cancel",
         payload: {
-          schema: CancelPayload as unknown as Schema.Codec<typeof CancelPayload.Type, unknown>,
+          schema: CancelPayload,
           value: input.on === undefined ? { id, reason } : { id, reason, on: input.on },
         },
         result: CancelResultCodec,
@@ -604,7 +651,7 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         if (row.kind === "proforma" && hasFinalInvoice(row)) return yield* illegal();
         const on = input.on ?? today;
         if (on < row.issuedOn || on > today) {
-          return yield* new Invalid({
+          return yield* Invalid.make({
             issues: [
               { path: ["on"], code: "request.malformed", params: { reason: "out_of_range" } },
             ],
@@ -616,15 +663,18 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         if (row.taxDocument) {
           const earlier = yield* repo.getMany(
             workspaceId,
-            row.links.filter((l) => l.relation === "corrected_by").map((l) => l.id),
+            EffectArray.map(
+              EffectArray.filter(row.links, (l) => l.relation === "corrected_by"),
+              (l) => l.id,
+            ),
           );
-          const { original, creditNote } = yield* issueCreditNote(row, {
+          const { original, creditNote } = yield* issueCreditNote(caller, row, {
             reason,
             issuedOn: today,
             correctedOn: on,
             credit: remainderSpec(row, earlier),
           });
-          yield* appendAudit({
+          yield* appendAudit(caller, {
             workspaceId,
             subject: { entity: "Document", id },
             action: "document.cancel",
@@ -642,7 +692,8 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         }
 
         // A Credit Note already offsets part of it: cancelling would count that credit twice.
-        if (row.links.some((l) => l.relation === "corrected_by")) return yield* illegal();
+        if (EffectArray.some(row.links, (l) => l.relation === "corrected_by"))
+          return yield* illegal();
         const next = yield* repo
           .update(
             {
@@ -657,7 +708,7 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
             row.revision,
           )
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.cancel",
@@ -671,4 +722,6 @@ export const cancel = (id: DocumentId, input: CancelInput, opts?: RequestOptions
         return { document: yield* viewOf(next), creditNote: null } satisfies CancelResult;
       }),
     );
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);

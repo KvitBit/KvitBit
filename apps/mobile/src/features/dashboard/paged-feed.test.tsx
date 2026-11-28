@@ -1,24 +1,14 @@
 import { expect, test } from "bun:test";
-import { Remote, UiError } from "@kvitbit/ui-port/api";
-import { Effect, Option } from "effect";
+import { UiError } from "@kvitbit/ui-port/api";
+import * as Effect from "effect/Effect";
 import { act } from "react";
 import { ApiProvider } from "../../runtime/api-runtime";
 import { clientRoot } from "../../testing/client-root";
 import { eventually } from "../../testing/eventually";
 import { TestProviders } from "../../testing/providers";
-import { usePagedFeed } from "./paged-feed";
+import { FeedProbe } from "../test-probes";
 
 const root = clientRoot({ keepFetch: true });
-
-function FeedProbe({ load }: { readonly load: () => Effect.Effect<string, UiError> }) {
-  const { state, reload } = usePagedFeed(load);
-  return (
-    <button type="button" onClick={reload}>
-      {Option.getOrElse(Remote.value(state), () => "")}
-      {state._tag === "Failed" ? ` (${state.error._tag})` : ""}
-    </button>
-  );
-}
 
 test("superseding a feed read aborts it and a failed refresh retains the last good result", async () => {
   const requests: Array<{

@@ -1,48 +1,40 @@
 import { describe, expect, test } from "bun:test";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import { findReadyUpdate, type OtaUpdateSource } from "./ota-update";
 
 type CheckResult = Awaited<ReturnType<OtaUpdateSource["checkForUpdateAsync"]>>;
 type FetchResult = Awaited<ReturnType<OtaUpdateSource["fetchUpdateAsync"]>>;
 
-const available = {
+const available: CheckResult = {
   isAvailable: true,
   isRollBackToEmbedded: false,
-  manifest: { id: "update-a" },
-  reason: undefined,
-} as unknown as CheckResult;
+};
 
-const unavailable = {
+const unavailable: CheckResult = {
   isAvailable: false,
   isRollBackToEmbedded: false,
-  manifest: undefined,
-  reason: "noUpdateAvailableOnServer",
-} as unknown as CheckResult;
+};
 
-const fetchedNew = {
+const fetchedNew: FetchResult = {
   isNew: true,
   isRollBackToEmbedded: false,
   manifest: { id: "update-a" },
-} as unknown as FetchResult;
+};
 
-const rollBack = {
+const rollBack: CheckResult = {
   isAvailable: false,
   isRollBackToEmbedded: true,
-  manifest: undefined,
-  reason: undefined,
-} as unknown as CheckResult;
+};
 
-const fetchedRollBack = {
+const fetchedRollBack: FetchResult = {
   isNew: false,
   isRollBackToEmbedded: true,
-  manifest: undefined,
-} as unknown as FetchResult;
+};
 
-const fetchedNothingNew = {
+const fetchedNothingNew: FetchResult = {
   isNew: false,
   isRollBackToEmbedded: false,
-  manifest: undefined,
-} as unknown as FetchResult;
+};
 
 const source = (check: () => Promise<CheckResult>, fetch: () => Promise<FetchResult>) => {
   const calls = { check: 0, fetch: 0 };
@@ -62,8 +54,8 @@ const source = (check: () => Promise<CheckResult>, fetch: () => Promise<FetchRes
 describe("findReadyUpdate", () => {
   test("downloads an available update and reports it ready", async () => {
     const { calls, updates } = source(
-      async () => available,
-      async () => fetchedNew,
+      () => Promise.resolve(available),
+      () => Promise.resolve(fetchedNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toEqual({
       kind: "update",
@@ -74,8 +66,8 @@ describe("findReadyUpdate", () => {
 
   test("fetches a rollback directive and reports the embedded update ready", async () => {
     const { calls, updates } = source(
-      async () => rollBack,
-      async () => fetchedRollBack,
+      () => Promise.resolve(rollBack),
+      () => Promise.resolve(fetchedRollBack),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toEqual({
       kind: "embedded",
@@ -85,8 +77,8 @@ describe("findReadyUpdate", () => {
 
   test("reports nothing when the rollback fetch brings nothing to apply", async () => {
     const { calls, updates } = source(
-      async () => rollBack,
-      async () => fetchedNothingNew,
+      () => Promise.resolve(rollBack),
+      () => Promise.resolve(fetchedNothingNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();
     expect(calls).toEqual({ check: 1, fetch: 1 });
@@ -96,8 +88,8 @@ describe("findReadyUpdate", () => {
   // result decides what is ready.
   test("reports the rollback a download brought after the check found an update", async () => {
     const { updates } = source(
-      async () => available,
-      async () => fetchedRollBack,
+      () => Promise.resolve(available),
+      () => Promise.resolve(fetchedRollBack),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toEqual({
       kind: "embedded",
@@ -106,8 +98,8 @@ describe("findReadyUpdate", () => {
 
   test("reports the update a download brought after the check found a rollback", async () => {
     const { updates } = source(
-      async () => rollBack,
-      async () => fetchedNew,
+      () => Promise.resolve(rollBack),
+      () => Promise.resolve(fetchedNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toEqual({
       kind: "update",
@@ -117,7 +109,7 @@ describe("findReadyUpdate", () => {
 
   test("swallows a failed rollback fetch", async () => {
     const { updates } = source(
-      async () => rollBack,
+      () => Promise.resolve(rollBack),
       () => Promise.reject(new Error("signature rejected")),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();
@@ -125,8 +117,8 @@ describe("findReadyUpdate", () => {
 
   test("downloads nothing when the server has no update", async () => {
     const { calls, updates } = source(
-      async () => unavailable,
-      async () => fetchedNew,
+      () => Promise.resolve(unavailable),
+      () => Promise.resolve(fetchedNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();
     expect(calls).toEqual({ check: 1, fetch: 0 });
@@ -134,8 +126,8 @@ describe("findReadyUpdate", () => {
 
   test("reports nothing when the download brings nothing new", async () => {
     const { updates } = source(
-      async () => available,
-      async () => fetchedNothingNew,
+      () => Promise.resolve(available),
+      () => Promise.resolve(fetchedNothingNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();
   });
@@ -143,7 +135,7 @@ describe("findReadyUpdate", () => {
   test("swallows a failed check", async () => {
     const { calls, updates } = source(
       () => Promise.reject(new Error("offline")),
-      async () => fetchedNew,
+      () => Promise.resolve(fetchedNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();
     expect(calls.fetch).toBe(0);
@@ -154,14 +146,14 @@ describe("findReadyUpdate", () => {
       () => {
         throw new Error("updates disabled");
       },
-      async () => fetchedNew,
+      () => Promise.resolve(fetchedNew),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();
   });
 
   test("swallows a failed download", async () => {
     const { updates } = source(
-      async () => available,
+      () => Promise.resolve(available),
       () => Promise.reject(new Error("signature rejected")),
     );
     expect(await Effect.runPromise(findReadyUpdate(updates))).toBeUndefined();

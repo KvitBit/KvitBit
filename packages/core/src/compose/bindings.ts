@@ -4,11 +4,15 @@
  * authorizes (the calling method has), and each runs inside the caller's transaction.
  * Board agreements are cited per binding (channel kvitbit).
  */
-import type { NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Contacts, CurrentCaller, NotFound } from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import type { ContactViewData } from "../modules/contacts";
+
+import type { ContactView, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
+import { type Caller, Contacts, NotFound } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { ContactSeriesLookup, ContactSnapshots } from "../modules/contacts";
+import { ContactViewSchema } from "../modules/contacts/model";
 import {
   DeliveriesRepo,
   DocumentContacts,
@@ -36,7 +40,12 @@ export const ContactSeriesLookupLive: Layer.Layer<ContactSeriesLookup, never, Nu
       kindsOf: (workspaceId: WorkspaceId, ids: ReadonlyArray<NumberingSeriesId>) =>
         Effect.map(repo.list(workspaceId), (rows) => {
           const wanted = new Set<string>(ids);
-          return new Map(rows.filter((r) => wanted.has(r.id)).map((r) => [r.id, r.kind] as const));
+          return new Map(
+            EffectArray.map(
+              EffectArray.filter(rows, (r) => wanted.has(r.id)),
+              (r) => [r.id, r.kind] as const,
+            ),
+          );
         }),
     })),
   );
@@ -63,16 +72,18 @@ export const PaymentSettingsLive: Layer.Layer<PaymentSettings, never, WorkspaceS
   Layer.effect(
     PaymentSettings,
     Effect.map(Effect.service(WorkspaceSnapshots), (snapshots) => ({
-      autoSendPaymentTaxDocument: (workspaceId: WorkspaceId) =>
-        Effect.gen(function* () {
-          const caller = yield* CurrentCaller;
-          const own =
-            (caller._tag === "Member" || caller._tag === "System") &&
-            caller.workspaceId === workspaceId;
-          if (!own) return yield* new NotFound({ entity: "Workspace", id: workspaceId });
-          const snapshot = yield* snapshots.get(workspaceId, yield* today);
-          return snapshot.paymentTaxDocumentAutoSend;
-        }),
+      autoSendPaymentTaxDocument: Effect.fn("autoSendPaymentTaxDocument")(function* (
+        caller: Caller,
+        workspaceId: WorkspaceId,
+      ) {
+        const own =
+          (caller._tag === "Member" || caller._tag === "System") &&
+          caller.workspaceId === workspaceId;
+        if (!own) return yield* NotFound.make({ entity: "Workspace", id: workspaceId });
+        const today_1 = yield* today;
+        const snapshot = yield* snapshots.get(workspaceId, today_1);
+        return snapshot.paymentTaxDocumentAutoSend;
+      }),
     })),
   );
 
@@ -84,13 +95,18 @@ export const ExpenseSuppliersLive: Layer.Layer<ExpenseSuppliers, never, Contacts
   ExpenseSuppliers,
   Effect.map(Effect.service(Contacts), (contacts) => {
     // The domain ContactView is a placeholder schema; the contacts module returns ContactViewData.
-    const supplier = (view: unknown) => {
-      const contact = view as ContactViewData;
-      return { contactId: contact.id, name: contact.name, ico: contact.ico, dic: contact.dic };
-    };
+    const supplier = ({ id, name, ico, dic }: typeof ContactViewSchema.Type) => ({
+      contactId: id,
+      name,
+      ico,
+      dic,
+    });
+    const decodeSupplier = (view: ContactView) =>
+      Schema.decodeUnknownEffect(ContactViewSchema)(view).pipe(Effect.orDie, Effect.map(supplier));
     return {
-      contact: (id) => Effect.map(contacts.get(id), supplier),
-      fromIco: (ico) => Effect.map(contacts.fromIco(ico, { role: "supplier" }), supplier),
+      contact: (caller, id) => contacts.get(caller, id).pipe(Effect.flatMap(decodeSupplier)),
+      fromIco: (caller, ico) =>
+        contacts.fromIco(caller, ico, { role: "supplier" }).pipe(Effect.flatMap(decodeSupplier)),
     };
   }),
 );

@@ -10,26 +10,34 @@ import {
   spyOn,
   test,
 } from "bun:test";
-import type {
+import {
   ContactId,
   DocumentId,
+  type DocumentView,
   WorkspaceId,
   WorkspaceSlug,
-  WorkspaceSummary,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { act, type ReactNode } from "react";
 import {
   fakeTransfer,
   useFakeTransfer as registerFakeTransfer,
 } from "../../platform/transfer/testing";
 import { ApiProvider } from "../../runtime/api-runtime";
-import { SessionProvider, useSession } from "../../session/session-provider";
+import { SessionProvider } from "../../session/session-provider";
 import { tokenStore } from "../../session/token-store";
-import { clientRoot } from "../../testing/client-root";
+import { clientRoot, waitForRender } from "../../testing/client-root";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
-import { recordedOverlay, TestProviders } from "../../testing/providers";
+import { SignedInFixture, TestProviders } from "../../testing/providers";
+import { recordedOverlay } from "../../testing/recorded-overlay";
 import { WorkspaceProvider } from "../../workspace/workspace-provider";
+import { reactEventHandler } from "./react-event.test-utils";
 import { uiShim } from "./test-ui-shim";
 
 const pushed: string[] = [];
@@ -51,9 +59,10 @@ mock.module("expo-router", () => ({
 }));
 
 mock.module("expo-clipboard", () => ({
-  setStringAsync: async (value: string) => {
-    copiedStrings.push(value);
-  },
+  setStringAsync: (value: string) =>
+    Effect.sync(() => {
+      copiedStrings.push(value);
+    }).pipe(Effect.runPromise),
 }));
 
 const realUi = { ...(await import("../../ui")) };
@@ -65,34 +74,15 @@ const { DocumentEditorScreen } = await import("./editor-screen");
 const { default: DocumentNewRoute } = await import("../../../app/w/[ws]/documents/new/[kind]");
 const { default: DocumentEditRoute } = await import("../../../app/w/[ws]/documents/[id]/edit");
 
-function SignedInFixture({ children }: { readonly children: ReactNode }) {
-  return useSession().state.status === "signed-in" ? children : null;
-}
+const waitFor = (check: () => boolean, label?: string): Promise<void> =>
+  waitForRender({ check, label, attempts: 250 });
 
-const reactPropsOf = (el: Element | null): Record<string, unknown> => {
-  if (el === null) throw new Error("Element not found");
-  const key = Object.keys(el).find((k) => k.startsWith("__reactProps$"));
-  if (key === undefined) throw new Error("React props not found on element");
-  const record = (el as unknown as Record<string, Record<string, unknown>>)[key];
-  if (record === undefined) throw new Error("React props object missing");
-  return record;
-};
-
-const waitFor = async (check: () => boolean, label = "condition"): Promise<void> => {
-  for (let i = 0; i < 250; i++) {
-    if (check()) return;
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 5));
-    });
-  }
-  throw new Error(`Timed out waiting for ${label}`);
-};
-
-const WS_ID = "01930000-0000-7000-8000-000000000001" as WorkspaceId;
-const WS_SLUG = "acme" as WorkspaceSlug;
-const DOC_ID = "01930000-0000-7000-8000-000000000101" as DocumentId;
-const FINAL_ID = "01930000-0000-7000-8000-000000000199" as DocumentId;
-const CON_ID = "01930000-0000-7000-8000-000000000201" as ContactId;
+const uuidV7Pattern = /^[0-9a-f-]{14}7[0-9a-f-]{21}$/;
+const WS_ID = WorkspaceId.make("01930000-0000-7000-8000-000000000001");
+const WS_SLUG = WorkspaceSlug.make("acme");
+const DOC_ID = DocumentId.make("01930000-0000-7000-8000-000000000101");
+const FINAL_ID = DocumentId.make("01930000-0000-7000-8000-000000000199");
+const CON_ID = ContactId.make("01930000-0000-7000-8000-000000000201");
 const TEMPLATE_ID = "01930000-0000-7000-8000-000000000901";
 const CONTACT_SERIES = "01930000-0000-7000-8000-000000000602";
 
@@ -106,7 +96,10 @@ const WORKSPACE: WorkspaceSummary = {
   closed: false,
 };
 
-const makeWireDoc = (overrides: Record<string, unknown> = {}) => ({
+type WireDocOverrides = Partial<
+  Pick<DocumentView, "id" | "kind" | "number" | "status" | "settlement" | "revision" | "share">
+>;
+const makeWireDoc = (overrides: WireDocOverrides = {}) => ({
   id: DOC_ID,
   kind: "proforma",
   number: "ZF-2026-001",
@@ -244,16 +237,16 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           ifMatch: req.headers.get("If-Match"),
         });
 
-        if (url.pathname.endsWith("/get-session")) {
+        if (Str.endsWith("/get-session")(url.pathname)) {
           return Response.json({
             user: { id: "documents-test-user", email: "documents@example.test" },
           });
         }
 
-        if (req.method === "GET" && url.pathname.endsWith(`/documents/${wireDoc.id}`)) {
+        if (req.method === "GET" && Str.endsWith(`/documents/${wireDoc.id}`)(url.pathname)) {
           return Response.json(wireDoc);
         }
-        if (req.method === "PATCH" && url.pathname.endsWith(`/documents/${wireDoc.id}`)) {
+        if (req.method === "PATCH" && Str.endsWith(`/documents/${wireDoc.id}`)(url.pathname)) {
           if (req.headers.get("If-Match") !== `"${wireDoc.revision}"`) {
             return new Response(null, { status: 412 });
           }
@@ -267,13 +260,13 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
           return Response.json(wireDoc);
         }
-        if (req.method === "POST" && url.pathname.endsWith("/issue") && key !== null) {
+        if (req.method === "POST" && Str.endsWith("/issue")(url.pathname) && key !== null) {
           const earlier = committed.get(key);
           if (earlier !== undefined)
             return Response.json(earlier, {
-              status: url.pathname.endsWith(`/documents/${DOC_ID}/issue`) ? 200 : 201,
+              status: Str.endsWith(`/documents/${DOC_ID}/issue`)(url.pathname) ? 200 : 201,
             });
-          const fromDraft = url.pathname.endsWith(`/documents/${DOC_ID}/issue`);
+          const fromDraft = Str.endsWith(`/documents/${DOC_ID}/issue`)(url.pathname);
           if (dropNext === url.pathname && dropIssueBeforeCommit) {
             dropNext = null;
             return new Response("{", {
@@ -298,7 +291,10 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           }
           return Response.json(issued, { status: fromDraft ? 200 : 201 });
         }
-        if (req.method === "POST" && url.pathname.endsWith(`/templates/${TEMPLATE_ID}/documents`)) {
+        if (
+          req.method === "POST" &&
+          Str.endsWith(`/templates/${TEMPLATE_ID}/documents`)(url.pathname)
+        ) {
           templateTerms = {
             language: body.patch.language,
             series: body.patch.series,
@@ -313,7 +309,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
           }
           return Response.json(wireDoc, { status: 201 });
         }
-        if (req.method === "GET" && url.pathname.endsWith(`/templates/${TEMPLATE_ID}`)) {
+        if (req.method === "GET" && Str.endsWith(`/templates/${TEMPLATE_ID}`)(url.pathname)) {
           return Response.json({
             revision: 9,
             schedule: null,
@@ -325,7 +321,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             },
           });
         }
-        if (req.method === "GET" && url.pathname.endsWith(`/contacts/${CON_ID}`)) {
+        if (req.method === "GET" && Str.endsWith(`/contacts/${CON_ID}`)(url.pathname)) {
           return Response.json({
             id: CON_ID,
             name: "Beta s.r.o.",
@@ -334,7 +330,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             defaults: { language: "en", preferredSeriesByKind: { invoice: CONTACT_SERIES } },
           });
         }
-        if (req.method === "GET" && url.pathname.endsWith(`/documents/${DOC_ID}/payments`)) {
+        if (req.method === "GET" && Str.endsWith(`/documents/${DOC_ID}/payments`)(url.pathname)) {
           return Response.json([
             {
               id: "01930000-0000-7000-8000-000000000501",
@@ -349,7 +345,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             },
           ]);
         }
-        if (req.method === "POST" && url.pathname.endsWith("/payments")) {
+        if (req.method === "POST" && Str.endsWith("/payments")(url.pathname)) {
           if (dropNext === url.pathname) {
             dropNext = null;
             return new Response("{", {
@@ -376,23 +372,29 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             { status: 201 },
           );
         }
-        if (req.method === "POST" && url.pathname.endsWith(`/documents/${DOC_ID}/final-invoice`)) {
+        if (
+          req.method === "POST" &&
+          Str.endsWith(`/documents/${DOC_ID}/final-invoice`)(url.pathname)
+        ) {
           return Response.json(
             makeWireDoc({ id: FINAL_ID, kind: "invoice", number: "2026-0099" }),
             { status: 201 },
           );
         }
-        if (req.method === "DELETE" && url.pathname.endsWith(`/documents/${DOC_ID}/share-link`)) {
+        if (
+          req.method === "DELETE" &&
+          Str.endsWith(`/documents/${DOC_ID}/share-link`)(url.pathname)
+        ) {
           wireDoc = makeWireDoc({ share: null });
           return new Response(null, { status: 204 });
         }
         if (
           req.method === "GET" &&
-          url.pathname.endsWith(`/documents/${DOC_ID}/share-link/views`)
+          Str.endsWith(`/documents/${DOC_ID}/share-link/views`)(url.pathname)
         ) {
           return Response.json({ items: [], nextCursor: null });
         }
-        if (req.method === "GET" && url.pathname.endsWith(`/workspaces/${WS_ID}`)) {
+        if (req.method === "GET" && Str.endsWith(`/workspaces/${WS_ID}`)(url.pathname)) {
           return Response.json({
             slug: WS_SLUG,
             revision: 1,
@@ -416,7 +418,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             },
           });
         }
-        if (req.method === "GET" && url.pathname.endsWith("/contacts")) {
+        if (req.method === "GET" && Str.endsWith("/contacts")(url.pathname)) {
           return Response.json({
             items: [
               {
@@ -433,10 +435,10 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             nextCursor: null,
           });
         }
-        if (req.method === "GET" && url.pathname.endsWith("/price-list-items")) {
+        if (req.method === "GET" && Str.endsWith("/price-list-items")(url.pathname)) {
           return Response.json([]);
         }
-        if (req.method === "GET" && url.pathname.endsWith("/bank-accounts")) {
+        if (req.method === "GET" && Str.endsWith("/bank-accounts")(url.pathname)) {
           return Response.json([
             {
               id: "01930000-0000-7000-8000-000000000302",
@@ -449,7 +451,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             },
           ]);
         }
-        if (req.method === "GET" && url.pathname.endsWith("/numbering-series")) {
+        if (req.method === "GET" && Str.endsWith("/numbering-series")(url.pathname)) {
           return Response.json([
             {
               id: "01930000-0000-7000-8000-000000000601",
@@ -463,12 +465,16 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
             },
           ]);
         }
-        if (req.method === "GET" && url.pathname.endsWith("/fx-rates/EUR") && holdFxResponse) {
+        if (
+          req.method === "GET" &&
+          Str.endsWith("/fx-rates/EUR")(url.pathname) &&
+          holdFxResponse !== null
+        ) {
           const held = holdFxResponse;
           holdFxResponse = null;
           await held;
         }
-        if (req.method === "POST" && url.pathname.endsWith("/documents")) {
+        if (req.method === "POST" && Str.endsWith("/documents")(url.pathname)) {
           return Response.json(
             makeWireDoc({ id: FINAL_ID, kind: "invoice", number: null, status: "draft" }),
             { status: 201 },
@@ -477,19 +483,6 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
         return new Response("Not Found", { status: 404 });
       },
     });
-  });
-
-  afterAll(() => {
-    server.stop(true);
-    mock.module("../../ui", () => realUi);
-  });
-
-  afterEach(async () => {
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 25));
-    });
-    await root.render(null);
-    await tokenStore.clear();
   });
 
   beforeEach(async () => {
@@ -512,6 +505,19 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     mockParams = { id: DOC_ID };
   });
 
+  afterEach(async () => {
+    await act(async () => {
+      await Effect.runPromise(Effect.sleep(25));
+    });
+    await root.render(null);
+    await tokenStore.clear();
+  });
+
+  afterAll(() => {
+    server.stop(true);
+    mock.module("../../ui", () => realUi);
+  });
+
   const show = (node: ReactNode, token = "tok") =>
     root.render(
       <TestProviders locale="en" overlay={overlay}>
@@ -532,17 +538,17 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     );
 
   const click = (testId: string) =>
-    act(async () => {
-      (
-        reactPropsOf(root.container().querySelector(`[data-testid="${testId}"]`))
-          .onClick as () => void
-      )();
+    act(() => {
+      reactEventHandler(root.container().querySelector(`[data-testid="${testId}"]`), "onClick")();
     });
 
   const change = (testId: string, value: string) =>
-    act(async () => {
+    act(() => {
       const input = root.container().querySelector(`[data-testid="${testId}"]`);
-      (reactPropsOf(input).onChange as (event: { target: { value: string } }) => void)({
+      reactEventHandler(
+        input,
+        "onChange",
+      )({
         target: { value },
       });
     });
@@ -551,11 +557,11 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await show(<DocumentDetailScreen />);
 
     await waitFor(
-      () => (root.container().textContent ?? "").includes("ZF-2026-001"),
+      () => Str.includes("ZF-2026-001")(root.container().textContent ?? ""),
       "detail loaded",
     );
 
-    const text = (root.container().textContent ?? "").replace(/\u00a0/g, " ");
+    const text = Str.replace(/\u00a0/g, " ")(root.container().textContent ?? "");
     expect(text).toContain("Development sprint");
     expect(text).toContain("DD-2026-001");
     expect(text).toContain("CZK 5,292.00");
@@ -564,29 +570,29 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
 
     const pdfOpenBtn = root.container().querySelector('[data-testid="detail-pdf-download"]');
     const pdfShareBtn = root.container().querySelector('[data-testid="detail-pdf-share"]');
-    await act(async () => {
-      (reactPropsOf(pdfOpenBtn).onClick as () => void)();
+    await act(() => {
+      reactEventHandler(pdfOpenBtn, "onClick")();
     });
     await waitFor(() => transferFake.opened.length === 1, "pdf opened");
     expect(transferFake.downloads[0]?.path).toBe(`/workspaces/${WS_ID}/documents/${DOC_ID}/pdf`);
     expect(transferFake.downloads[0]?.filename).toBe("ZF-2026-001.pdf");
 
-    await act(async () => {
-      (reactPropsOf(pdfShareBtn).onClick as () => void)();
+    await act(() => {
+      reactEventHandler(pdfShareBtn, "onClick")();
     });
     await waitFor(() => transferFake.shared.length === 1, "pdf shared");
 
     const finalBtn = root.container().querySelector('[data-testid="detail-action-final"]');
-    await act(async () => {
-      (reactPropsOf(finalBtn).onClick as () => void)();
+    await act(() => {
+      reactEventHandler(finalBtn, "onClick")();
     });
     await waitFor(
       () =>
-        calls.some((c) => c.path.endsWith(`/documents/${DOC_ID}/final-invoice`)) &&
-        pushed.some((href) => href.includes(FINAL_ID)),
+        Arr.some(calls, (c) => Str.endsWith(`/documents/${DOC_ID}/final-invoice`)(c.path)) &&
+        Arr.some(pushed, (href) => Str.includes(FINAL_ID)(href)),
       "final invoice issued and navigated",
     );
-    expect(pushed.some((href) => href.includes(FINAL_ID))).toBe(true);
+    expect(Arr.some(pushed, (href) => Str.includes(FINAL_ID)(href))).toBe(true);
   });
 
   test("detail share tab copies and revokes public share link", async () => {
@@ -594,26 +600,26 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await show(<DocumentDetailScreen />);
 
     await waitFor(
-      () => (root.container().textContent ?? "").includes("https://kvitbit.cz/i/tok123"),
+      () => Str.includes("https://kvitbit.cz/i/tok123")(root.container().textContent ?? ""),
       "share link shown",
     );
 
     const copyBtn = root.container().querySelector('[data-testid="share-link-copy"]');
-    await act(async () => {
-      (reactPropsOf(copyBtn).onClick as () => void)();
+    await act(() => {
+      reactEventHandler(copyBtn, "onClick")();
     });
     await waitFor(() => copiedStrings.length === 1, "copied");
     expect(copiedStrings[0]).toBe("https://kvitbit.cz/i/tok123");
 
     const revokeBtn = root.container().querySelector('[data-testid="share-link-revoke"]');
-    await act(async () => {
-      (reactPropsOf(revokeBtn).onClick as () => void)();
+    await act(() => {
+      reactEventHandler(revokeBtn, "onClick")();
     });
     await waitFor(
       () =>
-        calls.some((c) => c.method === "DELETE" && c.path.endsWith("/share-link")) &&
-        calls.filter((c) => c.method === "GET" && c.path.endsWith(`/documents/${DOC_ID}`)).length >=
-          2,
+        Arr.some(calls, (c) => c.method === "DELETE" && Str.endsWith("/share-link")(c.path)) &&
+        Arr.filter(calls, (c) => c.method === "GET" && Str.endsWith(`/documents/${DOC_ID}`)(c.path))
+          .length >= 2,
       "share link revoked and document reloaded",
     );
   });
@@ -628,34 +634,40 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
 
     const descInput = root.container().querySelector('[data-testid="editor-line-desc-0"]');
     const priceInput = root.container().querySelector('[data-testid="editor-line-price-0"]');
-    await act(async () => {
-      (reactPropsOf(descInput).onChange as (e: { target: { value: string } }) => void)({
+    await act(() => {
+      reactEventHandler(
+        descInput,
+        "onChange",
+      )({
         target: { value: "Audit work" },
       });
-      (reactPropsOf(priceInput).onChange as (e: { target: { value: string } }) => void)({
+      reactEventHandler(
+        priceInput,
+        "onChange",
+      )({
         target: { value: "1000" },
       });
     });
 
     await waitFor(
       () =>
-        (
-          root.container().querySelector('[data-testid="editor-preview-total"]')?.textContent ?? ""
-        ).includes("1,210.00"),
+        Str.includes("1,210.00")(
+          root.container().querySelector('[data-testid="editor-preview-total"]')?.textContent ?? "",
+        ),
       "live preview updated",
     );
 
     const saveBtn = root.container().querySelector('[data-testid="editor-save-button"]');
-    await act(async () => {
-      (reactPropsOf(saveBtn).onClick as () => void)();
+    await act(() => {
+      reactEventHandler(saveBtn, "onClick")();
     });
     await waitFor(
       () =>
-        calls.some((c) => c.method === "POST" && c.path.endsWith("/documents")) &&
-        replaced.some((href) => href.includes(FINAL_ID)),
+        Arr.some(calls, (c) => c.method === "POST" && Str.endsWith("/documents")(c.path)) &&
+        Arr.some(replaced, (href) => Str.includes(FINAL_ID)(href)),
       "draft saved and navigated",
     );
-    expect(replaced.some((href) => href.includes(FINAL_ID))).toBe(true);
+    expect(Arr.some(replaced, (href) => Str.includes(FINAL_ID)(href))).toBe(true);
   });
 
   test("retries a committed issue-from-input with the same key after the response is lost", async () => {
@@ -665,13 +677,16 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await waitFor(
       () => root.container().querySelector('[data-testid="editor-line-desc-0"]') !== null,
     );
-    await act(async () => {
+    await act(() => {
       for (const [testId, value] of [
         ["editor-line-desc-0", "Audit work"],
         ["editor-line-price-0", "1000"],
       ] as const) {
         const input = root.container().querySelector(`[data-testid="${testId}"]`);
-        (reactPropsOf(input).onChange as (event: { target: { value: string } }) => void)({
+        reactEventHandler(
+          input,
+          "onChange",
+        )({
           target: { value },
         });
       }
@@ -679,17 +694,20 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await click("editor-issue-button");
     await waitFor(
       () =>
-        calls.some((c) => c.path === path) &&
-        root.container().textContent?.includes("Please try again") === true,
+        Arr.some(calls, (c) => c.path === path) &&
+        Str.includes("Please try again")(root.container().textContent ?? ""),
       "failed issue response",
     );
     expect(replaced).toEqual([]);
     await click("editor-issue-button");
-    await waitFor(() => replaced.some((href) => href.includes(FINAL_ID)), "retried issue");
+    await waitFor(
+      () => Arr.some(replaced, (href) => Str.includes(FINAL_ID)(href)),
+      "retried issue",
+    );
 
-    const attempts = calls.filter((c) => c.path === path);
+    const attempts = Arr.filter(calls, (c) => c.path === path);
     expect(attempts).toHaveLength(2);
-    expect(attempts[0]?.key).toMatch(/^[0-9a-f-]{14}7[0-9a-f-]{21}$/);
+    expect(attempts[0]?.key).toMatch(uuidV7Pattern);
     expect(attempts[1]?.key).toBe(attempts[0]?.key);
     expect(committed.size).toBe(1);
   });
@@ -707,18 +725,21 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await click("editor-issue-button");
     await waitFor(
       () =>
-        calls.some((c) => c.path === path) &&
-        root.container().textContent?.includes("Please try again") === true,
+        Arr.some(calls, (c) => c.path === path) &&
+        Str.includes("Please try again")(root.container().textContent ?? ""),
       "failed issue after PATCH",
     );
     await click("editor-issue-button");
-    await waitFor(() => replaced.some((href) => href.includes(DOC_ID)), "retried draft issue");
+    await waitFor(
+      () => Arr.some(replaced, (href) => Str.includes(DOC_ID)(href)),
+      "retried draft issue",
+    );
 
-    const edits = calls.filter((c) => c.method === "PATCH");
+    const edits = Arr.filter(calls, (c) => c.method === "PATCH");
     expect(edits).toHaveLength(1);
     expect(edits[0]?.ifMatch).toBe('"3"');
-    const attempts = calls.filter((c) => c.path === path);
-    expect(attempts.map((c) => c.ifMatch)).toEqual(['"4"', '"4"']);
+    const attempts = Arr.filter(calls, (c) => c.path === path);
+    expect(Arr.map(attempts, (c) => c.ifMatch)).toEqual(['"4"', '"4"']);
     expect(attempts[1]?.key).toBe(attempts[0]?.key);
     expect(committed.size).toBe(1);
   });
@@ -734,17 +755,25 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await waitFor(editorReady);
     await change("editor-note", "Saved before issue");
     await click("editor-issue-button");
-    await waitFor(() => root.container().textContent?.includes("Please try again") === true);
+    await waitFor(() => Str.includes("Please try again")(root.container().textContent ?? ""));
 
     await root.render(null);
     await show(<DocumentEditorScreen mode="edit" documentId={DOC_ID} />);
     await waitFor(editorReady);
     await click("editor-issue-button");
-    await waitFor(() => replaced.some((href) => href.includes(DOC_ID)), "retried after reopening");
+    await waitFor(
+      () => Arr.some(replaced, (href) => Str.includes(DOC_ID)(href)),
+      "retried after reopening",
+    );
 
-    expect(calls.filter((c) => c.method === "PATCH").map((c) => c.ifMatch)).toEqual(['"3"']);
-    const attempts = calls.filter((c) => c.path === path);
-    expect(attempts.map((c) => c.ifMatch)).toEqual(['"4"', '"4"']);
+    expect(
+      Arr.map(
+        Arr.filter(calls, (c) => c.method === "PATCH"),
+        (c) => c.ifMatch,
+      ),
+    ).toEqual(['"3"']);
+    const attempts = Arr.filter(calls, (c) => c.path === path);
+    expect(Arr.map(attempts, (c) => c.ifMatch)).toEqual(['"4"', '"4"']);
     expect(attempts[1]?.key).toBe(attempts[0]?.key);
     expect(committed.size).toBe(1);
   });
@@ -756,21 +785,27 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await waitFor(
       () => root.container().querySelector('[data-testid="payment-amount-input"]') !== null,
     );
-    await act(async () => {
+    await act(() => {
       const amount = root.container().querySelector('[data-testid="payment-amount-input"]');
-      (reactPropsOf(amount).onChange as (event: { target: { value: string } }) => void)({
+      reactEventHandler(
+        amount,
+        "onChange",
+      )({
         target: { value: "100" },
       });
     });
     await click("payment-modal-submit");
     await waitFor(
-      () => overlay.toasts.some((message) => message.includes("Please try again")),
+      () => Arr.some(overlay.toasts, (message) => Str.includes("Please try again")(message)),
       "first payment response lost",
     );
     await click("payment-modal-submit");
     await waitFor(() => overlay.toasts.includes("Payment recorded"), "payment retry confirmed");
 
-    const attempts = calls.filter((c) => c.method === "POST" && c.path.endsWith("/payments"));
+    const attempts = Arr.filter(
+      calls,
+      (c) => c.method === "POST" && Str.endsWith("/payments")(c.path),
+    );
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.key).toBeTruthy();
     expect(attempts[1]?.key).toBe(attempts[0]?.key);
@@ -783,13 +818,15 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
     const paymentReady = () =>
       root.container().querySelector('[data-testid="payment-amount-input"]') !== null &&
-      root.container().textContent?.includes("Wire") === true;
+      Str.includes("Wire")(root.container().textContent ?? "");
 
     await show(<DocumentDetailScreen />);
     await waitFor(paymentReady);
     await change("payment-amount-input", "100");
     await click("payment-modal-submit");
-    await waitFor(() => overlay.toasts.some((message) => message.includes("Please try again")));
+    await waitFor(() =>
+      Arr.some(overlay.toasts, (message) => Str.includes("Please try again")(message)),
+    );
 
     await change("payment-amount-input", "200");
     await click("payment-modal-submit");
@@ -802,7 +839,9 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await change("payment-amount-input", "100");
     await click("payment-modal-submit");
     await waitFor(
-      () => overlay.toasts.filter((message) => message.includes("Please try again")).length === 2,
+      () =>
+        Arr.filter(overlay.toasts, (message) => Str.includes("Please try again")(message))
+          .length === 2,
     );
 
     await root.render(null);
@@ -811,15 +850,18 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await change("payment-amount-input", "100");
     await click("payment-modal-submit");
     await waitFor(
-      () => overlay.toasts.filter((message) => message === "Payment recorded").length === 2,
+      () => Arr.filter(overlay.toasts, (message) => message === "Payment recorded").length === 2,
     );
 
-    const attempts = calls.filter((c) => c.method === "POST" && c.path.endsWith("/payments"));
+    const attempts = Arr.filter(
+      calls,
+      (c) => c.method === "POST" && Str.endsWith("/payments")(c.path),
+    );
     expect(attempts).toHaveLength(4);
     expect(attempts[2]?.body).toEqual(attempts[0]?.body);
     expect(attempts[3]?.body).toEqual(attempts[2]?.body);
     expect(attempts[3]?.key).toBe(attempts[2]?.key);
-    expect(new Set(attempts.map(({ key }) => key)).size).toBe(3);
+    expect(new Set(Arr.map(attempts, ({ key }) => key)).size).toBe(3);
   });
 
   test("a replayed template import opens the created draft's effective fields", async () => {
@@ -839,7 +881,7 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await root.render(null);
     await show(<DocumentNewRoute />);
     await waitFor(() => replaced.length === 1, "template draft opened");
-    const attempts = calls.filter((call) => call.path === path);
+    const attempts = Arr.filter(calls, (call) => call.path === path);
     expect(attempts).toHaveLength(2);
     expect(attempts[0]?.body).toEqual({
       as: "draft",
@@ -869,14 +911,17 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       .querySelector<HTMLInputElement>('[data-testid="editor-line-desc-0"]');
     expect(line?.value).toBe("Development sprint");
     expect(
-      calls.filter(
-        ({ method, path }) => method === "GET" && path.endsWith(`/templates/${TEMPLATE_ID}`),
+      Arr.filter(
+        calls,
+        (call) => call.method === "GET" && Str.endsWith(`/templates/${TEMPLATE_ID}`)(call.path),
       ),
     ).toHaveLength(1);
     await change("editor-line-desc-0", "Edited development sprint");
     await click("editor-save-button");
-    await waitFor(() => calls.some((call) => call.method === "PATCH"), "template draft saved");
-    expect(calls.find((call) => call.method === "PATCH")?.body).toEqual({
+    await waitFor(() => Arr.some(calls, (call) => call.method === "PATCH"), "template draft saved");
+    expect(
+      Option.getOrUndefined(Arr.findFirst(calls, (call) => call.method === "PATCH"))?.body,
+    ).toEqual({
       lines: [expect.objectContaining({ description: "Edited development sprint" })],
     });
     expect(templateTerms).toEqual({
@@ -887,16 +932,17 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
   });
   const paymentPath = `/api/v1/workspaces/${WS_ID}/payments`;
   const paymentAttempts = () =>
-    calls.filter((c) => c.method === "POST" && c.path.endsWith("/payments"));
+    Arr.filter(calls, (c) => c.method === "POST" && Str.endsWith("/payments")(c.path));
   const paymentReady = () =>
     root.container().querySelector('[data-testid="payment-amount-input"]') !== null &&
-    root.container().textContent?.includes("Wire") === true;
-  const lostToasts = () => overlay.toasts.filter((m) => m.includes("Please try again")).length;
-  const recordedToasts = () => overlay.toasts.filter((m) => m === "Payment recorded").length;
+    Str.includes("Wire")(root.container().textContent ?? "");
+  const lostToasts = () =>
+    Arr.filter(overlay.toasts, (m) => Str.includes("Please try again")(m)).length;
+  const recordedToasts = () => Arr.filter(overlay.toasts, (m) => m === "Payment recorded").length;
   // Let reloads started by the previous screen settle before it unmounts.
   const settle = () =>
     act(async () => {
-      await new Promise((r) => setTimeout(r, 25));
+      await Effect.runPromise(Effect.sleep(25));
     });
   const openPaymentForm = async () => {
     await settle();
@@ -942,17 +988,17 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     const attempts = paymentAttempts();
     expect(attempts).toHaveLength(3);
     expect(attempts[2]?.body).toEqual(attempts[0]?.body);
-    expect(new Set(attempts.map(({ key }) => key)).size).toBe(3);
+    expect(new Set(Arr.map(attempts, ({ key }) => key)).size).toBe(3);
   });
 
   test("a confirmed payment keeps its key when the next form scope cannot be stored", async () => {
     mockParams = { id: DOC_ID, tab: "payments", dialog: "payment" };
     const setItem = AsyncStorage.setItem;
     let failScope = true;
-    AsyncStorage.setItem = async (slot: string, value: string) => {
-      if (failScope && slot.startsWith("kvitbit.payment-form.v1.")) {
+    AsyncStorage.setItem = (slot: string, value: string) => {
+      if (failScope && Str.startsWith("kvitbit.payment-form.v1.")(slot)) {
         failScope = false;
-        throw new Error("storage full");
+        return Promise.reject(new Error("storage full"));
       }
       return setItem(slot, value);
     };
@@ -986,11 +1032,16 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await openPaymentForm();
     await submitPayment("400");
     await waitFor(() => lostToasts() === 1, "payment response lost");
-    setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1000));
+    DateTime.now.pipe(
+      Effect.map(DateTime.add({ hours: 25 })),
+      Effect.map(DateTime.toDateUtc),
+      Effect.runSync,
+      setSystemTime,
+    );
     try {
       await submitPayment("400");
       await waitFor(
-        () => overlay.toasts.some((m) => m.includes("may already have been saved")),
+        () => Arr.some(overlay.toasts, (m) => Str.includes("may already have been saved")(m)),
         "reconciliation shown",
       );
     } finally {
@@ -1018,13 +1069,16 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     );
   };
   const saveEdit = async (description: string) => {
-    const before = calls.filter((call) => call.method === "PATCH").length;
+    const before = Arr.filter(calls, (call) => call.method === "PATCH").length;
     replaced.length = 0;
     await change("editor-line-desc-0", description);
     await click("editor-save-button");
     await waitFor(() => replaced.length === 1, "saved");
-    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(before + 1);
-    return calls.filter((call) => call.method === "PATCH").at(-1);
+    const writes = Arr.filter(calls, (call) => call.method === "PATCH");
+    if (writes.length !== before + 1) {
+      throw new Error(`Expected one document write, got ${writes.length - before}`);
+    }
+    return writes.at(-1);
   };
 
   test("imported template fields survive saving and reopening the draft", async () => {
@@ -1054,10 +1108,10 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await importTemplateDraft();
     wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
     await show(<DocumentEditRoute />);
-    await waitFor(() => root.container().textContent?.includes("Editing is paused") === true);
+    await waitFor(() => Str.includes("Editing is paused")(root.container().textContent ?? ""));
     expect(noteValue()).toBeUndefined();
     expect(root.container().querySelector('[data-testid="editor-save-button"]')).toBeNull();
-    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+    expect(Arr.filter(calls, (call) => call.method === "PATCH")).toHaveLength(0);
   });
 
   test("an acknowledged template draft edit recovers after its snapshot write fails", async () => {
@@ -1067,20 +1121,21 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     replaced.length = 0;
     const setItem = AsyncStorage.setItem.bind(AsyncStorage);
     const storage = spyOn(AsyncStorage, "setItem").mockImplementation(async (key, value) => {
-      if (key.startsWith("kvitbit.template-draft.v1.")) throw new Error("Test storage is full");
+      if (Str.startsWith("kvitbit.template-draft.v1.")(key))
+        throw new Error("Test storage is full");
       await setItem(key, value);
     });
     try {
       await click("editor-save-button");
       await waitFor(
-        () => root.container().textContent?.includes("The document was saved, but") === true,
+        () => Str.includes("The document was saved, but")(root.container().textContent ?? ""),
         "local checkpoint failure shown",
       );
       expect(wireDoc.revision).toBe(4);
       expect(replaced).toHaveLength(0);
       expect(root.container().querySelector('[data-testid="editor-save-button"]')).toBeNull();
       await click("editor-template-checkpoint-retry");
-      expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
+      expect(Arr.filter(calls, (call) => call.method === "PATCH")).toHaveLength(1);
     } finally {
       storage.mockRestore();
     }
@@ -1109,17 +1164,19 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       await change("editor-line-desc-0", "Local edit before refresh");
       wireDoc = { ...wireDoc, revision: wireDoc.revision + 1 };
       const reads = () =>
-        calls.filter((call) => call.method === "GET" && call.path.endsWith(`/documents/${DOC_ID}`))
-          .length;
+        Arr.filter(
+          calls,
+          (call) => call.method === "GET" && Str.endsWith(`/documents/${DOC_ID}`)(call.path),
+        ).length;
       const before = reads();
       await show(<DocumentEditRoute />, "refreshed");
       await waitFor(() => reads() > before, "document reloaded");
       await settle();
       await click("editor-save-button");
-      await waitFor(
-        () => root.container().textContent?.includes("changed while you were editing") === true,
+      await waitFor(() =>
+        Str.includes("changed while you were editing")(root.container().textContent ?? ""),
       );
-      expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+      expect(Arr.filter(calls, (call) => call.method === "PATCH")).toHaveLength(0);
     } finally {
       fxResponse.resolve();
     }
@@ -1133,14 +1190,14 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
       () => root.container().querySelector('[data-testid="detail-action-issue"]') !== null,
     );
     await click("detail-action-issue");
-    await waitFor(() => overlay.toasts.some((message) => message.includes("2026-0099")));
+    await waitFor(() => Arr.some(overlay.toasts, (message) => Str.includes("2026-0099")(message)));
     await openEditor();
     expect(noteValue()).toBe("Newer template note");
   });
 
   test("an expired template import starts fresh only after explicit reconciliation confirmation", async () => {
     const path = `/api/v1/workspaces/${WS_ID}/templates/${TEMPLATE_ID}/documents`;
-    const recoveredId = "01930000-0000-7000-8000-000000000199" as DocumentId;
+    const recoveredId = DocumentId.make("01930000-0000-7000-8000-000000000199");
     dropNext = path;
     wireDoc = makeWireDoc({
       id: recoveredId,
@@ -1154,16 +1211,21 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
     await waitFor(
       () => root.container().querySelector('[data-testid="template-import-retry"]') !== null,
     );
-    setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1000));
+    DateTime.now.pipe(
+      Effect.map(DateTime.add({ hours: 25 })),
+      Effect.map(DateTime.toDateUtc),
+      Effect.runSync,
+      setSystemTime,
+    );
     try {
       await root.render(null);
       await show(<DocumentNewRoute />);
       await waitFor(
-        () => root.container().textContent?.includes("may already have been saved") === true,
+        () => Str.includes("may already have been saved")(root.container().textContent ?? ""),
         "reconciliation shown",
       );
       expect(root.container().querySelector('[data-testid="template-import-retry"]')).toBeNull();
-      expect(calls.filter((call) => call.path === path)).toHaveLength(1);
+      expect(Arr.filter(calls, (call) => call.path === path)).toHaveLength(1);
       expect(replaced).toHaveLength(0);
 
       await click("template-import-review-documents");
@@ -1199,13 +1261,13 @@ describe("DocumentDetailScreen and DocumentEditorScreen", () => {
 
       overlay.answer = false;
       await click("template-import-start-new");
-      expect(calls.filter((call) => call.path === path)).toHaveLength(1);
+      expect(Arr.filter(calls, (call) => call.path === path)).toHaveLength(1);
 
       wireDoc = { ...wireDoc, id: FINAL_ID, revision: 1 };
       overlay.answer = true;
       await click("template-import-start-new");
       await waitFor(() => replaced.length === 1, "new import opens its draft");
-      const attempts = calls.filter((call) => call.path === path);
+      const attempts = Arr.filter(calls, (call) => call.path === path);
       expect(attempts).toHaveLength(2);
       expect(attempts[1]?.key).not.toBe(attempts[0]?.key);
       expect(attempts[1]?.body).toMatchObject({ patch: { note: "Newer template note" } });

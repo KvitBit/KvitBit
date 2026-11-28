@@ -1,3 +1,6 @@
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 /**
  * Effect-managed receive-only RFC 5321 + RFC 3207 (STARTTLS) SMTP server.
  *
@@ -9,20 +12,34 @@
  *   SMTP transaction state per RFC 3207 section 4.2.
  * - Strict CRLF-terminated `.\r\n` end-of-DATA (blocks SMTP smuggling) + RFC 5321 dot-unstuffing.
  * - Scoped lifecycle via `Effect.acquireRelease`; message handling runs inside the caller's
- *   Effect context via `Effect.runPromiseWith`.
+ *   Effect context via `Effect.runForkWith`.
  */
 
 import net from "node:net";
 import tls from "node:tls";
-import { Data, Effect, type Scope } from "effect";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import type * as Scope from "effect/Scope";
+import * as Str from "effect/String";
 import { isValidMailbox, trimAsciiWsp } from "./mime";
 import type { InboundMessage, RelayResult } from "./relay";
 
-export class SmtpBindError extends Data.TaggedError("SmtpBindError")<{
-  readonly host: string;
-  readonly port: number;
-  readonly reason: string;
-}> {}
+const angleMatchPattern = /^<[ \t]*([^<>]*?)[ \t]*>(.*)$/;
+const spaceIdxPattern = /[ \t]/;
+const sizePattern = /(?:^|[ \t])SIZE=(\d+)(?:[ \t]|$)/i;
+const fromPattern = /^FROM:/i;
+const handleCommandLinePattern = /^TO:/i;
+
+export class SmtpBindError extends Schema.TaggedError<
+  SmtpBindError,
+  { readonly brand: unique symbol }
+>()("SmtpBindError", {
+  host: Schema.String,
+  port: Schema.Finite,
+  reason: Schema.String,
+}) {}
 
 export interface SmtpServerOptions {
   readonly host: string;
@@ -62,8 +79,8 @@ const DEFAULT_MAX_BAD_COMMANDS = 10;
 const MAX_COMMAND_LINE_BYTES = 8192;
 
 const normalizeIp = (raw: string | undefined): string => {
-  if (!raw) return "unknown";
-  return raw.startsWith("::ffff:") ? raw.slice(7) : raw;
+  if (!(raw !== undefined && raw !== "")) return "unknown";
+  return Str.startsWith("::ffff:")(raw) ? Str.slice(7)(raw) : raw;
 };
 
 /**
@@ -71,22 +88,22 @@ const normalizeIp = (raw: string | undefined): string => {
  * Supports RFC 6531 (`SMTPUTF8`) internationalized addresses and RFC 5321 §4.5.1
  * bare `<Postmaster>` recipient syntax when `barePostmasterDomain` is provided.
  */
-export const parseEnvelopePath = (
+const parseEnvelopePathImpl = (
   args: string,
   allowEmpty: boolean,
   barePostmasterDomain?: string,
 ): { address: string; sizeParam?: number } | undefined => {
   const trimmed = trimAsciiWsp(args);
-  const angleMatch = trimmed.match(/^<[ \t]*([^<>]*?)[ \t]*>(.*)$/);
+  const angleMatch = Option.getOrNull(Str.match(angleMatchPattern)(trimmed));
   let address: string;
   let rest: string;
-  if (angleMatch) {
+  if (angleMatch !== null) {
     address = trimAsciiWsp(angleMatch[1] ?? "");
     rest = trimAsciiWsp(angleMatch[2] ?? "");
   } else {
-    const spaceIdx = trimmed.search(/[ \t]/);
-    address = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
-    rest = spaceIdx === -1 ? "" : trimAsciiWsp(trimmed.slice(spaceIdx));
+    const spaceIdx = Option.getOrElse(Str.search(spaceIdxPattern)(trimmed), () => -1);
+    address = spaceIdx === -1 ? trimmed : Str.slice(0, spaceIdx)(trimmed);
+    rest = spaceIdx === -1 ? "" : trimAsciiWsp(Str.slice(spaceIdx)(trimmed));
   }
 
   if (address.length === 0) {
@@ -94,17 +111,17 @@ export const parseEnvelopePath = (
   } else if (
     !allowEmpty &&
     barePostmasterDomain !== undefined &&
-    address.toLowerCase() === "postmaster"
+    Str.toLowerCase(address) === "postmaster"
   ) {
-    address = `postmaster@${barePostmasterDomain.toLowerCase()}`;
+    address = `postmaster@${Str.toLowerCase(barePostmasterDomain)}`;
   } else if (!isValidMailbox(address)) {
     return undefined;
   }
 
   let sizeParam: number | undefined;
   if (rest.length > 0) {
-    const sizeMatch = rest.match(/(?:^|[ \t])SIZE=(\d+)(?:[ \t]|$)/i);
-    if (sizeMatch?.[1]) {
+    const sizeMatch = Option.getOrNull(Str.match(sizePattern)(rest));
+    if (sizeMatch?.[1] !== undefined && sizeMatch?.[1] !== "") {
       const parsed = Number.parseInt(sizeMatch[1], 10);
       if (Number.isFinite(parsed) && parsed >= 0) {
         sizeParam = parsed;
@@ -112,12 +129,21 @@ export const parseEnvelopePath = (
     }
   }
 
-  return { address: address.toLowerCase(), ...(sizeParam !== undefined ? { sizeParam } : {}) };
+  const sizeParamFields = sizeParam !== undefined ? { sizeParam } : {};
+  return { address: Str.toLowerCase(address), ...sizeParamFields };
 };
+
+type EnvelopePath = ReturnType<typeof parseEnvelopePathImpl>;
+
+export const parseEnvelopePath: {
+  (allowEmpty: boolean, barePostmasterDomain?: string): (args: string) => EnvelopePath;
+  (args: string, allowEmpty: boolean, barePostmasterDomain?: string): EnvelopePath;
+} = Fn.dual((args) => Predicate.isString(args[0]), parseEnvelopePathImpl);
 
 const createRawSmtpServer = (
   options: SmtpServerOptions,
-  runMessage: (message: InboundMessage) => Promise<RelayResult>,
+  run: (effect: Effect.Effect<void>) => void,
+  defaultNow: () => number,
 ): net.Server => {
   const maxMessageBytes = options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
   const maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
@@ -129,12 +155,12 @@ const createRawSmtpServer = (
   const sessionTimeoutMs = options.sessionTimeoutMs ?? DEFAULT_SESSION_TIMEOUT_MS;
   const maxRecipients = options.maxRecipients ?? DEFAULT_MAX_RECIPIENTS;
   const maxBadCommands = options.maxBadCommands ?? DEFAULT_MAX_BAD_COMMANDS;
-  const nowFn = options.now ?? (() => Date.now());
+  const nowFn = options.now ?? defaultNow;
   const tlsEnabled = Boolean(options.tlsCert && options.tlsKey);
 
   const normalizedAllowed = new Set<string>();
   for (const recipient of options.allowedRecipients) {
-    normalizedAllowed.add(recipient.trim().toLowerCase());
+    normalizedAllowed.add(Str.toLowerCase(Str.trim(recipient)));
   }
 
   let activeConnections = 0;
@@ -144,7 +170,7 @@ const createRawSmtpServer = (
   const recordAndCheckRateLimit = (ip: string): boolean => {
     const now = nowFn();
     const cutoff = now - rateWindowMs;
-    const recent = (ipMessageTimestamps.get(ip) ?? []).filter((ts) => ts >= cutoff);
+    const recent = Arr.filter(ipMessageTimestamps.get(ip) ?? [], (ts) => ts >= cutoff);
     if (recent.length >= maxMessagesPerIpWindow) {
       ipMessageTimestamps.set(ip, recent);
       return false;
@@ -153,7 +179,7 @@ const createRawSmtpServer = (
     ipMessageTimestamps.set(ip, recent);
     if (ipMessageTimestamps.size > 1000) {
       for (const [key, list] of ipMessageTimestamps) {
-        const pruned = list.filter((ts) => ts >= cutoff);
+        const pruned = Arr.filter(list, (ts) => ts >= cutoff);
         if (pruned.length === 0) ipMessageTimestamps.delete(key);
         else ipMessageTimestamps.set(key, pruned);
       }
@@ -199,7 +225,7 @@ const createRawSmtpServer = (
 
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     const resetIdleTimer = () => {
-      if (idleTimer) clearTimeout(idleTimer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         if (!closed) {
           writeLine("421 4.4.2 Idle timeout");
@@ -212,7 +238,7 @@ const createRawSmtpServer = (
       if (closed) return;
       closed = true;
       clearTimeout(sessionTimer);
-      if (idleTimer) clearTimeout(idleTimer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
       activeConnections = Math.max(0, activeConnections - 1);
       const count = (ipConnections.get(remoteIp) ?? 1) - 1;
       if (count <= 0) ipConnections.delete(remoteIp);
@@ -220,7 +246,7 @@ const createRawSmtpServer = (
     };
 
     const writeLine = (line: string) => {
-      if (!closed && !socket.destroyed) {
+      if (!(closed || socket.destroyed)) {
         socket.write(`${line}\r\n`);
       }
     };
@@ -271,17 +297,17 @@ const createRawSmtpServer = (
     };
 
     const handleCommandLine = (line: string): "continue" | "stop" => {
-      const spaceIdx = line.search(/[ \t]/);
-      const verb = (spaceIdx === -1 ? line : line.slice(0, spaceIdx)).toUpperCase();
-      const args = spaceIdx === -1 ? "" : trimAsciiWsp(line.slice(spaceIdx));
+      const spaceIdx = Option.getOrElse(Str.search(spaceIdxPattern)(line), () => -1);
+      const verb = Str.toUpperCase(spaceIdx === -1 ? line : Str.slice(0, spaceIdx)(line));
+      const args = spaceIdx === -1 ? "" : trimAsciiWsp(Str.slice(spaceIdx)(line));
 
       switch (verb) {
         case "EHLO": {
-          if (!args) {
+          if (!(args !== "")) {
             handleBadCommand("501 5.5.4 Syntax: EHLO hostname");
             return "continue";
           }
-          heloDomain = args.slice(0, 255);
+          heloDomain = Str.slice(0, 255)(args);
           resetTransaction();
           const extensions = [
             options.mxHost,
@@ -298,11 +324,11 @@ const createRawSmtpServer = (
         }
 
         case "HELO": {
-          if (!args) {
+          if (!(args !== "")) {
             handleBadCommand("501 5.5.4 Syntax: HELO hostname");
             return "continue";
           }
-          heloDomain = args.slice(0, 255);
+          heloDomain = Str.slice(0, 255)(args);
           resetTransaction();
           writeLine(`250 ${options.mxHost}`);
           return "continue";
@@ -328,16 +354,16 @@ const createRawSmtpServer = (
         }
 
         case "MAIL": {
-          if (!heloDomain) {
+          if (!(heloDomain !== "")) {
             handleBadCommand("503 5.5.1 Send EHLO/HELO first");
             return "continue";
           }
-          if (!/^FROM:/i.test(args)) {
+          if (!fromPattern.test(args)) {
             handleBadCommand("501 5.5.4 Syntax: MAIL FROM:<address>");
             return "continue";
           }
-          const parsed = parseEnvelopePath(args.slice(5), true);
-          if (!parsed) {
+          const parsed = parseEnvelopePath(Str.slice(5)(args), true);
+          if (!(parsed !== undefined)) {
             handleBadCommand("501 5.1.7 Bad sender address syntax");
             return "continue";
           }
@@ -356,7 +382,7 @@ const createRawSmtpServer = (
             handleBadCommand("503 5.5.1 Need MAIL command");
             return "continue";
           }
-          if (!/^TO:/i.test(args)) {
+          if (!handleCommandLinePattern.test(args)) {
             handleBadCommand("501 5.5.4 Syntax: RCPT TO:<address>");
             return "continue";
           }
@@ -364,8 +390,8 @@ const createRawSmtpServer = (
             writeLine("452 4.5.3 Too many recipients");
             return "continue";
           }
-          const parsed = parseEnvelopePath(args.slice(3), false, options.domain);
-          if (!parsed?.address) {
+          const parsed = parseEnvelopePath(Str.slice(3)(args), false, options.domain);
+          if (parsed === undefined || parsed.address === "") {
             handleBadCommand("501 5.1.3 Bad recipient address syntax");
             return "continue";
           }
@@ -444,86 +470,91 @@ const createRawSmtpServer = (
       dataBytes += needed;
     };
 
-    const processBuffer = async () => {
-      if (processing || closed) return;
-      processing = true;
-      socket.pause();
-      try {
-        while (!closed) {
-          const lfIdx = buffer.indexOf(10);
-          if (lfIdx === -1) {
-            if (mode === "command" && buffer.length > MAX_COMMAND_LINE_BYTES) {
-              writeLine("500 5.5.2 Line too long");
-              closeSocket();
-              return;
-            }
-            if (mode === "data" && buffer.length > maxMessageBytes) {
-              dataOversized = true;
-              dataChunks = [];
-              buffer = Buffer.alloc(0);
-            }
-            break;
+    const readBufferedLines = Effect.gen(function* () {
+      while (!closed) {
+        const lfIdx = buffer.indexOf(10);
+        if (lfIdx === -1) {
+          if (mode === "command" && buffer.length > MAX_COMMAND_LINE_BYTES) {
+            writeLine("500 5.5.2 Line too long");
+            closeSocket();
+            return;
           }
-
-          const hasCrlf = lfIdx > 0 && buffer[lfIdx - 1] === 13;
-          const lineEnd = hasCrlf ? lfIdx - 1 : lfIdx;
-          const lineBuf = buffer.subarray(0, lineEnd);
-          buffer = buffer.subarray(lfIdx + 1);
-          resetIdleTimer();
-
-          if (mode === "command") {
-            if (lineBuf.length > MAX_COMMAND_LINE_BYTES) {
-              writeLine("500 5.5.2 Line too long");
-              closeSocket();
-              return;
-            }
-            const status = handleCommandLine(lineBuf.toString("utf8"));
-            if (status === "stop") return;
-          } else if (prevDataLineHadCrlf && hasCrlf && lineBuf.length === 1 && lineBuf[0] === 46) {
-            mode = "command";
-            prevDataLineHadCrlf = true;
-            const oversized = dataOversized;
-            const rawBytes = oversized ? new Uint8Array(0) : Buffer.concat(dataChunks);
-            const currentMailFrom = mailFrom ?? "";
-            const currentRcptTo = [...rcptTo];
-            resetTransaction();
-
-            if (oversized) {
-              writeLine("552 5.3.4 Message size exceeds fixed maximum message size");
-              continue;
-            }
-
-            try {
-              const result = await runMessage({
-                remoteIp,
-                tls: isTls,
-                helo: heloDomain,
-                mailFrom: currentMailFrom,
-                rcptTo: currentRcptTo,
-                rawBytes,
-              });
-              writeLine(`${result.smtpCode} ${result.smtpMessage}`);
-            } catch {
-              writeLine("451 4.3.0 Temporary local error");
-            }
-          } else {
-            prevDataLineHadCrlf = hasCrlf;
-            appendDataLine(lineBuf);
+          if (mode === "data" && buffer.length > maxMessageBytes) {
+            dataOversized = true;
+            dataChunks = [];
+            buffer = Buffer.alloc(0);
           }
+          break;
         }
-      } finally {
-        processing = false;
-        if (!closed && !socket.destroyed) {
-          socket.resume();
+
+        const hasCrlf = lfIdx > 0 && buffer[lfIdx - 1] === 13;
+        const lineEnd = hasCrlf ? lfIdx - 1 : lfIdx;
+        const lineBuf = buffer.subarray(0, lineEnd);
+        buffer = buffer.subarray(lfIdx + 1);
+        resetIdleTimer();
+
+        if (mode === "command") {
+          if (lineBuf.length > MAX_COMMAND_LINE_BYTES) {
+            writeLine("500 5.5.2 Line too long");
+            closeSocket();
+            return;
+          }
+          const status = handleCommandLine(lineBuf.toString("utf8"));
+          if (status === "stop") return;
+        } else if (prevDataLineHadCrlf && hasCrlf && lineBuf.length === 1 && lineBuf[0] === 46) {
+          mode = "command";
+          prevDataLineHadCrlf = true;
+          const oversized = dataOversized;
+          const rawBytes = oversized ? new Uint8Array(0) : Buffer.concat(dataChunks);
+          const currentMailFrom = mailFrom ?? "";
+          const currentRcptTo = [...rcptTo];
+          resetTransaction();
+
+          if (oversized) {
+            writeLine("552 5.3.4 Message size exceeds fixed maximum message size");
+            continue;
+          }
+
+          const message = {
+            remoteIp,
+            tls: isTls,
+            helo: heloDomain,
+            mailFrom: currentMailFrom,
+            rcptTo: currentRcptTo,
+            rawBytes,
+          };
+          const result = yield* Effect.suspend(() => options.onMessage(message)).pipe(
+            Effect.catchDefect(() =>
+              Effect.succeed({
+                smtpCode: 451 as const,
+                smtpMessage: "4.3.0 Temporary local error",
+              }),
+            ),
+          );
+          writeLine(`${result.smtpCode} ${result.smtpMessage}`);
+        } else {
+          prevDataLineHadCrlf = hasCrlf;
+          appendDataLine(lineBuf);
         }
       }
-    };
+    });
+    const processBuffer = readBufferedLines.pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          processing = false;
+          if (!(closed || socket.destroyed)) socket.resume();
+        }),
+      ),
+    );
 
     const attachSocketListeners = (target: net.Socket | tls.TLSSocket) => {
       target.on("data", (chunk: Buffer) => {
         if (closed) return;
         buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
-        void processBuffer();
+        if (processing) return;
+        processing = true;
+        socket.pause();
+        run(processBuffer);
       });
       target.on("error", () => {
         cleanup();
@@ -544,9 +575,14 @@ export const startSmtpServer = (
 ): Effect.Effect<RunningSmtpServer, SmtpBindError, Scope.Scope> =>
   Effect.gen(function* () {
     const ctx = yield* Effect.context();
-    const runWithCtx = Effect.runPromiseWith(ctx);
-    const server = createRawSmtpServer(options, (message) =>
-      runWithCtx(options.onMessage(message)),
+    const runWithCtx = Effect.runForkWith(ctx);
+    const clock = yield* Clock.Clock;
+    const server = createRawSmtpServer(
+      options,
+      (effect) => {
+        runWithCtx(effect);
+      },
+      () => clock.currentTimeMillisUnsafe(),
     );
 
     return yield* Effect.acquireRelease(
@@ -555,7 +591,7 @@ export const startSmtpServer = (
           server.off("listening", onListening);
           resume(
             Effect.fail(
-              new SmtpBindError({
+              SmtpBindError.make({
                 host: options.host,
                 port: options.port,
                 reason: error.message,
@@ -566,7 +602,7 @@ export const startSmtpServer = (
         const onListening = () => {
           server.off("error", onError);
           const addr = server.address();
-          const boundPort = typeof addr === "object" && addr !== null ? addr.port : options.port;
+          const boundPort = addr === null || Predicate.isString(addr) ? options.port : addr.port;
           resume(Effect.succeed({ server, port: boundPort }));
         };
         server.once("error", onError);

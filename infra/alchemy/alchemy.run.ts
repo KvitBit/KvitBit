@@ -1,5 +1,8 @@
 import * as GCP from "@alchemy.run/gcp";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import * as Alchemy from "alchemy";
+import * as Config from "effect/Config";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import {
@@ -21,7 +24,20 @@ import {
 export const loadAlchemyStackConfig = loadStackConfig.pipe(
   Effect.provideServiceEffect(
     StackEnv,
-    Effect.sync(() => readAlchemyRawEnv(process.argv, process.env)),
+    Effect.suspend(() =>
+      readAlchemyRawEnv({ argv: process.argv, env: process.env, cwd: process.cwd() }),
+    ).pipe(
+      Effect.mapError(
+        (cause) =>
+          new Config.ConfigError(
+            new ConfigProvider.SourceError({
+              message: "Unable to read the Alchemy environment file",
+              cause,
+            }),
+          ),
+      ),
+      Effect.provide(BunServices.layer),
+    ),
   ),
   Effect.tap((config) => assertTargetedSecretSelection(config, process.argv)),
 );

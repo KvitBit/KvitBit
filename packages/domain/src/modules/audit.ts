@@ -1,5 +1,5 @@
 /** Audit log entry (core-ports section 4.10). Insert-only; written in the changing transaction. */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { Channel, SystemJob } from "../caller";
 import { AuditEntryId, UserId } from "../ids";
 import { ClientRef, EntityKind } from "../vocabulary";

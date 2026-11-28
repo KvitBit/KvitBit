@@ -1,7 +1,9 @@
 import { expect, test } from "bun:test";
 import { Caller, ExportId, UserId, Workspaces } from "@kvitbit/domain/contract";
-import { Effect, Layer, Option } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { makeCronHandlers } from "../../src/runtime/crons";
 import { DataExportWorkflow, makeWorkflowHandlersLayer } from "../../src/runtime/workflows";
@@ -17,12 +19,14 @@ test("outbox reconciliation resumes a failed export finalizer under the original
   const workflows = makeWorkflowHandlersLayer().pipe(
     Layer.provideMerge(WorkflowEngine.layerMemory),
   );
-  const exit = await runSqlCore(
-    Caller.account({ ...owner, channel: "web", locale: "cs" }),
-    Effect.gen(function* () {
+  const exit = await runSqlCore({
+    effect: Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const workspaces = yield* Workspaces;
-      const { workspaceId } = yield* workspaces.create({ name: "Export fixture" });
+      const { workspaceId } = yield* workspaces.create(
+        Caller.account({ ...owner, channel: "web", locale: "cs" }),
+        { name: "Export fixture" },
+      );
       yield* sql`INSERT INTO exports (id, workspace_id, created_at)
         VALUES (${exportId}, ${workspaceId}, '2020-01-01T00:00:00Z')`;
       yield* sql`CREATE FUNCTION reject_export_finish() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -38,7 +42,11 @@ test("outbox reconciliation resumes a failed export finalizer under the original
         let suspended = false;
         for (let attempts = 0; attempts < 100; attempts++) {
           const result = yield* DataExportWorkflow.poll(executionId);
-          if (Option.isSome(result) && result.value._tag === "Suspended" && result.value.failed) {
+          if (
+            Option.isSome(result) &&
+            result.value._tag === "Suspended" &&
+            result.value.failed === true
+          ) {
             suspended = true;
             break;
           }
@@ -55,7 +63,7 @@ test("outbox reconciliation resumes a failed export finalizer under the original
         yield* sql`SELECT status, size_bytes > 0 AS nonempty FROM exports WHERE id = ${exportId}`;
       return row;
     }),
-    { users: [owner] },
-  );
+    options: { users: [owner] },
+  });
   expect(exit).toMatchObject({ _tag: "Success", value: { status: "ready", nonempty: true } });
 }, 30_000);

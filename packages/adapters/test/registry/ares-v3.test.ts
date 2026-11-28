@@ -1,18 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { CompanyRegistry, type RegistryRecord, RegistryUnavailable } from "@kvitbit/domain/ports";
-import { Effect, Layer } from "effect";
-import {
-  HttpClient,
-  HttpClientError,
-  type HttpClientRequest,
-  HttpClientResponse,
-} from "effect/http";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import type * as Schema from "effect/Schema";
 import { AresV3 } from "../../src/registry";
-import notFound from "./fixtures/ares-not-found.json";
-import serverError from "./fixtures/ares-server-error.json";
-import soleTrader from "./fixtures/ares-sole-trader.json";
-import sro from "./fixtures/ares-sro.json";
-import terminated from "./fixtures/ares-terminated.json";
+import notFound from "./fixtures/ares-not-found.json" with { type: "json" };
+import serverError from "./fixtures/ares-server-error.json" with { type: "json" };
+import soleTrader from "./fixtures/ares-sole-trader.json" with { type: "json" };
+import sro from "./fixtures/ares-sro.json" with { type: "json" };
+import terminated from "./fixtures/ares-terminated.json" with { type: "json" };
 
 type Reply = Effect.Effect<Response, HttpClientError.HttpClientError>;
 
@@ -34,7 +35,7 @@ const fakeHttp = (reply: (request: HttpClientRequest.HttpClientRequest) => Reply
   return { recorded, layer: Layer.succeed(HttpClient.HttpClient, client) };
 };
 
-const json = (body: unknown, status = 200) => Effect.succeed(Response.json(body, { status }));
+const json = (body: Schema.Json, status = 200) => Effect.succeed(Response.json(body, { status }));
 
 const lookup = (
   ico: string,
@@ -53,10 +54,9 @@ const lookup = (
   return run.then((result) => ({ result, ...http.recorded }));
 };
 
-const expectUnavailable = async (outcome: ReturnType<typeof lookup>) => {
+const failureOf = async (outcome: ReturnType<typeof lookup>) => {
   const { result } = await outcome;
-  expect(result._tag).toBe("Failure");
-  if (result._tag === "Failure") expect(result.failure).toBeInstanceOf(RegistryUnavailable);
+  return result._tag === "Failure" ? result.failure : undefined;
 };
 
 const expectRecord = async (outcome: ReturnType<typeof lookup>): Promise<RegistryRecord | null> => {
@@ -74,7 +74,7 @@ describe("AresV3 lookup", () => {
     expect(request?.url).toBe(
       "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest/ekonomicke-subjekty/10047514",
     );
-    expect(request?.headers.accept).toBe("application/json");
+    expect(request?.headers["accept"]).toBe("application/json");
   });
 
   test("maps a full s.r.o. record", async () => {
@@ -116,67 +116,85 @@ describe("AresV3 lookup", () => {
     expect(await expectRecord(lookup("10047514", () => json(notFound, 404)))).toBeNull();
   });
 
-  test("a malformed IČO returns null without a request", async () => {
-    for (const ico of ["1004751", "100475144", "1004751a", "../10047514", ""]) {
+  test.each(["1004751", "100475144", "1004751a", "../10047514", ""])(
+    "malformed IČO %s returns null without a request",
+    async (ico) => {
       const { result, requests } = await lookup(ico, () => json(sro));
       expect(result).toMatchObject({ _tag: "Success", success: null });
       expect(requests).toHaveLength(0);
-    }
-  });
+    },
+  );
 
   test("500 is RegistryUnavailable", async () => {
-    await expectUnavailable(lookup("10047514", () => json(serverError, 500)));
+    expect(await failureOf(lookup("10047514", () => json(serverError, 500)))).toBeInstanceOf(
+      RegistryUnavailable,
+    );
   });
 
-  test("other non-200 statuses (429, 503, 400) are RegistryUnavailable", async () => {
-    for (const status of [429, 503, 400]) {
-      await expectUnavailable(lookup("10047514", () => json(serverError, status)));
-    }
+  test.each([429, 503, 400])("status %s is RegistryUnavailable", async (status) => {
+    expect(await failureOf(lookup("10047514", () => json(serverError, status)))).toBeInstanceOf(
+      RegistryUnavailable,
+    );
   });
 
   test("a transport error is RegistryUnavailable", async () => {
-    await expectUnavailable(
-      lookup("10047514", (request) =>
-        Effect.fail(
-          new HttpClientError.HttpClientError({
-            reason: new HttpClientError.TransportError({ request, cause: new Error("ECONNRESET") }),
-          }),
+    expect(
+      await failureOf(
+        lookup("10047514", (request) =>
+          Effect.fail(
+            new HttpClientError.HttpClientError({
+              reason: new HttpClientError.TransportError({
+                request,
+                cause: new Error("ECONNRESET"),
+              }),
+            }),
+          ),
         ),
       ),
-    );
+    ).toBeInstanceOf(RegistryUnavailable);
   });
 
   test("a hanging request times out as RegistryUnavailable", async () => {
-    const started = Date.now();
-    await expectUnavailable(lookup("10047514", () => Effect.never, { timeout: "30 millis" }));
-    expect(Date.now() - started).toBeLessThan(2000);
+    const started = Effect.runSync(Clock.currentTimeMillis);
+    expect(
+      await failureOf(lookup("10047514", () => Effect.never, { timeout: "30 millis" })),
+    ).toBeInstanceOf(RegistryUnavailable);
+    expect(Effect.runSync(Clock.currentTimeMillis) - started).toBeLessThan(2000);
   });
 
   test("a non-JSON body is RegistryUnavailable", async () => {
-    await expectUnavailable(
-      lookup("10047514", () =>
-        Effect.succeed(new Response("<html>maintenance</html>", { status: 200 })),
+    expect(
+      await failureOf(
+        lookup("10047514", () =>
+          Effect.succeed(new Response("<html>maintenance</html>", { status: 200 })),
+        ),
       ),
-    );
+    ).toBeInstanceOf(RegistryUnavailable);
   });
 
   test("a body missing obchodniJmeno is RegistryUnavailable", async () => {
     const { obchodniJmeno: _, ...withoutName } = sro;
-    await expectUnavailable(lookup("10047514", () => json(withoutName)));
-  });
-
-  test("an impossible datumZaniku is RegistryUnavailable", async () => {
-    await expectUnavailable(
-      lookup("10087109", () => json({ ...terminated, datumZaniku: "2024-02-30" })),
+    expect(await failureOf(lookup("10047514", () => json(withoutName)))).toBeInstanceOf(
+      RegistryUnavailable,
     );
   });
 
+  test("an impossible datumZaniku is RegistryUnavailable", async () => {
+    expect(
+      await failureOf(lookup("10087109", () => json({ ...terminated, datumZaniku: "2024-02-30" }))),
+    ).toBeInstanceOf(RegistryUnavailable);
+  });
+
   test("a blank obchodniJmeno is RegistryUnavailable", async () => {
-    await expectUnavailable(lookup("10047514", () => json({ ...sro, obchodniJmeno: "   " })));
+    expect(
+      await failureOf(lookup("10047514", () => json({ ...sro, obchodniJmeno: "   " }))),
+    ).toBeInstanceOf(RegistryUnavailable);
   });
 
   test("a pravniForma that is not three digits is RegistryUnavailable", async () => {
-    await expectUnavailable(lookup("10047514", () => json({ ...sro, pravniForma: "ABC" })));
+    expect(
+      await failureOf(lookup("10047514", () => json({ ...sro, pravniForma: "ABC" }))),
+    ).toBeInstanceOf(RegistryUnavailable);
   });
 
   test("a body that stalls after the headers times out as RegistryUnavailable", async () => {
@@ -190,33 +208,34 @@ describe("AresV3 lookup", () => {
           },
         ),
       );
-    const started = Date.now();
-    await expectUnavailable(lookup("10047514", stalled, { timeout: "30 millis" }));
-    expect(Date.now() - started).toBeLessThan(2000);
+    const started = Effect.runSync(Clock.currentTimeMillis);
+    expect(await failureOf(lookup("10047514", stalled, { timeout: "30 millis" }))).toBeInstanceOf(
+      RegistryUnavailable,
+    );
+    expect(Effect.runSync(Clock.currentTimeMillis) - started).toBeLessThan(2000);
   });
 
-  test("404 and 500 responses release the request when the lookup ends", async () => {
-    const openBody = (status: number) => () =>
-      Effect.succeed(new Response(new ReadableStream({}), { status }));
-    for (const status of [404, 500]) {
-      const { signals } = await lookup("10047514", openBody(status));
-      expect(signals).toHaveLength(1);
-      expect(signals[0]?.aborted).toBe(true);
-    }
+  test.each([404, 500])("status %s releases the request when the lookup ends", async (status) => {
+    const openBody = () => Effect.succeed(new Response(new ReadableStream({}), { status }));
+    const outcome = await lookup("10047514", openBody);
+    expect(outcome.signals).toHaveLength(1);
+    expect(outcome.signals[0]?.aborted).toBe(true);
   });
 
   test("a subject for a different IČO is RegistryUnavailable", async () => {
-    await expectUnavailable(lookup("10079190", () => json(sro)));
+    expect(await failureOf(lookup("10079190", () => json(sro)))).toBeInstanceOf(
+      RegistryUnavailable,
+    );
   });
 });
 
 describe("AresV3 address mapping", () => {
-  const subject = (sidlo: Record<string, unknown>) => ({
+  const subject = (sidlo: Record<string, string | number>) => ({
     ico: "10047514",
     obchodniJmeno: "Firma s.r.o.",
     sidlo,
   });
-  const address = (sidlo: Record<string, unknown>) =>
+  const address = (sidlo: Record<string, string | number>) =>
     expectRecord(lookup("10047514", () => json(subject(sidlo)))).then((r) => r?.address);
 
   test("orientation number letter is appended", async () => {

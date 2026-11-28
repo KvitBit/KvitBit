@@ -2,39 +2,16 @@
  * Shell overlay (ui-port-contracts 2.5): snackbar toasts and confirmation dialogs, hosted once in
  * the root layout and reached through `useOverlay`.
  */
-import {
-  createContext,
-  type ReactNode,
-  useCallback,
-  useContext,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+
+import * as Effect from "effect/Effect";
+import { type ReactNode, useCallback, useMemo, useRef, useState } from "react";
 import { Modal, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { forkMobileEffect, runMobileEffect } from "../runtime/request-intent";
 import { useTheme } from "../theme/theme-provider";
 import { Button } from "./button";
+import { type ConfirmRequest, type Overlay, OverlayContext } from "./overlay-context";
 import { Text } from "./text";
-
-export interface ConfirmRequest {
-  readonly title: string;
-  readonly body?: string;
-  readonly confirmLabel: string;
-  readonly cancelLabel: string;
-  readonly destructive?: boolean;
-}
-
-export interface Overlay {
-  readonly toast: (
-    text: string,
-    action?: { readonly label: string; readonly onPress: () => void },
-  ) => void;
-  /** Resolves true when the user confirms. */
-  readonly confirm: (request: ConfirmRequest) => Promise<boolean>;
-}
-
-const OverlayContext = createContext<Overlay | null>(null);
 
 interface ToastState {
   readonly id: number;
@@ -53,10 +30,21 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
   const showToast = useCallback<Overlay["toast"]>((text, action) => {
     const id = ++seq.current;
     setToast(action === undefined ? { id, text } : { id, text, action });
-    setTimeout(() => setToast((t) => (t?.id === id ? null : t)), 5000);
+    forkMobileEffect(
+      Effect.sleep("5 seconds").pipe(
+        Effect.andThen(
+          Effect.sync(() => setToast((current) => (current?.id === id ? null : current))),
+        ),
+      ),
+    );
   }, []);
   const confirm = useCallback<Overlay["confirm"]>(
-    (request) => new Promise<boolean>((resolve) => setDialog({ ...request, resolve })),
+    (request) =>
+      runMobileEffect(
+        Effect.callback<boolean>((resume) =>
+          setDialog({ ...request, resolve: (ok) => resume(Effect.succeed(ok)) }),
+        ),
+      ),
     [],
   );
   const value = useMemo(() => ({ toast: showToast, confirm }), [showToast, confirm]);
@@ -116,7 +104,7 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
             <View className="flex-row justify-end gap-2">
               <Button kind="text" label={dialog?.cancelLabel ?? ""} onPress={() => close(false)} />
               <Button
-                kind={dialog?.destructive ? "danger" : "filled"}
+                kind={dialog?.destructive === true ? "danger" : "filled"}
                 label={dialog?.confirmLabel ?? ""}
                 onPress={() => close(true)}
               />
@@ -127,12 +115,3 @@ export function OverlayProvider(props: { readonly children: ReactNode }) {
     </OverlayContext.Provider>
   );
 }
-
-/** The bare context, for tests that record toasts and answer confirmations. */
-export const OverlayContextProvider = OverlayContext.Provider;
-
-export const useOverlay = (): Overlay => {
-  const value = useContext(OverlayContext);
-  if (value === null) throw new Error("useOverlay needs an OverlayProvider");
-  return value;
-};

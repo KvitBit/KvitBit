@@ -10,7 +10,7 @@ import {
 
 const minutes = (count: number) => count * 60 * 1000;
 
-describe("isUpdateCheckDue", () => {
+describe("update timing", () => {
   test("waits fifteen minutes between checks", () => {
     expect(updateCheckIntervalMs).toBe(minutes(15));
     expect(isUpdateCheckDue(0, minutes(15) - 1)).toBe(false);

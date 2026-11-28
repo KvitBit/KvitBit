@@ -8,9 +8,9 @@
  * "16 Nov 2026"), and between a count and its unit ("24 hodin", "64 KB"). The plain-text part
  * keeps U+00A0 as is; the HTML part writes it as `&nbsp;` (see `escapeHtml`).
  */
-import type { IsoDate, Locale, Money } from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
-import { BigDecimal } from "effect";
+import { type IsoDate, type Locale, type Money, MoneyMath } from "@kvitbit/domain/contract";
+import * as Fn from "effect/Function";
+import * as Str from "effect/String";
 
 export const NBSP = " ";
 
@@ -18,19 +18,23 @@ export const NBSP = " ";
 const CS_CURRENCY_SIGNS: Readonly<Record<string, string>> = { CZK: "Kč", EUR: "€" };
 
 const groupDigits = (digits: string, separator: string): string =>
-  digits.replace(/\B(?=(\d{3})+(?!\d))/g, separator);
+  Str.replace(/\B(?=(\d{3})+(?!\d))/g, separator)(digits);
 
 /**
  * Rounds half away from zero to the currency's minor unit, then formats without floating point.
  * cs: "58 100,00 Kč", "1 234,50 €", "-12,00 Kč". en: "CZK 58,100.00", "-EUR 12.00".
  */
-export const formatMoney = (money: Money, locale: Locale): string => {
+export const formatMoney: {
+  (locale: Locale): (money: Money) => string;
+  (money: Money, locale: Locale): string;
+} = Fn.dual(2, (money: Money, locale: Locale): string => {
   const scale = MoneyMath.minorUnitScale(money.currency);
-  const units = BigDecimal.scale(MoneyMath.round(money).amount, scale).value;
+  const units = MoneyMath.toMinorUnits(money);
   const negative = units < 0n;
-  const digits = (negative ? -units : units).toString().padStart(scale + 1, "0");
-  const whole = digits.slice(0, digits.length - scale);
-  const fraction = digits.slice(digits.length - scale);
+  const digits = Str.padStart(scale + 1, "0")((negative ? -units : units).toString());
+  const fractionStart = digits.length - scale;
+  const whole = Str.slice(0, fractionStart)(digits);
+  const fraction = Str.slice(fractionStart)(digits);
   const sign = negative ? "-" : "";
   if (locale === "cs") {
     const number = groupDigits(whole, NBSP) + (scale > 0 ? `,${fraction}` : "");
@@ -38,7 +42,7 @@ export const formatMoney = (money: Money, locale: Locale): string => {
   }
   const number = groupDigits(whole, ",") + (scale > 0 ? `.${fraction}` : "");
   return `${sign}${money.currency}${NBSP}${number}`;
-};
+});
 
 const EN_MONTHS = [
   "Jan",
@@ -56,14 +60,17 @@ const EN_MONTHS = [
 ] as const;
 
 /** Calendar date without zero padding. cs: "16. 11. 2026"; en: "16 Nov 2026". */
-export const formatDate = (date: IsoDate, locale: Locale): string => {
-  const [year = "", month = "", day = ""] = date.split("-");
+export const formatDate: {
+  (locale: Locale): (date: IsoDate) => string;
+  (date: IsoDate, locale: Locale): string;
+} = Fn.dual(2, (date: IsoDate, locale: Locale): string => {
+  const [year, month = "", day = ""] = Str.split(date, "-");
   const d = Number(day);
   const m = Number(month);
   return locale === "cs"
     ? `${d}.${NBSP}${m}.${NBSP}${year}`
     : `${d}${NBSP}${EN_MONTHS[m - 1] ?? month}${NBSP}${year}`;
-};
+});
 
 /** Czech plural form for a count: 1, 2-4, everything else (including 0 and 11-14). */
 const csPlural = (n: number, one: string, few: string, many: string): string =>
@@ -75,7 +82,10 @@ const enPlural = (n: number, one: string, many: string): string => (n === 1 ? on
  * A validity period in the accusative ("Odkaz platí 24 hodin", "platí 1 hodinu"); en "24 hours".
  * Whole days and whole hours use the larger unit.
  */
-export const formatDuration = (minutes: number, locale: Locale): string => {
+export const formatDuration: {
+  (locale: Locale): (minutes: number) => string;
+  (minutes: number, locale: Locale): string;
+} = Fn.dual(2, (minutes: number, locale: Locale): string => {
   if (minutes > 0 && minutes % 1440 === 0) {
     const n = minutes / 1440;
     return `${n}${NBSP}${locale === "cs" ? csPlural(n, "den", "dny", "dní") : enPlural(n, "day", "days")}`;
@@ -85,16 +95,21 @@ export const formatDuration = (minutes: number, locale: Locale): string => {
     return `${n}${NBSP}${locale === "cs" ? csPlural(n, "hodinu", "hodiny", "hodin") : enPlural(n, "hour", "hours")}`;
   }
   return `${minutes}${NBSP}${locale === "cs" ? csPlural(minutes, "minutu", "minuty", "minut") : enPlural(minutes, "minute", "minutes")}`;
-};
+});
 
 /** Days in a count phrase: cs "1 den", "3 dny", "10 dní"; en "1 day", "10 days". */
-export const formatDays = (days: number, locale: Locale): string =>
-  `${days}${NBSP}${locale === "cs" ? csPlural(days, "den", "dny", "dní") : enPlural(days, "day", "days")}`;
+export const formatDays =
+  (locale: Locale) =>
+  (days: number): string =>
+    `${days}${NBSP}${locale === "cs" ? csPlural(days, "den", "dny", "dní") : enPlural(days, "day", "days")}`;
 
 /** Attachment size in KB (rounded up) below 1 MB, else MB with one decimal. cs "1,5 MB". */
-export const formatFileSize = (bytes: number, locale: Locale): string => {
+export const formatFileSize: {
+  (locale: Locale): (bytes: number) => string;
+  (bytes: number, locale: Locale): string;
+} = Fn.dual(2, (bytes: number, locale: Locale): string => {
   const kb = Math.max(1, Math.ceil(bytes / 1024));
   if (kb < 1024) return `${kb}${NBSP}KB`;
   const mb = (Math.round((bytes / (1024 * 1024)) * 10) / 10).toFixed(1);
-  return `${locale === "cs" ? mb.replace(".", ",") : mb}${NBSP}MB`;
-};
+  return `${locale === "cs" ? Str.replace(".", ",")(mb) : mb}${NBSP}MB`;
+});

@@ -1,21 +1,23 @@
 import type { Html } from "@effect/ui/html";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
 import type { Markup } from "./html";
 import { barToneVariants } from "./styles";
 
-export type BarTone = "primary" | "secondary" | "overdue";
+type BarTone = "primary" | "secondary" | "overdue";
 export interface BarGroup {
   readonly label: string;
   readonly bars: ReadonlyArray<{ readonly value: number; readonly tone: BarTone }>;
 }
 
-export const barChart = <M>(
+const barChartImpl = <M>(
   h: Html.H<M>,
   label: string,
   groups: ReadonlyArray<BarGroup>,
 ): Markup<M> => {
   const maximum = Math.max(
     1,
-    ...groups.flatMap((group) => group.bars.map((bar) => Math.abs(bar.value))),
+    ...Arr.flatMap(groups, (group) => Arr.map(group.bars, (bar) => Math.abs(bar.value))),
   );
   return h.div
     .class("grid h-32 auto-cols-[minmax(0,1fr)] grid-flow-col gap-1")
@@ -23,12 +25,12 @@ export const barChart = <M>(
     .attr("role", "img")
     .attr("aria-label", label)
     .children(
-      groups.map((group) =>
+      Arr.map(groups, (group) =>
         h.div.class("grid min-w-0 grid-rows-[1fr_auto] text-center").children(
           h.div
             .class("flex min-h-24 items-end justify-center gap-0.5 border-b border-outline-variant")
             .children(
-              group.bars.map(({ value, tone }) =>
+              Arr.map(group.bars, ({ value, tone }) =>
                 h.span
                   .class(barToneVariants({ tone }))
                   .attr("title", `${group.label}: ${value}`)
@@ -44,3 +46,8 @@ export const barChart = <M>(
       ),
     );
 };
+
+export const barChart: {
+  <M>(label: string, groups: ReadonlyArray<BarGroup>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, label: string, groups: ReadonlyArray<BarGroup>): Markup<M>;
+} = Fn.dual(3, barChartImpl);

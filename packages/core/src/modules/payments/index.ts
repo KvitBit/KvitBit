@@ -50,7 +50,7 @@
  * Known contract gaps: none (the domain signatures carry every error the methods yield). db gap:
  * none (the row maps 1:1 onto `payments`).
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { DocumentsTestLayer } from "../documents";
 import { PaymentDocumentsLive } from "./documentReads";
 import { PaymentFakesLive } from "./fakes";

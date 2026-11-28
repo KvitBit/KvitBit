@@ -1,17 +1,24 @@
-import type {
+import {
   BankAccountId,
-  BankAccountView,
+  type BankAccountView,
   CurrencyCode,
   Locale,
   PaymentMethod,
   TaxRegime,
-  WorkspaceBranding,
-  WorkspaceSlug,
-  WorkspaceView,
+  type WorkspaceBranding,
+  type WorkspaceSlug,
+  type WorkspaceView,
 } from "@kvitbit/domain/contract";
 import { SettingsSection } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export interface AddressData {
+interface AddressData {
   readonly street: string;
   readonly city: string;
   readonly postalCode: string;
@@ -30,14 +37,14 @@ export interface IssuingEntityData {
   readonly web: string | null;
 }
 
-export interface TaxRegimePeriodData {
+interface TaxRegimePeriodData {
   readonly regime: TaxRegime;
   readonly effectiveFrom: string;
 }
 
 export type PaymentRounding = "none" | "whole_unit";
 
-export interface WorkspaceDefaultsData {
+interface WorkspaceDefaultsData {
   readonly currency: CurrencyCode;
   readonly language: Locale;
   readonly dueDays: number;
@@ -47,7 +54,7 @@ export interface WorkspaceDefaultsData {
   readonly paymentTaxDocumentAutoSend: boolean;
 }
 
-export interface ReminderPolicyData {
+interface ReminderPolicyData {
   readonly enabled: boolean;
   readonly proformas: boolean;
   readonly offsetsDays: ReadonlyArray<number>;
@@ -76,86 +83,89 @@ export interface ParsedWorkspace {
   readonly branding: WorkspaceBranding;
 }
 
-const isRecord = (u: unknown): u is Record<string, unknown> =>
-  typeof u === "object" && u !== null && !Array.isArray(u);
-
-const str = (u: unknown, fallback = ""): string => (typeof u === "string" ? u : fallback);
-
-const optStr = (u: unknown): string | null => (typeof u === "string" && u !== "" ? u : null);
-
-const bool = (u: unknown, fallback: boolean): boolean => (typeof u === "boolean" ? u : fallback);
-
-const int = (u: unknown, fallback: number): number =>
-  typeof u === "number" && Number.isInteger(u) ? u : fallback;
-
-const asTaxRegime = (u: unknown): TaxRegime =>
-  u === "vat_payer" || u === "identified_person" || u === "non_vat_payer" ? u : "non_vat_payer";
-
-const asPaymentMethod = (u: unknown): PaymentMethod =>
-  u === "bank_transfer" || u === "cash" || u === "card" || u === "other" ? u : "bank_transfer";
-
-const asLocale = (u: unknown): Locale => (u === "en" ? "en" : "cs");
-
-const asRounding = (u: unknown): PaymentRounding => (u === "whole_unit" ? "whole_unit" : "none");
-
-const asCurrency = (u: unknown): CurrencyCode =>
-  (typeof u === "string" && /^[A-Z]{3}$/.test(u) ? u : "CZK") as CurrencyCode;
+const Fields = Schema.Record(Schema.String, Schema.Unknown);
+const emptyFields = Fields.make({});
+const toRecord = Fn.flow(
+  Schema.decodeUnknownOption(Fields),
+  Option.getOrElse(() => emptyFields),
+);
+const toList = Schema.decodeUnknownOption(Schema.Array(Schema.Unknown));
+const text = Schema.decodeUnknownOption(Schema.String);
+const optText = Fn.flow(
+  text,
+  Option.filter((value) => value !== ""),
+  Option.getOrNull,
+);
+const boolean = Schema.decodeUnknownOption(Schema.Boolean);
+const integer = Schema.decodeUnknownOption(Schema.Int);
+const regime = Schema.decodeUnknownOption(TaxRegime);
+const method = Schema.decodeUnknownOption(PaymentMethod);
+const locale = Schema.decodeUnknownOption(Locale);
+const rounding = Schema.decodeUnknownOption(Schema.Literals(["none", "whole_unit"]));
+const currency = Schema.decodeUnknownOption(CurrencyCode);
+const czk = CurrencyCode.make("CZK");
+const bankAccountId = Schema.decodeUnknownResult(BankAccountId);
+const isPositive = Schema.is(Schema.Finite.check(Schema.isGreaterThan(0)));
 
 /** Safely extracts the concrete core fields from an open `WorkspaceView`. */
 export const parseWorkspaceView = (raw: WorkspaceView): ParsedWorkspace => {
-  const r = raw as Record<string, unknown>;
-  const entity = isRecord(r.issuingEntity) ? r.issuingEntity : {};
-  const addr = isRecord(entity.address) ? entity.address : {};
-  const defaults = isRecord(r.defaults) ? r.defaults : {};
-  const reminder = isRecord(r.reminderPolicy) ? r.reminderPolicy : {};
-  const rawHistory = Array.isArray(r.taxRegimeHistory) ? r.taxRegimeHistory : [];
-  const taxRegimeHistory: TaxRegimePeriodData[] = [];
-  for (const item of rawHistory) {
-    if (isRecord(item) && typeof item.effectiveFrom === "string") {
-      taxRegimeHistory.push({
-        regime: asTaxRegime(item.regime),
-        effectiveFrom: item.effectiveFrom,
-      });
-    }
-  }
-  const rawOffsets = Array.isArray(reminder.offsetsDays) ? reminder.offsetsDays : [3, 10, 30];
-  const offsetsDays = rawOffsets.filter((n): n is number => typeof n === "number" && n > 0);
+  const entity = toRecord(raw["issuingEntity"]);
+  const addr = toRecord(entity["address"]);
+  const defaults = toRecord(raw["defaults"]);
+  const reminder = toRecord(raw["reminderPolicy"]);
+  const rawHistory = Option.getOrElse(toList(raw["taxRegimeHistory"]), () => []);
+  const taxRegimeHistory = Arr.filterMap(rawHistory, (item) => {
+    const period = toRecord(item);
+    return Schema.decodeUnknownResult(Schema.String)(period["effectiveFrom"]).pipe(
+      Result.map(
+        (effectiveFrom): TaxRegimePeriodData => ({
+          regime: Option.getOrElse(regime(period["regime"]), () => "non_vat_payer"),
+          effectiveFrom,
+        }),
+      ),
+    );
+  });
+  const rawOffsets = Option.getOrElse(toList(reminder["offsetsDays"]), () => [3, 10, 30]);
+  const offsetsDays = Arr.filter(rawOffsets, isPositive);
 
   return {
     slug: raw.slug,
-    name: str(r.name, raw.slug),
-    closed: bool(r.closed, false),
+    name: Option.getOrElse(text(raw["name"]), () => raw.slug),
+    closed: Option.getOrElse(boolean(raw["closed"]), () => false),
     revision: raw.revision,
     issuingEntity: {
-      name: str(entity.name),
-      ico: optStr(entity.ico),
-      dic: optStr(entity.dic),
+      name: Option.getOrElse(text(entity["name"]), () => ""),
+      ico: optText(entity["ico"]),
+      dic: optText(entity["dic"]),
       address: {
-        street: str(addr.street),
-        city: str(addr.city),
-        postalCode: str(addr.postalCode),
-        country: str(addr.country, "CZ"),
+        street: Option.getOrElse(text(addr["street"]), () => ""),
+        city: Option.getOrElse(text(addr["city"]), () => ""),
+        postalCode: Option.getOrElse(text(addr["postalCode"]), () => ""),
+        country: Option.getOrElse(text(addr["country"]), () => "CZ"),
       },
-      legalForm: optStr(entity.legalForm),
-      registerEntry: optStr(entity.registerEntry),
-      email: optStr(entity.email),
-      phone: optStr(entity.phone),
-      web: optStr(entity.web),
+      legalForm: optText(entity["legalForm"]),
+      registerEntry: optText(entity["registerEntry"]),
+      email: optText(entity["email"]),
+      phone: optText(entity["phone"]),
+      web: optText(entity["web"]),
     },
-    taxRegime: asTaxRegime(r.taxRegime),
+    taxRegime: Option.getOrElse(regime(raw["taxRegime"]), () => "non_vat_payer"),
     taxRegimeHistory,
     defaults: {
-      currency: asCurrency(defaults.currency),
-      language: asLocale(defaults.language),
-      dueDays: int(defaults.dueDays, 14),
-      paymentMethod: asPaymentMethod(defaults.paymentMethod),
-      defaultNote: optStr(defaults.defaultNote),
-      paymentRounding: asRounding(defaults.paymentRounding),
-      paymentTaxDocumentAutoSend: bool(defaults.paymentTaxDocumentAutoSend, true),
+      currency: Option.getOrElse(currency(defaults["currency"]), () => czk),
+      language: Option.getOrElse(locale(defaults["language"]), () => "cs"),
+      dueDays: Option.getOrElse(integer(defaults["dueDays"]), () => 14),
+      paymentMethod: Option.getOrElse(method(defaults["paymentMethod"]), () => "bank_transfer"),
+      defaultNote: optText(defaults["defaultNote"]),
+      paymentRounding: Option.getOrElse(rounding(defaults["paymentRounding"]), () => "none"),
+      paymentTaxDocumentAutoSend: Option.getOrElse(
+        boolean(defaults["paymentTaxDocumentAutoSend"]),
+        () => true,
+      ),
     },
     reminderPolicy: {
-      enabled: bool(reminder.enabled, true),
-      proformas: bool(reminder.proformas, false),
+      enabled: Option.getOrElse(boolean(reminder["enabled"]), () => true),
+      proformas: Option.getOrElse(boolean(reminder["proformas"]), () => false),
       offsetsDays,
     },
     branding: raw.branding,
@@ -163,21 +173,32 @@ export const parseWorkspaceView = (raw: WorkspaceView): ParsedWorkspace => {
 };
 
 /** Safely extracts the concrete fields from an opaque `BankAccountView`. */
-export const parseBankAccountView = (raw: BankAccountView): BankAccountData => {
-  const r: Record<string, unknown> = isRecord(raw) ? raw : {};
-  return {
-    id: str(r.id) as BankAccountId,
-    name: optStr(r.name),
-    iban: str(r.iban),
-    bic: optStr(r.bic),
-    currency: asCurrency(r.currency),
-    isDefault: bool(r.isDefault, false),
-    revision: int(r.revision, 1),
-  };
+export const parseBankAccountView = (raw: BankAccountView) => {
+  const r = toRecord(raw);
+  return bankAccountId(r["id"]).pipe(
+    Result.map(
+      (id): BankAccountData => ({
+        id,
+        name: optText(r["name"]),
+        iban: Option.getOrElse(text(r["iban"]), () => ""),
+        bic: optText(r["bic"]),
+        currency: Option.getOrElse(currency(r["currency"]), () => czk),
+        isDefault: Option.getOrElse(boolean(r["isDefault"]), () => false),
+        revision: Option.getOrElse(integer(r["revision"]), () => 1),
+      }),
+    ),
+  );
 };
 
+const UPPERCASE_INITIAL = /[A-Z]/;
 const toKebab = (value: string): string =>
-  value.replace(/_/g, "-").replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+  Arr.join(
+    Arr.map(Str.split("")(value), (char) => {
+      if (char === "_") return "-";
+      return UPPERCASE_INITIAL.test(char) ? `-${Str.toLowerCase(char)}` : char;
+    }),
+    "",
+  );
 
 /** Resolves a route param (kebab-case or camelCase) to a valid `SettingsSection`, or null. */
 export const parseSettingsSection = (segment: string | undefined): SettingsSection | null => {
@@ -192,9 +213,9 @@ export const sectionTitleKey = (section: SettingsSection): `settings.nav.${Setti
   `settings.nav.${section}`;
 
 /** Today's calendar date in YYYY-MM-DD (local). */
-export const todayIsoDate = (now: Date = new Date()): string => {
+export const todayIsoDate = (now: Date = DateTime.toDateUtc(DateTime.nowUnsafe())): string => {
   const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
+  const m = Str.padStart(2, "0")(String(now.getMonth() + 1));
+  const d = Str.padStart(2, "0")(String(now.getDate()));
   return `${y}-${m}-${d}`;
 };

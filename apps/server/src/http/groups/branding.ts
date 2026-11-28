@@ -4,6 +4,7 @@ import {
   BRANDING_IMAGE_MAX_BYTES,
   type BrandingView,
   PayloadTooLarge,
+  RequestCaller,
   type ResolvedTheme,
 } from "@kvitbit/api-contract";
 import {
@@ -13,38 +14,41 @@ import {
   Workspaces,
   type WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { Effect, Stream } from "effect";
-import type { Multipart } from "effect/http";
-import { HttpApiBuilder } from "effect/http-api";
-import { downloadResponse, fileDownload, withRevision } from "../conventions";
+import * as Effect from "effect/Effect";
+import type * as Multipart from "effect/http/Multipart";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as Stream from "effect/Stream";
+import { downloadResponse, withRevision } from "../conventions";
+import { multipartFailureKind } from "./records/multipart";
 import { resolveTheme } from "./workspace/themeResolver";
 
 /** Sentinel defect used to abort core's `Stream.runForEach` cleanly when a multipart part fails mid-stream. */
 class MultipartStreamDefect {
   readonly _tag = "MultipartStreamDefect";
-  constructor(readonly error: Multipart.MultipartError) {}
+  readonly error: Multipart.MultipartError;
+
+  constructor(error: Multipart.MultipartError) {
+    this.error = error;
+  }
 }
 
 const mapMultipartError = (
   error: Multipart.MultipartError,
 ): Invalid | PayloadTooLarge | Unavailable => {
-  switch (error.reason._tag) {
-    case "FileTooLarge":
-    case "BodyTooLarge":
-    case "FieldTooLarge":
-      return new PayloadTooLarge({ limitBytes: BRANDING_IMAGE_MAX_BYTES });
-    case "TooManyParts":
-    case "Parse":
-      return new Invalid({ issues: [{ path: ["file"], code: "request.malformed" }] });
-    case "InternalError":
-      return new Unavailable({ dependency: "blob_storage" });
+  switch (multipartFailureKind[error.reason._tag]) {
+    case "size":
+      return PayloadTooLarge.make({ limitBytes: BRANDING_IMAGE_MAX_BYTES });
+    case "shape":
+      return Invalid.make({ issues: [{ path: ["file"], code: "request.malformed" }] });
+    case "internal":
+      return Unavailable.make({ dependency: "blob_storage" });
   }
 };
 
 const toBrandingView = (
   view: WorkspaceView,
   preResolved?: ResolvedTheme | null,
-): Effect.Effect<BrandingView> =>
+): Effect.Effect<BrandingView, never, Effect.Services<ReturnType<typeof resolveTheme>>> =>
   Effect.gen(function* () {
     const b = view.branding;
     const resolvedTheme =
@@ -67,39 +71,55 @@ const toBrandingView = (
     };
   });
 
-export const BrandingGroupLive = HttpApiBuilder.group(Api, "branding", (handlers) =>
-  Effect.gen(function* () {
+export const BrandingGroupLive = HttpApiBuilder.group(
+  Api,
+  "branding",
+  Effect.fnUntraced(function* (handlers) {
     const workspaces = yield* Workspaces;
     return handlers
       .handle("getBranding", () =>
-        Effect.flatMap(workspaces.current, (view) => toBrandingView(view)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.flatMap(workspaces.current(caller), (view) => toBrandingView(view)),
+        ),
       )
       .handle("updateBranding", ({ headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          Effect.gen(function* () {
-            const preResolved =
-              payload.theme === undefined
-                ? undefined
-                : payload.theme === null
-                  ? null
-                  : yield* resolveTheme(payload.theme);
-            const view = yield* workspaces.updateSettings({ branding: payload }, expectedRevision);
-            return yield* toBrandingView(view, preResolved);
-          }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(
+            headers["if-match"],
+            Effect.fnUntraced(function* (expectedRevision) {
+              const preResolved =
+                payload.theme === undefined
+                  ? undefined
+                  : payload.theme === null
+                    ? null
+                    : yield* resolveTheme(payload.theme);
+              const view = yield* workspaces.updateSettings(
+                caller,
+                { branding: payload },
+                expectedRevision,
+              );
+              return yield* toBrandingView(view, preResolved);
+            }),
+          ),
         ),
       )
       .handle("previewPdf", ({ payload }) =>
-        Effect.map(workspaces.previewBranding(payload), (file) =>
-          fileDownload(file, { disposition: "inline" }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(workspaces.previewBranding(caller, payload), (file) =>
+            downloadResponse({ disposition: "inline" })(file),
+          ),
         ),
       )
-      .handle("putImage", ({ params, payload }) =>
-        Effect.gen(function* () {
+      .handle(
+        "putImage",
+        Effect.fnUntraced(function* ({ params, payload }) {
+          const caller = yield* RequestCaller;
           let uploaded: ImageRef | undefined;
-          yield* Stream.runForEach(payload, (part) =>
-            Effect.gen(function* () {
+          yield* Stream.runForEach(
+            payload,
+            Effect.fnUntraced(function* (part) {
               if (part._tag !== "File" || part.key !== "file" || uploaded !== undefined) {
-                return yield* new Invalid({
+                return yield* Invalid.make({
                   issues: [{ path: ["file"], code: "request.malformed" }],
                 });
               }
@@ -107,35 +127,45 @@ export const BrandingGroupLive = HttpApiBuilder.group(Api, "branding", (handlers
                 Stream.catch((err) => Stream.die(new MultipartStreamDefect(err))),
               );
               uploaded = yield* workspaces
-                .setBrandingImage(params.image, { contentType: part.contentType, bytes })
+                .setBrandingImage(caller, params.image, { contentType: part.contentType, bytes })
                 .pipe(
                   Effect.catchDefect((defect) =>
                     defect instanceof MultipartStreamDefect
-                      ? Effect.fail(mapMultipartError(defect.error))
+                      ? defect.error.pipe(mapMultipartError, Effect.fail)
                       : Effect.die(defect),
                   ),
                 );
             }),
-          ).pipe(Effect.catchTag("MultipartError", (err) => Effect.fail(mapMultipartError(err))));
+          ).pipe(
+            Effect.catchTag("MultipartError", (error) =>
+              error.pipe(mapMultipartError, Effect.fail),
+            ),
+          );
           if (uploaded === undefined) {
-            return yield* new Invalid({
+            return yield* Invalid.make({
               issues: [{ path: ["file"], code: "request.malformed" }],
             });
           }
           return uploaded;
         }),
       )
-      .handle("getImage", ({ params }) =>
-        Effect.gen(function* () {
-          const file = yield* workspaces.brandingImage(params.image);
-          const view = yield* workspaces.current;
+      .handle(
+        "getImage",
+        Effect.fnUntraced(function* ({ params }) {
+          const caller = yield* RequestCaller;
+          const file = yield* workspaces.brandingImage(caller, params.image);
+          const view = yield* workspaces.current(caller);
           const ref = view.branding[params.image];
-          return downloadResponse(ref === null ? file : { ...file, sizeBytes: ref.bytes }, {
+          return downloadResponse({
             etag: ref === null ? undefined : `"${ref.sha256}"`,
             cacheControl: "private, max-age=300",
-          });
+          })(ref === null ? file : { ...file, sizeBytes: ref.bytes });
         }),
       )
-      .handle("removeImage", ({ params }) => workspaces.removeBrandingImage(params.image));
+      .handle("removeImage", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.removeBrandingImage(caller, params.image),
+        ),
+      );
   }),
 );

@@ -1,33 +1,86 @@
-import type { RequestKey } from "@kvitbit/domain/contract";
-import { type ApiResult, describeError, UiError, uuidV7 } from "@kvitbit/ui-port/api";
+import { RequestKey } from "@kvitbit/domain/contract";
+import { type ApiResult, UiError, uuidV7 } from "@kvitbit/ui-port/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Effect } from "effect";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import { CryptoDigestAlgorithm, digestStringAsync } from "expo-crypto";
+import {
+  executeRequestIntent,
+  makeRequestIntentStore,
+  RequestIntentExpired,
+  requestKeyReplayWindowOpen as replayWindowOpenAt,
+} from "./request-intent-store";
 
-interface IntentStorage {
-  getItem(slot: string): Promise<string | null>;
-  setItem(slot: string, value: string): Promise<void>;
-  removeItem(slot: string): Promise<void>;
-}
+export { settlesRequestIntent } from "./request-intent-store";
 
-interface RequestIntent {
-  readonly key: RequestKey;
-  readonly firstAttemptAt: number;
-}
+export const runMobileEffect = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(effect);
 
-// The core request log retains a completed or pending claim for 24 hours.
-const REPLAY_WINDOW_MS = 24 * 60 * 60 * 1000;
+export const runMobileSync = <A, E>(effect: Effect.Effect<A, E>) => Effect.runSync(effect);
 
-export const requestKeyReplayWindowOpen = (firstAttemptAt: number, now = Date.now()): boolean =>
-  Number.isFinite(firstAttemptAt) &&
-  now >= firstAttemptAt &&
-  now - firstAttemptAt < REPLAY_WINDOW_MS;
+export const requestKeyReplayWindowOpen = (
+  ...[firstAttemptAt, now]: [firstAttemptAt: number, now?: number]
+): boolean => replayWindowOpenAt(firstAttemptAt, now ?? runMobileSync(Clock.currentTimeMillis));
 
-class RequestIntentExpired extends Error {
-  constructor() {
-    super("The request-key replay window expired. Reconcile the original write before retrying.");
-  }
-}
+export const forkMobileEffect = <A, E>(effect: Effect.Effect<A, E>) => Effect.runFork(effect);
+
+class MobileBridgeError extends Schema.TaggedError<
+  MobileBridgeError,
+  { readonly brand: unique symbol }
+>()("MobileBridgeError", {
+  cause: Schema.Unknown,
+}) {}
+
+export const fromMobilePromise = <A>(tryPromise: () => Promise<A>) =>
+  Effect.tryPromise({ try: tryPromise, catch: (cause) => MobileBridgeError.make({ cause }) });
+
+const withWebLock = <A, E>(slot: string, work: Effect.Effect<A, E>) => {
+  const locks = globalThis.navigator?.locks;
+  if (!(Predicate.isObject(locks) && Predicate.isFunction(locks.request))) return;
+  return Effect.tryPromise({
+    try: (signal) => locks.request(slot, { signal }, () => Effect.runPromiseExit(work, { signal })),
+    catch: (cause) => MobileBridgeError.make({ cause }),
+  }).pipe(
+    Effect.flatMap((exit) =>
+      Exit.isSuccess(exit) ? Effect.succeed(exit.value) : Effect.failCause(exit.cause),
+    ),
+  );
+};
+
+const store = makeRequestIntentStore<MobileBridgeError, MobileBridgeError>({
+  storage: {
+    getItem: (slot) => fromMobilePromise(() => AsyncStorage.getItem(slot)),
+    setItem: (slot, value) => fromMobilePromise(() => AsyncStorage.setItem(slot, value)),
+    removeItem: (slot) => fromMobilePromise(() => AsyncStorage.removeItem(slot)),
+  },
+  digest: (value) =>
+    fromMobilePromise(() => digestStringAsync(CryptoDigestAlgorithm.SHA256, value)),
+  mint: Effect.map(uuidV7, RequestKey.make),
+  withWebLock,
+});
+export const acquireRequestKey: {
+  <P>(operation: string, payload: P): (owner: string) => Promise<RequestKey>;
+  <P>(owner: string, operation: string, payload: P): Promise<RequestKey>;
+} = Fn.dual(3, <P>(owner: string, operation: string, payload: P) =>
+  runMobileEffect(store.acquireRequestKey(owner, operation, payload)),
+);
+
+export const reuseRequestKey: {
+  <P>(operation: string, payload: P, key: RequestKey): (owner: string) => Promise<RequestKey>;
+  <P>(owner: string, operation: string, payload: P, key: RequestKey): Promise<RequestKey>;
+} = Fn.dual(4, <P>(owner: string, operation: string, payload: P, key: RequestKey) =>
+  runMobileEffect(store.reuseRequestKey(owner, operation, payload, key)),
+);
+
+export const completeRequestKey: {
+  (operation: string, key: RequestKey): (owner: string) => Promise<void>;
+  (owner: string, operation: string, key: RequestKey): Promise<void>;
+} = Fn.dual(3, (owner: string, operation: string, key: RequestKey) =>
+  runMobileEffect(store.completeRequestKey(owner, operation, key)),
+);
 
 const expiredRequest = UiError.unexpected(409, null);
 
@@ -38,137 +91,31 @@ export const requestIntentReconciliationCopy = {
   cs: "Tato změna se už mohla uložit. Než ji provedete znovu, zkontrolujte původní výsledek.",
 };
 
-export const requestIntentFailure = (error: unknown): UiError =>
-  error instanceof RequestIntentExpired ? expiredRequest : UiError.offline;
+export const requestIntentFailure = (cause: unknown): UiError =>
+  Schema.is(RequestIntentExpired)(cause) ? expiredRequest : UiError.offline;
 
-const readRecord = (record: RequestIntent | RequestKey): RequestIntent => {
-  if (typeof record !== "string") return record;
-  // Old mobile builds persisted only UUIDv7 keys. Their timestamp is the
-  // conservative start of the replay window for legacy unresolved writes.
-  const time = /^[\da-f]{8}-[\da-f]{4}-7/i.test(record)
-    ? Number.parseInt(record.slice(0, 13).replace("-", ""), 16)
-    : Number.NaN;
-  return { key: record, firstAttemptAt: time };
-};
-
-// Wire payloads are JSON. Sort object keys so a rerender or a restored form
-// can reconstruct the same intent even when keys were inserted in a different order.
-const canonicalPayload = (payload: unknown): string =>
-  JSON.stringify(payload, (_key, value: unknown) => {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return value;
-    const record = value as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.keys(record)
-        .sort()
-        .map((key) => [key, record[key]]),
-    );
-  }) ?? "";
-
-export const makeRequestIntents = (
-  storage: IntentStorage,
-  digest: (value: string) => Promise<string>,
-  mint: () => Promise<RequestKey>,
-  now: () => number = () => Date.now(),
-) => {
-  const readKeys = async (slot: string): Promise<Record<string, RequestIntent | RequestKey>> => {
-    const stored = await storage.getItem(slot);
-    return stored === null ? {} : JSON.parse(stored);
-  };
-  const reusableKey = (record: RequestIntent | RequestKey): RequestKey => {
-    const { key, firstAttemptAt } = readRecord(record);
-    if (!requestKeyReplayWindowOpen(firstAttemptAt, now())) throw new RequestIntentExpired();
-    return key;
-  };
-  const pending = new Map<string, Promise<void>>();
-  const inSlot = async <T>(
+export const runRequestIntent = <A, P>(
+  ...input: [
     owner: string,
     operation: string,
-    work: (slot: string) => Promise<T>,
-  ) => {
-    const slot = `kvitbit.request-intent.v1.${await digest(JSON.stringify([owner, operation]))}`;
-    // Web tabs share local storage. Native uses the same queue within its JS runtime.
-    if (typeof navigator !== "undefined" && typeof navigator.locks?.request === "function") {
-      return navigator.locks.request(slot, () => work(slot));
-    }
-    const task = (pending.get(slot) ?? Promise.resolve()).then(() => work(slot));
-    const settled = task.then(
-      () => undefined,
-      () => undefined,
-    );
-    pending.set(slot, settled);
-    try {
-      return await task;
-    } finally {
-      if (pending.get(slot) === settled) pending.delete(slot);
-    }
-  };
-
-  return {
-    acquireRequestKey: async (owner: string, operation: string, payload: unknown) => {
-      const fingerprint = await digest(canonicalPayload(payload));
-      return inSlot(owner, operation, async (slot) => {
-        const keys = await readKeys(slot);
-        const previous = keys[fingerprint];
-        if (previous !== undefined) return reusableKey(previous);
-        const key = await mint();
-        const intent = { key, firstAttemptAt: now() };
-        await storage.setItem(slot, JSON.stringify({ ...keys, [fingerprint]: intent }));
-        return key;
-      });
-    },
-    reuseRequestKey: async (
-      owner: string,
-      operation: string,
-      payload: unknown,
-      key: RequestKey,
-    ) => {
-      const fingerprint = await digest(canonicalPayload(payload));
-      return inSlot(owner, operation, async (slot) => {
-        const previous = (await readKeys(slot))[fingerprint];
-        if (previous === undefined || readRecord(previous).key !== key) {
-          throw new RequestIntentExpired();
-        }
-        return reusableKey(previous);
-      });
-    },
-    completeRequestKey: (owner: string, operation: string, key: RequestKey) =>
-      inSlot(owner, operation, async (slot) => {
-        const keys = Object.entries(await readKeys(slot));
-        const remaining = keys.filter(([, candidate]) => readRecord(candidate).key !== key);
-        if (remaining.length === keys.length) return;
-        if (remaining.length === 0) await storage.removeItem(slot);
-        else await storage.setItem(slot, JSON.stringify(Object.fromEntries(remaining)));
-      }),
-  };
-};
-
-export const { acquireRequestKey, completeRequestKey, reuseRequestKey } = makeRequestIntents(
-  AsyncStorage,
-  (value) => digestStringAsync(CryptoDigestAlgorithm.SHA256, value),
-  async () => (await Effect.runPromise(uuidV7)) as RequestKey,
-);
-
-export const settlesRequestIntent = (
-  result: { readonly _tag: "Ok" } | { readonly _tag: "Err"; readonly error: UiError },
-): boolean => result._tag === "Ok" || describeError(result.error).clearRequestKey;
-
-export const runRequestIntent = async <A>(
-  owner: string,
-  operation: string,
-  payload: unknown,
-  run: (key: RequestKey) => Promise<ApiResult<A>>,
-  persistSuccess?: (value: A) => Promise<void>,
-): Promise<ApiResult<A>> => {
-  try {
-    const key = await acquireRequestKey(owner, operation, payload);
-    const result = await run(key);
-    if (result._tag === "Ok") await persistSuccess?.(result.value);
-    if (settlesRequestIntent(result)) {
-      // The write has already succeeded. A failed cleanup must not report it as a failed write.
-      await completeRequestKey(owner, operation, key).catch(() => undefined);
-    }
-    return result;
-  } catch (error) {
-    return { _tag: "Err", error: requestIntentFailure(error) };
-  }
+    payload: P,
+    request: (key: RequestKey) => Promise<ApiResult<A>>,
+    persistSuccess?: (value: A) => Promise<void>,
+  ]
+) => {
+  const [owner, operation, payload, request, persistSuccess] = input;
+  return executeRequestIntent({
+    acquire: store.acquireRequestKey(owner, operation, payload),
+    request: (key) => fromMobilePromise(() => request(key)),
+    checkpoint:
+      persistSuccess === undefined
+        ? undefined
+        : (value) => fromMobilePromise(() => persistSuccess(value)),
+    complete: (key) => store.completeRequestKey(owner, operation, key),
+  }).pipe(
+    Effect.catch((error) =>
+      Effect.succeed({ _tag: "Err" as const, error: requestIntentFailure(error) }),
+    ),
+    runMobileEffect,
+  );
 };

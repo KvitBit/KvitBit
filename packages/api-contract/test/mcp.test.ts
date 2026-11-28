@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { Action, Scope } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import type * as JsonSchema from "effect/JsonSchema";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
+import * as Record from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   ConfirmationRequired,
   CreateDraftArgs,
@@ -59,31 +68,40 @@ create_final_invoice documents:write 2 D document.finalInvoice
 create_credit_note documents:write 2 D document.correct
 `;
 
-const MODES = { "1": "single", "2": "two_step", "1/2": "two_step_when_issued" } as const;
-const spec = SPEC.trim()
-  .split("\n")
-  .map((line) => {
-    const [name = "", scope = "", mode = "", hints = "", actions = ""] = line.split(" ");
-    const flags = hints === "-" ? [] : hints.split(",");
-    return {
-      name,
-      scope,
-      mode: MODES[mode as keyof typeof MODES],
-      annotations: {
-        readOnlyHint: flags.includes("RO"),
-        destructiveHint: flags.includes("D"),
-        idempotentHint: flags.includes("I"),
-        openWorldHint: flags.includes("O"),
-      },
-      actions: actions.split(","),
-    };
-  });
+const MODES: Readonly<Record<string, string>> = {
+  "1": "single",
+  "2": "two_step",
+  "1/2": "two_step_when_issued",
+};
+const spec = Arr.map(Str.split(Str.trim(SPEC), "\n"), (line) => {
+  const [name = "", scope = "", mode = "", hints = "", actions = ""] = Str.split(line, " ");
+  const flags: ReadonlyArray<string> = hints === "-" ? [] : Str.split(hints, ",");
+  return {
+    name,
+    scope,
+    mode: MODES[mode],
+    annotations: {
+      readOnlyHint: flags.includes("RO"),
+      destructiveHint: flags.includes("D"),
+      idempotentHint: flags.includes("I"),
+      openWorldHint: flags.includes("O"),
+    },
+    actions: Str.split(actions, ","),
+  };
+});
+
+const json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Fn.flow(Schema.encodeEffect(json), Effect.runSync);
+const LOCAL_REF = /"\$ref":"#\/\$defs\/([^"]+)"/g;
+const EXTERNAL_REF = /"\$ref":"(?!#\/\$defs\/)/;
+const schemaProperties = ({ properties }: JsonSchema.JsonSchema) =>
+  Predicate.isObject(properties) ? properties : {};
 
 describe("MCP tool catalog", () => {
   test("matches the section 6.5 table: 28 tools in order with scope, mode, hints, actions", () => {
     expect(spec).toHaveLength(28);
     expect<unknown>(
-      MCP_TOOLS.map(({ name, scope, mode, annotations, actions }) => ({
+      Arr.map(MCP_TOOLS, ({ name, scope, mode, annotations, actions }) => ({
         name,
         scope,
         mode,
@@ -96,7 +114,10 @@ describe("MCP tool catalog", () => {
   test("read-only tools need <area>:read, every other tool <area>:write", () => {
     for (const t of MCP_TOOLS) {
       expect(Schema.is(Scope)(t.scope)).toBe(true);
-      expect([t.name, t.scope.endsWith(":read")]).toEqual([t.name, t.annotations.readOnlyHint]);
+      expect([t.name, Str.endsWith(":read")(t.scope)]).toEqual([
+        t.name,
+        t.annotations.readOnlyHint,
+      ]);
     }
   });
 
@@ -106,7 +127,7 @@ describe("MCP tool catalog", () => {
 
   test("input and output JSON Schemas are objects, as MCP requires", () => {
     for (const t of MCP_TOOLS) {
-      expect([t.name, toolJsonSchema(t.input).type, toolJsonSchema(t.output).type]).toEqual([
+      expect([t.name, toolJsonSchema(t.input)["type"], toolJsonSchema(t.output)["type"]]).toEqual([
         t.name,
         "object",
         "object",
@@ -129,24 +150,23 @@ describe("MCP tool catalog", () => {
   test("every $ref in a tool schema resolves inside its own $defs", () => {
     for (const t of MCP_TOOLS) {
       for (const schema of [toolJsonSchema(t.input), toolJsonSchema(t.output)]) {
-        const defs = (schema.$defs as Record<string, unknown> | undefined) ?? {};
-        for (const match of JSON.stringify(schema).matchAll(/"\$ref":"#\/\$defs\/([^"]+)"/g)) {
+        const defs = Predicate.isObject(schema["$defs"]) ? schema["$defs"] : {};
+        const encoded = encodeJson(schema);
+        for (const match of Str.matchAll(LOCAL_REF)(encoded)) {
           expect([t.name, match[1] ?? "", (match[1] ?? "") in defs]).toEqual([
             t.name,
             match[1] ?? "",
             true,
           ]);
         }
-        expect(JSON.stringify(schema)).not.toMatch(/"\$ref":"(?!#\/\$defs\/)/);
+        expect(encoded).not.toMatch(EXTERNAL_REF);
       }
     }
   });
 
   test("no tool takes a workspaceId; two-step tools take confirm and confirmationToken", () => {
     for (const t of MCP_TOOLS) {
-      const properties = Object.keys(
-        (toolJsonSchema(t.input).properties as Record<string, unknown> | undefined) ?? {},
-      );
+      const properties = t.input.pipe(toolJsonSchema, schemaProperties, Record.keys);
       expect(properties).not.toContain("workspaceId");
       const twoStep = t.mode !== "single";
       expect([
@@ -203,12 +223,14 @@ describe("two-step preview and confirm schemas", () => {
   };
 
   test("the section 6.6 example decodes and round-trips", () => {
-    const decoded = Schema.decodeUnknownSync(ConfirmationRequired)(example);
-    expect<unknown>(Schema.encodeSync(ConfirmationRequired)(decoded)).toEqual(example);
+    const decoded = Schema.decodeUnknownEffect(ConfirmationRequired)(example).pipe(Effect.runSync);
+    expect<unknown>(
+      Schema.encodeEffect(ConfirmationRequired)(decoded).pipe(Effect.runSync),
+    ).toEqual(example);
   });
 
   test("ConfirmationRequired rejects malformed tokens, amounts and empty summaries", () => {
-    const decode = Schema.decodeUnknownSync(ConfirmationRequired);
+    const decode = Fn.flow(Schema.decodeUnknownEffect(ConfirmationRequired), Effect.runSync);
     expect(() => decode({ ...example, confirmationToken: "tok_123" })).toThrow();
     expect(() => decode({ ...example, confirmationToken: "mcpc_short" })).toThrow();
     expect(() =>
@@ -224,18 +246,21 @@ describe("two-step preview and confirm schemas", () => {
   });
 
   test("two-step output is either the preview or a Confirmed result", () => {
-    const output = Schema.decodeUnknownSync(twoStepOutput(Schema.Struct({ ok: Schema.Boolean })));
+    const output = Fn.flow(
+      Schema.decodeUnknownEffect(twoStepOutput(Schema.Struct({ ok: Schema.Boolean }))),
+      Effect.runSync,
+    );
     expect(output(example)).toMatchObject({ _tag: "ConfirmationRequired" });
     expect(output({ _tag: "Confirmed", result: { ok: true } })).toEqual({
       _tag: "Confirmed",
       result: { ok: true },
     });
     expect(() => output({ _tag: "Confirmed", result: {} })).toThrow();
-    expect(toolJsonSchema(twoStepOutput(DocumentResult)).type).toBe("object");
+    expect(DocumentResult.pipe(twoStepOutput, toolJsonSchema)["type"]).toBe("object");
   });
 
   test("args decode for preview and confirm; confirm must be literally true", () => {
-    const decode = Schema.decodeUnknownSync(IssueDocumentArgs);
+    const decode = Fn.flow(Schema.decodeUnknownEffect(IssueDocumentArgs), Effect.runSync);
     const preview = decode({ from: { draft: DOC, revision: 4 }, send: { to: ["a@b.cz"] } });
     expect(confirmStep(preview)).toBe("preview");
     const confirm = decode({
@@ -256,7 +281,7 @@ describe("two-step preview and confirm schemas", () => {
   });
 
   test("send_document has no purpose argument", () => {
-    const properties = Object.keys(toolJsonSchema(SendDocumentArgs).properties as object);
+    const properties = SendDocumentArgs.pipe(toolJsonSchema, schemaProperties, Record.keys);
     expect(properties).not.toContain("purpose");
     expect(properties).toEqual(
       expect.arrayContaining(["documentId", "to", "language", "reminders"]),
@@ -269,56 +294,76 @@ describe("two-step preview and confirm schemas", () => {
         documentId: DOC,
         confirm: true,
         confirmationToken: TOKEN,
-        idempotencyKey: "k".repeat(8),
+        idempotencyKey: Str.repeat(8)("k"),
       }),
     ).toEqual({ documentId: DOC });
   });
 
+  test("the confirmation hash accepts unions of argument dictionaries", () => {
+    const bound = (fields: Record<string, string> | Record<string, number>) =>
+      confirmationBoundArgs(fields);
+    expect(bound({ documentId: DOC, confirmationToken: TOKEN })).toEqual({ documentId: DOC });
+    expect(bound({ revision: 4 })).toEqual({ revision: 4 });
+  });
+
   test("retry keys use the confirmation id or the grant plus idempotencyKey", () => {
-    expect(mcpConfirmRequestKey("0193")).toBe("mcp-confirm:0193" as never);
-    expect(mcpRequestKey("grant-1", "abcdefgh")).toBe("mcp:grant-1:abcdefgh" as never);
+    expect<string>(mcpConfirmRequestKey("0193")).toBe("mcp-confirm:0193");
+    expect<string>(mcpRequestKey("grant-1", "abcdefgh")).toBe("mcp:grant-1:abcdefgh");
   });
 
   test("single-call idempotencyKey follows the Idempotency-Key format", () => {
     const fields = CreateDraftArgs.fields;
-    expect(Object.keys(fields)).toContain("idempotencyKey");
-    const decode = Schema.decodeUnknownSync(
-      Schema.Struct({ idempotencyKey: fields.idempotencyKey }),
+    expect(Record.keys(fields)).toContain("idempotencyKey");
+    const decode = Fn.flow(
+      Schema.decodeUnknownEffect(Schema.Struct({ idempotencyKey: fields.idempotencyKey })),
+      Effect.runSync,
     );
     expect(decode({ idempotencyKey: "abcdefgh" })).toEqual({ idempotencyKey: "abcdefgh" });
     expect(() => decode({ idempotencyKey: "short" })).toThrow();
   });
 
   test("tool errors carry the encoded core error", () => {
-    const decoded = Schema.decodeUnknownSync(McpToolError)({
+    const decoded = Schema.decodeEffect(McpToolError)({
       error: { _tag: "Forbidden", action: "document.issue" },
-    });
+    }).pipe(Effect.runSync);
     expect(decoded.error._tag).toBe("Forbidden");
   });
 });
 
 describe("MCP resources", () => {
   test("four static resources and five templates, as in section 6.7", () => {
-    expect(MCP_RESOURCES.filter((r) => r.kind === "static").map((r) => r.uri)).toEqual([
+    expect(
+      Arr.map(
+        Arr.filter(MCP_RESOURCES, (r) => r.kind === "static"),
+        (r) => r.uri,
+      ),
+    ).toEqual([
       "kvitbit://workspace",
       "kvitbit://templates",
       "kvitbit://price-list",
       "kvitbit://guide",
     ]);
-    expect(MCP_RESOURCES.filter((r) => r.kind === "template").map((r) => r.uri)).toEqual([
+    expect(
+      Arr.map(
+        Arr.filter(MCP_RESOURCES, (r) => r.kind === "template"),
+        (r) => r.uri,
+      ),
+    ).toEqual([
       "kvitbit://documents/{documentId}",
       "kvitbit://documents/{documentId}/pdf{?template,language}",
       "kvitbit://contacts/{contactId}",
       "kvitbit://expenses/{expenseId}",
       "kvitbit://expenses/{expenseId}/attachments/{attachmentId}",
     ]);
-    for (const r of MCP_RESOURCES)
-      if (r.action !== null) expect(Schema.is(Action)(r.action)).toBe(true);
+    for (const r of MCP_RESOURCES) {
+      if (r.action === null) continue;
+      expect(Schema.is(Action)(r.action)).toBe(true);
+    }
   });
 });
 
 describe("upsert_contact argument forms", () => {
-  const decode = Schema.decodeUnknownSync(UpsertContactArgs);
+  const decode = Fn.flow(Schema.decodeUnknownEffect(UpsertContactArgs), Effect.runSync);
   const contact = { name: "Acme s.r.o." };
   const contactId = "01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f";
 
@@ -345,31 +390,41 @@ describe("upsert_contact argument forms", () => {
 
   test("the JSON Schema describes the valid forms and the Contact revision", () => {
     const schema = toolJsonSchema(UpsertContactArgs);
-    expect(String(schema.description)).toContain("{ contactId, revision, contact }");
-    const revision = JSON.stringify((schema.properties as Record<string, unknown>).revision);
+    expect(String(schema["description"])).toContain("{ contactId, revision, contact }");
+    const revision = encodeJson(schemaProperties(schema)["revision"]);
     expect(revision).toContain("Contact revision");
     expect(revision).not.toContain("document revision");
   });
 });
 
 describe("list_expenses arguments", () => {
-  const decode = Schema.decodeUnknownSync(ListExpensesArgs);
+  const decode = Fn.flow(Schema.decodeUnknownEffect(ListExpensesArgs), Effect.runSync);
 
   test("are incomplete plus paging, the same fields as the HTTP list query", () => {
-    const properties = Object.keys(toolJsonSchema(ListExpensesArgs).properties as object);
-    expect(properties.sort()).toEqual(["cursor", "incomplete", "limit"]);
-    expect(Object.keys(ExpenseListQuery).sort()).toEqual(["cursor", "incomplete", "limit"]);
+    const properties = ListExpensesArgs.pipe(toolJsonSchema, schemaProperties, Record.keys);
+    expect(Arr.sort(properties, Order.String)).toEqual(["cursor", "incomplete", "limit"]);
+    expect(Arr.sort(Record.keys(ExpenseListQuery), Order.String)).toEqual([
+      "cursor",
+      "incomplete",
+      "limit",
+    ]);
   });
 
   test("typed decode and encode accept the modeled fields", () => {
     const wire: typeof ListExpensesArgs.Encoded = { incomplete: true };
-    expect(Schema.decodeSync(ListExpensesArgs)(wire)).toEqual({ incomplete: true });
-    expect(Schema.decodeSync(ListExpensesArgs)({ incomplete: true, limit: 3 })).toEqual({
+    expect(Schema.decodeEffect(ListExpensesArgs)(wire).pipe(Effect.runSync)).toEqual({
+      incomplete: true,
+    });
+    expect(
+      Schema.decodeEffect(ListExpensesArgs)({ incomplete: true, limit: 3 }).pipe(Effect.runSync),
+    ).toEqual({
       incomplete: true,
       limit: 3,
     });
     const args: typeof ListExpensesArgs.Type = { cursor: "c1" };
-    expect(Schema.encodeSync(ListExpensesArgs)(args)).toEqual({ cursor: "c1" });
+    expect(Schema.encodeEffect(ListExpensesArgs)(args).pipe(Effect.runSync)).toEqual({
+      cursor: "c1",
+    });
   });
 
   test("decode the modeled fields and reject any other, with default options", () => {
@@ -387,16 +442,27 @@ describe("list_expenses arguments", () => {
   });
 
   test("the JSON Schema is closed", () => {
-    expect(toolJsonSchema(ListExpensesArgs).additionalProperties).toBe(false);
+    expect(toolJsonSchema(ListExpensesArgs)["additionalProperties"]).toBe(false);
   });
 
   test("only list_expenses is closed so far; other inputs still drop extras", () => {
-    expect(MCP_TOOLS.filter((t) => t.closedInput).map((t) => t.name)).toEqual(["list_expenses"]);
-    const listExpenses = MCP_TOOLS.find((t) => t.name === "list_expenses");
+    expect(
+      Arr.map(
+        Arr.filter(MCP_TOOLS, (t) => t.closedInput),
+        (t) => t.name,
+      ),
+    ).toEqual(["list_expenses"]);
+    const listExpenses = Option.getOrUndefined(
+      Arr.findFirst(MCP_TOOLS, (t) => t.name === "list_expenses"),
+    );
     expect(listExpenses?.input).toBe(ListExpensesArgs);
-    expect(Schema.decodeUnknownSync(ListContactsArgs)({ text: "Ada", extra: true })).toEqual({
+    expect(
+      Schema.decodeUnknownEffect(ListContactsArgs)({ text: "Ada", extra: true }).pipe(
+        Effect.runSync,
+      ),
+    ).toEqual({
       text: "Ada",
     });
-    expect(toolJsonSchema(ListContactsArgs).additionalProperties).toBe(true);
+    expect(toolJsonSchema(ListContactsArgs)["additionalProperties"]).toBe(true);
   });
 });

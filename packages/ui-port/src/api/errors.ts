@@ -3,6 +3,7 @@
  * anything a KvitbitApi call can fail with; `describe` turns a UiError into the render-ready
  * model (field issues, banner text, retry hints) that every screen starts from.
  */
+
 import {
   InvalidBotProof,
   OriginRejected,
@@ -21,21 +22,31 @@ import {
   NotFound,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { Cause, Exit, Option, Schema } from "effect";
-import { HttpClientError } from "effect/http";
-import { type Text, type TextParam, text } from "../text";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as HttpClientError from "effect/http/HttpClientError";
+import * as Match from "effect/Match";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export interface Offline {
+import { type Text, text } from "../text";
+
+interface Offline {
   readonly _tag: "Offline";
 }
-export interface Timeout {
+interface Timeout {
   readonly _tag: "Timeout";
 }
-export interface Cancelled {
+interface Cancelled {
   readonly _tag: "Cancelled";
 }
 /** 5xx, undeclared statuses and decode failures. `requestId` is the response's `X-Request-Id`. */
-export interface Unexpected {
+interface Unexpected {
   readonly _tag: "Unexpected";
   readonly status: number | null;
   readonly requestId: string | null;
@@ -59,7 +70,7 @@ export type WireError =
 /** A Better Auth issue code (`auth.bot_proof_required`, ...): not in the domain IssueCode enum. */
 export type AuthIssueCode = `auth.${string}`;
 
-export interface AuthIssue {
+interface AuthIssue {
   readonly path: ReadonlyArray<string | number>;
   readonly code: AuthIssueCode | IssueCode;
   readonly params?: Readonly<Record<string, string>>;
@@ -102,8 +113,8 @@ const WIRE_ERRORS = [
 
 export const UiError = { offline, timeout, cancelled, unexpected } as const;
 
-export const isWireError = (u: unknown): u is WireError =>
-  WIRE_ERRORS.some((ErrorClass) => u instanceof ErrorClass);
+const isWireError: Predicate.Refinement<unknown, WireError> = (u): u is WireError =>
+  Arr.some(WIRE_ERRORS, (ErrorClass) => Schema.is(ErrorClass)(u));
 
 const LOCAL_TAGS = new Set(["Offline", "Timeout", "Cancelled", "Unexpected"]);
 
@@ -114,37 +125,34 @@ const LOCAL_TAGS = new Set(["Offline", "Timeout", "Cancelled", "Unexpected"]);
  */
 const isIssueCode = Schema.is(IssueCode);
 
-const isAuthIssue = (u: unknown): u is AuthIssue => {
-  if (typeof u !== "object" || u === null) return false;
-  const { path, code, params } = u as { path?: unknown; code?: unknown; params?: unknown };
+const isAuthIssue: Predicate.Refinement<unknown, AuthIssue> = (u): u is AuthIssue => {
+  if (!Predicate.isObjectOrArray(u)) return false;
+  const path = "path" in u ? u["path"] : undefined;
+  const code = "code" in u ? u["code"] : undefined;
+  const params = "params" in u ? u["params"] : undefined;
   return (
-    Array.isArray(path) &&
-    path.every((segment) => typeof segment === "string" || typeof segment === "number") &&
-    typeof code === "string" &&
-    (code.startsWith("auth.") || isIssueCode(code)) &&
+    Arr.isArray(path) &&
+    Arr.every(path, (segment) => Predicate.isString(segment) || Predicate.isNumber(segment)) &&
+    Predicate.isString(code) &&
+    (Fn.pipe(code, Str.startsWith("auth.")) || isIssueCode(code)) &&
     (params === undefined ||
-      (typeof params === "object" &&
-        params !== null &&
-        !Array.isArray(params) &&
-        Object.values(params).every((value) => typeof value === "string")))
+      (Predicate.isObject(params) && Arr.every(Rec.values(params), Predicate.isString)))
   );
 };
 
-const isPlainInvalid = (u: object): u is AuthInvalid => {
-  const candidate = u as { _tag?: unknown; issues?: unknown };
-  return (
-    candidate._tag === "Invalid" &&
-    Array.isArray(candidate.issues) &&
-    candidate.issues.length > 0 &&
-    candidate.issues.every(isAuthIssue)
-  );
-};
+const isPlainInvalid: Predicate.Refinement<object, AuthInvalid> = (u): u is AuthInvalid =>
+  "_tag" in u &&
+  u._tag === "Invalid" &&
+  "issues" in u &&
+  Arr.isArray(u.issues) &&
+  u.issues.length > 0 &&
+  Arr.every(u.issues, isAuthIssue);
 
-export const isUiError = (u: unknown): u is UiError =>
+export const isUiError: Predicate.Refinement<unknown, UiError> = (u): u is UiError =>
   isWireError(u) ||
-  (typeof u === "object" &&
-    u !== null &&
-    (LOCAL_TAGS.has((u as { _tag?: unknown })._tag as string) || isPlainInvalid(u)));
+  (Predicate.isObjectOrArray(u) &&
+    (("_tag" in u && Predicate.isString(u["_tag"]) && LOCAL_TAGS.has(u["_tag"])) ||
+      isPlainInvalid(u)));
 
 /** The exchange a failure came from, when the failure value does not carry its response. */
 export interface FailedResponse {
@@ -160,14 +168,14 @@ const failedResponses = new WeakMap<object, FailedResponse>();
  * recovery (`Effect.catchTag("SchemaError", ...)`) still sees it; `toUiError` reads the
  * association. Keyed by the error object, so each failure keeps its own exchange.
  */
-export const annotateFailedResponse = (error: unknown, response: FailedResponse): void => {
-  if (typeof error === "object" && error !== null && !failedResponses.has(error)) {
+export const annotateFailedResponse: {
+  (response: FailedResponse): <E>(error: E) => void;
+  <E>(error: E, response: FailedResponse): void;
+} = Fn.dual(2, <E>(error: E, response: FailedResponse): void => {
+  if (Predicate.isObjectOrArray(error) && !failedResponses.has(error)) {
     failedResponses.set(error, { status: response.status, requestId: response.requestId });
   }
-};
-
-export const failedResponseOf = (error: unknown): FailedResponse | undefined =>
-  typeof error === "object" && error !== null ? failedResponses.get(error) : undefined;
+});
 
 const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError => {
   const reason = error.reason;
@@ -184,14 +192,15 @@ const fromHttpClientError = (error: HttpClientError.HttpClientError): UiError =>
 };
 
 /** The one mapping from a failure value (the `E` channel of a KvitbitApi call) to UiError. */
-export const toUiError = (error: unknown): UiError => {
-  if (isUiError(error)) return error;
-  if (HttpClientError.isHttpClientError(error)) return fromHttpClientError(error);
-  const failed = failedResponseOf(error);
-  if (failed !== undefined) return unexpected(failed.status, failed.requestId);
-  if (Cause.isTimeoutError(error)) return timeout;
-  return unexpected();
-};
+export const toUiError = Match.type<unknown>().pipe(
+  Match.when(isUiError, (error) => error),
+  Match.when(HttpClientError.isHttpClientError, fromHttpClientError),
+  Match.orElse((error): UiError => {
+    const failed = Predicate.isObjectOrArray(error) ? failedResponses.get(error) : undefined;
+    if (failed !== undefined) return unexpected(failed.status, failed.requestId);
+    return Cause.isTimeoutError(error) ? timeout : unexpected();
+  }),
+);
 
 /** Interruption only (the user navigated away, a newer query won) is `Cancelled`. */
 export const fromCause = (cause: Cause.Cause<unknown>): UiError => {
@@ -201,7 +210,7 @@ export const fromCause = (cause: Cause.Cause<unknown>): UiError => {
 };
 
 export const fromExit = <A>(exit: Exit.Exit<A, unknown>): Option.Option<UiError> =>
-  Exit.isFailure(exit) ? Option.some(fromCause(exit.cause)) : Option.none();
+  Exit.isFailure(exit) ? exit.cause.pipe(fromCause, Option.some) : Option.none();
 
 // --- presentation -------------------------------------------------------------------------------
 
@@ -221,7 +230,7 @@ export interface FieldIssue {
  * - session: emit SessionInvalid; Shell signs out and routes to sign-in
  * - silent: nothing to show (cancelled, stale cursor reloads by itself)
  */
-export type Surface = "fields" | "inline" | "banner" | "page" | "session" | "silent";
+type Surface = "fields" | "inline" | "banner" | "page" | "session" | "silent";
 
 export interface UiErrorView {
   readonly error: UiError;
@@ -241,18 +250,18 @@ export interface UiErrorView {
   readonly retryText: Text | null;
 }
 
-export const issueText = (issue: Issue | AuthIssue): Text =>
-  text(`issue.${issue.code}`, issue.params as Readonly<Record<string, TextParam>> | undefined);
+const issueText = (issue: Issue | AuthIssue): Text => text(`issue.${issue.code}`, issue.params);
 
-export const fieldIssues = (issues: ReadonlyArray<Issue | AuthIssue>): ReadonlyArray<FieldIssue> =>
-  issues.map((issue) => ({ path: issue.path, text: issueText(issue) }));
+const fieldIssues = (issues: ReadonlyArray<Issue | AuthIssue>): ReadonlyArray<FieldIssue> =>
+  Arr.map(issues, (issue) => ({ path: issue.path, text: issueText(issue) }));
 
 /** Better Auth issue code (via the AuthClient port, not the domain enum): solve ALTCHA first. */
 const BOT_PROOF_CODES = new Set<string>(["auth.bot_proof_required"]);
 
 /** True when the server says the list cursor no longer matches its filters. */
 export const isCursorMismatch = (error: UiError): boolean =>
-  error._tag === "Invalid" && error.issues.every((issue) => issue.code === "page.cursor_mismatch");
+  error._tag === "Invalid" &&
+  Arr.every<Issue | AuthIssue>(error.issues, (issue) => issue.code === "page.cursor_mismatch");
 
 /**
  * Whether the screen offers Retry (a user action). `Conflict{idempotency_mismatch}` qualifies only
@@ -347,7 +356,9 @@ export const describeError = (error: UiError): UiErrorView => {
         ? view(error, "silent", text("error.invalid"))
         : view(error, "fields", text("error.invalid"), {
             issues: fieldIssues(error.issues),
-            freshBotProof: error.issues.some((issue) => BOT_PROOF_CODES.has(issue.code)),
+            freshBotProof: Arr.some<Issue | AuthIssue>(error.issues, (issue) =>
+              BOT_PROOF_CODES.has(issue.code),
+            ),
           });
     case "PreconditionFailed":
       return view(error, "banner", text("error.conflict.revision_changed"), {
@@ -419,21 +430,43 @@ export const describeError = (error: UiError): UiErrorView => {
  * Splits issues between the form's fields and the form-level summary (section 2.7): an issue whose
  * path a field owns goes to that field, the rest to the summary.
  */
-export const partitionIssues = (
-  issues: ReadonlyArray<FieldIssue>,
-  ownsPath: (path: IssuePath) => boolean,
-): { readonly fields: ReadonlyArray<FieldIssue>; readonly summary: ReadonlyArray<FieldIssue> } => {
-  const fields: Array<FieldIssue> = [];
-  const summary: Array<FieldIssue> = [];
-  for (const issue of issues) (ownsPath(issue.path) ? fields : summary).push(issue);
-  return { fields, summary };
-};
+export const partitionIssues: {
+  (
+    ownsPath: (path: IssuePath) => boolean,
+  ): (issues: ReadonlyArray<FieldIssue>) => {
+    readonly fields: ReadonlyArray<FieldIssue>;
+    readonly summary: ReadonlyArray<FieldIssue>;
+  };
+  (
+    issues: ReadonlyArray<FieldIssue>,
+    ownsPath: (path: IssuePath) => boolean,
+  ): { readonly fields: ReadonlyArray<FieldIssue>; readonly summary: ReadonlyArray<FieldIssue> };
+} = Fn.dual(
+  2,
+  (
+    issues: ReadonlyArray<FieldIssue>,
+    ownsPath: (path: IssuePath) => boolean,
+  ): {
+    readonly fields: ReadonlyArray<FieldIssue>;
+    readonly summary: ReadonlyArray<FieldIssue>;
+  } => {
+    const fields: Array<FieldIssue> = [];
+    const summary: Array<FieldIssue> = [];
+    for (const issue of issues) (ownsPath(issue.path) ? fields : summary).push(issue);
+    return { fields, summary };
+  },
+);
 
 /** Issues exactly at `path` (for one field). */
-export const issuesAt = (
-  issues: ReadonlyArray<FieldIssue>,
-  path: IssuePath,
-): ReadonlyArray<FieldIssue> =>
-  issues.filter(
-    (issue) => issue.path.length === path.length && issue.path.every((p, i) => p === path[i]),
-  );
+export const issuesAt: {
+  (path: IssuePath): (issues: ReadonlyArray<FieldIssue>) => ReadonlyArray<FieldIssue>;
+  (issues: ReadonlyArray<FieldIssue>, path: IssuePath): ReadonlyArray<FieldIssue>;
+} = Fn.dual(
+  2,
+  (issues: ReadonlyArray<FieldIssue>, path: IssuePath): ReadonlyArray<FieldIssue> =>
+    Arr.filter(
+      issues,
+      (issue) =>
+        issue.path.length === path.length && Arr.every(issue.path, (p, i) => p === path[i]),
+    ),
+);

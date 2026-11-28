@@ -1,9 +1,32 @@
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Str from "effect/String";
+
 /**
  * Best-effort parser for pasted postal addresses across Czech, European, UK, US, and Canadian
  * formats, plus a field-merge helper that prefills empty address inputs without overwriting
  * values the user already entered.
  */
 
+const parseCountrySegmentPattern = /^[A-Z]{2}$/;
+const normalizePostalCodePattern = /[a-z]/i;
+const parseStandalonePostalPattern = /^\d{4}$/;
+const looksLikeCityPattern = /^\p{L}/u;
+const looksLikeCityPattern2 = /\d+\s*\/\s*\d+/;
+const looksLikeCityPattern3 = /\d{3}/;
+const looksLikeCityPattern4 = /\d[A-Z]/;
+const looksLikeDistrictPattern = /\d/;
+const looksLikeStateCodePattern = /^[A-Z]{2,3}$/;
+const prahaPragueBrnoPattern =
+  /^(?:praha|prague|brno|ostrava|plze[nň]|olomouc|liberec|bratislava|ko[sš]ice)\s+\d{1,2}(?:\s*-\s*[\p{L}\s-]+)?$/iu;
+const isPlainFiveDigitPattern = /^\d{5}$/;
+const zaZaZaPattern = /\b[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/;
+const httpsPattern = /https?:\/\//i;
+const parseAddressPattern = /\bwww\./i;
+const parseAddressPattern2 = /^[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,}$/i;
+const adresaDloSidloPattern = /^(?:adresa|sídlo|sidlo|address)\s*:\s*/iu;
+const segmentsPattern = /[\n;|,]+/;
 export type AddressField = "street" | "city" | "postalCode" | "country";
 
 export interface AddressFields {
@@ -238,16 +261,13 @@ const POSTAL_COUNTRY_PREFIX: Readonly<Record<string, string>> = {
   SK: "SK",
 };
 
-const collapseSpaces = (value: string): string => value.replace(/\s+/g, " ").trim();
+const collapseSpaces = (value: string): string => Str.trim(Str.replace(/\s+/g, " ")(value));
 
 const stripDiacritics = (value: string): string =>
-  value
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase();
+  Str.toLowerCase(Str.replace(/\p{Diacritic}/gu, "")(Str.normalize("NFD")(value)));
 
 const normalizeCountryKey = (segment: string): string =>
-  collapseSpaces(stripDiacritics(segment).replace(/\./g, " "));
+  collapseSpaces(Str.replace(/\./g, " ")(stripDiacritics(segment)));
 
 const parseCountrySegment = (
   segment: string,
@@ -264,7 +284,7 @@ const parseCountrySegment = (
   if (key === "c r" || trimmed === "ČR" || trimmed === "Č.R.") return "CZ";
   if (key === "u s a" || key === "u s") return "US";
 
-  if (allowIso2 && /^[A-Z]{2}$/.test(trimmed)) {
+  if (allowIso2 && parseCountrySegmentPattern.test(trimmed)) {
     if (trimmed === "UK") return "GB";
     if (trimmed === "CA") return allowCaIso2 ? "CA" : undefined;
     if (ISO2_COUNTRIES.has(trimmed)) return trimmed;
@@ -275,7 +295,7 @@ const parseCountrySegment = (
 
 const normalizePostalCode = (code: string): string => {
   const cleaned = collapseSpaces(code);
-  return /[a-z]/i.test(cleaned) ? cleaned.toUpperCase() : cleaned;
+  return normalizePostalCodePattern.test(cleaned) ? Str.toUpperCase(cleaned) : cleaned;
 };
 
 interface PostalToken {
@@ -343,42 +363,39 @@ const parseStandalonePostal = (
 
   let country: string | undefined;
   if (rawPrefix !== undefined) {
-    country = POSTAL_COUNTRY_PREFIX[rawPrefix.toUpperCase()];
+    country = POSTAL_COUNTRY_PREFIX[Str.toUpperCase(rawPrefix)];
     if (country === undefined) return undefined;
   }
-  if (!allowFourDigit && country === undefined && /^\d{4}$/.test(rawCode)) {
+  if (!allowFourDigit && country === undefined && parseStandalonePostalPattern.test(rawCode)) {
     return undefined;
   }
-  return {
-    postalCode: normalizePostalCode(rawCode),
-    ...(country !== undefined ? { country } : {}),
-  };
+  const postalCode = normalizePostalCode(rawCode);
+  return country === undefined ? { postalCode } : { postalCode, country };
 };
 
 const looksLikeCity = (value: string, strictNoStreetWord = false): boolean => {
   const s = collapseSpaces(value);
   if (s.length < 2) return false;
-  if (!/^\p{L}/u.test(s)) return false;
+  if (!looksLikeCityPattern.test(s)) return false;
   if (UNIT_OR_SUBPREMISE_REGEX.test(s)) return false;
   if (LEGAL_FORM_REGEX.test(s)) return false;
-  if (/\d+\s*\/\s*\d+/.test(s)) return false;
-  if (/\d{3}/.test(s)) return false;
-  if (/\d[A-Z]/.test(s)) return false;
+  if (looksLikeCityPattern2.test(s)) return false;
+  if (looksLikeCityPattern3.test(s)) return false;
+  if (looksLikeCityPattern4.test(s)) return false;
   if (strictNoStreetWord && STREET_KEYWORD_REGEX.test(s)) return false;
   return true;
 };
 
 const looksLikeDistrict = (value: string): boolean => {
   const s = collapseSpaces(value);
-  return s.length >= 2 && !/\d/.test(s) && looksLikeCity(s);
+  return s.length >= 2 && !looksLikeDistrictPattern.test(s) && looksLikeCity(s);
 };
 
-const looksLikeStateCode = (value: string): boolean => /^[A-Z]{2,3}$/.test(collapseSpaces(value));
+const looksLikeStateCode = (value: string): boolean =>
+  looksLikeStateCodePattern.test(collapseSpaces(value));
 
 const looksLikeNumberedCzechCity = (value: string): boolean =>
-  /^(?:praha|prague|brno|ostrava|plze[nň]|olomouc|liberec|bratislava|ko[sš]ice)\s+\d{1,2}(?:\s*-\s*[\p{L}\s-]+)?$/iu.test(
-    collapseSpaces(value),
-  );
+  prahaPragueBrnoPattern.test(collapseSpaces(value));
 
 const combineStreetParts = (parts: ReadonlyArray<string>): string | undefined => {
   if (parts.length === 0) return undefined;
@@ -387,14 +404,16 @@ const combineStreetParts = (parts: ReadonlyArray<string>): string | undefined =>
     const first = parts[0] ?? "";
     const second = parts[1] ?? "";
     // Czech ARES / Google Maps format: "Na Florenci 2116/15, Nové Město, 110 00 Praha 1"
-    if (/\d/.test(first) && looksLikeDistrict(second)) {
+    if (looksLikeDistrictPattern.test(first) && looksLikeDistrict(second)) {
       return first;
     }
   }
-  return parts.join(", ");
+  return Arr.join(parts, ", ");
 };
 
-const buildResult = (parts: ParsedAddress): ParsedAddress | undefined => {
+const buildResult = (
+  parts: Partial<Record<AddressField, string | undefined>>,
+): ParsedAddress | undefined => {
   const street = parts.street !== undefined && parts.street !== "" ? parts.street : undefined;
   const city = parts.city !== undefined && parts.city !== "" ? parts.city : undefined;
   const postalCode =
@@ -409,26 +428,29 @@ const buildResult = (parts: ParsedAddress): ParsedAddress | undefined => {
 
   if (count < 2) return undefined;
 
-  return {
-    ...(street !== undefined ? { street } : {}),
-    ...(city !== undefined ? { city } : {}),
-    ...(postalCode !== undefined ? { postalCode } : {}),
-    ...(country !== undefined ? { country } : {}),
-  };
+  const result: Partial<Record<AddressField, string>> = {};
+  if (street !== undefined) result.street = street;
+  if (city !== undefined) result.city = city;
+  if (postalCode !== undefined) result.postalCode = postalCode;
+  if (country !== undefined) result.country = country;
+  return result;
 };
+
+const trimPart = (part: string | undefined): string | undefined =>
+  part === undefined ? undefined : Str.trim(part);
 
 const parseSingleSegment = (segment: string): ParsedAddress | undefined => {
   // Country-prefixed postal code inside a single line: "Na Florenci 2116/15 CZ-110 00 Praha 1" or "CZ-110 00 Praha 1"
   const prefixed = SINGLE_LINE_PREFIXED_REGEX.exec(segment);
   if (prefixed !== null) {
-    const street = prefixed[1]?.trim();
-    const rawPrefix = prefixed[2]?.toUpperCase() ?? "";
+    const street = trimPart(prefixed[1]);
+    const rawPrefix = Str.toUpperCase(prefixed[2] ?? "");
     const rawCode = prefixed[3] ?? "";
-    const city = prefixed[4]?.trim() ?? "";
+    const city = Str.trim(prefixed[4] ?? "");
     const country = POSTAL_COUNTRY_PREFIX[rawPrefix];
     if (country !== undefined && looksLikeCity(city, street === undefined)) {
       return buildResult({
-        ...(street !== undefined && street !== "" ? { street } : {}),
+        street: street !== undefined && street !== "" ? street : undefined,
         postalCode: normalizePostalCode(rawCode),
         city,
         country,
@@ -439,14 +461,14 @@ const parseSingleSegment = (segment: string): ParsedAddress | undefined => {
   // Unmistakable postal code followed by city: "Jankovcova 1522/53 170 00 Praha 7" or "170 00 Praha 7"
   const postalCity = SINGLE_LINE_POSTAL_CITY_REGEX.exec(segment);
   if (postalCity !== null) {
-    const street = postalCity[1]?.trim();
+    const street = trimPart(postalCity[1]);
     const rawCode = postalCity[2] ?? "";
-    const city = postalCity[3]?.trim() ?? "";
-    const isPlainFiveDigit = /^\d{5}$/.test(rawCode);
+    const city = Str.trim(postalCity[3] ?? "");
+    const isPlainFiveDigit = isPlainFiveDigitPattern.test(rawCode);
     // Avoid parsing US house numbers like "10001 Main Street" as postal + city.
     if (looksLikeCity(city, street === undefined && isPlainFiveDigit)) {
       return buildResult({
-        ...(street !== undefined && street !== "" ? { street } : {}),
+        street: street !== undefined && street !== "" ? street : undefined,
         postalCode: normalizePostalCode(rawCode),
         city,
       });
@@ -456,7 +478,7 @@ const parseSingleSegment = (segment: string): ParsedAddress | undefined => {
   // Trailing spaced UK postcode on a single line: "London SW1A 2AA"
   const uk = SINGLE_LINE_UK_REGEX.exec(segment);
   if (uk !== null) {
-    const before = uk[1]?.trim() ?? "";
+    const before = Str.trim(uk[1] ?? "");
     const code = uk[2] ?? "";
     if (looksLikeCity(before, true)) {
       return buildResult({
@@ -477,11 +499,10 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
   if (remaining.length >= 2) {
     const last = remaining[remaining.length - 1] ?? "";
     const prev = remaining[remaining.length - 2] ?? "";
-    const hasCaPostal =
-      CA_POSTCODE_TEST.test(prev) || /\b[A-Za-z]\d[A-Za-z]\s?\d[A-Za-z]\d$/.test(prev);
+    const hasCaPostal = CA_POSTCODE_TEST.test(prev) || zaZaZaPattern.test(prev);
     const parsedCountry = parseCountrySegment(
       last,
-      remaining.length >= 3 || /\d/.test(prev),
+      remaining.length >= 3 || looksLikeDistrictPattern.test(prev),
       hasCaPostal,
     );
     if (parsedCountry !== undefined) {
@@ -498,13 +519,13 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
       const resolvedCountry = country ?? single.country;
       return buildResult({
         ...single,
-        ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+        country: resolvedCountry !== undefined ? resolvedCountry : undefined,
       });
     }
     if (country !== undefined) {
       const only = remaining[0] ?? "";
       return buildResult(
-        /\d/.test(only) && !looksLikeNumberedCzechCity(only)
+        looksLikeDistrictPattern.test(only) && !looksLikeNumberedCzechCity(only)
           ? { street: only, country }
           : looksLikeCity(only)
             ? { city: only, country }
@@ -522,17 +543,17 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
   if (leading !== null) {
     const rawPrefix = leading[1];
     const rawCode = leading[2] ?? "";
-    const city = leading[3]?.trim() ?? "";
+    const city = Str.trim(leading[3] ?? "");
     const prefixCountry =
-      rawPrefix !== undefined ? POSTAL_COUNTRY_PREFIX[rawPrefix.toUpperCase()] : undefined;
+      rawPrefix !== undefined ? POSTAL_COUNTRY_PREFIX[Str.toUpperCase(rawPrefix)] : undefined;
     if ((rawPrefix === undefined || prefixCountry !== undefined) && looksLikeCity(city)) {
       const street = combineStreetParts(remaining.slice(0, lastIndex));
       const resolvedCountry = country ?? prefixCountry;
       return buildResult({
-        ...(street !== undefined ? { street } : {}),
+        street: street !== undefined ? street : undefined,
         postalCode: normalizePostalCode(rawCode),
         city,
-        ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+        country: resolvedCountry !== undefined ? resolvedCountry : undefined,
       });
     }
   }
@@ -540,11 +561,11 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
   // Layout B: Last segment is "<city|state> <prefix?><postalCode>" (US / CA / UK / reversed CZ).
   const trailing = TRAILING_POSTAL_REGEX.exec(last);
   if (trailing !== null) {
-    const before = trailing[1]?.trim() ?? "";
+    const before = Str.trim(trailing[1] ?? "");
     const rawPrefix = trailing[2];
     const rawCode = trailing[3] ?? "";
     const prefixCountry =
-      rawPrefix !== undefined ? POSTAL_COUNTRY_PREFIX[rawPrefix.toUpperCase()] : undefined;
+      rawPrefix !== undefined ? POSTAL_COUNTRY_PREFIX[Str.toUpperCase(rawPrefix)] : undefined;
     if (rawPrefix === undefined || prefixCountry !== undefined) {
       const resolvedCountry = country ?? prefixCountry;
       if (looksLikeStateCode(before) && remaining.length >= 3) {
@@ -552,20 +573,20 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
         if (looksLikeCity(cityPart)) {
           const street = combineStreetParts(remaining.slice(0, lastIndex - 1));
           return buildResult({
-            ...(street !== undefined ? { street } : {}),
+            street: street !== undefined ? street : undefined,
             city: `${cityPart}, ${before}`,
             postalCode: normalizePostalCode(rawCode),
-            ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+            country: resolvedCountry !== undefined ? resolvedCountry : undefined,
           });
         }
       }
       if (looksLikeCity(before)) {
         const street = combineStreetParts(remaining.slice(0, lastIndex));
         return buildResult({
-          ...(street !== undefined ? { street } : {}),
+          street: street !== undefined ? street : undefined,
           city: before,
           postalCode: normalizePostalCode(rawCode),
-          ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+          country: resolvedCountry !== undefined ? resolvedCountry : undefined,
         });
       }
     }
@@ -578,11 +599,11 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
     const resolvedCountry = country ?? lastPostal.country;
     if (beforePostal.length === 1) {
       const only = beforePostal[0] ?? "";
-      const isCity = !/\d/.test(only) || looksLikeNumberedCzechCity(only);
+      const isCity = !looksLikeDistrictPattern.test(only) || looksLikeNumberedCzechCity(only);
       return buildResult({
         ...(isCity ? { city: only } : { street: only }),
         postalCode: lastPostal.postalCode,
-        ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+        country: resolvedCountry !== undefined ? resolvedCountry : undefined,
       });
     }
     const prev = beforePostal[beforePostal.length - 1] ?? "";
@@ -591,20 +612,20 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
       if (looksLikeCity(cityPart)) {
         const street = combineStreetParts(beforePostal.slice(0, beforePostal.length - 2));
         return buildResult({
-          ...(street !== undefined ? { street } : {}),
+          street: street !== undefined ? street : undefined,
           city: `${cityPart}, ${prev}`,
           postalCode: lastPostal.postalCode,
-          ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+          country: resolvedCountry !== undefined ? resolvedCountry : undefined,
         });
       }
     }
     if (looksLikeCity(prev)) {
       const street = combineStreetParts(beforePostal.slice(0, beforePostal.length - 1));
       return buildResult({
-        ...(street !== undefined ? { street } : {}),
+        street: street !== undefined ? street : undefined,
         city: prev,
         postalCode: lastPostal.postalCode,
-        ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+        country: resolvedCountry !== undefined ? resolvedCountry : undefined,
       });
     }
   }
@@ -616,10 +637,10 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
     const street = combineStreetParts(remaining.slice(0, prevIndex));
     const resolvedCountry = country ?? prevPostal.country;
     return buildResult({
-      ...(street !== undefined ? { street } : {}),
+      street: street !== undefined ? street : undefined,
       postalCode: prevPostal.postalCode,
       city: last,
-      ...(resolvedCountry !== undefined ? { country: resolvedCountry } : {}),
+      country: resolvedCountry !== undefined ? resolvedCountry : undefined,
     });
   }
 
@@ -630,7 +651,7 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
     if (country !== undefined) {
       const street = combineStreetParts(streetParts);
       return buildResult({
-        ...(street !== undefined ? { street } : {}),
+        street: street !== undefined ? street : undefined,
         city: last,
         country,
       });
@@ -638,15 +659,12 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
     // Without country or postal code, require a house number in the first segment so company names
     // ("Novak Design, s.r.o.") or prose are never split across fields.
     if (
-      /\d/.test(first) &&
+      looksLikeDistrictPattern.test(first) &&
       (streetParts.length === 1 ||
         (streetParts.length === 2 && looksLikeDistrict(streetParts[1] ?? "")))
     ) {
       const street = combineStreetParts(streetParts);
-      return buildResult({
-        ...(street !== undefined ? { street } : {}),
-        city: last,
-      });
+      return buildResult({ street: street !== undefined ? street : undefined, city: last });
     }
   }
 
@@ -659,23 +677,26 @@ const parseMultiSegment = (segments: ReadonlyArray<string>): ParsedAddress | und
  * or non-address text so normal pastes are left untouched.
  */
 export const parseAddress = (input: string): ParsedAddress | undefined => {
-  const trimmed = input.trim();
+  const trimmed = Str.trim(input);
   if (trimmed.length < MIN_ADDRESS_LENGTH || trimmed.length > MAX_ADDRESS_LENGTH) {
     return undefined;
   }
-  if (/https?:\/\//i.test(trimmed) || /\bwww\./i.test(trimmed) || trimmed.includes("@")) {
+  if (
+    httpsPattern.test(trimmed) ||
+    parseAddressPattern.test(trimmed) ||
+    Str.includes("@")(trimmed)
+  ) {
     return undefined;
   }
-  if (/^[A-Z]{2}\d{2}(?:\s?[A-Z0-9]{4}){2,}$/i.test(trimmed)) {
+  if (parseAddressPattern2.test(trimmed)) {
     return undefined;
   }
 
-  const unlabeled = trimmed.replace(/^(?:adresa|sídlo|sidlo|address)\s*:\s*/iu, "");
-  const segments = unlabeled
-    .replace(/\r\n?/g, "\n")
-    .split(/[\n;|,]+/)
-    .map(collapseSpaces)
-    .filter((segment) => segment.length > 0);
+  const unlabeled = Str.replace(adresaDloSidloPattern, "")(trimmed);
+  const segments = Arr.filter(
+    Arr.map(Str.split(Str.replace(/\r\n?/g, "\n")(unlabeled), segmentsPattern), collapseSpaces),
+    (segment) => segment.length > 0,
+  );
 
   if (segments.length === 0) return undefined;
   if (segments.length === 1) return parseSingleSegment(segments[0] ?? "");
@@ -690,7 +711,7 @@ export const parseAddress = (input: string): ParsedAddress | undefined => {
  *   empty, or if `country` still holds `defaultCountry` while all other address fields are empty.
  * Returns `undefined` when the text is not a multi-part address or nothing applies.
  */
-export const applyAddressPaste = (
+const applyAddressPasteImpl = (
   current: AddressFields,
   target: AddressField,
   pasted: string,
@@ -700,7 +721,10 @@ export const applyAddressPaste = (
   if (parsed === undefined) return undefined;
 
   const includeCountry = options?.includeCountry !== false;
-  const defaultCountry = options?.defaultCountry?.trim().toUpperCase();
+  const defaultCountry =
+    options?.defaultCountry === undefined
+      ? undefined
+      : Str.toUpperCase(Str.trim(options.defaultCountry));
 
   const next = {
     street: current.street,
@@ -718,7 +742,7 @@ export const applyAddressPaste = (
   for (const field of textFields) {
     const value = parsed[field];
     if (value === undefined) continue;
-    if (field === target || current[field].trim() === "") {
+    if (field === target || Str.trim(current[field]) === "") {
       next[field] = value;
       if (value !== current[field]) filledAny = true;
     }
@@ -726,14 +750,14 @@ export const applyAddressPaste = (
 
   if (includeCountry && parsed.country !== undefined) {
     const allTextEmpty =
-      current.street.trim() === "" &&
-      current.city.trim() === "" &&
-      current.postalCode.trim() === "";
+      Str.trim(current.street) === "" &&
+      Str.trim(current.city) === "" &&
+      Str.trim(current.postalCode) === "";
     const isUntouchedDefault =
       defaultCountry !== undefined &&
       allTextEmpty &&
-      current.country.trim().toUpperCase() === defaultCountry;
-    if (target === "country" || current.country.trim() === "" || isUntouchedDefault) {
+      Str.toUpperCase(Str.trim(current.country)) === defaultCountry;
+    if (target === "country" || Str.trim(current.country) === "" || isUntouchedDefault) {
       next.country = parsed.country;
       if (parsed.country !== current.country) filledAny = true;
     }
@@ -746,7 +770,7 @@ export const applyAddressPaste = (
       ? includeCountry && parsed.country !== undefined
       : parsed[target] !== undefined;
 
-  if (!filledAny && !targetHasExtractedPart) return undefined;
+  if (!(filledAny || targetHasExtractedPart)) return undefined;
   return next;
 };
 
@@ -755,13 +779,32 @@ export const applyAddressPaste = (
  * clipboard paste event. Ignores ordinary character-by-character typing and splits only sudden
  * multi-character insertions or multiline text.
  */
-export const applyAddressInputChange = (
+const applyAddressInputChangeImpl = (
   current: AddressFields,
   target: AddressField,
   nextValue: string,
   options?: AddressPasteOptions,
 ): AddressFields | undefined => {
   const delta = nextValue.length - current[target].length;
-  if (delta < 4 && !nextValue.includes("\n")) return undefined;
+  if (delta < 4 && !Str.includes("\n")(nextValue)) return undefined;
   return applyAddressPaste(current, target, nextValue, options);
 };
+
+export const applyAddressPaste: {
+  (
+    target: AddressField,
+    pasted: string,
+    options?: AddressPasteOptions,
+  ): (current: AddressFields) => AddressFields | undefined;
+  (
+    current: AddressFields,
+    target: AddressField,
+    pasted: string,
+    options?: AddressPasteOptions,
+  ): AddressFields | undefined;
+} = Fn.dual((args) => Predicate.isObject(args[0]), applyAddressPasteImpl);
+
+export const applyAddressInputChange: typeof applyAddressPaste = Fn.dual(
+  (args) => Predicate.isObject(args[0]),
+  applyAddressInputChangeImpl,
+);

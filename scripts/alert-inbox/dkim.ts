@@ -1,3 +1,5 @@
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 /**
  * RFC 6376 / RFC 8301 / RFC 8463 cryptographic DKIM verifier for programmatic alert ingestion.
  *
@@ -27,39 +29,51 @@ import {
   verify as verifySignature,
 } from "node:crypto";
 import { resolveTxt } from "node:dns/promises";
-import { Clock, Context, Data, Effect, Layer } from "effect";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import {
   decodeRfc2047,
   extractAddress,
   trimAsciiWsp,
 } from "../../infra/alchemy/src/mail-forwarder/mime";
 
+const trailingDotPattern = /\.$/;
+const updatedPattern = /(^|;)([\r\n \t]*b[\r\n \t]*=)([^;]*)/;
+const digitsOnlyPattern = /^\d+$/;
+const enotfoundEnodataNxdomainPattern = /\b(?:ENOTFOUND|ENODATA|NXDOMAIN)\b/i;
+
 export interface DnsTxtResolverService {
   readonly resolveTxt: (hostname: string) => Effect.Effect<ReadonlyArray<string>, DnsLookupError>;
 }
 
-export class DnsLookupError extends Data.TaggedError("DnsLookupError")<{
-  readonly hostname: string;
-  readonly reason: string;
-}> {}
+export class DnsLookupError extends Schema.TaggedError<
+  DnsLookupError,
+  { readonly brand: unique symbol }
+>()("DnsLookupError", {
+  hostname: Schema.String,
+  reason: Schema.String,
+}) {}
 
 export class DnsTxtResolver extends Context.Service<DnsTxtResolver, DnsTxtResolverService>()(
-  "KvitbitAlertDnsTxtResolver",
+  "kvitbit/scripts/alert-inbox/dkim/DnsTxtResolver",
 ) {}
 
 export const DnsTxtResolverLive: Layer.Layer<DnsTxtResolver> = Layer.succeed(DnsTxtResolver, {
-  resolveTxt: (hostname) =>
+  resolveTxt: Effect.fn("DnsTxtResolver.resolveTxt")((hostname) =>
     Effect.tryPromise({
-      try: async () => {
-        const records = await resolveTxt(hostname);
-        return records.map((chunks) => chunks.join(""));
-      },
+      try: () => resolveTxt(hostname),
       catch: (error) =>
-        new DnsLookupError({
+        DnsLookupError.make({
           hostname,
           reason: error instanceof Error ? error.message : String(error),
         }),
-    }),
+    }).pipe(Effect.map(Arr.map((chunks) => Arr.join(chunks, "")))),
+  ),
 });
 
 export interface DkimVerified {
@@ -80,12 +94,12 @@ export interface DkimVerified {
   readonly verifiedBodyBytes: Uint8Array;
 }
 
-export interface DkimRejected {
+interface DkimRejected {
   readonly _tag: "DkimRejected";
   readonly reason: string;
 }
 
-export interface DkimTransientError {
+interface DkimTransientError {
   readonly _tag: "DkimTransientError";
   readonly reason: string;
 }
@@ -104,7 +118,8 @@ const MIN_RSA_MODULUS_BITS = 1024;
 // RFC 6376 §3.2: tag-name = ALPHA *ALNUMPUNC ; ALNUMPUNC = ALPHA / DIGIT / "_"
 const RFC6376_TAG_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
 
-const normalizeDomain = (domain: string): string => domain.trim().toLowerCase().replace(/\.$/, "");
+const normalizeDomain = (domain: string): string =>
+  Str.replace(trailingDotPattern, "")(Str.toLowerCase(Str.trim(domain)));
 
 const matchesAllowedDomain = (
   domain: string,
@@ -115,7 +130,7 @@ const matchesAllowedDomain = (
   for (const rawAllowed of allowedDomains) {
     const allowed = normalizeDomain(rawAllowed);
     if (allowed.length === 0) continue;
-    if (normalized === allowed || normalized.endsWith(`.${allowed}`)) {
+    if (normalized === allowed || Str.endsWith(`.${allowed}`)(normalized)) {
       return allowed;
     }
   }
@@ -152,28 +167,28 @@ const splitRawMessage = (raw: Uint8Array): { headerRaw: string; bodyBytes: Buffe
 
 const parseRawHeaderFields = (headerRaw: string): ReadonlyArray<RawHeaderField> => {
   if (headerRaw.length === 0) return [];
-  const normalized = headerRaw.replace(/\r?\n/g, "\r\n");
-  const lines = normalized.split("\r\n");
+  const normalized = Str.replace(/\r?\n/g, "\r\n")(headerRaw);
+  const lines = Str.split(normalized, "\r\n");
   const fields: Array<RawHeaderField> = [];
   let current = "";
 
   const flush = () => {
     if (current.length === 0) return;
-    const colon = current.indexOf(":");
+    const colon = Option.getOrElse(Str.indexOf(":")(current), () => -1);
     if (colon > 0) {
-      const name = current.slice(0, colon);
+      const name = Str.slice(0, colon)(current);
       fields.push({
         raw: current,
         name,
-        nameLower: name.trim().toLowerCase(),
-        rawValue: current.slice(colon + 1),
+        nameLower: Str.toLowerCase(Str.trim(name)),
+        rawValue: Str.slice(colon + 1)(current),
       });
     }
     current = "";
   };
 
   for (const line of lines) {
-    if ((line.startsWith(" ") || line.startsWith("\t")) && current.length > 0) {
+    if ((Str.startsWith(" ")(line) || Str.startsWith("\t")(line)) && current.length > 0) {
       current += `\r\n${line}`;
     } else {
       flush();
@@ -191,19 +206,19 @@ const parseRawHeaderFields = (headerRaw: string): ReadonlyArray<RawHeaderField> 
  */
 export const parseTagList = (raw: string): Map<string, string> | undefined => {
   const tags = new Map<string, string>();
-  const parts = raw.split(";");
+  const parts = Str.split(raw, ";");
   for (let i = 0; i < parts.length; i += 1) {
     const part = parts[i] ?? "";
-    const trimmed = part.trim();
+    const trimmed = Str.trim(part);
     if (trimmed.length === 0) {
       // A single trailing semicolon is permitted per RFC 6376 §3.2; empty interior entries are invalid.
       if (i === parts.length - 1) continue;
       return undefined;
     }
-    const eq = trimmed.indexOf("=");
+    const eq = Option.getOrElse(Str.indexOf("=")(trimmed), () => -1);
     if (eq <= 0) return undefined;
-    const key = trimmed.slice(0, eq).trim();
-    const value = trimmed.slice(eq + 1).trim();
+    const key = Str.trim(Str.slice(0, eq)(trimmed));
+    const value = Str.trim(Str.slice(eq + 1)(trimmed));
     if (!RFC6376_TAG_NAME.test(key) || tags.has(key)) {
       return undefined;
     }
@@ -212,76 +227,80 @@ export const parseTagList = (raw: string): Map<string, string> | undefined => {
   return tags;
 };
 
-const stripFws = (value: string): string => value.replace(/[\r\n \t]+/g, "");
+const stripFws = (value: string): string => Str.replace(/[\r\n \t]+/g, "")(value);
 
 const unfoldHeaderValueUtf8 = (rawValueLatin1: string): string =>
   trimAsciiWsp(
-    Buffer.from(rawValueLatin1, "latin1")
-      .toString("utf8")
-      .replace(/\r\n([ \t])/g, "$1"),
+    Str.replace(/\r\n([ \t])/g, "$1")(Buffer.from(rawValueLatin1, "latin1").toString("utf8")),
   );
 
-export const canonicalizeBody = (bodyBytes: Uint8Array, mode: "simple" | "relaxed"): Buffer => {
-  const rawStr = Buffer.from(bodyBytes).toString("latin1").replace(/\r?\n/g, "\r\n");
+const canonicalizeBodyImpl = (bodyBytes: Uint8Array, mode: "simple" | "relaxed"): Buffer => {
+  const rawStr = Str.replace(/\r?\n/g, "\r\n")(Buffer.from(bodyBytes).toString("latin1"));
   if (mode === "simple") {
     let end = rawStr.length;
-    while (end >= 2 && rawStr.charCodeAt(end - 2) === 13 && rawStr.charCodeAt(end - 1) === 10) {
+    while (
+      end >= 2 &&
+      Option.getOrElse(Str.charCodeAt(rawStr, end - 2), () => Number.NaN) === 13 &&
+      Option.getOrElse(Str.charCodeAt(rawStr, end - 1), () => Number.NaN) === 10
+    ) {
       end -= 2;
     }
     if (end === 0) {
       return Buffer.from("\r\n", "latin1");
     }
-    return Buffer.from(`${rawStr.slice(0, end)}\r\n`, "latin1");
+    return Buffer.from(`${Str.slice(0, end)(rawStr)}\r\n`, "latin1");
   }
 
-  const lines = rawStr.split("\r\n");
-  const canonicalLines = lines.map((line) => line.replace(/[ \t]+$/g, "").replace(/[ \t]+/g, " "));
+  const lines = Str.split(rawStr, "\r\n");
+  const canonicalLines = Arr.map(lines, (line) =>
+    Str.replace(/[ \t]+/g, " ")(Str.replace(/[ \t]+$/g, "")(line)),
+  );
   while (canonicalLines.length > 0 && canonicalLines[canonicalLines.length - 1] === "") {
     canonicalLines.pop();
   }
   if (canonicalLines.length === 0) {
     return Buffer.alloc(0);
   }
-  return Buffer.from(`${canonicalLines.join("\r\n")}\r\n`, "latin1");
+  return Buffer.from(`${Arr.join(canonicalLines, "\r\n")}\r\n`, "latin1");
 };
 
-export const canonicalizeHeaderField = (
-  field: RawHeaderField,
-  mode: "simple" | "relaxed",
-): string => {
+export const canonicalizeBody: {
+  (mode: "simple" | "relaxed"): (bodyBytes: Uint8Array) => Buffer;
+  (bodyBytes: Uint8Array, mode: "simple" | "relaxed"): Buffer;
+} = Fn.dual(2, canonicalizeBodyImpl);
+
+const canonicalizeHeaderFieldImpl = (field: RawHeaderField, mode: "simple" | "relaxed"): string => {
   if (mode === "simple") {
     return field.raw;
   }
-  const name = field.name.trim().toLowerCase();
-  const value = field.rawValue
-    .replace(/\r\n[ \t]+/g, " ")
-    .replace(/[ \t]+/g, " ")
-    .replace(/^[ \t]+|[ \t]+$/g, "");
+  const name = Str.toLowerCase(Str.trim(field.name));
+  const value = Str.replace(
+    /^[ \t]+|[ \t]+$/g,
+    "",
+  )(Str.replace(/[ \t]+/g, " ")(Str.replace(/\r\n[ \t]+/g, " ")(field.rawValue)));
   return `${name}:${value}`;
 };
 
+export const canonicalizeHeaderField: {
+  (mode: "simple" | "relaxed"): (field: RawHeaderField) => string;
+  (field: RawHeaderField, mode: "simple" | "relaxed"): string;
+} = Fn.dual(2, canonicalizeHeaderFieldImpl);
+
 const emptyDkimSignatureBTag = (rawHeader: string): string | undefined => {
-  const colon = rawHeader.indexOf(":");
+  const colon = Option.getOrElse(Str.indexOf(":")(rawHeader), () => -1);
   if (colon <= 0) return undefined;
-  const namePart = rawHeader.slice(0, colon + 1);
-  const valuePart = rawHeader.slice(colon + 1);
-  let replaced = false;
-  // Tag names are case-sensitive per RFC 6376 §3.2: strip only lowercase `b=`, not extension `B=`.
-  const updated = valuePart.replace(
-    /(^|;)([\r\n \t]*b[\r\n \t]*=)([^;]*)/,
-    (_match, sep: string, prefix: string) => {
-      replaced = true;
-      return `${sep}${prefix}`;
-    },
-  );
-  return replaced ? `${namePart}${updated}` : undefined;
+  const namePart = Str.slice(0, colon + 1)(rawHeader);
+  const valuePart = Str.slice(colon + 1)(rawHeader);
+  // Tag names are case-sensitive per RFC 6376 §3.2.
+  if (!updatedPattern.test(valuePart)) return undefined;
+  return namePart + Str.replace(updatedPattern, "$1$2")(valuePart);
 };
 
 const parseCanonicalization = (
   raw: string | undefined,
 ): { header: "simple" | "relaxed"; body: "simple" | "relaxed" } | undefined => {
-  const value = (raw ?? "simple/simple").trim().toLowerCase();
-  const [headerRaw, bodyRaw = "simple"] = value.split("/");
+  const value = Str.toLowerCase(Str.trim(raw ?? "simple/simple"));
+  const [headerRaw, bodyRaw = "simple"] = Str.split(value, "/");
   if (
     (headerRaw !== "simple" && headerRaw !== "relaxed") ||
     (bodyRaw !== "simple" && bodyRaw !== "relaxed")
@@ -297,10 +316,10 @@ const parseIdentityDomain = (
 ): string | undefined => {
   if (rawI === undefined) return signingDomain;
   const cleaned = stripFws(rawI);
-  const atIdx = cleaned.lastIndexOf("@");
+  const atIdx = Option.getOrElse(Str.lastIndexOf("@")(cleaned), () => -1);
   if (atIdx === -1 || atIdx === cleaned.length - 1) return undefined;
-  const iDomain = normalizeDomain(cleaned.slice(atIdx + 1));
-  if (iDomain !== signingDomain && !iDomain.endsWith(`.${signingDomain}`)) {
+  const iDomain = normalizeDomain(Str.slice(atIdx + 1)(cleaned));
+  if (iDomain !== signingDomain && !Str.endsWith(`.${signingDomain}`)(iDomain)) {
     return undefined;
   }
   return iDomain;
@@ -342,7 +361,7 @@ const parsePublicKey = (
   }
 };
 
-export const verifyAlertDkim = (
+const verifyAlertDkimImpl = (
   rawBytes: Uint8Array,
   allowedDomains: ReadonlyArray<string>,
 ): Effect.Effect<DkimVerificationResult, never, DnsTxtResolver> =>
@@ -353,7 +372,7 @@ export const verifyAlertDkim = (
     const fields = parseRawHeaderFields(headerRaw);
 
     // Reject duplicate or missing From headers to prevent RFC 6376 header-shadowing attacks.
-    const fromHeaders = fields.filter((f) => f.nameLower === "from");
+    const fromHeaders = Arr.filter(fields, (f) => f.nameLower === "from");
     if (fromHeaders.length !== 1) {
       return {
         _tag: "DkimRejected",
@@ -365,14 +384,14 @@ export const verifyAlertDkim = (
     }
     const rawFromUnfolded = unfoldHeaderValueUtf8(fromHeaders[0]?.rawValue ?? "");
     const fromParsed = extractAddress(rawFromUnfolded);
-    if (!fromParsed.address) {
+    if (!(fromParsed.address !== undefined && fromParsed.address !== "")) {
       return { _tag: "DkimRejected", reason: "Invalid From address" };
     }
-    const atIdx = fromParsed.address.lastIndexOf("@");
-    const fromDomain = normalizeDomain(fromParsed.address.slice(atIdx + 1));
+    const atIdx = Option.getOrElse(Str.lastIndexOf("@")(fromParsed.address), () => -1);
+    const fromDomain = normalizeDomain(Str.slice(atIdx + 1)(fromParsed.address));
     const fromHeaderDecoded = trimAsciiWsp(decodeRfc2047(rawFromUnfolded));
 
-    const dkimHeaders = fields.filter((f) => f.nameLower === "dkim-signature");
+    const dkimHeaders = Arr.filter(fields, (f) => f.nameLower === "dkim-signature");
     if (dkimHeaders.length === 0) {
       return { _tag: "DkimRejected", reason: "No DKIM-Signature header present" };
     }
@@ -382,7 +401,7 @@ export const verifyAlertDkim = (
 
     for (const dkimField of dkimHeaders) {
       const tags = parseTagList(dkimField.rawValue);
-      if (!tags) {
+      if (!(tags !== undefined)) {
         failureReasons.push("Malformed DKIM-Signature tag list or duplicate tag");
         continue;
       }
@@ -394,7 +413,7 @@ export const verifyAlertDkim = (
         failureReasons.push("Rejected DKIM body-length tag (l=)");
         continue;
       }
-      const algRaw = (tags.get("a") ?? "").trim().toLowerCase();
+      const algRaw: string = Str.toLowerCase(Str.trim(tags.get("a") ?? ""));
       if (algRaw !== "rsa-sha256" && algRaw !== "ed25519-sha256") {
         failureReasons.push(`Unsupported DKIM algorithm '${algRaw || "missing"}'`);
         continue;
@@ -406,23 +425,31 @@ export const verifyAlertDkim = (
       const signedHeadersRaw = tags.get("h") ?? "";
       const bhRaw = stripFws(tags.get("bh") ?? "");
       const bRaw = stripFws(tags.get("b") ?? "");
-      if (!signingDomain || !selector || !signedHeadersRaw || !bhRaw || !bRaw) {
+      if (
+        !(
+          signingDomain !== "" &&
+          selector !== "" &&
+          signedHeadersRaw !== "" &&
+          bhRaw !== "" &&
+          bRaw !== ""
+        )
+      ) {
         failureReasons.push("DKIM-Signature missing required tag(s)");
         continue;
       }
 
       const identityDomain = parseIdentityDomain(tags.get("i"), signingDomain);
-      if (!identityDomain) {
+      if (!(identityDomain !== undefined && identityDomain !== "")) {
         failureReasons.push("Invalid DKIM identity tag (i=)");
         continue;
       }
 
       const matchedAllowed = matchesAllowedDomain(signingDomain, allowedDomains);
-      if (!matchedAllowed) {
+      if (!(matchedAllowed !== undefined && matchedAllowed !== "")) {
         failureReasons.push(`Signing domain '${signingDomain}' is not in allowlist`);
         continue;
       }
-      if (fromDomain !== matchedAllowed && !fromDomain.endsWith(`.${matchedAllowed}`)) {
+      if (fromDomain !== matchedAllowed && !Str.endsWith(`.${matchedAllowed}`)(fromDomain)) {
         failureReasons.push(
           `From domain '${fromDomain}' does not align with allowed domain '${matchedAllowed}'`,
         );
@@ -431,11 +458,11 @@ export const verifyAlertDkim = (
 
       const xRaw = tags.get("x");
       if (xRaw !== undefined) {
-        if (!/^\d+$/.test(xRaw.trim())) {
+        if (!digitsOnlyPattern.test(Str.trim(xRaw))) {
           failureReasons.push("Invalid DKIM expiration tag (x=)");
           continue;
         }
-        const expiresAt = Number.parseInt(xRaw.trim(), 10);
+        const expiresAt = Number.parseInt(Str.trim(xRaw), 10);
         if (nowSec > expiresAt) {
           failureReasons.push("DKIM signature expired");
           continue;
@@ -444,13 +471,13 @@ export const verifyAlertDkim = (
 
       const tRaw = tags.get("t");
       if (tRaw !== undefined) {
-        if (!/^\d+$/.test(tRaw.trim())) {
+        if (!digitsOnlyPattern.test(Str.trim(tRaw))) {
           failureReasons.push("Invalid DKIM timestamp tag (t=)");
           continue;
         }
         if (
           xRaw !== undefined &&
-          Number.parseInt(tRaw.trim(), 10) >= Number.parseInt(xRaw.trim(), 10)
+          Number.parseInt(Str.trim(tRaw), 10) >= Number.parseInt(Str.trim(xRaw), 10)
         ) {
           failureReasons.push("DKIM timestamp t= >= x=");
           continue;
@@ -458,15 +485,15 @@ export const verifyAlertDkim = (
       }
 
       const canon = parseCanonicalization(tags.get("c"));
-      if (!canon) {
+      if (!(canon !== undefined)) {
         failureReasons.push(`Unsupported DKIM canonicalization '${tags.get("c") ?? ""}'`);
         continue;
       }
 
-      const signedHeaderNames = signedHeadersRaw
-        .split(":")
-        .map((h) => h.trim().toLowerCase())
-        .filter((h) => h.length > 0);
+      const signedHeaderNames = Arr.filter(
+        Arr.map(Str.split(signedHeadersRaw, ":"), (h) => Str.toLowerCase(Str.trim(h))),
+        (h) => h.length > 0,
+      );
       if (!signedHeaderNames.includes("from")) {
         failureReasons.push("DKIM h= does not sign From header");
         continue;
@@ -490,7 +517,7 @@ export const verifyAlertDkim = (
         for (let idx = fields.length - 1; idx >= 0; idx -= 1) {
           if (usedIndices.has(idx)) continue;
           const candidate = fields[idx];
-          if (candidate && candidate.nameLower === targetName) {
+          if (candidate !== undefined && candidate.nameLower === targetName) {
             usedIndices.add(idx);
             signedLines.push(`${canonicalizeHeaderField(candidate, canon.header)}\r\n`);
             const list = verifiedHeaderValues.get(targetName) ?? [];
@@ -502,20 +529,20 @@ export const verifyAlertDkim = (
       }
 
       const strippedDkimRaw = emptyDkimSignatureBTag(dkimField.raw);
-      if (!strippedDkimRaw) {
+      if (!(strippedDkimRaw !== undefined && strippedDkimRaw !== "")) {
         failureReasons.push("Unable to strip b= from DKIM-Signature header");
         continue;
       }
-      const strippedColon = strippedDkimRaw.indexOf(":");
+      const strippedColon = Option.getOrElse(Str.indexOf(":")(strippedDkimRaw), () => -1);
       const strippedDkimField: RawHeaderField = {
         raw: strippedDkimRaw,
-        name: strippedDkimRaw.slice(0, strippedColon),
+        name: Str.slice(0, strippedColon)(strippedDkimRaw),
         nameLower: "dkim-signature",
-        rawValue: strippedDkimRaw.slice(strippedColon + 1),
+        rawValue: Str.slice(strippedColon + 1)(strippedDkimRaw),
       };
       // Per RFC 6376 §3.7, the DKIM-Signature header itself has NO trailing CRLF.
       const signingInput = Buffer.from(
-        signedLines.join("") + canonicalizeHeaderField(strippedDkimField, canon.header),
+        Arr.join(signedLines, "") + canonicalizeHeaderField(strippedDkimField, canon.header),
         "latin1",
       );
 
@@ -524,7 +551,7 @@ export const verifyAlertDkim = (
       const txtResult = yield* Effect.result(resolver.resolveTxt(dnsHost));
       if (txtResult._tag === "Failure") {
         const msg = `DNS lookup failed for ${dnsHost}: ${txtResult.failure.reason}`;
-        if (/\b(?:ENOTFOUND|ENODATA|NXDOMAIN)\b/i.test(txtResult.failure.reason)) {
+        if (enotfoundEnodataNxdomainPattern.test(txtResult.failure.reason)) {
           failureReasons.push(msg);
         } else {
           transientReasons.push(msg);
@@ -536,7 +563,7 @@ export const verifyAlertDkim = (
       let matched = false;
       for (const txt of txtResult.success) {
         const keyTags = parseTagList(txt);
-        if (!keyTags) {
+        if (!(keyTags !== undefined)) {
           failureReasons.push(`Malformed DKIM DNS key record at ${dnsHost}`);
           continue;
         }
@@ -550,7 +577,7 @@ export const verifyAlertDkim = (
             continue;
           }
         }
-        const keyType = (keyTags.get("k") ?? "rsa").trim().toLowerCase();
+        const keyType = Str.toLowerCase(Str.trim(keyTags.get("k") ?? "rsa"));
         if (
           (algorithm === "rsa-sha256" && keyType !== "rsa") ||
           (algorithm === "ed25519-sha256" && keyType !== "ed25519")
@@ -558,28 +585,27 @@ export const verifyAlertDkim = (
           continue;
         }
         // RFC 6376 §3.6.1 service type restriction (`s=` defaults to `*`)
-        const serviceTypes = (keyTags.get("s") ?? "*")
-          .split(":")
-          .map((s) => s.trim().toLowerCase())
-          .filter((s) => s.length > 0);
-        if (!serviceTypes.includes("*") && !serviceTypes.includes("email")) {
+        const serviceTypes = Arr.filter(
+          Arr.map(Str.split(keyTags.get("s") ?? "*", ":"), (s) => Str.toLowerCase(Str.trim(s))),
+          (s) => s.length > 0,
+        );
+        if (!(serviceTypes.includes("*") || serviceTypes.includes("email"))) {
           failureReasons.push(`DKIM key at ${dnsHost} is not permitted for email service`);
           continue;
         }
         const allowedHashes = keyTags.get("h");
         if (
           allowedHashes !== undefined &&
-          !allowedHashes
-            .split(":")
-            .map((h) => h.trim().toLowerCase())
-            .includes("sha256")
+          !Arr.map(Str.split(allowedHashes, ":"), (h) => Str.toLowerCase(Str.trim(h))).includes(
+            "sha256",
+          )
         ) {
           continue;
         }
         // RFC 6376 §3.6.1 `t=s` requires the identity domain (`i=`) to equal `d=` exactly.
-        const keyFlags = (keyTags.get("t") ?? "")
-          .split(":")
-          .map((flag) => flag.trim().toLowerCase());
+        const keyFlags = Arr.map(Str.split(keyTags.get("t") ?? "", ":"), (flag) =>
+          Str.toLowerCase(Str.trim(flag)),
+        );
         if (keyFlags.includes("s") && identityDomain !== signingDomain) {
           failureReasons.push(
             `Key t=s requires strict identity alignment (${identityDomain} != ${signingDomain})`,
@@ -592,7 +618,7 @@ export const verifyAlertDkim = (
           continue;
         }
         const pubKey = parsePublicKey(algorithm, keyBase64);
-        if (!pubKey) {
+        if (!(pubKey !== undefined)) {
           failureReasons.push(`Invalid or too-weak DKIM public key at ${dnsHost}`);
           continue;
         }
@@ -656,12 +682,22 @@ export const verifyAlertDkim = (
     if (transientReasons.length > 0) {
       return {
         _tag: "DkimTransientError",
-        reason: transientReasons.join("; "),
+        reason: Arr.join(transientReasons, "; "),
       };
     }
 
     return {
       _tag: "DkimRejected",
-      reason: failureReasons.join("; ") || "No valid allowlisted DKIM signature found",
+      reason: Arr.join(failureReasons, "; ") || "No valid allowlisted DKIM signature found",
     };
   });
+
+export const verifyAlertDkim: {
+  (
+    allowedDomains: ReadonlyArray<string>,
+  ): (rawBytes: Uint8Array) => Effect.Effect<DkimVerificationResult, never, DnsTxtResolver>;
+  (
+    rawBytes: Uint8Array,
+    allowedDomains: ReadonlyArray<string>,
+  ): Effect.Effect<DkimVerificationResult, never, DnsTxtResolver>;
+} = Fn.dual(2, verifyAlertDkimImpl);

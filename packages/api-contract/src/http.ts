@@ -2,14 +2,17 @@
  * Shared HTTP conventions (http-mcp-contracts section 3.2): entity tags, retry keys, paging
  * query fields, status helpers and the binary body schemas of section 3.4.
  */
-import { Context, Schema } from "effect";
-import { Multipart } from "effect/http";
-import { HttpApiSchema } from "effect/http-api";
+
+import * as Context from "effect/Context";
+import * as Multipart from "effect/http/Multipart";
+import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
 /** Strong entity tag holding a revision: `"7"`. Weak tags (W/) and `*` are rejected. */
 export const EntityTag = Schema.String.pipe(Schema.check(Schema.isPattern(/^"(0|[1-9]\d{0,9})"$/)));
 export type EntityTag = typeof EntityTag.Type;
-export const parseEntityTag = (tag: EntityTag): number => Number(tag.slice(1, -1));
+export const parseEntityTag = (tag: EntityTag): number => Number(Str.slice(1, -1)(tag));
 export const entityTag = (revision: number): EntityTag => `"${revision}"`;
 
 /** Client-chosen retry key. UUIDv7 recommended. Maps to RequestOptions.requestKey. */
@@ -92,6 +95,7 @@ export const ReportExportBytes = HttpApiSchema.StreamUint8Array({
 export const ZipBytes = HttpApiSchema.StreamUint8Array({ contentType: "application/zip" });
 
 /** One multipart part named `file` (filename and content type), streamed to core. */
+/** @public Single-file payload used by the multipart upload contract. */
 export const UploadedFile = Multipart.SingleFileSchema;
 export const AttachPayload = Schema.Struct({ file: UploadedFile }).pipe(
   HttpApiSchema.asMultipartStream({ maxParts: 1, maxFileSize: ATTACHMENT_MAX_BYTES }),

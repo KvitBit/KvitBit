@@ -2,15 +2,18 @@ import { Head } from "@effect/ui";
 import { Html } from "@effect/ui/html";
 import { WorkspaceSummary } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { Markup } from "../ui/html";
 import type { PageCommand } from "./commands";
 import { Intent } from "./intent";
 import { Locale, Prefs } from "./prefs";
 import { SessionState } from "./session";
 
+const Route = ViewModels.Route.pipe(Schema.toTaggedUnion("_tag"));
+export const RouteCases = Route.cases;
 export type Route = ViewModels.Route;
-export type RouteOf<T extends ViewModels.RouteTag> = ViewModels.RouteOf<T>;
 
 export const PageContext = Schema.Struct({
   route: ViewModels.Route,
@@ -26,27 +29,26 @@ export type PageContext = typeof PageContext.Type;
 export interface PageReturn<Model, Message> {
   readonly model: Model;
   readonly commands?: ReadonlyArray<PageCommand<Message>>;
-  readonly outMessage?: Intent;
+  readonly outMessage?: Intent | undefined;
 }
 
 export type MessageHandlers<Message extends { readonly _tag: string }, Result> = {
   readonly [Tag in Message["_tag"]]: (message: Extract<Message, { readonly _tag: Tag }>) => Result;
 };
 
-export const definePage = <const Name extends string, Model, Message, PageRoute extends Route>(
+interface PageDefinition<Model, Message, PageRoute extends Route> {
+  readonly Route: Schema.Codec<PageRoute, unknown, never, never>;
+  readonly Model: Schema.Codec<Model, unknown, never, never>;
+  readonly Message: Schema.Codec<Message, unknown, never, never>;
+  readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
+  readonly update: (model: Model, message: Message, ctx: PageContext) => PageReturn<Model, Message>;
+  readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
+  readonly title: (model: Model, ctx: PageContext) => string;
+}
+
+const definePageImpl = <const Name extends string, Model, Message, PageRoute extends Route>(
   name: Name,
-  page: {
-    readonly Model: Schema.Codec<Model, unknown, never, never>;
-    readonly Message: Schema.Codec<Message, unknown, never, never>;
-    readonly init: (route: PageRoute, ctx: PageContext) => PageReturn<Model, Message>;
-    readonly update: (
-      model: Model,
-      message: Message,
-      ctx: PageContext,
-    ) => PageReturn<Model, Message>;
-    readonly view: (model: Model, ctx: PageContext, h: Html.H<Message>) => Markup<Message>;
-    readonly title: (model: Model, ctx: PageContext) => string;
-  },
+  page: PageDefinition<Model, Message, PageRoute>,
 ) =>
   Html.component({
     name,
@@ -59,7 +61,13 @@ export const definePage = <const Name extends string, Model, Message, PageRoute 
   }).make({
     init: ($) => {
       // The route-to-component switch is exhaustive and selects the matching PageRoute.
-      const result = page.init($.props.route as PageRoute, $.props);
+      const result = page.init(
+        Option.getOrThrowWith(
+          Schema.decodeUnknownOption(Schema.toType(page.Route))($.props.route),
+          () => new Error(`Invalid route for ${name}`),
+        ),
+        $.props,
+      );
       const step = $.set(result.model).run(...(result.commands ?? []));
       return result.outMessage === undefined ? step : step.emit(result.outMessage);
     },
@@ -71,3 +79,13 @@ export const definePage = <const Name extends string, Model, Message, PageRoute 
     view: (h, model) => page.view(model, h.props, h),
     head: ({ model, props }) => [Head.title(`${page.title(model, props)} · Kvitbit`)],
   });
+
+export const definePage: {
+  <const Name extends string, Model, Message, PageRoute extends Route>(
+    page: PageDefinition<Model, Message, PageRoute>,
+  ): (name: Name) => ReturnType<typeof definePageImpl<Name, Model, Message, PageRoute>>;
+  <const Name extends string, Model, Message, PageRoute extends Route>(
+    name: Name,
+    page: PageDefinition<Model, Message, PageRoute>,
+  ): ReturnType<typeof definePageImpl<Name, Model, Message, PageRoute>>;
+} = Fn.dual(2, definePageImpl);

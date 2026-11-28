@@ -3,8 +3,10 @@
  * Effect Cluster's `WorkflowEngine` (core-ports 7.1-7.2).
  */
 import { DeliveryJobs, ExportWorkflow, InvitationDelivery } from "@kvitbit/core";
-import { Effect, Layer, Option } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import type * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import {
   DataExportWorkflow,
@@ -30,15 +32,15 @@ export const DeliveryJobsLive: Layer.Layer<
     const sql = yield* SqlClient.SqlClient;
     const ctx = yield* Effect.context<WorkflowEngine.WorkflowEngine>();
     return DeliveryJobs.of({
-      start: (workspaceId, deliveryId) =>
-        Effect.gen(function* () {
-          for (;;) {
-            const [row] = yield* sql<{ readonly workflow_attempt: number }>`
+      start: Effect.fn("DeliveryJobs.start")(
+        function* (workspaceId, deliveryId) {
+          const currentAttempt = sql<{ readonly workflow_attempt: number }>`
               SELECT workflow_attempt FROM deliveries
               WHERE workspace_id = ${workspaceId} AND id = ${deliveryId}
                 AND status IN ('queued', 'sending')
             `;
-            if (row === undefined) return;
+          let [row] = yield* currentAttempt;
+          while (row !== undefined) {
             const payload = { workspaceId, deliveryId, attempt: row.workflow_attempt };
             const execId = yield* DocumentDeliveryWorkflow.executionId(payload);
             const status = yield* DocumentDeliveryWorkflow.poll(execId);
@@ -48,7 +50,7 @@ export const DeliveryJobsLive: Layer.Layer<
               return;
             }
             if (status.value._tag === "Suspended") {
-              if (status.value.failed) yield* DocumentDeliveryWorkflow.resume(execId);
+              if (status.value.failed === true) yield* DocumentDeliveryWorkflow.resume(execId);
               return;
             }
 
@@ -59,14 +61,18 @@ export const DeliveryJobsLive: Layer.Layer<
               WHERE workspace_id = ${workspaceId} AND id = ${deliveryId}
                 AND status IN ('queued', 'sending') AND workflow_attempt = ${row.workflow_attempt}
             `;
+            [row] = yield* currentAttempt;
           }
-        }).pipe(Effect.provide(ctx), Effect.orDie),
+        },
+        Effect.provide(ctx),
+        Effect.orDie,
+      ),
     });
   }),
 );
 
 /** `InvitationDelivery` bound to `MemberInvitationWorkflow` (`${invitationId}:${epoch}`). */
-export const InvitationDeliveryLive: Layer.Layer<
+const InvitationDeliveryLive: Layer.Layer<
   InvitationDelivery,
   never,
   WorkflowEngine.WorkflowEngine
@@ -74,7 +80,7 @@ export const InvitationDeliveryLive: Layer.Layer<
   InvitationDelivery,
   Effect.map(Effect.context<WorkflowEngine.WorkflowEngine>(), (ctx) =>
     InvitationDelivery.of({
-      start: (send) =>
+      start: Effect.fn("InvitationDelivery.start")((send) =>
         MemberInvitationWorkflow.execute(
           {
             workspaceId: send.workspaceId,
@@ -83,21 +89,23 @@ export const InvitationDeliveryLive: Layer.Layer<
           },
           { discard: true, detached: true },
         ).pipe(Effect.provide(ctx), Effect.asVoid),
+      ),
     }),
   ),
 );
 
 /** `ExportWorkflow` bound to `DataExportWorkflow` (`exportId`). */
-export const ExportWorkflowLive: Layer.Layer<ExportWorkflow, never, WorkflowEngine.WorkflowEngine> =
+const ExportWorkflowLive: Layer.Layer<ExportWorkflow, never, WorkflowEngine.WorkflowEngine> =
   Layer.effect(
     ExportWorkflow,
     Effect.map(Effect.context<WorkflowEngine.WorkflowEngine>(), (ctx) =>
       ExportWorkflow.of({
-        start: (job) =>
+        start: Effect.fn("ExportWorkflow.start")((job) =>
           DataExportWorkflow.execute(
             { workspaceId: job.workspaceId, exportId: job.exportId },
             { discard: true, detached: true },
           ).pipe(Effect.provide(ctx), Effect.asVoid),
+        ),
       }),
     ),
   );

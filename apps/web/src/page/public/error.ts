@@ -4,21 +4,28 @@ import type { Html } from "@effect/ui/html";
  * Screen 03 — Error pages (404 Not Found, 403 No Access, 500 Server Error, Offline)
  * with context-aware recovery links.
  */
-import { ViewModels } from "@kvitbit/ui-port";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import { href } from "../../app/routing";
 import { attribute } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import { button, card, linkButton, separator } from "../../ui/kit";
 import { cn, ui } from "../../ui/styles";
 
-export type Route = RouteOf<"Error">;
+export const Route = RouteCases.Error;
+export type Route = typeof Route.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   kind: Schema.Literals(["not_found", "no_access", "server", "offline"]),
 });
 export type Model = typeof Model.Type;
@@ -50,11 +57,16 @@ const CODE: Readonly<Record<Model["kind"], string>> = {
   offline: "OFFLINE",
 };
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => ({
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => ({
   model: { route, kind: route.kind },
 });
 
-export const update = (
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (
   model: Model,
   message: Message,
   _ctx: PageContext,
@@ -66,7 +78,12 @@ export const update = (
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, _ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   switch (model.kind) {
     case "not_found":
@@ -80,7 +97,12 @@ export const title = (model: Model, ctx: PageContext): string => {
   }
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const heading = title(model, ctx);
   const body =
@@ -114,7 +136,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               separator(h),
               h.span.class(cn(ui.small, ui.muted)).children([local(ctx.locale, "workspacesTitle")]),
               h.div.class(ui.row).children(
-                workspaces.map((ws) =>
+                Arr.map(workspaces, (ws) =>
                   linkButton(h, {
                     label: ws.name,
                     href: href({ _tag: "Dashboard", ws: ws.slug }),
@@ -176,3 +198,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     ),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

@@ -3,10 +3,26 @@
  * PriceList), a EUR Invoice on a weekend tax point with numbering and a number override, and the
  * vat_payer advance flow (Proforma, Payment, auto-sent PTD, Final Invoice, Credit Note).
  */
+
 import { describe, expect, test } from "bun:test";
-import type { ContactView, DocumentId, DocumentView, IsoDate } from "@kvitbit/domain/contract";
-import { Contacts, Documents, Payments, PriceList, Workspaces } from "@kvitbit/domain/contract";
-import { Effect, Exit, Ref } from "effect";
+import type { DocumentInput, DocumentView } from "@kvitbit/domain/contract";
+import {
+  Contacts,
+  Documents,
+  IsoDate,
+  type MemberCaller,
+  Payments,
+  PriceList,
+  PriceListItemInput,
+  Workspaces,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import { LineViewData } from "../../src/modules/documents/view";
 import { StartedDeliveries } from "../../src/testing";
 import { account, asCaller, runCore } from "../helpers";
 import {
@@ -24,9 +40,11 @@ import {
 } from "./documents-fixtures";
 
 const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
-  if (Exit.isFailure(exit)) throw new Error(`expected success, got ${JSON.stringify(exit.cause)}`);
+  if (Exit.isFailure(exit))
+    throw new Error("Expected document flow to succeed", { cause: exit.cause });
   return exit.value;
 };
+const PTD_NUMBER = /^DD-2026-\d{4}$/;
 
 describe("onboarding", () => {
   test("an Account creates a Workspace, adds a Contact from ARES and a Price List Item", async () => {
@@ -35,23 +53,31 @@ describe("onboarding", () => {
         account(),
         Effect.gen(function* () {
           const ws = yield* Workspaces;
-          const owner = yield* ws.create({ name: "Kvitbit s.r.o." } as never);
+          const owner = yield* ws.create(account(), { name: "Kvitbit s.r.o." });
           return yield* asCaller(
             owner,
             Effect.gen(function* () {
-              const current = yield* ws.current;
-              const contact = yield* Effect.flatMap(Contacts, (c) => c.fromIco(BUYER_ICO));
+              const current = yield* ws.current(owner);
+              const contact = yield* Effect.flatMap(Contacts, (c) => c.fromIco(owner, BUYER_ICO));
               const priceList = yield* PriceList;
-              const item = yield* priceList.save({
-                name: "Konzultace",
-                unit: "h",
-                unitPrice: dec("1500"),
-                currency: CZK,
-                vat: "standard",
-              } as never);
-              const items = yield* priceList.list();
-              const found = yield* Effect.flatMap(Contacts, (c) => c.search({ text: "Odběratel" }));
-              return { owner, current, contact, item, items, found };
+              const item = yield* priceList.save(
+                owner,
+                PriceListItemInput.make({
+                  name: "Konzultace",
+                  unit: "h",
+                  unitPrice: dec("1500"),
+                  currency: CZK,
+                  vat: "standard",
+                }),
+              );
+              const unitPrice = yield* Schema.decodeUnknownEffect(Schema.toType(Schema.BigDecimal))(
+                item["unitPrice"],
+              );
+              const items = yield* priceList.list(owner);
+              const found = yield* Effect.flatMap(Contacts, (c) =>
+                c.search(owner, { text: "Odběratel" }),
+              );
+              return { owner, current, contact, item, unitPrice, items, found };
             }),
           );
         }),
@@ -59,18 +85,19 @@ describe("onboarding", () => {
       ),
     );
     expect(result.owner).toMatchObject({ _tag: "Member", role: "owner" });
-    expect(result.current.name).toBe("Kvitbit s.r.o.");
-    const contact = result.contact as ContactView & Record<string, unknown>;
+    expect(result.current["name"]).toBe("Kvitbit s.r.o.");
+    const { contact } = result;
     expect(contact).toMatchObject({
       ico: BUYER_ICO,
       name: buyerRecord.name,
       dic: buyerRecord.dic,
       address: buyerRecord.address,
     });
-    expect(result.found.items.map((c) => c.id)).toEqual([contact.id]);
+    expect(EffectArray.map(result.found.items, (c) => c["id"])).toEqual([contact["id"]]);
     expect(result.item).toMatchObject({ name: "Konzultace", unit: "h", vat: "standard" });
-    expect(str(result.item.unitPrice as never)).toBe("1500");
-    expect(result.items.map((i) => i.id)).toEqual([result.item.id]);
+    const price = str(result.unitPrice);
+    expect(price).toBe("1500");
+    expect(EffectArray.map(result.items, (i) => i["id"])).toEqual([result.item["id"]]);
   });
 });
 
@@ -78,42 +105,44 @@ describe("EUR invoice on a weekend tax point", () => {
   test("uses the prior working day's CNB fixing, CZK VAT per bucket, and numbering skips an override", async () => {
     // Fixings: Thursday, Friday, then Monday; none for the weekend of 21-22 Nov 2026.
     const fixings = [
-      fixing("2026-11-19", "24.900"),
-      fixing("2026-11-20", "25.000"),
-      fixing("2026-11-23", "25.500"),
+      fixing({ date: "2026-11-19", eur: "24.900" }),
+      fixing({ date: "2026-11-20", eur: "25.000" }),
+      fixing({ date: "2026-11-23", eur: "25.500" }),
     ];
     const result = ok(
       await runCore(
         account(),
         Effect.gen(function* () {
-          const { owner, buyer } = yield* onboard("vat_payer");
+          const { owner, buyer } = yield* onboard(account(), "vat_payer");
           return yield* asCaller(
             owner,
             Effect.gen(function* () {
               const docs = yield* Documents;
-              const input = (extra: object = {}) =>
-                ({
-                  kind: "invoice",
-                  contact: buyer,
-                  currency: EUR,
-                  issuedOn: "2026-11-23",
-                  taxableSupplyOn: "2026-11-21", // Saturday
-                  lines: [
-                    { description: "Vývoj", quantity: dec("10"), unitPrice: dec("100") },
-                    { description: "Kniha", unitPrice: dec("50"), vat: "reduced" },
-                  ],
-                  ...extra,
-                }) as never;
-              const eur = yield* docs.issue({ input: input() });
-              const second = yield* docs.issue({ input: input() });
+              const input = (extra: Partial<DocumentInput> = {}): DocumentInput => ({
+                kind: "invoice",
+                contact: buyer,
+                currency: EUR,
+                issuedOn: IsoDate.make("2026-11-23"),
+                taxableSupplyOn: IsoDate.make("2026-11-21"), // Saturday
+                lines: [
+                  { description: "Vývoj", quantity: dec("10"), unitPrice: dec("100") },
+                  { description: "Kniha", unitPrice: dec("50"), vat: "reduced" },
+                ],
+                ...extra,
+              });
+              const eur = yield* docs.issue(owner, { input: input() });
+              const second = yield* docs.issue(owner, { input: input() });
               const overridden = yield* docs.edit(
+                owner,
                 second.id,
                 { number: "2026-0003" },
                 second.revision,
               );
-              const next = yield* docs.issue({ input: input({ currency: CZK }) });
+              const next = yield* docs.issue(owner, { input: input({ currency: CZK }) });
+              if (eur.number === null)
+                return yield* Effect.die("Expected a number on the EUR invoice");
               const duplicate = yield* Effect.flip(
-                docs.edit(next.id, { number: eur.number as string }, next.revision),
+                docs.edit(owner, next.id, { number: eur.number }, next.revision),
               );
               return { eur, second, overridden, next, duplicate };
             }),
@@ -125,13 +154,13 @@ describe("EUR invoice on a weekend tax point", () => {
     const { eur } = result;
     expect(eur.dates).toMatchObject({ issuedOn: "2026-11-23", taxableSupplyOn: "2026-11-21" });
     expect(eur.fx).toMatchObject({ fixingDate: "2026-11-20", source: "cnb", quantity: 1 });
-    expect(str(eur.fx?.rate ?? dec("0"))).toBe("25");
+    (eur.fx?.rate ?? dec("0")).pipe(str, expect).toBe("25");
     expect(buckets(eur)).toEqual([
       ["standard", "21", "1000", "210", "1210", "5250"],
       ["reduced", "12", "50", "6", "56", "150"],
     ]);
     expect(eur.totals.gross.currency).toBe(EUR);
-    expect(str(eur.totals.vatCzk?.amount ?? dec("0"))).toBe("5400");
+    (eur.totals.vatCzk?.amount ?? dec("0")).pipe(str, expect).toBe("5400");
     // Numbering: next in series, override keeps the old number reserved and is skipped.
     expect([eur.number, result.second.number]).toEqual(["2026-0001", "2026-0002"]);
     expect(result.overridden.number).toBe("2026-0003");
@@ -147,34 +176,35 @@ describe("vat_payer advance flow", () => {
    */
   const advance = <A, E, R>(
     autoSend: boolean,
-    after: (proforma: DocumentView) => Effect.Effect<A, E, R>,
+    after: (owner: MemberCaller, proforma: DocumentView) => Effect.Effect<A, E, R>,
   ) =>
     Effect.gen(function* () {
-      const { owner, buyer } = yield* onboard("vat_payer");
+      const { owner, buyer } = yield* onboard(account(), "vat_payer");
       return yield* asCaller(
         owner,
         Effect.gen(function* () {
           const ws = yield* Workspaces;
-          const current = yield* ws.current;
+          const current = yield* ws.current(owner);
           yield* ws.updateSettings(
-            { defaults: { paymentTaxDocumentAutoSend: autoSend } } as never,
+            owner,
+            { defaults: { paymentTaxDocumentAutoSend: autoSend } },
             current.revision,
           );
           const docs = yield* Documents;
-          const proforma = yield* docs.issue({
+          const proforma = yield* docs.issue(owner, {
             input: {
               kind: "proforma",
               contact: buyer,
-              issuedOn: "2026-11-23" as IsoDate,
+              issuedOn: IsoDate.make("2026-11-23"),
               lines: [{ description: "Záloha na vývoj", unitPrice: dec("1000") }],
             },
           });
           const recorded = yield* Effect.flatMap(Payments, (p) =>
-            p.record({ target: { document: proforma.id } }),
+            p.record(owner, { target: { document: proforma.id } }),
           );
-          const ptd = yield* docs.get((recorded.issued[0] as DocumentView).id);
+          const ptd = yield* docs.get(owner, EffectArray.getUnsafe(recorded.issued, 0).id);
           const started = yield* Effect.flatMap(StartedDeliveries, Ref.get);
-          return { proforma, recorded, ptd, started, after: yield* after(proforma) };
+          return { proforma, recorded, ptd, started, after: yield* after(owner, proforma) };
         }),
       );
     });
@@ -183,10 +213,10 @@ describe("vat_payer advance flow", () => {
     const result = ok(
       await runCore(
         account(),
-        advance(true, (proforma) =>
+        advance(true, (owner, advanceDocument) =>
           Effect.gen(function* () {
             const docs = yield* Documents;
-            const finalInvoice = yield* docs.issueFinalInvoice(proforma.id, {
+            const finalInvoice = yield* docs.issueFinalInvoice(owner, advanceDocument.id, {
               patch: {
                 lines: [
                   { description: "Vývoj", unitPrice: dec("1000") },
@@ -194,15 +224,15 @@ describe("vat_payer advance flow", () => {
                 ],
               },
             });
-            const creditNote = yield* docs.correct(finalInvoice.id, {
+            const creditNote = yield* docs.correct(owner, finalInvoice.id, {
               reason: "dobropis",
               lines: "full",
             });
             return {
-              proforma: yield* docs.get(proforma.id),
+              proforma: yield* docs.get(owner, advanceDocument.id),
               finalInvoice,
               creditNote,
-              credited: yield* docs.get(finalInvoice.id),
+              credited: yield* docs.get(owner, finalInvoice.id),
             };
           }),
         ),
@@ -214,36 +244,39 @@ describe("vat_payer advance flow", () => {
     // The payment covers the Proforma; the PTD is numbered in the PTD series (DD-YYYY-NNNN).
     expect(proforma.number).toBe("ZF-2026-0001");
     expect(recorded.settlement).toBe("paid");
-    expect(recorded.issued.map((d) => d.id)).toEqual([ptd.id]);
+    expect(EffectArray.map(recorded.issued, (d) => d.id)).toEqual([ptd.id]);
     expect(ptd.kind).toBe("payment_tax_document");
-    expect(ptd.number).toMatch(/^DD-2026-\d{4}$/);
+    expect(ptd.number).toMatch(PTD_NUMBER);
     expect(ptd.number).toBe("DD-2026-0001");
     expect(ptd.taxDocument).toBe(true);
     expect(amounts(ptd)).toEqual({ net: "1000", vat: "210", gross: "1210" });
-    expect(ptd.related.map((r) => [r.relation, r.id])).toEqual([["advance_of", proforma.id]]);
+    expect(EffectArray.map(ptd.related, (r) => [r.relation, r.id])).toEqual([
+      ["advance_of", proforma.id],
+    ]);
     // Auto-sent through the real DocumentSender: a delivery row and a started delivery job.
     expect(ptd.deliveries).toHaveLength(1);
     expect(ptd.deliveries[0]).toMatchObject({
       purpose: "document",
       to: ["fakturace@odberatel.cz"],
     });
-    expect(started.map((s) => s.deliveryId)).toEqual(ptd.deliveries.map((d) => d.id));
+    expect(EffectArray.map(started, (s) => s.deliveryId)).toEqual(
+      EffectArray.map(ptd.deliveries, (d) => d.id),
+    );
     // Final Invoice: the full supply less the advance; only the extra work remains due.
     expect(finalInvoice.kind).toBe("invoice");
     expect(finalInvoice.number).toBe("2026-0001");
-    const fiLines = finalInvoice.lines as unknown as ReadonlyArray<{
-      readonly deducts: DocumentId | null;
-      readonly quantity: never;
-      readonly unitPrice: never;
-    }>;
-    expect(fiLines.map((l) => [str(l.quantity), str(l.unitPrice), l.deducts])).toEqual([
+    const decodeLine = Schema.decodeUnknownResult(Schema.toType(LineViewData));
+    const lines = EffectArray.map(finalInvoice.lines, (line) =>
+      Result.getOrThrow(decodeLine(line)),
+    );
+    expect(EffectArray.map(lines, (l) => [str(l.quantity), str(l.unitPrice), l.deducts])).toEqual([
       ["1", "1000", null],
       ["1", "500", null],
       ["-1", "1000", ptd.id],
     ]);
     expect(amounts(finalInvoice)).toEqual({ net: "500", vat: "105", gross: "605" });
     expect(finalInvoice.settlement).toBe("unpaid");
-    expect(finalInvoice.related.map((r) => [r.relation, r.id])).toEqual([
+    expect(EffectArray.map(finalInvoice.related, (r) => [r.relation, r.id])).toEqual([
       ["advance_of", proforma.id],
       ["deducts", ptd.id],
     ]);
@@ -251,16 +284,18 @@ describe("vat_payer advance flow", () => {
     expect(creditNote.kind).toBe("credit_note");
     expect(creditNote.number).toBe("OD-2026-0001");
     expect(amounts(creditNote)).toEqual({ net: "-500", vat: "-105", gross: "-605" });
+    const finalNumber = finalInvoice.number;
+    if (finalNumber === null) throw new Error("Expected a number on the Final Invoice");
     expect(creditNote.related).toEqual([
       {
         relation: "corrects",
         id: finalInvoice.id,
         kind: "invoice",
-        number: finalInvoice.number as string,
+        number: finalNumber,
       },
     ]);
     expect(credited.settlement).toBe("credited");
-    expect(credited.related.map((r) => [r.relation, r.id])).toContainEqual([
+    expect(EffectArray.map(credited.related, (r) => [r.relation, r.id])).toContainEqual([
       "corrected_by",
       creditNote.id,
     ]);
@@ -274,7 +309,7 @@ describe("vat_payer advance flow", () => {
         { registry },
       ),
     );
-    expect(recorded.issued.map((d) => d.id)).toEqual([ptd.id]);
+    expect(EffectArray.map(recorded.issued, (d) => d.id)).toEqual([ptd.id]);
     expect(ptd.number).toBe("DD-2026-0001");
     expect(ptd.deliveries).toEqual([]);
     expect(started).toEqual([]);

@@ -12,7 +12,10 @@
  * The length bounds are this contract's choice, not the spec's: they await confirmation against
  * the key issuer (the Better Auth `apiKey` plugin storage, section 2.1) and may change then.
  */
-import { Option, Schema } from "effect";
+
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
 export const API_KEY_PREFIX = "kvb_";
 
@@ -32,7 +35,7 @@ export const ApiKeyToken = Schema.String.pipe(
 export type ApiKeyToken = typeof ApiKeyToken.Type;
 
 /** Rule A1: does this bearer value go to the API Key lookup? */
-export const isApiKeyBearer = (bearer: string): boolean => bearer.startsWith(API_KEY_PREFIX);
+export const isApiKeyBearer = Str.startsWith(API_KEY_PREFIX);
 
 export interface ApiKeyParts {
   readonly keyId: ApiKeyId;

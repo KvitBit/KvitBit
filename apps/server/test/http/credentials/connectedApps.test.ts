@@ -1,10 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { READ_SCOPES } from "@kvitbit/api-contract";
+import { ConnectedAppView, READ_SCOPES } from "@kvitbit/api-contract";
 import { CoreStore } from "@kvitbit/core/ports";
 import type { MemberCaller } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { as, type Harness, makeHarness, TEST_NOW, type TestUser } from "../harness";
 import {
   createSeededWorkspace,
@@ -22,6 +26,11 @@ let accountant: TestUser;
 let ownerCaller: MemberCaller;
 let base: string;
 
+const decodeGrants = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Array(ConnectedAppView)),
+  Effect.runSync,
+);
+
 beforeEach(async () => {
   h = makeHarness();
   await h.run(TestClock.setTime(TEST_NOW));
@@ -35,16 +44,20 @@ beforeEach(async () => {
   await joinMember(h, ownerCaller, accountant, "accountant");
   base = `/api/v1/workspaces/${ownerCaller.workspaceId}/connected-apps`;
 
-  await seedOAuthClient(h, {
-    clientId: "claude-desktop",
-    name: "Claude Desktop",
-    redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
-  });
-  await seedOAuthClient(h, {
-    clientId: "cursor-mcp",
-    name: null,
-    redirectUris: ["http://127.0.0.1:4321/callback"],
-  });
+  await h.run(
+    seedOAuthClient({
+      clientId: "claude-desktop",
+      name: "Claude Desktop",
+      redirectUris: ["https://claude.ai/api/mcp/auth_callback"],
+    }),
+  );
+  await h.run(
+    seedOAuthClient({
+      clientId: "cursor-mcp",
+      name: null,
+      redirectUris: ["http://127.0.0.1:4321/callback"],
+    }),
+  );
 }, 20_000);
 
 afterEach(async () => {
@@ -76,38 +89,35 @@ const countRows = (
 
 describe("connectedApps group", () => {
   test("owner and admin see all workspace grants; member and accountant see only their own", async () => {
-    await seedOAuthGrant(h, {
-      id: "grant-owner",
-      clientId: "claude-desktop",
-      userId: owner.id,
-      workspaceId: ownerCaller.workspaceId,
-      access: "read",
-      grantedScopes: READ_SCOPES,
-      createdAt: new Date("2026-11-21T10:00:00.000Z"),
-      lastUsedAt: new Date("2026-11-22T12:30:00.000Z"),
-    });
-    await seedOAuthGrant(h, {
-      id: "grant-member",
-      clientId: "cursor-mcp",
-      userId: member.id,
-      workspaceId: ownerCaller.workspaceId,
-      access: "custom",
-      grantedScopes: ["documents:write"],
-      createdAt: new Date("2026-11-22T10:00:00.000Z"),
-    });
+    await h.run(
+      seedOAuthGrant({
+        id: "grant-owner",
+        clientId: "claude-desktop",
+        userId: owner.id,
+        workspaceId: ownerCaller.workspaceId,
+        access: "read",
+        grantedScopes: READ_SCOPES,
+        createdAt: DateTime.makeUnsafe("2026-11-21T10:00:00.000Z"),
+        lastUsedAt: DateTime.makeUnsafe("2026-11-22T12:30:00.000Z"),
+      }),
+    );
+    await h.run(
+      seedOAuthGrant({
+        id: "grant-member",
+        clientId: "cursor-mcp",
+        userId: member.id,
+        workspaceId: ownerCaller.workspaceId,
+        access: "custom",
+        grantedScopes: ["documents:write"],
+        createdAt: DateTime.makeUnsafe("2026-11-22T10:00:00.000Z"),
+      }),
+    );
 
     // Owner sees both, newest first
     const ownerRes = await h.fetch(base, { headers: as.mobile(owner) });
     expect(ownerRes.status).toBe(200);
-    const ownerList = (await ownerRes.json()) as Array<{
-      grantId: string;
-      client: { id: string; name: string; redirectHost: string };
-      member: { userId: string; name: string };
-      access: string;
-      scopes: string[];
-      lastUsedAt: string | null;
-    }>;
-    expect(ownerList.map((g) => g.grantId)).toEqual(["grant-member", "grant-owner"]);
+    const ownerList = decodeGrants(await ownerRes.json());
+    expect(Arr.map(ownerList, (g) => g.grantId)).toEqual(["grant-member", "grant-owner"]);
     expect(ownerList[0]).toMatchObject({
       grantId: "grant-member",
       client: { id: "cursor-mcp", name: "cursor-mcp", redirectHost: "127.0.0.1:4321" },
@@ -126,54 +136,60 @@ describe("connectedApps group", () => {
     });
 
     // Admin also sees both
-    const adminList = (await (await h.fetch(base, { headers: as.mobile(admin) })).json()) as Array<{
-      grantId: string;
-    }>;
-    expect(adminList.map((g) => g.grantId)).toEqual(["grant-member", "grant-owner"]);
+    const adminList = decodeGrants(
+      await (await h.fetch(base, { headers: as.mobile(admin) })).json(),
+    );
+    expect(Arr.map(adminList, (g) => g.grantId)).toEqual(["grant-member", "grant-owner"]);
 
     // Member sees only their own grant
-    const memberList = (await (
-      await h.fetch(base, { headers: as.mobile(member) })
-    ).json()) as Array<{ grantId: string }>;
-    expect(memberList.map((g) => g.grantId)).toEqual(["grant-member"]);
+    const memberList = decodeGrants(
+      await (await h.fetch(base, { headers: as.mobile(member) })).json(),
+    );
+    expect(Arr.map(memberList, (g) => g.grantId)).toEqual(["grant-member"]);
 
     // Accountant has no grants -> empty list
-    const accountantList = (await (
-      await h.fetch(base, { headers: as.mobile(accountant) })
-    ).json()) as Array<{ grantId: string }>;
+    const accountantList = await (await h.fetch(base, { headers: as.mobile(accountant) })).json();
     expect(accountantList).toEqual([]);
   });
 
   test("member can self-revoke their own grant (deleting access & refresh tokens) but gets 403 revoking someone else's", async () => {
-    await seedOAuthGrant(h, {
-      id: "grant-owner",
-      clientId: "claude-desktop",
-      userId: owner.id,
-      workspaceId: ownerCaller.workspaceId,
-      access: "read",
-      grantedScopes: READ_SCOPES,
-    });
-    await seedOAuthTokens(h, {
-      consentId: "grant-owner",
-      clientId: "claude-desktop",
-      userId: owner.id,
-      suffix: "owner",
-    });
+    await h.run(
+      seedOAuthGrant({
+        id: "grant-owner",
+        clientId: "claude-desktop",
+        userId: owner.id,
+        workspaceId: ownerCaller.workspaceId,
+        access: "read",
+        grantedScopes: READ_SCOPES,
+      }),
+    );
+    await h.run(
+      seedOAuthTokens({
+        consentId: "grant-owner",
+        clientId: "claude-desktop",
+        userId: owner.id,
+        suffix: "owner",
+      }),
+    );
 
-    await seedOAuthGrant(h, {
-      id: "grant-member",
-      clientId: "claude-desktop",
-      userId: member.id,
-      workspaceId: ownerCaller.workspaceId,
-      access: "read",
-      grantedScopes: READ_SCOPES,
-    });
-    await seedOAuthTokens(h, {
-      consentId: "grant-member",
-      clientId: "claude-desktop",
-      userId: member.id,
-      suffix: "member",
-    });
+    await h.run(
+      seedOAuthGrant({
+        id: "grant-member",
+        clientId: "claude-desktop",
+        userId: member.id,
+        workspaceId: ownerCaller.workspaceId,
+        access: "read",
+        grantedScopes: READ_SCOPES,
+      }),
+    );
+    await h.run(
+      seedOAuthTokens({
+        consentId: "grant-member",
+        clientId: "claude-desktop",
+        userId: member.id,
+        suffix: "member",
+      }),
+    );
 
     // Member cannot revoke owner's grant -> 403 Forbidden{grant.revoke.all}
     const forbiddenRes = await h.fetch(`${base}/grant-owner`, {
@@ -201,20 +217,24 @@ describe("connectedApps group", () => {
   });
 
   test("admin can revoke another member's grant and audits with onBehalfOf", async () => {
-    await seedOAuthGrant(h, {
-      id: "grant-acct",
-      clientId: "claude-desktop",
-      userId: accountant.id,
-      workspaceId: ownerCaller.workspaceId,
-      access: "read",
-      grantedScopes: READ_SCOPES,
-    });
-    await seedOAuthTokens(h, {
-      consentId: "grant-acct",
-      clientId: "claude-desktop",
-      userId: accountant.id,
-      suffix: "acct",
-    });
+    await h.run(
+      seedOAuthGrant({
+        id: "grant-acct",
+        clientId: "claude-desktop",
+        userId: accountant.id,
+        workspaceId: ownerCaller.workspaceId,
+        access: "read",
+        grantedScopes: READ_SCOPES,
+      }),
+    );
+    await h.run(
+      seedOAuthTokens({
+        consentId: "grant-acct",
+        clientId: "claude-desktop",
+        userId: accountant.id,
+        suffix: "acct",
+      }),
+    );
 
     const res = await h.fetch(`${base}/grant-acct`, {
       method: "DELETE",
@@ -243,17 +263,19 @@ describe("connectedApps group", () => {
     });
   });
 
-  test("cross-workspace isolation: foreign and unknown grantId answer 404 NotFound{McpGrant}", async () => {
+  test("other workspace grants return 404", async () => {
     const otherOwner = h.addUser("Petr");
     const otherWs = await createSeededWorkspace(h, otherOwner, "beta-sro", "Beta s.r.o.");
-    await seedOAuthGrant(h, {
-      id: "grant-beta",
-      clientId: "claude-desktop",
-      userId: otherOwner.id,
-      workspaceId: otherWs.workspaceId,
-      access: "read",
-      grantedScopes: READ_SCOPES,
-    });
+    await h.run(
+      seedOAuthGrant({
+        id: "grant-beta",
+        clientId: "claude-desktop",
+        userId: otherOwner.id,
+        workspaceId: otherWs.workspaceId,
+        access: "read",
+        grantedScopes: READ_SCOPES,
+      }),
+    );
 
     const listRes = await h.fetch(base, { headers: as.mobile(owner) });
     expect(await listRes.json()).toEqual([]);

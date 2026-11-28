@@ -5,7 +5,8 @@
  * `fromApiRequest` (http-mcp-contracts 2.1).
  */
 import type { Principal, Unauthorized } from "@kvitbit/api-contract";
-import { Context, type Effect } from "effect";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
 
 export interface PrincipalResolverShape {
   /** Session cookie, session bearer or `kvb_` API key -> principal (channel web|mobile|api). */
@@ -18,5 +19,5 @@ export interface PrincipalResolverShape {
 }
 
 export class PrincipalResolver extends Context.Service<PrincipalResolver, PrincipalResolverShape>()(
-  "kvitbit/server/PrincipalResolver",
+  "@kvitbit/server/auth/PrincipalResolver",
 ) {}

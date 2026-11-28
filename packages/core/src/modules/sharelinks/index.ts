@@ -16,7 +16,7 @@
  * Document subject (visible in `Documents.history`). Integration: fill `DocumentView.share` from
  * `ShareLinksRepo.activeFor` + view events (not wired by this module).
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { ShareLinkKeysTest, ShareWorkspacesFake } from "./ports";
 import { ShareLinksRepoMemory } from "./repo";
 import { PublicShareLinksLive } from "./service";

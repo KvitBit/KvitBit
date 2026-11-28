@@ -1,20 +1,14 @@
 import { brandColors } from "@kvitbit/brand";
+import * as EffectArray from "effect/Array";
 
 /** Path the server mounts the web export at (app.json `experiments.baseUrl` plus a slash). */
 export const APP_BASE = "/app/";
-
-export type PwaIcon = {
-  readonly src: string;
-  readonly sizes: string;
-  readonly type: "image/png";
-  readonly purpose: "any" | "maskable";
-};
 
 /** Icons copied from repo `assets/brand/web` into `dist/icons`. `file` is the source and target name. */
 export const pwaIcons: ReadonlyArray<{
   readonly file: string;
   readonly size: number;
-  readonly purpose: PwaIcon["purpose"];
+  readonly purpose: "any" | "maskable";
 }> = [
   { file: "icon-192.png", size: 192, purpose: "any" },
   { file: "icon-512.png", size: 512, purpose: "any" },
@@ -40,12 +34,10 @@ export const pwaManifest = () => ({
   display: "standalone",
   theme_color: pwaColors.theme,
   background_color: pwaColors.background,
-  icons: pwaIcons.map(
-    (icon): PwaIcon => ({
-      src: `${APP_BASE}icons/${icon.file}`,
-      sizes: `${icon.size}x${icon.size}`,
-      type: "image/png",
-      purpose: icon.purpose,
-    }),
-  ),
+  icons: EffectArray.map(pwaIcons, (icon) => ({
+    src: `${APP_BASE}icons/${icon.file}`,
+    sizes: `${icon.size}x${icon.size}`,
+    type: "image/png" as const,
+    purpose: icon.purpose,
+  })),
 });

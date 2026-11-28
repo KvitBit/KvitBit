@@ -3,6 +3,25 @@
  * Stateful in-memory fixtures so dashboard, list, editor, detail dialogs, payments, share links,
  * and templates/recurring work end-to-end in demo mode without apps/server.
  */
+import {
+  FromIcoInput,
+  IssueFromInputPayload,
+  RecordPaymentInput,
+  ScheduleInput,
+  SendInput,
+} from "@kvitbit/api-contract";
+import { DocumentInput, DocumentPatch, type DocumentView, TemplateInput } from "@kvitbit/domain";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import type {
+  ContactOptionData,
+  ContactSnapshotData,
+  PaymentViewData,
+  TemplateViewData,
+} from "../page/documents/shared";
 import type { DemoRoute } from "./router";
 import { status } from "./router";
 import { DEMO_WORKSPACE, demoId } from "./shell";
@@ -30,28 +49,38 @@ const SCHED_2_ID = demoId(812);
 let nextSeq = 900;
 const nextId = (): string => demoId(++nextSeq);
 
-interface DemoContact {
-  id: string;
-  roles: Array<"customer" | "supplier">;
-  name: string;
-  ico: string | null;
-  dic: string | null;
-  legalForm: string | null;
-  address: {
-    street: string | null;
-    city: string | null;
-    postalCode: string | null;
-    country: string;
-  };
-  billingEmails: Array<string>;
-  phone: string | null;
-  note: string | null;
-  defaults: Record<string, unknown>;
-  archived: boolean;
-  revision: number;
-}
+// The JSON codec represents BigDecimal values as strings in the demo store.
+type DemoWire<T> = T extends BigDecimal.BigDecimal
+  ? string
+  : T extends object
+    ? { -readonly [Key in keyof T]: DemoWire<T[Key]> }
+    : T;
 
-const contacts: Array<DemoContact> = [
+type DemoContact = Omit<typeof ContactOptionData.Encoded, "defaults"> & {
+  defaults: Partial<(typeof ContactOptionData.Encoded)["defaults"]>;
+};
+type DemoDocument = DemoWire<typeof DocumentView.Encoded> & {
+  contact: typeof ContactSnapshotData.Encoded;
+};
+type DemoPayment = Omit<DemoWire<typeof PaymentViewData.Encoded>, "target"> & {
+  target: { document: string | undefined };
+};
+type DemoTemplate = Omit<DemoWire<typeof TemplateViewData.Encoded>, "input"> & {
+  input: Schema.Json;
+};
+
+const decodeFromIco = Schema.decodeUnknownOption(FromIcoInput);
+const decodeDocumentInput = Schema.decodeUnknownOption(Schema.toCodecJson(DocumentInput));
+const decodeIssueInput = Schema.decodeUnknownOption(Schema.toCodecJson(IssueFromInputPayload));
+const decodeDocumentPatch = Schema.decodeUnknownOption(Schema.toCodecJson(DocumentPatch));
+const decodeDelivery = Schema.decodeUnknownOption(SendInput);
+const decodePayment = Schema.decodeUnknownOption(Schema.toCodecJson(RecordPaymentInput));
+const templateCodec = Schema.toCodecJson(TemplateInput);
+const decodeTemplate = Schema.decodeUnknownOption(templateCodec);
+const encodeTemplate = Schema.encodeOption(templateCodec);
+const decodeSchedule = Schema.decodeUnknownOption(ScheduleInput);
+
+const contacts: [DemoContact, DemoContact, ...Array<DemoContact>] = [
   {
     id: CONTACT_1_ID,
     roles: ["customer"],
@@ -147,7 +176,7 @@ const bankAccounts = [
     name: "Fio EUR",
     currency: "EUR",
     accountNumber: null,
-    iban: "CZ1220100000002909876543",
+    iban: Arr.join(["CZ12", "2010", "0000", "0029", "0987", "6543"], ""),
     bic: "FIOBCZPPXXX",
     isDefault: true,
   },
@@ -177,8 +206,7 @@ const toContactSnapshot = (c: DemoContact) => ({
   billingEmails: c.billingEmails,
 });
 
-// biome-ignore lint/suspicious/noExplicitAny: demo store holds wire-encoded JSON documents
-const documents: Array<any> = [
+const documentFixtures: [DemoDocument, ...Array<DemoDocument>] = [
   {
     id: DOC_1_ID,
     kind: "invoice",
@@ -189,7 +217,7 @@ const documents: Array<any> = [
     overdue: true,
     revision: 2,
     taxDocument: true,
-    contact: toContactSnapshot(contacts[0] as DemoContact),
+    contact: toContactSnapshot(contacts[0]),
     issuer: ISSUER_SNAPSHOT,
     dates: { issuedOn: "2026-10-15", taxableSupplyOn: "2026-10-15", dueOn: "2026-10-29" },
     paymentMethod: "bank_transfer",
@@ -255,7 +283,7 @@ const documents: Array<any> = [
     overdue: false,
     revision: 3,
     taxDocument: false,
-    contact: toContactSnapshot(contacts[0] as DemoContact),
+    contact: toContactSnapshot(contacts[0]),
     issuer: ISSUER_SNAPSHOT,
     dates: { issuedOn: "2026-11-01", taxableSupplyOn: null, dueOn: "2026-11-15" },
     paymentMethod: "bank_transfer",
@@ -314,7 +342,7 @@ const documents: Array<any> = [
     overdue: false,
     revision: 1,
     taxDocument: true,
-    contact: toContactSnapshot(contacts[0] as DemoContact),
+    contact: toContactSnapshot(contacts[0]),
     issuer: ISSUER_SNAPSHOT,
     dates: { issuedOn: "2026-11-05", taxableSupplyOn: "2026-11-05", dueOn: "2026-11-05" },
     paymentMethod: "bank_transfer",
@@ -366,7 +394,7 @@ const documents: Array<any> = [
     overdue: false,
     revision: 1,
     taxDocument: true,
-    contact: toContactSnapshot(contacts[1] as DemoContact),
+    contact: toContactSnapshot(contacts[1]),
     issuer: ISSUER_SNAPSHOT,
     dates: { issuedOn: "2026-11-24", taxableSupplyOn: "2026-11-24", dueOn: "2026-12-24" },
     paymentMethod: "bank_transfer",
@@ -412,8 +440,9 @@ const documents: Array<any> = [
   },
 ];
 
-// biome-ignore lint/suspicious/noExplicitAny: wire-encoded demo payments
-const payments: Array<any> = [
+const documents = [...documentFixtures];
+
+const payments: Array<DemoPayment> = [
   {
     id: PAY_1_ID,
     revision: 1,
@@ -427,8 +456,7 @@ const payments: Array<any> = [
   },
 ];
 
-// biome-ignore lint/suspicious/noExplicitAny: wire-encoded demo templates
-const templates: Array<any> = [
+const templates: Array<DemoTemplate> = [
   {
     id: TPL_1_ID,
     name: "Měsíční podpora webu — Alza",
@@ -501,31 +529,36 @@ const templates: Array<any> = [
   },
 ];
 
-const runsByTemplate: Record<string, Array<unknown>> = {
-  [TPL_1_ID]: [
-    {
-      occurrence: "2026-11-01",
-      outcome: "issued",
-      at: "2026-11-01T07:00:12Z",
-      document: { id: DOC_1_ID, number: "2026-0041" },
-      delivery: { id: demoId(851), status: "sent" },
-      failure: null,
-    },
+const runsByTemplate = new Map([
+  [
+    TPL_1_ID,
+    [
+      {
+        occurrence: "2026-11-01",
+        outcome: "issued",
+        at: "2026-11-01T07:00:12Z",
+        document: { id: DOC_1_ID, number: "2026-0041" },
+        delivery: { id: demoId(851), status: "sent" },
+        failure: null,
+      },
+    ],
   ],
-  [TPL_2_ID]: [
-    {
-      occurrence: "2026-10-01",
-      outcome: "failed",
-      at: "2026-10-01T07:00:05Z",
-      document: null,
-      delivery: null,
-      failure: "fx.rate_missing",
-    },
+  [
+    TPL_2_ID,
+    [
+      {
+        occurrence: "2026-10-01",
+        outcome: "failed",
+        at: "2026-10-01T07:00:05Z",
+        document: null,
+        delivery: null,
+        failure: "fx.rate_missing",
+      },
+    ],
   ],
-};
+]);
 
-// biome-ignore lint/suspicious/noExplicitAny: wire-encoded summary helper
-const toSummary = (doc: any) => ({
+const toSummary = (doc: DemoDocument) => ({
   id: doc.id,
   kind: doc.kind,
   number: doc.number,
@@ -634,8 +667,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/fx-rates/:currency",
     respond: ({ params, query }) => ({
-      currency: params.currency ?? "EUR",
-      rate: params.currency === "USD" ? "23.45" : params.currency === "GBP" ? "29.80" : "25.15",
+      currency: params["currency"] ?? "EUR",
+      rate:
+        params["currency"] === "USD" ? "23.45" : params["currency"] === "GBP" ? "29.80" : "25.15",
       quantity: 1,
       fixingDate: query.get("on") ?? "2026-11-24",
       source: "cnb",
@@ -687,8 +721,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/contacts/from-ico",
     respond: ({ body }) => {
-      const ico = String((body as { ico?: string } | null)?.ico ?? "").trim();
-      const existing = contacts.find((c) => c.ico === ico);
+      const ico = Str.trim(Option.getOrUndefined(decodeFromIco(body))?.ico ?? "");
+      const existing = Option.getOrUndefined(Arr.findFirst(contacts, (c) => c.ico === ico));
       if (existing !== undefined) return existing;
       const created: DemoContact = {
         id: nextId(),
@@ -728,38 +762,37 @@ export const routes: ReadonlyArray<DemoRoute> = [
       const docStatus = query.get("status");
       const settlement = query.get("settlement");
       const overdue = query.get("overdue");
-      const text = query.get("text")?.toLowerCase().trim() ?? "";
-      const filtered = documents.filter((d) => {
+      const text = Str.trim(Str.toLowerCase(query.get("text") ?? ""));
+      const filtered = Arr.filter(documents, (d) => {
         if (kind !== null && d.kind !== kind) return false;
         if (docStatus !== null && d.status !== docStatus) return false;
         if (settlement !== null && d.settlement !== settlement) return false;
         if (overdue === "true" && !d.overdue) return false;
         if (
           text !== "" &&
-          !String(d.number ?? "")
-            .toLowerCase()
-            .includes(text) &&
-          !String(d.contact.name).toLowerCase().includes(text)
+          !Str.includes(text)(Str.toLowerCase(d.number ?? "")) &&
+          !Str.includes(text)(Str.toLowerCase(d.contact.name))
         ) {
           return false;
         }
         return true;
       });
-      return { items: filtered.map(toSummary), nextCursor: null };
+      return { items: Arr.map(filtered, toSummary), nextCursor: null };
     },
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents",
     respond: ({ body }) => {
-      // biome-ignore lint/suspicious/noExplicitAny: demo payload
-      const input = (body ?? {}) as any;
-      const contact = contacts.find((c) => c.id === input.contact) ?? (contacts[0] as DemoContact);
+      const input = Option.getOrUndefined(decodeDocumentInput(body));
+      const contact =
+        Option.getOrUndefined(Arr.findFirst(contacts, (c) => c.id === input?.contact)) ??
+        contacts[0];
       const id = nextId();
-      const created = {
-        ...documents[0],
+      const created: DemoDocument = {
+        ...(documents[0] ?? documentFixtures[0]),
         id,
-        kind: input.kind ?? "invoice",
+        kind: input?.kind ?? "invoice",
         number: null,
         status: "draft",
         locked: false,
@@ -768,8 +801,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
         revision: 1,
         contact: toContactSnapshot(contact),
         dates: {
-          issuedOn: input.issuedOn ?? "2026-11-24",
-          taxableSupplyOn: input.taxableSupplyOn ?? input.issuedOn ?? "2026-11-24",
+          issuedOn: input?.issuedOn ?? "2026-11-24",
+          taxableSupplyOn: input?.taxableSupplyOn ?? input?.issuedOn ?? "2026-11-24",
           dueOn: "2026-12-08",
         },
         related: [],
@@ -784,15 +817,16 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/issue",
     respond: ({ body }) => {
-      // biome-ignore lint/suspicious/noExplicitAny: demo payload
-      const input = ((body as any)?.input ?? {}) as any;
-      const contact = contacts.find((c) => c.id === input.contact) ?? (contacts[0] as DemoContact);
+      const input = Option.getOrUndefined(decodeIssueInput(body))?.input;
+      const contact =
+        Option.getOrUndefined(Arr.findFirst(contacts, (c) => c.id === input?.contact)) ??
+        contacts[0];
       const id = nextId();
-      const created = {
-        ...documents[0],
+      const created: DemoDocument = {
+        ...(documents[0] ?? documentFixtures[0]),
         id,
-        kind: input.kind ?? "invoice",
-        number: input.kind === "proforma" ? `ZF-2026-00${nextSeq}` : `2026-00${nextSeq}`,
+        kind: input?.kind ?? "invoice",
+        number: input?.kind === "proforma" ? `ZF-2026-00${nextSeq}` : `2026-00${nextSeq}`,
         status: "issued",
         locked: false,
         settlement: "unpaid",
@@ -800,8 +834,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
         revision: 1,
         contact: toContactSnapshot(contact),
         dates: {
-          issuedOn: input.issuedOn ?? "2026-11-24",
-          taxableSupplyOn: input.taxableSupplyOn ?? input.issuedOn ?? "2026-11-24",
+          issuedOn: input?.issuedOn ?? "2026-11-24",
+          taxableSupplyOn: input?.taxableSupplyOn ?? input?.issuedOn ?? "2026-11-24",
           dueOn: "2026-12-08",
         },
         related: [],
@@ -816,21 +850,26 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
-      return found ?? status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
+      return (
+        found ?? status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] })
+      );
     },
   },
   {
     method: "PATCH",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId",
     respond: ({ params, body }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
-      // biome-ignore lint/suspicious/noExplicitAny: demo patch
-      const patch = (body ?? {}) as any;
-      if (patch.number !== undefined) found.number = patch.number;
+      const patch = Option.getOrUndefined(decodeDocumentPatch(body));
+      if (patch?.number !== undefined) found.number = patch.number;
       found.revision += 1;
       return found;
     },
@@ -839,18 +878,21 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId",
     respond: ({ params }) => {
-      const idx = documents.findIndex((d) => d.id === params.documentId);
-      if (idx >= 0) documents.splice(idx, 1);
-      return undefined;
+      const idx = Option.getOrUndefined(
+        Arr.findFirstIndex(documents, (d) => d.id === params["documentId"]),
+      );
+      if (idx !== undefined) documents.splice(idx, 1);
     },
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/issue",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.status = "issued";
       found.number = found.kind === "proforma" ? `ZF-2026-00${++nextSeq}` : `2026-00${++nextSeq}`;
@@ -862,9 +904,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/lock",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.locked = true;
       found.revision += 1;
@@ -875,9 +919,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/unlock",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.locked = false;
       found.revision += 1;
@@ -888,9 +934,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/cancel",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
       found.status = "cancelled";
       found.revision += 1;
@@ -901,15 +949,19 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/credit-notes",
     respond: ({ params }) => {
-      const orig = documents.find((d) => d.id === params.documentId);
+      const orig = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (orig === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
-      const cn = {
+      const id = nextId();
+      const number = `OD-2026-00${++nextSeq}`;
+      const cn: DemoDocument = {
         ...orig,
-        id: nextId(),
+        id,
         kind: "credit_note",
-        number: `OD-2026-00${++nextSeq}`,
+        number,
         status: "issued",
         locked: false,
         settlement: "paid",
@@ -921,7 +973,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
       };
       orig.related = [
         ...orig.related,
-        { relation: "corrected_by", id: cn.id, kind: "credit_note", number: cn.number },
+        { relation: "corrected_by", id, kind: "credit_note", number },
       ];
       documents.unshift(cn);
       return status(201, cn);
@@ -931,15 +983,19 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/final-invoice",
     respond: ({ params }) => {
-      const proforma = documents.find((d) => d.id === params.documentId);
+      const proforma = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (proforma === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Document", id: params.documentId });
+        return status(404, { _tag: "NotFound", entity: "Document", id: params["documentId"] });
       }
-      const fi = {
+      const id = nextId();
+      const number = `2026-00${++nextSeq}`;
+      const fi: DemoDocument = {
         ...proforma,
-        id: nextId(),
+        id,
         kind: "invoice",
-        number: `2026-00${++nextSeq}`,
+        number,
         status: "issued",
         locked: false,
         settlement: "paid",
@@ -957,7 +1013,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
       };
       proforma.related = [
         ...proforma.related,
-        { relation: "final_invoice_for", id: fi.id, kind: "invoice", number: fi.number },
+        { relation: "final_invoice_for", id, kind: "invoice", number },
       ];
       documents.unshift(fi);
       return status(201, fi);
@@ -967,16 +1023,17 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/deliveries",
     respond: ({ params, body }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       const deliveryId = nextId();
       if (found !== undefined) {
-        // biome-ignore lint/suspicious/noExplicitAny: demo delivery
-        const input = (body ?? {}) as any;
+        const input = Option.getOrUndefined(decodeDelivery(body));
         found.deliveries = [
           {
             id: deliveryId,
-            to: input.to ?? found.contact.billingEmails,
-            purpose: input.purpose ?? "document",
+            to: [...(input?.to ?? found.contact.billingEmails)],
+            purpose: input?.purpose ?? "document",
             status: "queued",
             at: "2026-11-24T13:00:00Z",
           },
@@ -994,7 +1051,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
         id: demoId(910),
         at: "2026-10-15T09:00:00Z",
         actor: { _tag: "Member", userId: demoId(1), channel: "web", client: null },
-        subject: { entity: "Document", id: params.documentId ?? DOC_1_ID },
+        subject: { entity: "Document", id: params["documentId"] ?? DOC_1_ID },
         action: "document.issue",
         revision: 1,
         changes: [],
@@ -1007,8 +1064,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/share-link",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
-      const url = `https://app.kvitbit.cz/i/demo-${params.documentId}`;
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
+      const url = `https://app.kvitbit.cz/i/demo-${params["documentId"]}`;
       if (found !== undefined) found.share = { url, views: 0, lastViewedAt: null };
       return { url };
     },
@@ -1017,9 +1076,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/share-link",
     respond: ({ params }) => {
-      const found = documents.find((d) => d.id === params.documentId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(documents, (d) => d.id === params["documentId"]),
+      );
       if (found !== undefined) found.share = null;
-      return undefined;
     },
   },
   {
@@ -1037,34 +1097,39 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/documents/:documentId/payments",
-    respond: ({ params }) => payments.filter((p) => p.target.document === params.documentId),
+    respond: ({ params }) =>
+      Arr.filter(payments, (p) => p.target.document === params["documentId"]),
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/payments",
     respond: ({ body }) => {
-      // biome-ignore lint/suspicious/noExplicitAny: demo payload
-      const input = (body ?? {}) as any;
-      const docId = input.target?.document;
-      const doc = documents.find((d) => d.id === docId);
-      const payment = {
+      const input = Option.getOrUndefined(decodePayment(body));
+      const docId =
+        input !== undefined && "document" in input.target ? input.target.document : undefined;
+      const doc = Option.getOrUndefined(Arr.findFirst(documents, (d) => d.id === docId));
+      const amount = input?.amount;
+      const payment: DemoPayment = {
         id: nextId(),
         revision: 1,
         target: { document: docId },
-        amount: input.amount ?? doc?.totals.gross ?? { amount: "1000", currency: "CZK" },
-        paidOn: input.paidOn ?? "2026-11-24",
-        method: input.method ?? "bank_transfer",
-        note: input.note ?? null,
-        taxDocument: null as string | null,
+        amount:
+          amount === undefined
+            ? (doc?.totals.gross ?? { amount: "1000", currency: "CZK" })
+            : { amount: BigDecimal.format(amount.amount), currency: amount.currency },
+        paidOn: input?.paidOn ?? "2026-11-24",
+        method: input?.method ?? "bank_transfer",
+        note: input?.note ?? null,
+        taxDocument: null,
         createdAt: "2026-11-24T13:10:00Z",
       };
-      const issued: Array<unknown> = [];
+      const issued: Array<DemoDocument> = [];
       if (doc !== undefined) {
         doc.settlement = "paid";
         doc.overdue = false;
         doc.revision += 1;
         if (doc.kind === "proforma") {
-          const ptd = {
+          const ptd: DemoDocument = {
             ...doc,
             id: nextId(),
             kind: "payment_tax_document",
@@ -1087,37 +1152,41 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/payments/:paymentId/remove",
     respond: ({ params }) => {
-      const idx = payments.findIndex((p) => p.id === params.paymentId);
-      if (idx >= 0) payments.splice(idx, 1);
-      return undefined;
+      const idx = Option.getOrUndefined(
+        Arr.findFirstIndex(payments, (p) => p.id === params["paymentId"]),
+      );
+      if (idx !== undefined) payments.splice(idx, 1);
     },
   },
   // Templates & Recurring
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/templates",
-    respond: () => templates.filter((t) => !t.archived),
+    respond: () => Arr.filter(templates, (t) => !t.archived),
   },
   {
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId",
     respond: ({ params }) => {
-      const found = templates.find((t) => t.id === params.templateId);
-      return found ?? status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+      const found = Option.getOrUndefined(
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
+      );
+      return (
+        found ?? status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] })
+      );
     },
   },
   {
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/templates",
     respond: ({ body }) => {
-      // biome-ignore lint/suspicious/noExplicitAny: demo template
-      const input = (body ?? {}) as any;
-      const created = {
+      const input = Option.getOrUndefined(decodeTemplate(body));
+      const created: DemoTemplate = {
         id: nextId(),
-        name: input.name ?? "Šablona",
+        name: input?.name ?? "Šablona",
         revision: 1,
         archived: false,
-        input,
+        input: input === undefined ? {} : Option.getOrElse(encodeTemplate(input), () => ({})),
         schedule: null,
       };
       templates.unshift(created);
@@ -1128,14 +1197,15 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId",
     respond: ({ params, body }) => {
-      const found = templates.find((t) => t.id === params.templateId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
-      // biome-ignore lint/suspicious/noExplicitAny: demo template
-      const input = (body ?? {}) as any;
-      found.name = input.name ?? found.name;
-      found.input = input;
+      const input = Option.getOrUndefined(decodeTemplate(body));
+      found.name = input?.name ?? found.name;
+      found.input = input === undefined ? {} : Option.getOrElse(encodeTemplate(input), () => ({}));
       found.revision += 1;
       return found;
     },
@@ -1144,29 +1214,31 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/archive",
     respond: ({ params }) => {
-      const found = templates.find((t) => t.id === params.templateId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
+      );
       if (found !== undefined) found.archived = true;
-      return undefined;
     },
   },
   {
     method: "PUT",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/schedule",
     respond: ({ params, body }) => {
-      const found = templates.find((t) => t.id === params.templateId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
-      // biome-ignore lint/suspicious/noExplicitAny: demo schedule
-      const input = (body ?? {}) as any;
+      const input = Option.getOrUndefined(decodeSchedule(body));
       found.schedule = {
         id: found.schedule?.id ?? nextId(),
-        every: input.every ?? { months: 1 },
-        startOn: input.startOn ?? "2026-12-01",
-        endOn: input.endOn ?? null,
-        issueAs: input.issueAs ?? "invoice",
-        autoSend: Boolean(input.autoSend),
-        nextOccurrence: input.startOn ?? "2026-12-01",
+        every: input?.every ?? { months: 1 },
+        startOn: input?.startOn ?? "2026-12-01",
+        endOn: input?.endOn ?? null,
+        issueAs: input?.issueAs ?? "invoice",
+        autoSend: input?.autoSend ?? false,
+        nextOccurrence: input?.startOn ?? "2026-12-01",
         paused: false,
         pausedReason: null,
         pausedError: null,
@@ -1179,9 +1251,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "DELETE",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/schedule",
     respond: ({ params }) => {
-      const found = templates.find((t) => t.id === params.templateId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
       found.schedule = null;
       found.revision += 1;
@@ -1192,9 +1266,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/resume",
     respond: ({ params }) => {
-      const found = templates.find((t) => t.id === params.templateId);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(templates, (t) => t.id === params["templateId"]),
+      );
       if (found === undefined) {
-        return status(404, { _tag: "NotFound", entity: "Template", id: params.templateId });
+        return status(404, { _tag: "NotFound", entity: "Template", id: params["templateId"] });
       }
       if (found.schedule !== null) {
         found.schedule.paused = false;
@@ -1209,7 +1285,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/workspaces/:workspaceId/templates/:templateId/runs",
     respond: ({ params }) => ({
-      items: runsByTemplate[params.templateId ?? ""] ?? [],
+      items: runsByTemplate.get(params["templateId"] ?? "") ?? [],
       nextCursor: null,
     }),
   },

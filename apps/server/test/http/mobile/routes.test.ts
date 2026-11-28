@@ -1,11 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import type { ReleaseInfo } from "@kvitbit/api-contract";
-import { Effect, Layer, Option, Redacted } from "effect";
-import { HttpRouter } from "effect/http";
+import assert from "node:assert/strict";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
+import { ReleaseInfo } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
+import * as Predicate from "effect/Predicate";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   assetKey,
   assetMetaKey,
@@ -23,22 +31,49 @@ import {
   type StoredRollback,
   type StoredUpdate,
 } from "../../../src/http/mobile";
+import { makeLocalMobileStorage } from "../../../src/http/mobile/storage";
 
 const ORIGIN = "https://kvitbit.test";
+const MULTIPART_BOUNDARY = /multipart\/mixed;\s*boundary=([^\s;]+)/i;
+const MANIFEST_SIGNATURE = /^sig="([^"]+)", keyid="main", alg="rsa-v1_5-sha256"$/;
 
-const { privateKey: TEST_PRIVATE_KEY_PEM, publicKey: TEST_PUBLIC_KEY_PEM } = generateKeyPairSync(
-  "rsa",
-  {
-    modulusLength: 2048,
-    privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    publicKeyEncoding: { type: "spki", format: "pem" },
-  },
+const signedManifestRequest = () =>
+  new Request(`${ORIGIN}/api/mobile/updates/manifest`, {
+    headers: {
+      "expo-protocol-version": "1",
+      "expo-platform": "android",
+      "expo-runtime-version": "1.4.0",
+      "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
+    },
+  });
+
+const privateKeyPem = (label: string, base64: string) =>
+  `-----BEGIN ${label}-----\r\n${base64}\r\n-----END ${label}-----`;
+
+const JsonText = Schema.fromJsonString(Schema.Unknown);
+const encodeJsonEffect = Schema.encodeEffect(JsonText);
+const decodeJsonEffect = Schema.decodeUnknownEffect(JsonText);
+const encodeJson = (value: StoredUpdate | StoredRollback | StoredAssetMeta | ReleaseInfo) =>
+  encodeJsonEffect(value).pipe(Effect.runSync);
+const decodeJson = (text: string) => decodeJsonEffect(text).pipe(Effect.runSync);
+const decodeManifest = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      id: Schema.String,
+      createdAt: Schema.String,
+      launchAsset: Schema.Struct({ url: Schema.String }),
+      assets: Schema.Array(
+        Schema.Struct({ url: Schema.String, fileExtension: Schema.optionalKey(Schema.String) }),
+      ),
+    }),
+  ),
 );
+const decodeReleaseInfo = Schema.decodeUnknownEffect(ReleaseInfo);
 
-const sha256Hex = (data: Uint8Array | string) => createHash("sha256").update(data).digest("hex");
+const sha256Hex = (data: Uint8Array | string) => Bun.CryptoHasher.hash("sha256", data, "hex");
 const sha256Base64Url = (data: Uint8Array | string) =>
-  createHash("sha256").update(data).digest("base64url");
-const md5Hex = (data: Uint8Array | string) => createHash("md5").update(data).digest("hex");
+  Bun.CryptoHasher.hash("sha256", data, "base64url");
+const md5Hex = (data: Uint8Array | string) => Bun.CryptoHasher.hash("md5", data, "hex");
 
 interface ParsedMultipartPart {
   readonly headers: Record<string, string>;
@@ -49,27 +84,28 @@ const parseMultipart = (
   contentType: string,
   rawBody: string,
 ): ReadonlyArray<ParsedMultipartPart> => {
-  const match = /multipart\/mixed;\s*boundary=([^\s;]+)/i.exec(contentType);
-  expect(match).not.toBeNull();
-  const boundary = match?.[1] ?? "";
+  const boundary = MULTIPART_BOUNDARY.exec(contentType)?.[1];
+  assert(boundary, `Missing multipart boundary in ${contentType}`);
   const delimiter = `--${boundary}`;
-  const chunks = rawBody.split(delimiter).slice(1);
+  const chunks = Str.split(rawBody, delimiter).slice(1);
   const parts: Array<ParsedMultipartPart> = [];
   for (const chunk of chunks) {
-    if (chunk.startsWith("--")) break;
-    const trimmed = chunk.startsWith("\r\n") ? chunk.slice(2) : chunk;
-    const sepIndex = trimmed.indexOf("\r\n\r\n");
-    expect(sepIndex).toBeGreaterThan(-1);
-    const headerBlock = trimmed.slice(0, sepIndex);
-    const bodyWithTrailing = trimmed.slice(sepIndex + 4);
-    const body = bodyWithTrailing.endsWith("\r\n")
-      ? bodyWithTrailing.slice(0, -2)
+    if (Str.startsWith("--")(chunk)) break;
+    const trimmed = Str.startsWith("\r\n")(chunk) ? Str.slice(2)(chunk) : chunk;
+    const separator = Str.indexOf("\r\n\r\n")(trimmed);
+    assert(Option.isSome(separator), "Multipart part has no header/body separator");
+    const headerBlock = Str.slice(0, separator.value)(trimmed);
+    const bodyWithTrailing = Str.slice(separator.value + 4)(trimmed);
+    const body = Str.endsWith("\r\n")(bodyWithTrailing)
+      ? Str.slice(0, -2)(bodyWithTrailing)
       : bodyWithTrailing;
     const headers: Record<string, string> = {};
-    for (const line of headerBlock.split("\r\n")) {
-      const colon = line.indexOf(":");
-      if (colon > 0) {
-        headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+    for (const line of Str.split(headerBlock, "\r\n")) {
+      const colon = Str.indexOf(":")(line);
+      if (Option.isSome(colon) && colon.value > 0) {
+        const name = Str.slice(0, colon.value)(line);
+        const value = Str.slice(colon.value + 1)(line);
+        headers[Str.toLowerCase(Str.trim(name))] = Str.trim(value);
       }
     }
     parts.push({ headers, body });
@@ -79,10 +115,19 @@ const parseMultipart = (
 
 let storageDir: string;
 
+const fixtureFs = FileSystem.FileSystem.pipe(Effect.provide(BunFileSystem.layer), Effect.runSync);
+const fixturePath = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
+
 const putFile = async (relativeKey: string, content: string | Uint8Array) => {
-  const fullPath = join(storageDir, relativeKey);
-  await mkdir(dirname(fullPath), { recursive: true });
-  await writeFile(fullPath, content);
+  const fullPath = fixturePath.join(storageDir, relativeKey);
+  await Effect.runPromise(
+    fixtureFs.makeDirectory(fixturePath.dirname(fullPath), { recursive: true }),
+  );
+  await Effect.runPromise(
+    Predicate.isString(content)
+      ? fixtureFs.writeFileString(fullPath, content)
+      : fixtureFs.writeFile(fullPath, content),
+  );
 };
 
 const makeWebHandler = (
@@ -139,11 +184,13 @@ const makeUpdateFixture = (overrides: Partial<StoredUpdate> = {}): StoredUpdate 
 };
 
 beforeEach(async () => {
-  storageDir = await mkdtemp(join(tmpdir(), "kvitbit-mobile-routes-"));
+  storageDir = await Effect.runPromise(
+    fixtureFs.makeTempDirectory({ prefix: "kvitbit-mobile-routes-" }),
+  );
 });
 
 afterEach(async () => {
-  await rm(storageDir, { recursive: true, force: true });
+  await Effect.runPromise(fixtureFs.remove(storageDir, { recursive: true, force: true }));
 });
 
 describe("mobile updates manifest route", () => {
@@ -156,8 +203,8 @@ describe("mobile updates manifest route", () => {
       id: "01900000-0000-7000-8000-000000000002",
       createdAt: "2026-11-24T10:30:00.000Z",
     });
-    await putFile(publicationKey(older), JSON.stringify(older));
-    await putFile(publicationKey(newer), JSON.stringify(newer));
+    await putFile(publicationKey(older), encodeJson(older));
+    await putFile(publicationKey(newer), encodeJson(newer));
 
     const { handler, dispose } = makeWebHandler();
     try {
@@ -177,19 +224,13 @@ describe("mobile updates manifest route", () => {
       expect(res.headers.get("expo-sfv-version")).toBe("0");
       expect(res.headers.get("cache-control")).toBe("private, max-age=0");
       const contentType = res.headers.get("content-type") ?? "";
-      expect(contentType.startsWith("multipart/mixed; boundary=")).toBe(true);
+      expect(Str.startsWith("multipart/mixed; boundary=")(contentType)).toBe(true);
 
       const parts = parseMultipart(contentType, await res.text());
       expect(parts).toHaveLength(2);
       expect(parts[0]?.headers["content-disposition"]).toBe('form-data; name="manifest"');
       expect(parts[0]?.headers["expo-signature"]).toBeUndefined();
-      const manifest = JSON.parse(parts[0]?.body ?? "{}") as {
-        id: string;
-        createdAt: string;
-        runtimeVersion: string;
-        launchAsset: { url: string; contentType: string };
-        assets: Array<{ url: string; fileExtension?: string }>;
-      };
+      const manifest = decodeManifest(parts[0]?.body ?? "{}").pipe(Effect.runSync);
       expect(manifest.id).toBe(newer.id);
       expect(manifest.createdAt).toBe(newer.createdAt);
       expect(manifest.launchAsset.url).toBe(
@@ -201,7 +242,7 @@ describe("mobile updates manifest route", () => {
       expect(manifest.assets[0]?.fileExtension).toBe(".png");
 
       expect(parts[1]?.headers["content-disposition"]).toBe('form-data; name="extensions"');
-      expect(JSON.parse(parts[1]?.body ?? "{}")).toEqual({ assetRequestHeaders: {} });
+      expect(decodeJson(parts[1]?.body ?? "{}")).toEqual({ assetRequestHeaders: {} });
     } finally {
       await dispose();
     }
@@ -220,8 +261,8 @@ describe("mobile updates manifest route", () => {
       platform: "android",
       runtimeVersion: "1.4.0",
     };
-    await putFile(publicationKey(update), JSON.stringify(update));
-    await putFile(publicationKey(rollback), JSON.stringify(rollback));
+    await putFile(publicationKey(update), encodeJson(update));
+    await putFile(publicationKey(rollback), encodeJson(rollback));
 
     const { handler, dispose } = makeWebHandler();
     try {
@@ -237,7 +278,7 @@ describe("mobile updates manifest route", () => {
       expect(res.status).toBe(200);
       const parts = parseMultipart(res.headers.get("content-type") ?? "", await res.text());
       expect(parts[0]?.headers["content-disposition"]).toBe('form-data; name="directive"');
-      expect(JSON.parse(parts[0]?.body ?? "{}")).toEqual({
+      expect(decodeJson(parts[0]?.body ?? "{}")).toEqual({
         type: "rollBackToEmbedded",
         parameters: { commitTime: rollback.createdAt },
       });
@@ -248,7 +289,7 @@ describe("mobile updates manifest route", () => {
 
   test("returns noUpdateAvailable for unknown runtime or matching currentUpdateId", async () => {
     const update = makeUpdateFixture({ channel: "preview", platform: "ios" });
-    await putFile(publicationKey(update), JSON.stringify(update));
+    await putFile(publicationKey(update), encodeJson(update));
 
     const { handler, dispose } = makeWebHandler();
     try {
@@ -263,7 +304,7 @@ describe("mobile updates manifest route", () => {
         await unknownRuntime.text(),
       );
       expect(unknownParts[0]?.headers["content-disposition"]).toBe('form-data; name="directive"');
-      expect(JSON.parse(unknownParts[0]?.body ?? "{}")).toEqual({ type: "noUpdateAvailable" });
+      expect(decodeJson(unknownParts[0]?.body ?? "{}")).toEqual({ type: "noUpdateAvailable" });
 
       const alreadyCurrent = await handler(
         new Request(`${ORIGIN}/api/mobile/updates/manifest?platform=ios&runtime-version=1.4.0`, {
@@ -279,39 +320,69 @@ describe("mobile updates manifest route", () => {
         alreadyCurrent.headers.get("content-type") ?? "",
         await alreadyCurrent.text(),
       );
-      expect(JSON.parse(currentParts[0]?.body ?? "{}")).toEqual({ type: "noUpdateAvailable" });
+      expect(decodeJson(currentParts[0]?.body ?? "{}")).toEqual({ type: "noUpdateAvailable" });
     } finally {
       await dispose();
     }
   });
 
-  test("signs manifest part with RSA-SHA256 when expo-expect-signature is set", async () => {
-    const update = makeUpdateFixture();
-    await putFile(publicationKey(update), JSON.stringify(update));
+  test.each(["PRIVATE KEY", "RSA PRIVATE KEY"] as const)(
+    "signs the manifest with the configured %s PEM",
+    async (label) => {
+      const update = makeUpdateFixture({ extra: { expoClient: { name: "Kvitbit Česko" } } });
+      await putFile(publicationKey(update), encodeJson(update));
 
+      const algorithm = "RSASSA-PKCS1-v1_5";
+      const { privateKey, publicKey } = await crypto.subtle.generateKey(
+        {
+          name: algorithm,
+          hash: "SHA-256",
+          modulusLength: 2048,
+          publicExponent: new Uint8Array([1, 0, 1]),
+        },
+        true,
+        ["sign", "verify"],
+      );
+      const pkcs8 = new Uint8Array(await crypto.subtle.exportKey("pkcs8", privateKey));
+      // A 2048-bit RSA key exported by WebCrypto has a 26-byte PKCS#8 wrapper.
+      const der = label === "RSA PRIVATE KEY" ? pkcs8.subarray(26) : pkcs8;
+      const base64 = der.toBase64();
+      const pem =
+        label === "PRIVATE KEY"
+          ? `Bag Attributes\r\nKey Attributes: <No Attributes>\r\n${privateKeyPem(label, `${Str.slice(0, 64)(base64)}  \r\n${Str.slice(64)(base64)}`)}`
+          : privateKeyPem(label, base64);
+      const { handler, dispose } = makeWebHandler({
+        signingKeyPem: Option.some(Redacted.make(pem)),
+      });
+      try {
+        const res = await handler(signedManifestRequest());
+        expect(res.status).toBe(200);
+        const parts = parseMultipart(res.headers.get("content-type") ?? "", await res.text());
+        const manifest = parts[0];
+        assert(manifest);
+        const sig = MANIFEST_SIGNATURE.exec(manifest.headers["expo-signature"] ?? "")?.[1];
+        assert(sig);
+        expect(
+          await crypto.subtle.verify(
+            algorithm,
+            publicKey,
+            Uint8Array.fromBase64(sig),
+            new TextEncoder().encode(manifest.body),
+          ),
+        ).toBe(true);
+      } finally {
+        await dispose();
+      }
+    },
+  );
+
+  test("answers 500 when a requested signature cannot use the configured key", async () => {
     const { handler, dispose } = makeWebHandler({
-      signingKeyPem: Option.some(Redacted.make(TEST_PRIVATE_KEY_PEM)),
+      signingKeyPem: Option.some(Redacted.make(privateKeyPem("RSA PRIVATE KEY", "YWJj"))),
     });
     try {
-      const res = await handler(
-        new Request(`${ORIGIN}/api/mobile/updates/manifest`, {
-          headers: {
-            "expo-protocol-version": "1",
-            "expo-platform": "android",
-            "expo-runtime-version": "1.4.0",
-            "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
-          },
-        }),
-      );
-      expect(res.status).toBe(200);
-      const parts = parseMultipart(res.headers.get("content-type") ?? "", await res.text());
-      const sigHeader = parts[0]?.headers["expo-signature"] ?? "";
-      const match = /^sig="([^"]+)", keyid="main", alg="rsa-v1_5-sha256"$/.exec(sigHeader);
-      expect(match).not.toBeNull();
-      const verified = createVerify("RSA-SHA256")
-        .update(parts[0]?.body ?? "", "utf8")
-        .verify(TEST_PUBLIC_KEY_PEM, match?.[1] ?? "", "base64");
-      expect(verified).toBe(true);
+      const res = await handler(signedManifestRequest());
+      expect(res.status).toBe(500);
     } finally {
       await dispose();
     }
@@ -319,20 +390,11 @@ describe("mobile updates manifest route", () => {
 
   test("answers 503 when expo-expect-signature is requested but no signing key is configured", async () => {
     const update = makeUpdateFixture();
-    await putFile(publicationKey(update), JSON.stringify(update));
+    await putFile(publicationKey(update), encodeJson(update));
 
     const { handler, dispose } = makeWebHandler({ signingKeyPem: Option.none() });
     try {
-      const res = await handler(
-        new Request(`${ORIGIN}/api/mobile/updates/manifest`, {
-          headers: {
-            "expo-protocol-version": "1",
-            "expo-platform": "android",
-            "expo-runtime-version": "1.4.0",
-            "expo-expect-signature": 'sig, keyid="main", alg="rsa-v1_5-sha256"',
-          },
-        }),
-      );
+      const res = await handler(signedManifestRequest());
       expect(res.status).toBe(503);
       expect(res.headers.get("cache-control")).toBe("no-store");
     } finally {
@@ -398,9 +460,9 @@ describe("mobile updates manifest route", () => {
 
   test("answers 503 when storage fails and 500 when stored publication JSON is malformed", async () => {
     const failingStorage = Layer.succeed(MobileStorage, {
-      list: () => Effect.fail(new MobileStorageUnavailable({ cause: "boom" })),
-      getText: () => Effect.fail(new MobileStorageUnavailable({ cause: "boom" })),
-      getStream: () => Effect.fail(new MobileStorageUnavailable({ cause: "boom" })),
+      list: () => Effect.fail(MobileStorageUnavailable.make({ cause: "boom" })),
+      getText: () => Effect.fail(MobileStorageUnavailable.make({ cause: "boom" })),
+      getStream: () => Effect.fail(MobileStorageUnavailable.make({ cause: "boom" })),
     });
     const unavailableHandler = makeWebHandler({ storageLayer: failingStorage });
     try {
@@ -441,6 +503,44 @@ describe("mobile updates manifest route", () => {
 });
 
 describe("mobile update assets route", () => {
+  test("returns 503 on an asset probe close error and preserves a completed text read", async () => {
+    const content = "asset";
+    const hash = sha256Hex(content);
+    await putFile(assetKey(hash), content);
+
+    const closeError = PlatformError.systemError({
+      _tag: "Unknown",
+      module: "FileSystem",
+      method: "open",
+      syscall: "close",
+      description: "EIO",
+    });
+    const fs: FileSystem.FileSystem = {
+      ...fixtureFs,
+      open: (path, options) =>
+        fixtureFs
+          .open(path, options)
+          .pipe(Effect.tap(() => Effect.addFinalizer(() => Effect.die(closeError)))),
+    };
+    const storageLayer = Layer.effect(MobileStorage, makeLocalMobileStorage(storageDir)).pipe(
+      Layer.provide([Layer.succeed(FileSystem.FileSystem, fs), Path.layer]),
+    );
+    const { handler, dispose } = makeWebHandler({ storageLayer });
+    try {
+      const res = await handler(new Request(`${ORIGIN}/api/mobile/updates/assets/${hash}`));
+      expect(res.status).toBe(503);
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      const text = await MobileStorage.pipe(
+        Effect.flatMap((storage) => storage.getText(assetKey(hash))),
+        Effect.provide(storageLayer),
+        Effect.runPromise,
+      );
+      expect(text).toBe(content);
+    } finally {
+      await dispose();
+    }
+  });
+
   test("serves asset bytes with sidecar contentType, immutable cache-control, and nosniff", async () => {
     const bytes = new TextEncoder().encode("export const ok = true;");
     const hash = sha256Hex(bytes);
@@ -451,7 +551,7 @@ describe("mobile update assets route", () => {
       size: bytes.byteLength,
     };
     await putFile(assetKey(hash), bytes);
-    await putFile(assetMetaKey(hash), JSON.stringify(meta));
+    await putFile(assetMetaKey(hash), encodeJson(meta));
 
     const { handler, dispose } = makeWebHandler();
     try {
@@ -480,7 +580,7 @@ describe("mobile update assets route", () => {
       expect(new Uint8Array(await ok.arrayBuffer())).toEqual(bytes);
 
       const unknown = await handler(
-        new Request(`${ORIGIN}/api/mobile/updates/assets/${"a".repeat(64)}`),
+        new Request(`${ORIGIN}/api/mobile/updates/assets/${Str.repeat(64)("a")}`),
       );
       expect(unknown.status).toBe(404);
 
@@ -498,9 +598,9 @@ describe("android releases routes", () => {
     versionCode,
     releasedAt: "2026-11-24T10:00:00.000Z",
     apkUrl: releaseApkPath(version),
-    apkSha256: "b".repeat(64),
+    apkSha256: Str.repeat(64)("b"),
     sizeBytes: 123456,
-    signingCertSha256: "c".repeat(64),
+    signingCertSha256: Str.repeat(64)("c"),
     minAndroidSdk: 26,
     obtainiumUrl: obtainiumImportUrl("https://old-build-origin.example"),
   });
@@ -508,15 +608,15 @@ describe("android releases routes", () => {
   test("GET /api/mobile/releases/latest picks highest versionCode and recomputes obtainiumUrl", async () => {
     const v12 = makeRelease("1.2.0", 1002000);
     const v110 = makeRelease("1.10.0", 1010000);
-    await putFile(releaseInfoKey("1.2.0"), JSON.stringify(v12));
-    await putFile(releaseInfoKey("1.10.0"), JSON.stringify(v110));
+    await putFile(releaseInfoKey("1.2.0"), encodeJson(v12));
+    await putFile(releaseInfoKey("1.10.0"), encodeJson(v110));
 
     const { handler, dispose } = makeWebHandler();
     try {
       const res = await handler(new Request(`${ORIGIN}/api/mobile/releases/latest`));
       expect(res.status).toBe(200);
       expect(res.headers.get("cache-control")).toBe("public, max-age=300");
-      const body = (await res.json()) as ReleaseInfo;
+      const body = decodeReleaseInfo(await res.json()).pipe(Effect.runSync);
       expect(body.version).toBe("1.10.0");
       expect(body.versionCode).toBe(1010000);
       expect(body.apkUrl).toBe("/api/mobile/releases/1.10.0/apk");
@@ -575,8 +675,14 @@ describe("android assetlinks.json route", () => {
   });
 
   test("returns cz.kvitbit.app statement with configured SHA-256 fingerprints", async () => {
-    const fp1 = Array.from({ length: 32 }, () => "AA").join(":");
-    const fp2 = Array.from({ length: 32 }, () => "BB").join(":");
+    const fp1 = Arr.join(
+      Array.from({ length: 32 }, () => "AA"),
+      ":",
+    );
+    const fp2 = Arr.join(
+      Array.from({ length: 32 }, () => "BB"),
+      ":",
+    );
     const { handler, dispose } = makeWebHandler({ androidAssetLinksSha256: [fp1, fp2] });
     try {
       const res = await handler(new Request(`${ORIGIN}/.well-known/assetlinks.json`));

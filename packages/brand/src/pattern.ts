@@ -1,8 +1,9 @@
+import * as Str from "effect/String";
 import { assertPaint } from "./svg";
 
 /** T4 Micro-Glyph Graph tile edge length; the tile is seamless at this period. */
 export const PATTERN_TILE_SIZE = 96 as const;
-export const PATTERN_VIEW_BOX = "0 0 96 96" as const;
+export const PATTERN_VIEW_BOX = "0 0 96 96";
 
 /** Tile body with `{ink}` placeholders, verbatim from `assets/brand/pattern/kvitbit-pattern-t4*.svg`. */
 const TILE_BODY = `  <path d="M0 0 H96 M0 48 H96 M0 96 H96 M0 0 V96 M48 0 V96 M96 0 V96" fill="none" stroke="{ink}" stroke-width="0.65" opacity="0.084"/>
@@ -29,17 +30,14 @@ export interface PatternOptions {
   readonly ink?: string;
 }
 
-const tileBody = (ink: string | undefined, indent: string): string =>
-  TILE_BODY.replaceAll("{ink}", assertPaint(ink ?? "currentColor"))
-    .split("\n")
-    .map((line) => indent + line)
-    .join("\n");
+const tileBody = (ink: string | undefined): string =>
+  Str.replaceAll("{ink}", assertPaint(ink ?? "currentColor"))(TILE_BODY);
 
 /** Standalone 96×96 tile SVG, identical to the committed pattern files for the same ink. */
 export const t4PatternSvg = (options: PatternOptions = {}): string =>
   `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${PATTERN_VIEW_BOX}" width="${PATTERN_TILE_SIZE}" height="${PATTERN_TILE_SIZE}">
 ${TILE_COMMENT}
-${tileBody(options.ink, "")}
+${tileBody(options.ink)}
 </svg>
 `;
 
@@ -48,7 +46,7 @@ export interface PatternDefOptions extends PatternOptions {
   readonly id: string;
 }
 
-const ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/;
+const ID_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]*$/u;
 
 /** `<pattern>` element (userSpaceOnUse, 96×96) for embedding in an SVG `<defs>`. */
 export const t4PatternDef = (options: PatternDefOptions): string => {
@@ -56,6 +54,6 @@ export const t4PatternDef = (options: PatternDefOptions): string => {
     throw new TypeError(`Invalid pattern id "${options.id}"`);
   }
   return `<pattern id="${options.id}" patternUnits="userSpaceOnUse" width="${PATTERN_TILE_SIZE}" height="${PATTERN_TILE_SIZE}" viewBox="${PATTERN_VIEW_BOX}">
-${tileBody(options.ink, "")}
+${tileBody(options.ink)}
 </pattern>`;
 };

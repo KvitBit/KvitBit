@@ -6,15 +6,21 @@
  * paymentMethod, preferredSeriesByKind, defaultNote and reminderPolicy. Bank account, VAT
  * treatment and pricesIncludeVat are not Contact-overridable in the domain and stay out.
  */
-import type {
-  ContactDefaults,
+
+import {
+  type ContactDefaults,
   CurrencyCode,
-  DocumentKind,
-  Locale,
-  NumberingSeriesId,
-  PaymentMethod,
-  ReminderPolicy,
+  type DocumentKind,
+  type Locale,
+  type NumberingSeriesId,
+  type PaymentMethod,
+  type ReminderPolicy,
 } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
 
 /** Where an effective value came from. `default` is the product fallback below the Workspace. */
 export type SettingSource = "document" | "contact" | "workspace" | "default";
@@ -45,7 +51,8 @@ const firstSet = <A>(
   from: number,
 ): { readonly value: A; readonly source: SettingSource } => {
   for (let i = from; i < ORDER.length; i++) {
-    const level = ORDER[i] as Level;
+    const level = ORDER[i];
+    if (level === undefined) continue;
     const value = layers[level];
     if (value !== undefined) return { value, source: level };
   }
@@ -57,21 +64,24 @@ const firstSet = <A>(
  * downwards that sets a value wins, else the product fallback. `inherited` is what the levels
  * below `at` give, so clearing `at`'s own value yields exactly `inherited`.
  */
-export const resolveSetting = <A>(
-  layers: SettingLayers<A>,
-  at: Level = "document",
-): Resolved<A> => {
-  const index = ORDER.indexOf(at);
-  const own = firstSet(layers, index);
-  const below = firstSet(layers, index + 1);
-  return {
-    value: own.value,
-    source: own.source,
-    overridden: own.source === at,
-    inherited: below.value,
-    inheritedSource: below.source,
-  };
-};
+export const resolveSetting: {
+  (at?: Level): <A>(layers: SettingLayers<A>) => Resolved<A>;
+  <A>(layers: SettingLayers<A>, at?: Level): Resolved<A>;
+} = Fn.dual(
+  (args) => Predicate.isObjectOrArray(args[0]),
+  <A>(layers: SettingLayers<A>, at: Level = "document"): Resolved<A> => {
+    const index = ORDER.indexOf(at);
+    const own = firstSet(layers, index);
+    const below = firstSet(layers, index + 1);
+    return {
+      value: own.value,
+      source: own.source,
+      overridden: own.source === at,
+      inherited: below.value,
+      inheritedSource: below.source,
+    };
+  },
+);
 
 // --- Billing defaults ----------------------------------------------------------------------------
 
@@ -92,10 +102,10 @@ export interface WorkspaceBillingDefaults {
  * ui-port assumptions until the Workspace defaults schema is specified (workspaces.ts "open").
  */
 export const PRODUCT_DEFAULTS = {
-  currency: "CZK" as CurrencyCode,
-  language: "cs" as Locale,
+  currency: CurrencyCode.make("CZK"),
+  language: "cs",
   dueDays: 14,
-  paymentMethod: "bank_transfer" as PaymentMethod,
+  paymentMethod: "bank_transfer",
   defaultNote: "",
 } as const;
 
@@ -170,27 +180,36 @@ export const resolveBilling = (input: {
 };
 
 /** Reminder schedule for a Contact: `inherit` (or absent) follows the Workspace schedule. */
-export const resolveReminders = (
-  contact: ReminderPolicy | undefined,
-  workspaceOffsetsDays: ReadonlyArray<number>,
-): Resolved<ReadonlyArray<number>> => {
-  const own =
-    contact === undefined || contact.mode === "inherit"
-      ? undefined
-      : contact.mode === "disabled"
-        ? []
-        : contact.offsetsDays;
-  return resolveSetting({ contact: own, workspace: workspaceOffsetsDays, fallback: [] }, "contact");
-};
+export const resolveReminders: {
+  (
+    workspaceOffsetsDays: ReadonlyArray<number>,
+  ): (contact: ReminderPolicy | undefined) => Resolved<ReadonlyArray<number>>;
+  (
+    contact: ReminderPolicy | undefined,
+    workspaceOffsetsDays: ReadonlyArray<number>,
+  ): Resolved<ReadonlyArray<number>>;
+} = Fn.dual(
+  2,
+  (
+    contact: ReminderPolicy | undefined,
+    workspaceOffsetsDays: ReadonlyArray<number>,
+  ): Resolved<ReadonlyArray<number>> => {
+    const own =
+      contact === undefined || contact.mode === "inherit"
+        ? undefined
+        : contact.mode === "disabled"
+          ? []
+          : contact.offsetsDays;
+    return resolveSetting(
+      { contact: own, workspace: workspaceOffsetsDays, fallback: [] },
+      "contact",
+    );
+  },
+);
 
 // --- Contact "Billing defaults" form ------------------------------------------------------------
 
-export type ScalarOverrideField =
-  | "currency"
-  | "language"
-  | "dueDays"
-  | "paymentMethod"
-  | "defaultNote";
+type ScalarOverrideField = "currency" | "language" | "dueDays" | "paymentMethod" | "defaultNote";
 
 export interface OverrideForm {
   /** As loaded (`ContactView.defaults`); `{}` for a new Contact. */
@@ -198,15 +217,21 @@ export interface OverrideForm {
   readonly current: ContactDefaults;
 }
 
-const withoutKey = <T extends object, K extends keyof T>(value: T, key: K): T => {
+const withoutKey = <K extends keyof ContactDefaults>(
+  value: ContactDefaults,
+  key: K,
+): ContactDefaults => {
   const { [key]: _removed, ...rest } = value;
-  return rest as T;
+  return rest;
 };
 
 const normalizeDefaults = (defaults: ContactDefaults): ContactDefaults => {
   let out = defaults;
   const series = out.preferredSeriesByKind;
-  if (series !== undefined && Object.values(series).every((id) => id === undefined)) {
+  if (
+    series !== undefined &&
+    Arr.every(Rec.values<string, NumberingSeriesId | undefined>(series), (id) => id === undefined)
+  ) {
     out = withoutKey(out, "preferredSeriesByKind");
   }
   // Absent behaves as inherit, so both spell the same stored state.
@@ -214,19 +239,31 @@ const normalizeDefaults = (defaults: ContactDefaults): ContactDefaults => {
   return out;
 };
 
-const deepEqual = (a: unknown, b: unknown): boolean => {
-  if (a === b) return true;
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const ka = Object.keys(a).filter((k) => (a as Record<string, unknown>)[k] !== undefined);
-  const kb = Object.keys(b).filter((k) => (b as Record<string, unknown>)[k] !== undefined);
-  return (
-    ka.length === kb.length &&
-    ka.every((k) => deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]))
-  );
+const definedEntries = <A>(value: A): ReadonlyArray<readonly [string, unknown]> => {
+  if (Arr.isArray(value)) {
+    return Arr.filterMap(value, (entry, index) =>
+      entry === undefined ? Result.failVoid : Result.succeed([String(index), entry] as const),
+    );
+  }
+  if (!Predicate.isObject(value)) return [];
+  return Arr.filterMap(Rec.keys(value), (key) => {
+    const entry = value[key];
+    return entry === undefined ? Result.failVoid : Result.succeed([key, entry] as const);
+  });
 };
 
-export type OverrideFieldKey = keyof ContactDefaults;
+const deepEqual = <A>(a: A, b: A): boolean => {
+  if (a === b) return true;
+  if (!(Predicate.isObjectOrArray(a) && Predicate.isObjectOrArray(b))) return false;
+  if (Arr.isArray(a) !== Arr.isArray(b)) return false;
+  const entriesA = definedEntries(a);
+  const entriesB = definedEntries(b);
+  if (entriesA.length !== entriesB.length) return false;
+  const bByKey = new Map(entriesB);
+  return Arr.every(entriesA, ([key, value]) => deepEqual(value, bByKey.get(key)));
+};
+
+type OverrideFieldKey = keyof ContactDefaults;
 
 export const OverrideForm = {
   init: (initial: ContactDefaults = {}): OverrideForm => {
@@ -272,7 +309,7 @@ export const OverrideForm = {
       "defaultNote",
       "reminderPolicy",
     ];
-    return keys.filter((k) => !deepEqual(form.initial[k], form.current[k]));
+    return Arr.filter(keys, (k) => !deepEqual(form.initial[k], form.current[k]));
   },
   isDirty: (form: OverrideForm): boolean => OverrideForm.dirtyFields(form).length > 0,
   /** `ContactInput.defaults` to send: only the fields this Contact overrides. */

@@ -8,7 +8,9 @@
  *   5 ClusterCrons. No `KvitbitRunner` entity or `entities.ts`.
  */
 import { CoreLive, IdGeneratorLive } from "@kvitbit/core";
-import { Effect, Layer } from "effect";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Str from "effect/String";
 import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
 import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgWorkerDatabaseLive } from "./persistence";
@@ -49,10 +51,11 @@ export const workerProgram = Effect.gen(function* () {
   return yield* Layer.launch(WorkerLive);
 });
 
+// Older Node versions lack import.meta.main.
+const entryPath = process.argv[1] ?? "";
 const isMain =
-  typeof import.meta.main === "boolean"
-    ? import.meta.main
-    : process.argv[1]?.endsWith("worker.ts") || process.argv[1]?.endsWith("worker.js");
+  import.meta.main ??
+  (Str.endsWith("worker.ts")(entryPath) || Str.endsWith("worker.js")(entryPath));
 
 if (isMain) {
   runServerMain(workerProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));

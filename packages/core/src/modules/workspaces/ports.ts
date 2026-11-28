@@ -9,6 +9,7 @@
  * - `BankAccountReferences`: drafts and Templates that use a bank account (documents, templates
  *   modules), for `removeBankAccount`.
  */
+
 import type {
   BankAccountId,
   DocumentKind,
@@ -20,10 +21,23 @@ import type {
   NumberingSeriesId,
   NumberingSeriesView,
   UserId,
+} from "@kvitbit/domain/contract";
+import {
+  Conflict,
+  DocumentKind as DocumentKindSchema,
+  Invalid,
+  NumberingSeriesId as NumberingSeriesIdSchema,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Conflict, Invalid } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Ref, Schema, Stream } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as EffectString from "effect/String";
 import { sha256Hex } from "../../shared/hash";
 import type { IdGenerator } from "../../shared/ids";
 import { newId } from "../../shared/ids";
@@ -48,26 +62,26 @@ export class UserDirectory extends Context.Service<
       ids: ReadonlyArray<UserId>,
     ) => Effect.Effect<ReadonlyArray<DirectoryUser>, StoreUnavailable>;
   }
->()("kvitbit/core/UserDirectory") {}
+>()("@kvitbit/core/modules/workspaces/ports/UserDirectory") {}
 
 /** In-memory `UserDirectory` with a writable user map. */
 export class UserDirectoryFake extends Context.Service<
   UserDirectoryFake,
   { readonly users: Ref.Ref<ReadonlyMap<UserId, DirectoryUser>> }
->()("kvitbit/core/testing/UserDirectoryFake") {
+>()("@kvitbit/core/modules/workspaces/ports/UserDirectoryFake") {
   static readonly layer = (
     users: ReadonlyArray<DirectoryUser> = [],
   ): Layer.Layer<UserDirectory | UserDirectoryFake> =>
     Layer.effectContext(
       Effect.gen(function* () {
         const ref = yield* Ref.make<ReadonlyMap<UserId, DirectoryUser>>(
-          new Map(users.map((u) => [u.userId, u])),
+          new Map(EffectArray.map(users, (u) => [u.userId, u])),
         );
         return Context.make(UserDirectoryFake, { users: ref }).pipe(
           Context.add(UserDirectory, {
             lookup: (ids) =>
               Effect.map(Ref.get(ref), (all) =>
-                ids.flatMap((id) => {
+                EffectArray.flatMap(ids, (id) => {
                   const user = all.get(id);
                   return user === undefined ? [] : [user];
                 }),
@@ -112,71 +126,74 @@ export class WorkspaceSeries extends Context.Service<
       kinds: ReadonlyArray<DocumentKind>,
     ) => Effect.Effect<void, StoreUnavailable>;
   }
->()("kvitbit/core/WorkspaceSeries") {}
+>()("@kvitbit/core/modules/workspaces/ports/WorkspaceSeries") {}
 
 /** Default patterns per kind (core-engines `DEFAULT_SERIES_PATTERNS`, user-flows 260). */
-export const DEFAULT_SERIES_PATTERNS: { readonly [K in DocumentKind]: string } = {
+export const DEFAULT_SERIES_PATTERNS = {
   invoice: "YYYY-NNNN",
   proforma: "ZF-YYYY-NNNN",
   payment_tax_document: "DD-YYYY-NNNN",
   credit_note: "OD-YYYY-NNNN",
-};
+} satisfies { readonly [K in DocumentKind]: string };
 
-const DEFAULT_SERIES_NAMES: { readonly [K in DocumentKind]: string } = {
+const DEFAULT_SERIES_NAMES = {
   invoice: "Faktury",
   proforma: "Zálohové faktury",
   payment_tax_document: "Daňové doklady k platbě",
   credit_note: "Opravné doklady",
-};
+} satisfies { readonly [K in DocumentKind]: string };
 
 const FakeSeriesRow = Schema.Struct({
-  id: Schema.String,
-  workspaceId: Schema.String,
-  revision: Schema.Number,
-  kind: Schema.String,
+  id: NumberingSeriesIdSchema,
+  workspaceId: WorkspaceId,
+  revision: Schema.Finite,
+  kind: DocumentKindSchema,
   name: Schema.String,
   pattern: Schema.String,
   isDefault: Schema.Boolean,
   /** Next counter per period key. */
-  counters: Schema.Record(Schema.String, Schema.Number),
+  counters: Schema.Record(Schema.String, Schema.Finite),
 });
-interface FakeSeriesRow {
-  readonly id: string;
-  readonly workspaceId: WorkspaceId;
-  readonly revision: number;
-  readonly kind: DocumentKind;
-  readonly name: string;
-  readonly pattern: string;
-  readonly isDefault: boolean;
-  readonly counters: Readonly<Record<string, number>>;
-}
+type FakeSeriesRow = typeof FakeSeriesRow.Type;
 
 const FakeSeries = defineCollection<FakeSeriesRow>({
   name: "numbering_series_fake",
   entity: "NumberingSeries",
-  schema: FakeSeriesRow as unknown as Schema.Codec<FakeSeriesRow, unknown>,
+  schema: FakeSeriesRow,
 });
 
 const PATTERN = /^(?:[^N]*?)(N+)(?:[^N]*)$/;
+const COUNTER_PATTERN = /N+/;
 
 /** Period key of `pattern` on `today`: month, year, or "all". */
 const periodKeyOf = (pattern: string, today: IsoDate): string =>
-  pattern.includes("MM") ? today.slice(0, 7) : pattern.includes("YY") ? today.slice(0, 4) : "all";
+  EffectString.includes("MM")(pattern)
+    ? EffectString.slice(0, 7)(today)
+    : EffectString.includes("YY")(pattern)
+      ? EffectString.slice(0, 4)(today)
+      : "all";
 
-const formatNumber = (pattern: string, counter: number, today: IsoDate): string =>
-  pattern
-    .replace(/N+/, (run) => String(counter).padStart(run.length, "0"))
-    .replace("YYYY", today.slice(0, 4))
-    .replace("YY", today.slice(2, 4))
-    .replace("MM", today.slice(5, 7));
+const formatNumber = (pattern: string, counter: number, today: IsoDate): string => {
+  const counterWidth = COUNTER_PATTERN.exec(pattern)?.[0].length ?? 0;
+  return Fn.pipe(
+    pattern,
+    EffectString.replace(
+      COUNTER_PATTERN,
+      EffectString.padStart(counterWidth, "0")(String(counter)),
+    ),
+    EffectString.replace("YYYY", EffectString.slice(0, 4)(today)),
+    EffectString.replace("YY", EffectString.slice(2, 4)(today)),
+    EffectString.replace("MM", EffectString.slice(5, 7)(today)),
+  );
+};
 
 const patternInvalid = (params?: Record<string, string>) =>
-  new Invalid({
+  Invalid.make({
     issues: [
       {
         path: ["pattern"],
         code: "numbering.pattern_invalid",
-        ...(params === undefined ? {} : { params }),
+        params,
       },
     ],
   });
@@ -199,7 +216,7 @@ export const WorkspaceSeriesMemory: Layer.Layer<
       const periodKey = periodKeyOf(row.pattern, today);
       const nextCounter = row.counters[periodKey] ?? 1;
       return {
-        id: row.id as NumberingSeriesId,
+        id: row.id,
         kind: row.kind,
         name: row.name,
         pattern: row.pattern,
@@ -210,99 +227,103 @@ export const WorkspaceSeriesMemory: Layer.Layer<
       };
     };
     const ofWorkspace = (workspaceId: WorkspaceId) => rows.list(workspaceId, { orderBy: ["kind"] });
-    const demoteOthers = (workspaceId: WorkspaceId, kind: DocumentKind, keep: string) =>
-      Effect.gen(function* () {
-        for (const other of yield* ofWorkspace(workspaceId)) {
-          if (other.kind === kind && other.id !== keep && other.isDefault) {
-            yield* storeOnly(rows.update({ ...other, isDefault: false }, other.revision));
-          }
+    const demoteOthers = Effect.fn("demoteOthers")(function* (
+      workspaceId: WorkspaceId,
+      kind: DocumentKind,
+      keep: string,
+    ) {
+      for (const other of yield* ofWorkspace(workspaceId)) {
+        if (other.kind === kind && other.id !== keep && other.isDefault) {
+          yield* storeOnly(rows.update({ ...other, isDefault: false }, other.revision));
         }
-      });
+      }
+    });
     return {
-      configure: (workspaceId, input, today) =>
-        Effect.gen(function* () {
-          if (!PATTERN.test(input.pattern)) return yield* patternInvalid();
-          if (
-            input.nextNumber !== undefined &&
-            !(Number.isSafeInteger(input.nextNumber) && input.nextNumber >= 1)
-          ) {
-            return yield* new Invalid({
-              issues: [{ path: ["nextNumber"], code: "request.malformed" }],
-            });
-          }
-          const periodKey = periodKeyOf(input.pattern, today);
-          const all = yield* ofWorkspace(workspaceId);
-          if (input.id === undefined) {
-            const first = !all.some((s) => s.kind === input.kind);
-            const isDefault = first || input.isDefault === true;
-            const id = yield* Effect.provide(newId<NumberingSeriesId>(), ids);
-            const row = yield* storeOnly(
-              rows.insert({
-                id,
-                workspaceId,
-                revision: 1,
-                kind: input.kind,
-                name: input.name,
-                pattern: input.pattern,
-                isDefault,
-                counters: input.nextNumber === undefined ? {} : { [periodKey]: input.nextNumber },
-              }),
-            );
-            if (isDefault) yield* demoteOthers(workspaceId, input.kind, id);
-            return { view: view(row, today), before: null };
-          }
-          const current = yield* rows.lock(workspaceId, input.id);
-          const before = view(current, today);
-          if (current.kind !== input.kind)
-            return yield* new Conflict({ reason: "illegal_transition" });
-          if (input.isDefault === false && current.isDefault) {
-            return yield* new Conflict({ reason: "illegal_transition" });
-          }
-          const used = current.counters[periodKey] ?? 1;
-          if (input.nextNumber !== undefined && input.nextNumber < used) {
-            return yield* patternInvalid({ reason: "below_used", minimum: String(used) });
-          }
-          const isDefault = current.isDefault || input.isDefault === true;
-          const next = yield* storeOnly(
-            rows.update(
-              {
-                ...current,
-                name: input.name,
-                pattern: input.pattern,
-                isDefault,
-                counters:
-                  input.nextNumber === undefined
-                    ? current.counters
-                    : { ...current.counters, [periodKey]: input.nextNumber },
-              },
-              current.revision,
-            ),
+      configure: Effect.fn("WorkspaceSeries.configure")(function* (workspaceId, input, today) {
+        if (!PATTERN.test(input.pattern)) return yield* patternInvalid();
+        if (
+          input.nextNumber !== undefined &&
+          !(Number.isSafeInteger(input.nextNumber) && input.nextNumber >= 1)
+        ) {
+          return yield* Invalid.make({
+            issues: [{ path: ["nextNumber"], code: "request.malformed" }],
+          });
+        }
+        const periodKey = periodKeyOf(input.pattern, today);
+        const all = yield* ofWorkspace(workspaceId);
+        if (input.id === undefined) {
+          const first = !EffectArray.some(all, (s) => s.kind === input.kind);
+          const isDefault = first || input.isDefault === true;
+          const id = yield* Effect.provide(newId(NumberingSeriesIdSchema.make), ids);
+          const row = yield* storeOnly(
+            rows.insert({
+              id,
+              workspaceId,
+              revision: 1,
+              kind: input.kind,
+              name: input.name,
+              pattern: input.pattern,
+              isDefault,
+              counters: input.nextNumber === undefined ? {} : { [periodKey]: input.nextNumber },
+            }),
           );
-          if (isDefault) yield* demoteOthers(workspaceId, input.kind, next.id);
-          return { view: view(next, today), before };
-        }),
-      list: (workspaceId, today) =>
-        Effect.map(ofWorkspace(workspaceId), (all) => all.map((row) => view(row, today))),
-      ensureDefaults: (workspaceId, kinds) =>
-        Effect.gen(function* () {
-          const all = yield* ofWorkspace(workspaceId);
-          for (const kind of kinds) {
-            if (all.some((s) => s.kind === kind)) continue;
-            const id = yield* Effect.provide(newId<NumberingSeriesId>(), ids);
-            yield* storeOnly(
-              rows.insert({
-                id,
-                workspaceId,
-                revision: 1,
-                kind,
-                name: DEFAULT_SERIES_NAMES[kind],
-                pattern: DEFAULT_SERIES_PATTERNS[kind],
-                isDefault: true,
-                counters: {},
-              }),
-            );
-          }
-        }),
+          if (isDefault) yield* demoteOthers(workspaceId, input.kind, id);
+          return { view: view(row, today), before: null };
+        }
+        const current = yield* rows.lock(workspaceId, input.id);
+        const before = view(current, today);
+        if (current.kind !== input.kind)
+          return yield* Conflict.make({ reason: "illegal_transition" });
+        if (input.isDefault === false && current.isDefault) {
+          return yield* Conflict.make({ reason: "illegal_transition" });
+        }
+        const used = current.counters[periodKey] ?? 1;
+        if (input.nextNumber !== undefined && input.nextNumber < used) {
+          return yield* patternInvalid({ reason: "below_used", minimum: String(used) });
+        }
+        const isDefault = current.isDefault || input.isDefault === true;
+        const next = yield* storeOnly(
+          rows.update(
+            {
+              ...current,
+              name: input.name,
+              pattern: input.pattern,
+              isDefault,
+              counters:
+                input.nextNumber === undefined
+                  ? current.counters
+                  : { ...current.counters, [periodKey]: input.nextNumber },
+            },
+            current.revision,
+          ),
+        );
+        if (isDefault) yield* demoteOthers(workspaceId, input.kind, next.id);
+        return { view: view(next, today), before };
+      }),
+      list: Effect.fn("WorkspaceSeries.list")((workspaceId, today) =>
+        Effect.map(ofWorkspace(workspaceId), (all) =>
+          EffectArray.map(all, (row) => view(row, today)),
+        ),
+      ),
+      ensureDefaults: Effect.fn("WorkspaceSeries.ensureDefaults")(function* (workspaceId, kinds) {
+        const all = yield* ofWorkspace(workspaceId);
+        for (const kind of kinds) {
+          if (EffectArray.some(all, (s) => s.kind === kind)) continue;
+          const id = yield* Effect.provide(newId(NumberingSeriesIdSchema.make), ids);
+          yield* storeOnly(
+            rows.insert({
+              id,
+              workspaceId,
+              revision: 1,
+              kind,
+              name: DEFAULT_SERIES_NAMES[kind],
+              pattern: DEFAULT_SERIES_PATTERNS[kind],
+              isDefault: true,
+              counters: {},
+            }),
+          );
+        }
+      }),
     };
   }),
 );
@@ -324,11 +345,13 @@ export interface InvitationSend {
 export class InvitationTokens extends Context.Service<
   InvitationTokens,
   { readonly token: (invitationId: InvitationId, epoch: number) => Effect.Effect<string> }
->()("kvitbit/core/InvitationTokens") {}
+>()("@kvitbit/core/modules/workspaces/ports/InvitationTokens") {}
 
 /** Deterministic test tokens (a fixed test secret; never use outside tests). */
 export const InvitationTokensFake: Layer.Layer<InvitationTokens> = Layer.succeed(InvitationTokens, {
-  token: (invitationId, epoch) => sha256Hex(`test-secret:${invitationId}:${epoch}`),
+  token: Effect.fn("InvitationTokens.token")((invitationId, epoch) =>
+    sha256Hex(`test-secret:${invitationId}:${epoch}`),
+  ),
 });
 
 export class InvitationDelivery extends Context.Service<
@@ -337,13 +360,13 @@ export class InvitationDelivery extends Context.Service<
     /** Called after commit; starts the `MemberInvitation` email for one send epoch. */
     readonly start: (send: InvitationSend) => Effect.Effect<void>;
   }
->()("kvitbit/core/InvitationDelivery") {}
+>()("@kvitbit/core/modules/workspaces/ports/InvitationDelivery") {}
 
 /** Captures every started invitation send. */
 export class CaptureInvitationDelivery extends Context.Service<
   CaptureInvitationDelivery,
   { readonly sent: Ref.Ref<ReadonlyArray<InvitationSend>> }
->()("kvitbit/core/testing/CaptureInvitationDelivery") {
+>()("@kvitbit/core/modules/workspaces/ports/CaptureInvitationDelivery") {
   static readonly layer: Layer.Layer<InvitationDelivery | CaptureInvitationDelivery> =
     Layer.effectContext(
       Effect.gen(function* () {
@@ -373,16 +396,20 @@ export class BrandingPreview extends Context.Service<
     /** Renders the fixed sample document; persists nothing. Renderer failures are defects. */
     readonly render: (input: BrandingPreviewInput) => Effect.Effect<FileDownload>;
   }
->()("kvitbit/core/BrandingPreview") {}
+>()("@kvitbit/core/modules/workspaces/ports/BrandingPreview") {}
+
+const encodePreview = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 /** A renderer that returns the input as JSON bytes, so tests can see what was rendered. */
 export const BrandingPreviewFake: Layer.Layer<BrandingPreview> = Layer.succeed(BrandingPreview, {
-  render: (input) =>
-    Effect.succeed({
+  render: Effect.fn("BrandingPreview.render")(function* (input) {
+    const json = yield* encodePreview(input).pipe(Effect.orDie);
+    return {
       filename: `preview-${input.kind}.pdf`,
       contentType: "application/pdf",
-      bytes: Stream.succeed(new TextEncoder().encode(JSON.stringify(input))),
-    }),
+      bytes: Stream.succeed(new TextEncoder().encode(json)),
+    };
+  }),
 });
 
 // BankAccountReferences ------------------------------------------------------------------------
@@ -402,26 +429,21 @@ export class BankAccountReferences extends Context.Service<
       to: BankAccountId,
     ) => Effect.Effect<void, StoreUnavailable>;
   }
->()("kvitbit/core/BankAccountReferences") {}
+>()("@kvitbit/core/modules/workspaces/ports/BankAccountReferences") {}
 
 const FakeReferenceRow = Schema.Struct({
   /** The bank account id. */
   id: Schema.String,
-  workspaceId: Schema.String,
-  revision: Schema.Number,
-  uses: Schema.Number,
+  workspaceId: WorkspaceId,
+  revision: Schema.Finite,
+  uses: Schema.Finite,
 });
-interface FakeReferenceRow {
-  readonly id: string;
-  readonly workspaceId: WorkspaceId;
-  readonly revision: number;
-  readonly uses: number;
-}
+type FakeReferenceRow = typeof FakeReferenceRow.Type;
 
 const FakeReferences = defineCollection<FakeReferenceRow>({
   name: "bank_account_references_fake",
   entity: "BankAccount",
-  schema: FakeReferenceRow as unknown as Schema.Codec<FakeReferenceRow, unknown>,
+  schema: FakeReferenceRow,
 });
 
 /**
@@ -443,7 +465,7 @@ export class BankAccountReferencesFake extends Context.Service<
       id: BankAccountId,
     ) => Effect.Effect<number, StoreUnavailable>;
   }
->()("kvitbit/core/testing/BankAccountReferencesFake") {
+>()("@kvitbit/core/modules/workspaces/ports/BankAccountReferencesFake") {
   static readonly layer: Layer.Layer<
     BankAccountReferences | BankAccountReferencesFake,
     never,
@@ -456,28 +478,30 @@ export class BankAccountReferencesFake extends Context.Service<
       const count = (workspaceId: WorkspaceId, id: BankAccountId) =>
         Effect.map(rows.find(workspaceId, id), (row) => (row._tag === "Some" ? row.value.uses : 0));
       /** Upserts the count; inside the caller's transaction. */
-      const write = (workspaceId: WorkspaceId, id: BankAccountId, uses: number) =>
-        Effect.gen(function* () {
-          const current = yield* rows.find(workspaceId, id);
-          if (current._tag === "Some") {
-            yield* storeOnly(rows.update({ ...current.value, uses }, current.value.revision));
-          } else {
-            yield* storeOnly(rows.insert({ id, workspaceId, revision: 1, uses }));
-          }
-        });
+      const write = Effect.fn("write")(function* (
+        workspaceId: WorkspaceId,
+        id: BankAccountId,
+        uses: number,
+      ) {
+        const current = yield* rows.find(workspaceId, id);
+        if (current._tag === "Some") {
+          yield* storeOnly(rows.update({ ...current.value, uses }, current.value.revision));
+        } else {
+          yield* storeOnly(rows.insert({ id, workspaceId, revision: 1, uses }));
+        }
+      });
       return Context.make(BankAccountReferencesFake, {
         set: (workspaceId, id, uses) => store.transaction(write(workspaceId, id, uses)),
         get: (workspaceId, id) => store.transaction(count(workspaceId, id)),
       }).pipe(
         Context.add(BankAccountReferences, {
           count,
-          reassign: (workspaceId, from, to) =>
-            Effect.gen(function* () {
-              const moved = yield* count(workspaceId, from);
-              const kept = yield* count(workspaceId, to);
-              yield* write(workspaceId, to, kept + moved);
-              yield* write(workspaceId, from, 0);
-            }),
+          reassign: Effect.fn("reassign")(function* (workspaceId, from, to) {
+            const moved = yield* count(workspaceId, from);
+            const kept = yield* count(workspaceId, to);
+            yield* write(workspaceId, to, kept + moved);
+            yield* write(workspaceId, from, 0);
+          }),
         }),
       );
     }),

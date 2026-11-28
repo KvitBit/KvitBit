@@ -1,20 +1,24 @@
 /** `shareLinks` group handlers (http-mcp-contracts 3.5.4): member side of PublicShareLinks. */
-import { Api } from "@kvitbit/api-contract";
-import { CurrentCaller, PublicShareLinks } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
+
+import { Api, RequestCaller } from "@kvitbit/api-contract";
+import { PublicShareLinks } from "@kvitbit/domain/contract";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { Analytics } from "../../runtime/analytics";
 import { compact } from "../conventions";
 
-export const ShareLinksGroupLive = HttpApiBuilder.group(Api, "shareLinks", (handlers) =>
-  Effect.gen(function* () {
+export const ShareLinksGroupLive = HttpApiBuilder.group(
+  Api,
+  "shareLinks",
+  Effect.fnUntraced(function* (handlers) {
     const shareLinks = yield* PublicShareLinks;
     const analytics = yield* Analytics;
     return handlers
-      .handle("create", ({ params }) =>
-        Effect.gen(function* () {
-          const link = yield* shareLinks.create(params.documentId);
-          const caller = yield* CurrentCaller;
+      .handle(
+        "create",
+        Effect.fn("ShareLinks.create")(function* ({ params }) {
+          const caller = yield* RequestCaller;
+          const link = yield* shareLinks.create(caller, params.documentId);
           if (caller._tag === "Member") {
             yield* analytics.capture({
               event: "share_link_created",
@@ -25,7 +29,13 @@ export const ShareLinksGroupLive = HttpApiBuilder.group(Api, "shareLinks", (hand
           return link;
         }),
       )
-      .handle("revoke", ({ params }) => shareLinks.revoke(params.documentId))
-      .handle("views", ({ params, query }) => shareLinks.views(params.documentId, compact(query)));
+      .handle("revoke", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) => shareLinks.revoke(caller, params.documentId)),
+      )
+      .handle("views", ({ params, query }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          shareLinks.views(caller, params.documentId, compact(query)),
+        ),
+      );
   }),
 );

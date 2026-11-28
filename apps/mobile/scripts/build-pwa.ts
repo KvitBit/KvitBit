@@ -1,96 +1,155 @@
 /**
- * Builds the installable web app the server mounts at `/app/`:
- * `expo export` into `dist`, then the manifest, icons, service worker and the
- * head tags that tie them together. Fails when a URL in index.html would not
- * load from `/app/`.
+ * Exports the installable web app and adds the files used by its /app/ mount.
  */
-import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import * as BunRuntime from "@effect/platform-bun/BunRuntime";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Arr from "effect/Array";
+import * as Console from "effect/Console";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Order from "effect/Order";
+import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { injectPwaHead, staticAssetUrls, urlsOutsideBase } from "./pwa/html";
+import { jsonManifest } from "./pwa/json";
 import { APP_BASE, appleTouchIcon, pwaColors, pwaIcons, pwaManifest } from "./pwa/manifest";
 import { serviceWorkerSource } from "./pwa/service-worker";
 
-const appRoot = resolve(import.meta.dir, "..");
-const brandWebAssets = resolve(appRoot, "../../assets/brand/web");
+const iconFiles = [...Arr.map(pwaIcons, (icon) => icon.file), appleTouchIcon];
 
-/** Files the `/app/` mount can't work without; checked after the build. */
+/** Files the `/app/` mount needs. */
 export const pwaEntryFiles = [
   "index.html",
   "manifest.webmanifest",
   "sw.js",
-  ...pwaIcons.map((icon) => `icons/${icon.file}`),
-  `icons/${appleTouchIcon}`,
-] as const;
+  ...Arr.map(iconFiles, (file) => `icons/${file}`),
+];
 
-/** Short content hash of the exported shell; its script names carry the bundle hashes. */
+class PwaBuildError extends Schema.TaggedError<PwaBuildError, { readonly brand: unique symbol }>()(
+  "PwaBuildError",
+  { reason: Schema.String },
+) {
+  override get message(): string {
+    return this.reason;
+  }
+}
+
+const buildError = (cause: unknown) =>
+  PwaBuildError.make({ reason: Predicate.isError(cause) ? cause.message : String(cause) });
+
+/** Short content hash of the shell, whose bundle names carry their content hashes. */
 export const exportVersion = (html: string): string =>
-  new Bun.CryptoHasher("sha256").update(html).digest("hex").slice(0, 12);
+  Str.slice(0, 12)(new Bun.CryptoHasher("sha256").update(html).digest("hex"));
 
-/** Adds the PWA files to an existing web export in `dist`. */
-export const decorateExport = async ({
+interface ExportDirectories {
+  readonly dist: string;
+  readonly iconSource: string;
+}
+
+/** Adds PWA assets to an existing Expo web export. */
+export const decorateExport = Effect.fn("MobilePwa.decorate")(function* ({
   dist,
   iconSource,
-}: {
-  dist: string;
-  iconSource: string;
-}) => {
-  const shellPath = join(dist, "index.html");
-  const exported = await readFile(shellPath, "utf8");
+}: ExportDirectories) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const shellPath = path.join(dist, "index.html");
+  const exported = yield* fs.readFileString(shellPath);
 
-  await mkdir(join(dist, "icons"), { recursive: true });
-  for (const file of [...pwaIcons.map((icon) => icon.file), appleTouchIcon]) {
-    await copyFile(join(iconSource, file), join(dist, "icons", file));
-  }
-  await writeFile(
-    join(dist, "manifest.webmanifest"),
-    `${JSON.stringify(pwaManifest(), null, 2)}\n`,
+  const iconDir = path.join(dist, "icons");
+  yield* fs.makeDirectory(iconDir, { recursive: true });
+  yield* Effect.forEach(
+    iconFiles,
+    (file) => fs.copyFile(path.join(iconSource, file), path.join(iconDir, file)),
+    { concurrency: "unbounded", discard: true },
   );
-  const shell = injectPwaHead(exported, { themeColor: pwaColors.theme });
+  yield* fs.writeFileString(
+    path.join(dist, "manifest.webmanifest"),
+    `${jsonManifest(pwaManifest())}\n`,
+  );
+  const shell = yield* Effect.try({
+    try: () => injectPwaHead(exported, { themeColor: pwaColors.theme }),
+    catch: buildError,
+  });
   const outside = urlsOutsideBase(shell);
   if (outside.length > 0) {
-    throw new Error(`index.html loads URLs outside /app/: ${outside.join(", ")}`);
+    return yield* PwaBuildError.make({
+      reason: `index.html loads URLs outside /app/: ${Arr.join(outside, ", ")}`,
+    });
   }
-  await writeFile(shellPath, shell);
-  const integrity: Record<string, string> = {};
-  const artifacts = [
-    "index.html",
-    ...(await Array.fromAsync(new Bun.Glob("_expo/static/**/*").scan(dist))),
-  ];
-  for (const file of artifacts.sort()) {
-    const url = file.split("/").map(encodeURIComponent).join("/");
-    integrity[`${APP_BASE}${url}`] =
-      `sha256-${new Bun.CryptoHasher("sha256").update(await readFile(join(dist, file))).digest("base64")}`;
-  }
+  yield* fs.writeFileString(shellPath, shell);
+
+  const staticFiles = yield* Effect.tryPromise({
+    try: () => Array.fromAsync(new Bun.Glob("_expo/static/**/*").scan(dist)),
+    catch: buildError,
+  });
+  const artifacts = Arr.sort(["index.html", ...staticFiles], Order.String);
+  const entries = yield* Effect.forEach(
+    artifacts,
+    (file) =>
+      fs.readFile(path.join(dist, file)).pipe(
+        Effect.map((bytes) => {
+          const url = Arr.join(Arr.map(Str.split(file, "/"), encodeURIComponent), "/");
+          const hash = new Bun.CryptoHasher("sha256").update(bytes).digest("base64");
+          return [`${APP_BASE}${url}`, `sha256-${hash}`] as const;
+        }),
+      ),
+    { concurrency: 1 },
+  );
+  const integrity: Readonly<Record<string, string>> = Rec.fromEntries(entries);
   const precache = staticAssetUrls(exported);
-  const missingArtifacts = precache.filter((url) => !Object.hasOwn(integrity, url));
+  const missingArtifacts = Arr.filter(precache, (url) => !Rec.has(integrity, url));
   if (missingArtifacts.length > 0) {
-    throw new Error(`The PWA build lacks static artifacts: ${missingArtifacts.join(", ")}`);
+    return yield* PwaBuildError.make({
+      reason: `The PWA build lacks static artifacts: ${Arr.join(missingArtifacts, ", ")}`,
+    });
   }
-  await writeFile(
-    join(dist, "sw.js"),
+  yield* fs.writeFileString(
+    path.join(dist, "sw.js"),
     serviceWorkerSource({ version: exportVersion(exported), precache, integrity }),
   );
 
-  const missing: string[] = [];
-  for (const file of pwaEntryFiles) {
-    if (!(await Bun.file(join(dist, file)).exists())) missing.push(file);
+  const missing = yield* Effect.filter(
+    pwaEntryFiles,
+    (file) => fs.exists(path.join(dist, file)).pipe(Effect.map((exists) => !exists)),
+    { concurrency: "unbounded" },
+  );
+  if (missing.length > 0) {
+    return yield* PwaBuildError.make({ reason: `The PWA build lacks ${Arr.join(missing, ", ")}` });
   }
-  if (missing.length > 0) throw new Error(`The PWA build lacks ${missing.join(", ")}`);
-};
+});
 
-const exportWeb = async (dist: string) => {
-  await rm(dist, { recursive: true, force: true });
-  const child = Bun.spawn(["bunx", "expo", "export", "--platform", "web", "--output-dir", "dist"], {
-    cwd: appRoot,
-    stdio: ["inherit", "inherit", "inherit"],
-  });
-  const code = await child.exited;
-  if (code !== 0) throw new Error(`expo export exited with ${code}`);
-};
+const build = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const appRoot = path.resolve(import.meta.dir, "..");
+  const dist = path.join(appRoot, "dist");
+  const iconSource = path.resolve(appRoot, "../../assets/brand/web");
+
+  yield* fs.remove(dist, { recursive: true, force: true });
+  const child = yield* spawner.spawn(
+    ChildProcess.make("bunx", ["expo", "export", "--platform", "web", "--output-dir", "dist"], {
+      cwd: appRoot,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    }),
+  );
+  const code = yield* child.exitCode;
+  if (Number(code) !== 0) {
+    return yield* PwaBuildError.make({ reason: `expo export exited with ${code}` });
+  }
+
+  yield* decorateExport({ dist, iconSource });
+  yield* Console.log(`PWA ready in ${dist} (served at /app/)`);
+});
 
 if (import.meta.main) {
-  const dist = join(appRoot, "dist");
-  await exportWeb(dist);
-  await decorateExport({ dist, iconSource: brandWebAssets });
-  process.stdout.write(`PWA ready in ${dist} (served at /app/)\n`);
+  BunRuntime.runMain(build.pipe(Effect.scoped, Effect.provide(BunServices.layer)));
 }

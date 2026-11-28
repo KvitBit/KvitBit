@@ -4,20 +4,21 @@
  */
 import { transactionWithRetry } from "@kvitbit/adapters/sql";
 import { Unavailable, type UserId, type WorkspaceId } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { SqlClient, SqlError } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as SqlError from "effect/sql/SqlError";
 
 /**
  * Deletes the member's API keys and OAuth grants for `workspaceId`. Deleting `auth.oauth_consent`
  * cascades to `auth.oauth_refresh_token` and `auth.oauth_access_token` via foreign-key `on delete cascade`.
  */
-export const changeMembershipAndRevokeCredentials = <E, R>(
+export const changeMembershipAndRevokeCredentials = Effect.fnUntraced(function* <E, R>(
   sql: SqlClient.SqlClient,
   change: Effect.Effect<void, E, R>,
   workspaceId: WorkspaceId,
   userId: UserId,
-) =>
-  transactionWithRetry(
+) {
+  return yield* transactionWithRetry(
     Effect.gen(function* () {
       yield* change;
       yield* sql`DELETE FROM auth.apikey WHERE workspace_id = ${workspaceId} AND created_by = ${userId}`;
@@ -26,6 +27,7 @@ export const changeMembershipAndRevokeCredentials = <E, R>(
   ).pipe(
     Effect.provideService(SqlClient.SqlClient, sql),
     Effect.mapError((error) =>
-      SqlError.isSqlError(error) ? new Unavailable({ dependency: "database" }) : error,
+      SqlError.isSqlError(error) ? Unavailable.make({ dependency: "database" }) : error,
     ),
   );
+});

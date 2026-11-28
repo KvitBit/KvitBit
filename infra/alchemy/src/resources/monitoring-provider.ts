@@ -4,13 +4,25 @@ import { isResolved } from "alchemy/Diff";
 import type { Input } from "alchemy/Input";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
-import * as Data from "effect/Data";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
-import { HttpClientRequest } from "effect/http";
+import * as Fn from "effect/Function";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
+import * as Str from "effect/String";
 import { makeGoogleApi } from "../google-api";
 
-type JsonObject = Readonly<Record<string, unknown>>;
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const projectsPattern = /^projects\/[^/]+\/([^/]+)\/([^/]+)$/;
+
+type JsonObject = Schema.JsonObject;
 type UptimePeriod = "60s" | "300s" | "600s" | "900s";
 
 interface MonitoringProps {
@@ -26,13 +38,13 @@ export interface UptimeCheckProps extends MonitoringProps {
   readonly period: UptimePeriod;
 }
 
-export interface MetricAggregation {
+export type MetricAggregation = {
   readonly alignmentPeriod: "300s" | "1200s";
   readonly perSeriesAligner: "ALIGN_DELTA" | "ALIGN_NEXT_OLDER";
   readonly crossSeriesReducer: "REDUCE_SUM" | "REDUCE_COUNT_FALSE";
-}
+};
 
-export interface MetricThreshold {
+type MetricThreshold = {
   readonly filter: string;
   readonly aggregations: ReadonlyArray<MetricAggregation>;
   readonly denominatorFilter?: string;
@@ -41,7 +53,7 @@ export interface MetricThreshold {
   readonly thresholdValue: number;
   readonly duration: "0s" | "120s";
   readonly trigger: { readonly count: 1 };
-}
+};
 
 export interface AlertPolicyProps extends MonitoringProps {
   readonly condition: {
@@ -78,12 +90,15 @@ export const NotificationChannel = Resource<
   MonitoringResource<"Kvitbit.Monitoring.NotificationChannel", NotificationChannelProps>
 >("Kvitbit.Monitoring.NotificationChannel");
 
-class MonitoringRequestFailed extends Data.TaggedError("MonitoringRequestFailed")<{
-  readonly operation: string;
-  readonly resource: string;
-  readonly reason: string;
-  readonly serviceDisabled?: boolean;
-}> {
+class MonitoringRequestFailed extends Schema.TaggedError<
+  MonitoringRequestFailed,
+  { readonly brand: unique symbol }
+>()("MonitoringRequestFailed", {
+  operation: Schema.String,
+  resource: Schema.String,
+  reason: Schema.String,
+  serviceDisabled: Schema.optionalKey(Schema.Boolean),
+}) {
   override get message() {
     return `Cloud Monitoring ${this.operation} ${this.resource}: ${this.reason}`;
   }
@@ -91,8 +106,10 @@ class MonitoringRequestFailed extends Data.TaggedError("MonitoringRequestFailed"
 
 const root = "https://monitoring.googleapis.com/v3";
 const generationLabel = "alchemy-instance";
-const object = (value: unknown): JsonObject =>
-  typeof value === "object" && value !== null && !Array.isArray(value) ? (value as JsonObject) : {};
+const object = Fn.flow(
+  Schema.decodeUnknownOption(Schema.JsonObject),
+  Option.getOrElse<JsonObject>(() => ({})),
+);
 
 const makeMonitoringApi = Effect.fnUntraced(function* () {
   const api = yield* makeGoogleApi();
@@ -102,7 +119,12 @@ const makeMonitoringApi = Effect.fnUntraced(function* () {
     resource: string,
   ): Effect.Effect<JsonObject | undefined, MonitoringRequestFailed> => {
     const failed = (reason: string, serviceDisabled = false) =>
-      new MonitoringRequestFailed({ operation: request.method, resource, reason, serviceDisabled });
+      MonitoringRequestFailed.make({
+        operation: request.method,
+        resource,
+        reason,
+        serviceDisabled,
+      });
 
     return api.call({
       request: request.pipe(HttpClientRequest.acceptJson),
@@ -115,28 +137,30 @@ const makeMonitoringApi = Effect.fnUntraced(function* () {
       },
       handle: (response) => {
         if (response.status === 404 && (request.method === "DELETE" || request.method === "GET")) {
-          return Effect.succeed(undefined);
+          return Effect.undefined;
         }
         if (response.status >= 200 && response.status < 300) {
           return request.method === "DELETE"
             ? Effect.succeed({})
             : response.json.pipe(
-                Effect.map(object),
-                Effect.mapError(() => failed("invalid JSON response")),
+                Effect.mapBoth({
+                  onSuccess: object,
+                  onFailure: () => failed("invalid JSON response"),
+                }),
               );
         }
         return response.json.pipe(
           Effect.orElseSucceed(() => ({})),
           Effect.flatMap((body) => {
-            const { message, details } = object(object(body).error);
+            const { message, details } = object(object(body)["error"]);
             const serviceDisabled =
               request.method === "GET" &&
               response.status === 403 &&
-              Array.isArray(details) &&
-              details.some((detail) => object(detail).reason === "SERVICE_DISABLED");
+              Arr.isArray(details) &&
+              Arr.some(details, (detail) => object(detail)["reason"] === "SERVICE_DISABLED");
             return Effect.fail(
               failed(
-                typeof message === "string"
+                Predicate.isString(message)
                   ? `HTTP ${response.status}: ${message}`
                   : `HTTP ${response.status}`,
                 serviceDisabled,
@@ -181,10 +205,14 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
     body: JsonObject,
   ): Effect.Effect<MonitoringAttributes, MonitoringRequestFailed> => {
     const { name } = body;
-    const match = typeof name === "string" && /^projects\/[^/]+\/([^/]+)\/([^/]+)$/.exec(name);
-    if (typeof name !== "string" || !match || match[1] !== collection || !match[2]) {
+    const match = Predicate.isString(name) ? projectsPattern.exec(name) : null;
+    if (
+      !(Predicate.isString(name) && match !== null) ||
+      match[1] !== collection ||
+      !(match[2] !== undefined && match[2] !== "")
+    ) {
       return Effect.fail(
-        new MonitoringRequestFailed({
+        MonitoringRequestFailed.make({
           operation: "read",
           resource: collection,
           reason: "invalid resource name in response",
@@ -207,41 +235,48 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
     do {
       const request = HttpClientRequest.get(collectionUrl(props.project));
       const page: JsonObject | undefined = yield* api.send(
-        pageToken ? HttpClientRequest.setUrlParam(request, "pageToken", pageToken) : request,
+        pageToken !== undefined && pageToken !== ""
+          ? HttpClientRequest.setUrlParam(request, "pageToken", pageToken)
+          : request,
         props.displayName,
       );
       if (page === undefined) {
-        return yield* new MonitoringRequestFailed({
+        return yield* MonitoringRequestFailed.make({
           operation: "list",
           resource: collection,
           reason: "collection not found",
         });
       }
       const entries = page[collection];
-      for (const entry of Array.isArray(entries) ? entries : []) {
+      for (const entry of Arr.isArray(entries) ? entries : []) {
         const body = object(entry);
         if (
-          (previous !== undefined && body.name === previous.name) ||
-          (definition.immutableMatches && !definition.immutableMatches(props, body))
+          (previous !== undefined && body["name"] === previous.name) ||
+          definition.immutableMatches?.(props, body) === false
         ) {
           continue;
         }
-        const liveLabels = object(body.userLabels);
-        if (Object.entries(labels).every(([key, value]) => liveLabels[key] === value)) {
+        const liveLabels = object(body["userLabels"]);
+        if (
+          Arr.every(EffectRecord.toEntries(labels), ([key, value]) => liveLabels[key] === value)
+        ) {
           if (liveLabels[generationLabel] === instanceId) {
-            exact.push(yield* attributes(props.project, body));
+            const value_1 = yield* attributes(props.project, body);
+            exact.push(value_1);
           } else if (previous === undefined) {
-            owned.push(yield* attributes(props.project, body));
+            const value_1 = yield* attributes(props.project, body);
+            owned.push(value_1);
           }
-        } else if (body.displayName === props.displayName) {
-          foreign.push(yield* attributes(props.project, body));
+        } else if (body["displayName"] === props.displayName) {
+          const value_1 = yield* attributes(props.project, body);
+          foreign.push(value_1);
         }
       }
-      pageToken = typeof page.nextPageToken === "string" ? page.nextPageToken : undefined;
+      pageToken = Predicate.isString(page["nextPageToken"]) ? page["nextPageToken"] : undefined;
     } while (pageToken);
     const matching = exact.length > 0 ? exact : [...owned, ...foreign];
     if (matching.length > 1) {
-      return yield* new MonitoringRequestFailed({
+      return yield* MonitoringRequestFailed.make({
         operation: "list",
         resource: props.displayName,
         reason: "multiple resources match the desired identity",
@@ -264,12 +299,15 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
     ...definition.mutable(props, live),
   });
   const drifted = (props: P, live: JsonObject) =>
-    Object.entries(mutable(props, live)).filter(([field, value]) => !matches(value, live[field]));
+    Arr.filter(
+      EffectRecord.toEntries(mutable(props, live)),
+      ([field, value]) => !matches(value, live[field]),
+    );
 
   const invalid = (body: JsonObject) =>
     definition.verifyReadback === true &&
-    body.validity !== undefined &&
-    object(body.validity).code !== 0;
+    body["validity"] !== undefined &&
+    object(body["validity"])["code"] !== 0;
 
   const verify = (
     resource: MonitoringAttributes,
@@ -279,10 +317,10 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
     if (
       definition.verifyReadback === true &&
       (invalid(body) ||
-        !Object.entries(expected).every(([key, value]) => matches(value, body[key])))
+        !Arr.every(EffectRecord.toEntries(expected), ([key, value]) => matches(value, body[key])))
     ) {
       return Effect.fail(
-        new MonitoringRequestFailed({
+        MonitoringRequestFailed.make({
           operation: "reconcile",
           resource: resource.name,
           reason:
@@ -309,7 +347,7 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
       if (output !== undefined) return yield* readByName(output);
       const labels = yield* createInternalLabels(fqn);
       const found = yield* find(olds, labels, sanitizeLabelValue(instanceId), previous);
-      if (found === undefined) return undefined;
+      if (found === undefined) return;
       return found.owned ? found.resource : Unowned(found.resource);
     }),
     diff: ({
@@ -324,16 +362,17 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
       Effect.sync(() => {
         const next = object(news);
         if (
-          (typeof next.project === "string" && next.project !== olds.project) ||
-          definition.immutableChanged?.(olds, next) ||
+          (Predicate.isString(next["project"]) && next["project"] !== olds.project) ||
+          definition.immutableChanged?.(olds, next) === true ||
           (isResolved(news) &&
             output !== undefined &&
             definition.immutableMatches?.(news, output.body) === false)
         ) {
           return { action: "replace" as const, deleteFirst: false };
         }
-        if (!isResolved(news)) return undefined;
-        return output && (invalid(output.body) || drifted(news, output.body).length > 0)
+        if (!isResolved(news)) return;
+        return output !== undefined &&
+          (invalid(output.body) || drifted(news, output.body).length > 0)
           ? { action: "update" as const }
           : undefined;
       }),
@@ -374,7 +413,7 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
             (found !== undefined && !found.exact) ||
             definition.immutableMatches?.(news, existing.body) === false
           ) {
-            return yield* new MonitoringRequestFailed({
+            return yield* MonitoringRequestFailed.make({
               operation: "reconcile",
               resource: existing.name,
               reason: "resource does not match the admitted identity",
@@ -388,11 +427,14 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
             HttpClientRequest.patch(`${root}/${existing.name}`).pipe(
               HttpClientRequest.setUrlParam(
                 "updateMask",
-                changed.map(([field]) => field).join(","),
+                Arr.join(
+                  Arr.map(changed, ([field]) => field),
+                  ",",
+                ),
               ),
               HttpClientRequest.bodyJsonUnsafe({
                 name: existing.name,
-                ...Object.fromEntries(changed),
+                ...EffectRecord.fromEntries(changed),
               }),
             ),
             existing.name,
@@ -412,28 +454,33 @@ function monitoringLifecycle<P extends MonitoringProps>(definition: MonitoringDe
 }
 
 // Protobuf can omit empty repeated fields and emit optional defaults.
-const protobufDefault = (value: unknown) =>
+const protobufDefault = (value: Schema.Json | undefined) =>
   value === undefined ||
   value === "" ||
   value === false ||
   value === 0 ||
-  (typeof value === "string" && value.endsWith("_UNSPECIFIED")) ||
-  (Array.isArray(value) && value.length === 0) ||
-  (value !== null && typeof value === "object" && Object.keys(value).length === 0);
+  (Predicate.isString(value) && Str.endsWith("_UNSPECIFIED")(value)) ||
+  (Arr.isArray(value) && value.length === 0) ||
+  (Predicate.isObject(value) && EffectRecord.keys(value).length === 0);
 
-const matches = (desired: unknown, live: unknown): boolean => {
-  if (Array.isArray(desired)) {
-    return Array.isArray(live)
-      ? desired.length === live.length && desired.every((item, index) => matches(item, live[index]))
+const isJsonArray = Schema.is(Schema.Array(Schema.Json));
+
+const matches = (desired: Schema.Json | undefined, live: Schema.Json | undefined): boolean => {
+  if (isJsonArray(desired)) {
+    return isJsonArray(live)
+      ? desired.length === live.length &&
+          Arr.every(desired, (item, index) => matches(item, live[index]))
       : desired.length === 0 && live === undefined;
   }
-  if (desired !== null && typeof desired === "object") {
+  if (Predicate.isObject(desired)) {
     const expected = object(desired);
     const current = object(live);
     return (
-      Object.entries(expected).every(([key, value]) => matches(value, current[key])) &&
-      Object.entries(current).every(
-        ([key, value]) => Object.hasOwn(expected, key) || protobufDefault(value),
+      Arr.every(EffectRecord.toEntries(expected), ([key, value]) => matches(value, current[key])) &&
+      Arr.every(
+        EffectRecord.toEntries(current),
+        ([key, value]) =>
+          EffectRecord.has<string, Schema.Json>(expected, key) || protobufDefault(value),
       )
     );
   }
@@ -449,14 +496,14 @@ export const UptimeCheckProvider = Provider.succeed(
       period,
     }),
     immutableChanged: (current, next) =>
-      (typeof next.host === "string" && current.host !== next.host) ||
-      (typeof next.period === "string" && current.period !== next.period),
+      (Predicate.isString(next["host"]) && current.host !== next["host"]) ||
+      (Predicate.isString(next["period"]) && current.period !== next["period"]),
     immutableMatches: ({ host, period }, live) => {
-      const target = object(live.monitoredResource);
+      const target = object(live["monitoredResource"]);
       return (
-        target.type === "uptime_url" &&
-        object(target.labels).host === host &&
-        (live.period ?? "60s") === period
+        target["type"] === "uptime_url" &&
+        object(target["labels"])["host"] === host &&
+        (live["period"] ?? "60s") === period
       );
     },
     mutable: ({ port }) => ({
@@ -473,7 +520,7 @@ export const UptimeCheckProvider = Provider.succeed(
         {
           matcher: "MATCHES_JSON_PATH",
           // Cloud Monitoring parses MATCHES_JSON_PATH + EXACT_MATCH content as a JSON value.
-          content: JSON.stringify("ok"),
+          content: encodeJson("ok"),
           jsonPathMatcher: { jsonPath: "$.status", jsonMatcher: "EXACT_MATCH" },
         },
       ],
@@ -488,12 +535,12 @@ export const AlertPolicyProvider = Provider.succeed(
     verifyReadback: true,
     mutable: ({ condition, notificationChannels }, live) => {
       // Each policy owns one condition. Its generated name preserves identity across edits.
-      const conditions = live?.conditions;
-      const name = Array.isArray(conditions) ? object(conditions[0]).name : undefined;
+      const conditions = live?.["conditions"];
+      const name = Arr.isArray(conditions) ? object(conditions[0])["name"] : undefined;
       return {
         combiner: "OR",
         enabled: true,
-        conditions: [typeof name === "string" ? { ...condition, name } : condition],
+        conditions: [Predicate.isString(name) ? { ...condition, name } : condition],
         notificationChannels,
       };
     },
@@ -505,7 +552,7 @@ export const NotificationChannelProvider = Provider.succeed(
   monitoringLifecycle<NotificationChannelProps>({
     collection: "notificationChannels",
     createFields: () => ({ type: "email" }),
-    immutableMatches: (_props, live) => live.type === "email",
+    immutableMatches: (_props, live) => live["type"] === "email",
     mutable: ({ email }) => ({ enabled: true, labels: { email_address: email } }),
   }),
 );

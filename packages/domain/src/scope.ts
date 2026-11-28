@@ -3,7 +3,7 @@
  * Core scopes are `<area>:<level>`; the OAuth wire form `kvitbit:<area>:<level>` is an edge
  * concern and maps one to one.
  */
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 /** The ten permission areas of rule R1. */
 export const SCOPE_AREAS = [

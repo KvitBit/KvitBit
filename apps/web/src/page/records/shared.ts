@@ -1,43 +1,60 @@
-import { apiCommand, browserCommand, type PageCommand } from "../../app/commands";
-
-export { apiCommand };
-
 /**
  * Private shared schemas, decoders, VAT/FX math helpers and Effect UI Commands for the `records`
  * page group (Expenses, Contacts, Price List, Reports). Kept private inside `src/page/records/`.
  */
-import type {
+import {
   ContactDefaults,
+  type ContactView,
   CurrencyCode,
-  DocumentKind,
+  type ExpenseSummary,
+  type ExpenseView,
   IsoDate,
-  Locale,
+  type Locale,
   PaymentMethod,
-  ReportKind,
-  VatTreatment,
+  type PaymentView,
+  type PriceListItemView,
+  type ReportKind,
+  type ReportView,
+  type VatTreatment,
 } from "@kvitbit/domain/contract";
-import { Format, I18n, type ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Effect, Option, Schema } from "effect";
+import { Format, I18n, ViewModels } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { type Failure, failureFromUnknown } from "../../app/api";
+import { browserOrigin, downloadFile, fetchBrowserOk } from "../../app/browser";
 import type { Translator } from "../../app/i18n";
 import type { PageContext } from "../../app/page";
 import type { BadgeTone } from "../../ui/kit";
 
-export const enumLabel = <E extends I18n.EnumName>(
-  t: Translator,
-  name: E,
-  value: I18n.EnumLabels[E],
-): string => t.translate(I18n.enumText(name, value));
+export { apiCommand } from "../../app/commands";
+
+export const enumLabel: {
+  <E extends I18n.EnumName>(name: E, value: I18n.EnumLabels[E]): (t: Translator) => string;
+  <E extends I18n.EnumName>(t: Translator, name: E, value: I18n.EnumLabels[E]): string;
+} = Fn.dual(
+  3,
+  <E extends I18n.EnumName>(t: Translator, name: E, value: I18n.EnumLabels[E]): string =>
+    t.translate(I18n.enumText({ name, value })),
+);
 
 // --- Common value schemas (JSON-safe for Effect UI SSR Model codecs) -------------------------------
 
-export const MoneyRecord = Schema.Struct({
+const MoneyRecord = Schema.Struct({
   amount: Schema.String,
   currency: Schema.String,
 });
-export type MoneyRecord = typeof MoneyRecord.Type;
+type MoneyRecord = typeof MoneyRecord.Type;
 
-export const VatBucketRecord = Schema.Struct({
+const VatBucketRecord = Schema.Struct({
   treatment: Schema.String,
   ratePercent: Schema.String,
   base: Schema.String,
@@ -45,9 +62,9 @@ export const VatBucketRecord = Schema.Struct({
   gross: Schema.String,
   vatCzk: Schema.NullOr(Schema.String),
 });
-export type VatBucketRecord = typeof VatBucketRecord.Type;
+type VatBucketRecord = typeof VatBucketRecord.Type;
 
-export const VatBreakdownRecord = Schema.Struct({
+const VatBreakdownRecord = Schema.Struct({
   buckets: Schema.Array(VatBucketRecord),
   net: MoneyRecord,
   vat: MoneyRecord,
@@ -55,27 +72,26 @@ export const VatBreakdownRecord = Schema.Struct({
   gross: MoneyRecord,
   vatCzk: Schema.NullOr(MoneyRecord),
 });
-export type VatBreakdownRecord = typeof VatBreakdownRecord.Type;
+type VatBreakdownRecord = typeof VatBreakdownRecord.Type;
 
 // --- Contact schemas -----------------------------------------------------------------------------
 
 export const ContactRoleLiteral = Schema.Literals(["customer", "supplier"]);
 export type ContactRoleLiteral = typeof ContactRoleLiteral.Type;
 
-export const ContactAddressRecord = Schema.Struct({
+const ContactAddressRecord = Schema.Struct({
   street: Schema.NullOr(Schema.String),
   city: Schema.NullOr(Schema.String),
   postalCode: Schema.NullOr(Schema.String),
   country: Schema.String,
 });
-export type ContactAddressRecord = typeof ContactAddressRecord.Type;
 
-export const ReminderPolicyRecord = Schema.Union([
+const ReminderPolicyRecord = Schema.Union([
   Schema.Struct({ mode: Schema.Literal("inherit") }),
   Schema.Struct({ mode: Schema.Literal("disabled") }),
   Schema.Struct({ mode: Schema.Literal("custom"), offsetsDays: Schema.Array(Schema.Int) }),
 ]);
-export type ReminderPolicyRecord = typeof ReminderPolicyRecord.Type;
+type ReminderPolicyRecord = typeof ReminderPolicyRecord.Type;
 
 export const ContactDefaultsRecord = Schema.Struct({
   currency: Schema.optionalKey(Schema.String),
@@ -123,8 +139,7 @@ export type PriceListItemRecord = typeof PriceListItemRecord.Type;
 
 // --- Expense & Payment schemas -------------------------------------------------------------------
 
-export const ExpenseStatusLiteral = Schema.Literals(["complete", "incomplete"]);
-export type ExpenseStatusLiteral = typeof ExpenseStatusLiteral.Type;
+const ExpenseStatusLiteral = Schema.Literals(["complete", "incomplete"]);
 
 export const ExpenseSettlementLiteral = Schema.Literals([
   "unpaid",
@@ -134,46 +149,45 @@ export const ExpenseSettlementLiteral = Schema.Literals([
 ]);
 export type ExpenseSettlementLiteral = typeof ExpenseSettlementLiteral.Type;
 
-export const ExpenseSupplierRecord = Schema.Struct({
+const ExpenseSupplierRecord = Schema.Struct({
   contactId: Schema.NullOr(Schema.String),
   name: Schema.NullOr(Schema.String),
   ico: Schema.NullOr(Schema.String),
   dic: Schema.NullOr(Schema.String),
 });
-export type ExpenseSupplierRecord = typeof ExpenseSupplierRecord.Type;
+type ExpenseSupplierRecord = typeof ExpenseSupplierRecord.Type;
 
-export const ExpenseVatLineRecord = Schema.Struct({
+const ExpenseVatLineRecord = Schema.Struct({
   treatment: Schema.String,
   base: Schema.String,
   vat: Schema.String,
   selfAssessed: Schema.NullOr(Schema.Literals(["standard", "reduced"])),
 });
-export type ExpenseVatLineRecord = typeof ExpenseVatLineRecord.Type;
 
-export const ExpenseFxRecord = Schema.Struct({
+const ExpenseFxRecord = Schema.Struct({
   rate: Schema.String,
   quantity: Schema.Int,
   fixingDate: Schema.NullOr(Schema.String),
   source: Schema.Literals(["cnb", "manual"]),
 });
-export type ExpenseFxRecord = typeof ExpenseFxRecord.Type;
+type ExpenseFxRecord = typeof ExpenseFxRecord.Type;
 
 export const ExpenseAttachmentRecord = Schema.Struct({
   id: Schema.String,
   expenseId: Schema.String,
   name: Schema.String,
   contentType: Schema.String,
-  bytes: Schema.Number,
+  bytes: Schema.Finite,
   sha256: Schema.String,
   createdAt: Schema.String,
 });
 export type ExpenseAttachmentRecord = typeof ExpenseAttachmentRecord.Type;
 
-export const DeductibilityRecord = Schema.Union([
+const DeductibilityRecord = Schema.Union([
   Schema.Literals(["full", "none"]),
   Schema.Struct({ partial: Schema.Int }),
 ]);
-export type DeductibilityRecord = typeof DeductibilityRecord.Type;
+type DeductibilityRecord = typeof DeductibilityRecord.Type;
 
 export const ExpenseSummaryRecord = Schema.Struct({
   id: Schema.String,
@@ -202,7 +216,7 @@ export const ExpenseViewRecord = Schema.Struct({
   dueOn: Schema.NullOr(Schema.String),
   currency: Schema.NullOr(Schema.String),
   total: Schema.NullOr(Schema.String),
-  vat: Schema.NullOr(Schema.Array(ExpenseVatLineRecord)),
+  vat: ExpenseVatLineRecord.pipe(Schema.Array, Schema.NullOr),
   totals: Schema.NullOr(VatBreakdownRecord),
   selfAssessed: Schema.Array(VatBucketRecord),
   fx: Schema.NullOr(ExpenseFxRecord),
@@ -229,7 +243,7 @@ export const PaymentRecord = Schema.Struct({
   revision: Schema.Int,
   amount: MoneyRecord,
   paidOn: Schema.String,
-  method: Schema.String,
+  method: PaymentMethod,
   note: Schema.NullOr(Schema.String),
   createdAt: Schema.String,
 });
@@ -237,12 +251,12 @@ export type PaymentRecord = typeof PaymentRecord.Type;
 
 // --- Reports schemas -----------------------------------------------------------------------------
 
-export const ReportPeriodRecord = Schema.Struct({
+const ReportPeriodRecord = Schema.Struct({
   from: Schema.String,
   to: Schema.String,
 });
 
-export const ReportAmountRow = Schema.Struct({
+const ReportAmountRow = Schema.Struct({
   key: Schema.String,
   label: Schema.NullOr(Schema.String),
   count: Schema.Int,
@@ -251,9 +265,9 @@ export const ReportAmountRow = Schema.Struct({
   gross: MoneyRecord,
   original: Schema.NullOr(MoneyRecord),
 });
-export type ReportAmountRow = typeof ReportAmountRow.Type;
+type ReportAmountRow = typeof ReportAmountRow.Type;
 
-export const ReportAmountTotals = Schema.Struct({
+const ReportAmountTotals = Schema.Struct({
   count: Schema.Int,
   net: MoneyRecord,
   vat: MoneyRecord,
@@ -317,7 +331,7 @@ export const CashflowReportRecord = Schema.Struct({
 });
 export type CashflowReportRecord = typeof CashflowReportRecord.Type;
 
-export const ReceivableRowRecord = Schema.Struct({
+const ReceivableRowRecord = Schema.Struct({
   id: Schema.String,
   kind: Schema.String,
   number: Schema.NullOr(Schema.String),
@@ -328,7 +342,6 @@ export const ReceivableRowRecord = Schema.Struct({
   outstanding: MoneyRecord,
   outstandingCzk: MoneyRecord,
 });
-export type ReceivableRowRecord = typeof ReceivableRowRecord.Type;
 
 export const ReceivablesReportRecord = Schema.Struct({
   report: Schema.Literal("receivables"),
@@ -347,7 +360,7 @@ export const ReceivablesReportRecord = Schema.Struct({
 });
 export type ReceivablesReportRecord = typeof ReceivablesReportRecord.Type;
 
-export const VatLineRecord = Schema.Struct({
+const VatLineRecord = Schema.Struct({
   month: Schema.String,
   treatment: Schema.String,
   ratePercent: Schema.String,
@@ -360,7 +373,7 @@ export const VatLineRecord = Schema.Struct({
     ]),
   ),
 });
-export type VatLineRecord = typeof VatLineRecord.Type;
+type VatLineRecord = typeof VatLineRecord.Type;
 
 export const VatSummaryReportRecord = Schema.Struct({
   report: Schema.Literal("vat_summary"),
@@ -383,437 +396,469 @@ export type ReportDataRecord = typeof ReportDataRecord.Type;
 
 // --- Wire normalization helpers (open/branded domain views -> JSON-safe records) -----------------
 
-const asRecord = (u: unknown): Record<string, unknown> =>
-  typeof u === "object" && u !== null ? (u as Record<string, unknown>) : {};
+const WireField = Schema.Union([
+  Schema.String,
+  Schema.Finite,
+  Schema.Boolean,
+  Schema.ObjectKeyword,
+]).pipe(Schema.UndefinedOr, Schema.NullOr);
+type WireField = typeof WireField.Type;
 
-const str = (u: unknown, fallback = ""): string => (typeof u === "string" ? u : fallback);
-const optStr = (u: unknown): string | null => (typeof u === "string" ? u : null);
-const num = (u: unknown, fallback = 0): number =>
-  typeof u === "number" && Number.isFinite(u) ? u : fallback;
-const int = (u: unknown, fallback = 0): number => Math.trunc(num(u, fallback));
-const bool = (u: unknown, fallback = false): boolean => (typeof u === "boolean" ? u : fallback);
+const WireFields = Schema.Record(Schema.String, WireField);
+const readFields = Schema.decodeUnknownOption(WireFields);
+const emptyFields: typeof WireFields.Type = {};
+const asRecord = Fn.compose(
+  readFields,
+  Option.getOrElse(() => emptyFields),
+);
+const readString = Schema.is(Schema.String);
+const readPaymentMethod = Schema.is(PaymentMethod);
+const readNumber = Schema.is(Schema.Finite);
+const readBoolean = Schema.is(Schema.Boolean);
+const str = (u: WireField, fallback = ""): string => (readString(u) ? u : fallback);
+const optStr = (u: WireField): string | null => (readString(u) ? u : null);
+const num = (u: WireField, fallback = 0): number => (readNumber(u) ? u : fallback);
+const int = (u: WireField, fallback = 0): number => Math.trunc(num(u, fallback));
+const bool = (u: WireField, fallback = false): boolean => (readBoolean(u) ? u : fallback);
 
-export const decimalToString = (u: unknown): string => {
-  if (typeof u === "string") return u;
-  if (typeof u === "number" && Number.isFinite(u)) return String(u);
-  if (BigDecimal.isBigDecimal(u)) return BigDecimal.format(BigDecimal.normalize(u));
-  return "0";
-};
+export const decimalToString = (u: WireField): string => optDecimalToString(u) ?? "0";
 
-export const optDecimalToString = (u: unknown): string | null => {
-  if (u === null || u === undefined) return null;
-  if (typeof u === "string") return u;
-  if (typeof u === "number" && Number.isFinite(u)) return String(u);
-  if (BigDecimal.isBigDecimal(u)) return BigDecimal.format(BigDecimal.normalize(u));
+const optDecimalToString = (u: WireField): string | null => {
+  if (readString(u)) return u;
+  if (readNumber(u)) return String(u);
+  if (BigDecimal.isBigDecimal(u)) return u.pipe(BigDecimal.normalize, BigDecimal.format);
   return null;
 };
 
-export const parseMoney = (u: unknown, fallbackCurrency = "CZK"): MoneyRecord => {
+const parseMoney = (u: WireField, fallbackCurrency = "CZK"): MoneyRecord => {
   const r = asRecord(u);
   return {
-    amount: decimalToString(r.amount),
-    currency: str(r.currency, fallbackCurrency),
+    amount: decimalToString(r["amount"]),
+    currency: str(r["currency"], fallbackCurrency),
   };
 };
 
-const parseOptMoney = (u: unknown): MoneyRecord | null =>
+const parseOptMoney = (u: WireField): MoneyRecord | null =>
   u === null || u === undefined ? null : parseMoney(u);
 
-const parseVatBucket = (u: unknown): VatBucketRecord => {
-  const r = asRecord(u);
-  return {
-    treatment: str(r.treatment, "standard"),
-    ratePercent: decimalToString(r.ratePercent),
-    base: decimalToString(r.base),
-    vat: decimalToString(r.vat),
-    gross: decimalToString(r.gross),
-    vatCzk: optDecimalToString(r.vatCzk),
-  };
-};
+const parseVatBucket = Fn.compose(
+  asRecord,
+  (r): VatBucketRecord => ({
+    treatment: str(r["treatment"], "standard"),
+    ratePercent: decimalToString(r["ratePercent"]),
+    base: decimalToString(r["base"]),
+    vat: decimalToString(r["vat"]),
+    gross: decimalToString(r["gross"]),
+    vatCzk: optDecimalToString(r["vatCzk"]),
+  }),
+);
 
-const parseVatBreakdown = (u: unknown): VatBreakdownRecord | null => {
+const parseVatBreakdown = (u: WireField): VatBreakdownRecord | null => {
   if (u === null || u === undefined) return null;
   const r = asRecord(u);
-  const buckets = Array.isArray(r.buckets) ? r.buckets.map(parseVatBucket) : [];
+  const buckets = Arr.isArray(r["buckets"]) ? Arr.map(r["buckets"], parseVatBucket) : [];
   return {
     buckets,
-    net: parseMoney(r.net),
-    vat: parseMoney(r.vat),
-    roundingAdjustment: parseMoney(r.roundingAdjustment),
-    gross: parseMoney(r.gross),
-    vatCzk: parseOptMoney(r.vatCzk),
+    net: parseMoney(r["net"]),
+    vat: parseMoney(r["vat"]),
+    roundingAdjustment: parseMoney(r["roundingAdjustment"]),
+    gross: parseMoney(r["gross"]),
+    vatCzk: parseOptMoney(r["vatCzk"]),
   };
 };
 
-export const normalizeContact = (raw: unknown): ContactRecord => {
+export const normalizeContact = (raw: ContactView): ContactRecord => {
   const r = asRecord(raw);
-  const addr = asRecord(r.address);
-  const def = asRecord(r.defaults);
-  const rp = asRecord(def.reminderPolicy);
+  const addr = asRecord(r["address"]);
+  const def = asRecord(r["defaults"]);
+  const rp = asRecord(def["reminderPolicy"]);
   const reminderPolicy: ReminderPolicyRecord | undefined =
-    rp.mode === "disabled"
+    rp["mode"] === "disabled"
       ? { mode: "disabled" }
-      : rp.mode === "custom"
+      : rp["mode"] === "custom"
         ? {
             mode: "custom",
-            offsetsDays: Array.isArray(rp.offsetsDays) ? rp.offsetsDays.map((x) => int(x)) : [],
+            offsetsDays: Arr.isArray(rp["offsetsDays"])
+              ? Arr.map(rp["offsetsDays"], (x) => (readNumber(x) ? Math.trunc(x) : 0))
+              : [],
           }
-        : rp.mode === "inherit"
+        : rp["mode"] === "inherit"
           ? { mode: "inherit" }
           : undefined;
-  const seriesRaw = asRecord(def.preferredSeriesByKind);
-  const seriesEntries = Object.entries(seriesRaw).filter(
-    (entry): entry is [string, string] => typeof entry[1] === "string",
+  const seriesRaw = asRecord(def["preferredSeriesByKind"]);
+  const seriesEntries = Arr.filter(Rec.toEntries(seriesRaw), (entry): entry is [string, string] =>
+    readString(entry[1]),
   );
-  const defaults: ContactDefaultsRecord = {
-    ...(typeof def.currency === "string" ? { currency: def.currency } : {}),
-    ...(def.language === "cs" || def.language === "en" ? { language: def.language } : {}),
-    ...(typeof def.dueDays === "number" ? { dueDays: int(def.dueDays) } : {}),
-    ...(typeof def.paymentMethod === "string" ? { paymentMethod: def.paymentMethod } : {}),
-    ...(seriesEntries.length > 0
-      ? { preferredSeriesByKind: Object.fromEntries(seriesEntries) }
-      : {}),
-    ...(typeof def.defaultNote === "string" ? { defaultNote: def.defaultNote } : {}),
-    ...(reminderPolicy !== undefined ? { reminderPolicy } : {}),
-  };
-  const rolesRaw = Array.isArray(r.roles) ? r.roles : ["customer"];
-  const roles = rolesRaw.filter(
+  const currency = readString(def["currency"]) ? { currency: def["currency"] } : undefined;
+  const language =
+    def["language"] === "cs" || def["language"] === "en"
+      ? ({ language: def["language"] } as const)
+      : undefined;
+  const dueDays = readNumber(def["dueDays"]) ? { dueDays: int(def["dueDays"]) } : undefined;
+  const method = readString(def["paymentMethod"])
+    ? { paymentMethod: def["paymentMethod"] }
+    : undefined;
+  const series =
+    seriesEntries.length > 0
+      ? { preferredSeriesByKind: Rec.fromEntries(seriesEntries) }
+      : undefined;
+  const note = readString(def["defaultNote"]) ? { defaultNote: def["defaultNote"] } : undefined;
+  const reminders = reminderPolicy === undefined ? undefined : { reminderPolicy };
+  const defaults = {
+    ...currency,
+    ...language,
+    ...dueDays,
+    ...method,
+    ...series,
+    ...note,
+    ...reminders,
+  } satisfies ContactDefaultsRecord;
+  const rolesRaw = Arr.isArray(r["roles"]) ? r["roles"] : ["customer"];
+  const roles = Arr.filter(
+    rolesRaw,
     (x): x is ContactRoleLiteral => x === "customer" || x === "supplier",
   );
   return {
-    id: str(r.id),
+    id: str(r["id"]),
     roles: roles.length > 0 ? roles : ["customer"],
-    name: str(r.name),
-    ico: optStr(r.ico),
-    dic: optStr(r.dic),
-    legalForm: optStr(r.legalForm),
+    name: str(r["name"]),
+    ico: optStr(r["ico"]),
+    dic: optStr(r["dic"]),
+    legalForm: optStr(r["legalForm"]),
     address: {
-      street: optStr(addr.street),
-      city: optStr(addr.city),
-      postalCode: optStr(addr.postalCode),
-      country: str(addr.country, "CZ"),
+      street: optStr(addr["street"]),
+      city: optStr(addr["city"]),
+      postalCode: optStr(addr["postalCode"]),
+      country: str(addr["country"], "CZ"),
     },
-    billingEmails: Array.isArray(r.billingEmails)
-      ? r.billingEmails.filter((e): e is string => typeof e === "string")
+    billingEmails: Arr.isArray(r["billingEmails"])
+      ? Arr.filter(r["billingEmails"], (e): e is string => readString(e))
       : [],
-    phone: optStr(r.phone),
-    note: optStr(r.note),
+    phone: optStr(r["phone"]),
+    note: optStr(r["note"]),
     defaults,
-    registryFetchedAt: optStr(r.registryFetchedAt),
-    archived: bool(r.archived),
-    revision: int(r.revision, 1),
+    registryFetchedAt: optStr(r["registryFetchedAt"]),
+    archived: bool(r["archived"]),
+    revision: int(r["revision"], 1),
   };
 };
 
-export const normalizePriceListItem = (raw: unknown): PriceListItemRecord => {
+export const normalizePriceListItem = (raw: PriceListItemView): PriceListItemRecord => {
   const r = asRecord(raw);
   return {
-    id: str(r.id),
-    name: str(r.name),
-    description: optStr(r.description),
-    unit: optStr(r.unit),
-    unitPrice: decimalToString(r.unitPrice),
-    currency: str(r.currency, "CZK"),
-    vat: optStr(r.vat),
-    archived: bool(r.archived),
-    revision: int(r.revision, 1),
+    id: str(r["id"]),
+    name: str(r["name"]),
+    description: optStr(r["description"]),
+    unit: optStr(r["unit"]),
+    unitPrice: decimalToString(r["unitPrice"]),
+    currency: str(r["currency"], "CZK"),
+    vat: optStr(r["vat"]),
+    archived: bool(r["archived"]),
+    revision: int(r["revision"], 1),
   };
 };
 
-export const normalizeExpenseSummary = (raw: unknown): ExpenseSummaryRecord => {
+export const normalizeExpenseSummary = (raw: ExpenseSummary): ExpenseSummaryRecord => {
   const r = asRecord(raw);
   const settlement =
-    r.settlement === "paid" ||
-    r.settlement === "partially_paid" ||
-    r.settlement === "overpaid" ||
-    r.settlement === "unpaid"
-      ? r.settlement
+    r["settlement"] === "paid" ||
+    r["settlement"] === "partially_paid" ||
+    r["settlement"] === "overpaid" ||
+    r["settlement"] === "unpaid"
+      ? r["settlement"]
       : "unpaid";
   return {
-    id: str(r.id),
-    revision: int(r.revision, 1),
-    status: r.status === "incomplete" ? "incomplete" : "complete",
-    supplierName: optStr(r.supplierName),
-    supplierDocumentNumber: optStr(r.supplierDocumentNumber),
-    issuedOn: optStr(r.issuedOn),
-    total: optDecimalToString(r.total),
-    currency: optStr(r.currency),
-    category: optStr(r.category),
-    tags: Array.isArray(r.tags) ? r.tags.filter((x): x is string => typeof x === "string") : [],
-    attachments: int(r.attachments, 0),
+    id: str(r["id"]),
+    revision: int(r["revision"], 1),
+    status: r["status"] === "incomplete" ? "incomplete" : "complete",
+    supplierName: optStr(r["supplierName"]),
+    supplierDocumentNumber: optStr(r["supplierDocumentNumber"]),
+    issuedOn: optStr(r["issuedOn"]),
+    total: optDecimalToString(r["total"]),
+    currency: optStr(r["currency"]),
+    category: optStr(r["category"]),
+    tags: Arr.isArray(r["tags"]) ? Arr.filter(r["tags"], (x): x is string => readString(x)) : [],
+    attachments: int(r["attachments"], 0),
     settlement,
   };
 };
 
-export const normalizeAttachment = (raw: unknown): ExpenseAttachmentRecord => {
-  const r = asRecord(raw);
-  return {
-    id: str(r.id),
-    expenseId: str(r.expenseId),
-    name: str(r.name, "attachment"),
-    contentType: str(r.contentType, "application/octet-stream"),
-    bytes: num(r.bytes, 0),
-    sha256: str(r.sha256),
-    createdAt: str(r.createdAt),
-  };
-};
+const normalizeAttachment = Fn.compose(
+  asRecord,
+  (r): ExpenseAttachmentRecord => ({
+    id: str(r["id"]),
+    expenseId: str(r["expenseId"]),
+    name: str(r["name"], "attachment"),
+    contentType: str(r["contentType"], "application/octet-stream"),
+    bytes: num(r["bytes"], 0),
+    sha256: str(r["sha256"]),
+    createdAt: str(r["createdAt"]),
+  }),
+);
 
-export const normalizeExpenseView = (raw: unknown): ExpenseViewRecord => {
+export const normalizeExpenseView = (raw: ExpenseView): ExpenseViewRecord => {
   const r = asRecord(raw);
-  const supRaw = r.supplier === null || r.supplier === undefined ? null : asRecord(r.supplier);
+  const supRaw =
+    r["supplier"] === null || r["supplier"] === undefined ? null : asRecord(r["supplier"]);
   const supplier: ExpenseSupplierRecord | null =
     supRaw === null
       ? null
       : {
-          contactId: optStr(supRaw.contactId),
-          name: optStr(supRaw.name),
-          ico: optStr(supRaw.ico),
-          dic: optStr(supRaw.dic),
+          contactId: optStr(supRaw["contactId"]),
+          name: optStr(supRaw["name"]),
+          ico: optStr(supRaw["ico"]),
+          dic: optStr(supRaw["dic"]),
         };
-  const fxRaw = r.fx === null || r.fx === undefined ? null : asRecord(r.fx);
+  const fxRaw = r["fx"] === null || r["fx"] === undefined ? null : asRecord(r["fx"]);
   const fx: ExpenseFxRecord | null =
     fxRaw === null
       ? null
       : {
-          rate: decimalToString(fxRaw.rate),
-          quantity: int(fxRaw.quantity, 1),
-          fixingDate: optStr(fxRaw.fixingDate),
-          source: fxRaw.source === "manual" ? "manual" : "cnb",
+          rate: decimalToString(fxRaw["rate"]),
+          quantity: int(fxRaw["quantity"], 1),
+          fixingDate: optStr(fxRaw["fixingDate"]),
+          source: fxRaw["source"] === "manual" ? "manual" : "cnb",
         };
-  const dedRaw = r.deductibility;
+  const dedRaw = r["deductibility"];
   const deductibility: DeductibilityRecord =
     dedRaw === "none"
       ? "none"
-      : typeof dedRaw === "object" && dedRaw !== null && "partial" in dedRaw
-        ? { partial: Math.max(1, Math.min(99, int((dedRaw as { partial: unknown }).partial, 50))) }
+      : "partial" in asRecord(dedRaw)
+        ? { partial: Math.max(1, Math.min(99, int(asRecord(dedRaw)["partial"], 50))) }
         : "full";
-  const payRaw = asRecord(r.payment);
+  const payRaw = asRecord(r["payment"]);
   const settlement =
-    payRaw.settlement === "paid" ||
-    payRaw.settlement === "partially_paid" ||
-    payRaw.settlement === "overpaid" ||
-    payRaw.settlement === "unpaid"
-      ? payRaw.settlement
+    payRaw["settlement"] === "paid" ||
+    payRaw["settlement"] === "partially_paid" ||
+    payRaw["settlement"] === "overpaid" ||
+    payRaw["settlement"] === "unpaid"
+      ? payRaw["settlement"]
       : "unpaid";
   return {
-    id: str(r.id),
-    revision: int(r.revision, 1),
-    status: r.status === "incomplete" ? "incomplete" : "complete",
+    id: str(r["id"]),
+    revision: int(r["revision"], 1),
+    status: r["status"] === "incomplete" ? "incomplete" : "complete",
     supplier,
-    supplierDocumentNumber: optStr(r.supplierDocumentNumber),
-    issuedOn: optStr(r.issuedOn),
-    taxableSupplyOn: optStr(r.taxableSupplyOn),
-    dueOn: optStr(r.dueOn),
-    currency: optStr(r.currency),
-    total: optDecimalToString(r.total),
-    vat: Array.isArray(r.vat)
-      ? r.vat.map((line) => {
+    supplierDocumentNumber: optStr(r["supplierDocumentNumber"]),
+    issuedOn: optStr(r["issuedOn"]),
+    taxableSupplyOn: optStr(r["taxableSupplyOn"]),
+    dueOn: optStr(r["dueOn"]),
+    currency: optStr(r["currency"]),
+    total: optDecimalToString(r["total"]),
+    vat: Arr.isArray(r["vat"])
+      ? Arr.map(r["vat"], (line) => {
           const l = asRecord(line);
           return {
-            treatment: str(l.treatment, "standard"),
-            base: decimalToString(l.base),
-            vat: decimalToString(l.vat),
+            treatment: str(l["treatment"], "standard"),
+            base: decimalToString(l["base"]),
+            vat: decimalToString(l["vat"]),
             selfAssessed:
-              l.selfAssessed === "standard" || l.selfAssessed === "reduced" ? l.selfAssessed : null,
+              l["selfAssessed"] === "standard" || l["selfAssessed"] === "reduced"
+                ? l["selfAssessed"]
+                : null,
           };
         })
       : null,
-    totals: parseVatBreakdown(r.totals),
-    selfAssessed: Array.isArray(r.selfAssessed) ? r.selfAssessed.map(parseVatBucket) : [],
+    totals: parseVatBreakdown(r["totals"]),
+    selfAssessed: Arr.isArray(r["selfAssessed"]) ? Arr.map(r["selfAssessed"], parseVatBucket) : [],
     fx,
-    totalCzk: optDecimalToString(r.totalCzk),
+    totalCzk: optDecimalToString(r["totalCzk"]),
     deductibility,
-    deductibleVat: parseOptMoney(r.deductibleVat),
-    deductibleVatCzk: optDecimalToString(r.deductibleVatCzk),
-    category: optStr(r.category),
-    tags: Array.isArray(r.tags) ? r.tags.filter((x): x is string => typeof x === "string") : [],
-    note: optStr(r.note),
-    attachments: Array.isArray(r.attachments) ? r.attachments.map(normalizeAttachment) : [],
+    deductibleVat: parseOptMoney(r["deductibleVat"]),
+    deductibleVatCzk: optDecimalToString(r["deductibleVatCzk"]),
+    category: optStr(r["category"]),
+    tags: Arr.isArray(r["tags"]) ? Arr.filter(r["tags"], (x): x is string => readString(x)) : [],
+    note: optStr(r["note"]),
+    attachments: Arr.isArray(r["attachments"])
+      ? Arr.map(r["attachments"], normalizeAttachment)
+      : [],
     payment: {
       settlement,
-      paid: parseOptMoney(payRaw.paid),
-      payments: int(payRaw.payments, 0),
+      paid: parseOptMoney(payRaw["paid"]),
+      payments: int(payRaw["payments"], 0),
     },
-    createdAt: str(r.createdAt),
-    updatedAt: str(r.updatedAt),
+    createdAt: str(r["createdAt"]),
+    updatedAt: str(r["updatedAt"]),
   };
 };
 
-export const normalizePayment = (raw: unknown): PaymentRecord => {
+export const normalizePayment = (raw: PaymentView): PaymentRecord => {
   const r = asRecord(raw);
   return {
-    id: str(r.id),
-    revision: int(r.revision, 1),
-    amount: parseMoney(r.amount),
-    paidOn: str(r.paidOn),
-    method: str(r.method, "bank_transfer"),
-    note: optStr(r.note),
-    createdAt: str(r.createdAt),
+    id: str(r["id"]),
+    revision: int(r["revision"], 1),
+    amount: parseMoney(r["amount"]),
+    paidOn: str(r["paidOn"]),
+    method: readPaymentMethod(r["method"]) ? r["method"] : "bank_transfer",
+    note: optStr(r["note"]),
+    createdAt: str(r["createdAt"]),
   };
 };
 
-const parseAmountRow = (raw: unknown): ReportAmountRow => {
+const parseAmountRow = Fn.compose(
+  asRecord,
+  (r): ReportAmountRow => ({
+    key: str(r["key"]),
+    label: optStr(r["label"]),
+    count: int(r["count"]),
+    net: parseMoney(r["net"]),
+    vat: parseMoney(r["vat"]),
+    gross: parseMoney(r["gross"]),
+    original: parseOptMoney(r["original"]),
+  }),
+);
+
+const parseAmountTotals = (raw: WireField) => {
   const r = asRecord(raw);
   return {
-    key: str(r.key),
-    label: optStr(r.label),
-    count: int(r.count),
-    net: parseMoney(r.net),
-    vat: parseMoney(r.vat),
-    gross: parseMoney(r.gross),
-    original: parseOptMoney(r.original),
+    count: int(r["count"]),
+    net: parseMoney(r["net"]),
+    vat: parseMoney(r["vat"]),
+    gross: parseMoney(r["gross"]),
   };
 };
 
-const parseAmountTotals = (raw: unknown) => {
-  const r = asRecord(raw);
-  return {
-    count: int(r.count),
-    net: parseMoney(r.net),
-    vat: parseMoney(r.vat),
-    gross: parseMoney(r.gross),
-  };
-};
-
-const parseVatLine = (raw: unknown): VatLineRecord => {
-  const r = asRecord(raw);
-  const docs = Array.isArray(r.documents)
-    ? r.documents.map((d) => {
+const parseVatLine = Fn.compose(asRecord, (r): VatLineRecord => {
+  const docs = Arr.isArray(r["documents"])
+    ? Arr.map(r["documents"], (d) => {
         const dr = asRecord(d);
-        return dr._tag === "Expense"
-          ? ({ _tag: "Expense", id: str(dr.id) } as const)
-          : ({ _tag: "Document", id: str(dr.id) } as const);
+        return dr["_tag"] === "Expense"
+          ? ({ _tag: "Expense", id: str(dr["id"]) } as const)
+          : ({ _tag: "Document", id: str(dr["id"]) } as const);
       })
     : [];
   return {
-    month: str(r.month),
-    treatment: str(r.treatment, "standard"),
-    ratePercent: decimalToString(r.ratePercent),
-    base: parseMoney(r.base),
-    vat: parseMoney(r.vat),
+    month: str(r["month"]),
+    treatment: str(r["treatment"], "standard"),
+    ratePercent: decimalToString(r["ratePercent"]),
+    base: parseMoney(r["base"]),
+    vat: parseMoney(r["vat"]),
     documents: docs,
   };
-};
+});
 
-export const normalizeReport = (raw: unknown, fallbackKind: ReportKind): ReportDataRecord => {
+export const normalizeReport: {
+  (fallbackKind: ReportKind): (raw: ReportView) => ReportDataRecord;
+  (raw: ReportView, fallbackKind: ReportKind): ReportDataRecord;
+} = Fn.dual(2, (raw: ReportView, fallbackKind: ReportKind): ReportDataRecord => {
   const r = asRecord(raw);
-  const periodRaw = asRecord(r.period);
-  const period = { from: str(periodRaw.from), to: str(periodRaw.to) };
-  const kind = str(r.report, fallbackKind);
+  const periodRaw = asRecord(r["period"]);
+  const period = { from: str(periodRaw["from"]), to: str(periodRaw["to"]) };
+  const kind = str(r["report"], fallbackKind);
   switch (kind) {
     case "expenses":
       return {
         report: "expenses",
         period,
         groupBy:
-          r.groupBy === "contact" || r.groupBy === "currency" || r.groupBy === "category"
-            ? r.groupBy
+          r["groupBy"] === "contact" || r["groupBy"] === "currency" || r["groupBy"] === "category"
+            ? r["groupBy"]
             : "month",
-        rows: Array.isArray(r.rows) ? r.rows.map(parseAmountRow) : [],
-        totals: parseAmountTotals(r.totals),
-        incomplete: int(r.incomplete),
+        rows: Arr.isArray(r["rows"]) ? Arr.map(r["rows"], parseAmountRow) : [],
+        totals: parseAmountTotals(r["totals"]),
+        incomplete: int(r["incomplete"]),
       };
     case "profit": {
-      const totalsRaw = asRecord(r.totals);
+      const totalsRaw = asRecord(r["totals"]);
       return {
         report: "profit",
         period,
-        rows: Array.isArray(r.rows)
-          ? r.rows.map((row) => {
+        rows: Arr.isArray(r["rows"])
+          ? Arr.map(r["rows"], (row) => {
               const rr = asRecord(row);
               return {
-                month: str(rr.month),
-                revenue: parseMoney(rr.revenue),
-                expenses: parseMoney(rr.expenses),
-                profit: parseMoney(rr.profit),
+                month: str(rr["month"]),
+                revenue: parseMoney(rr["revenue"]),
+                expenses: parseMoney(rr["expenses"]),
+                profit: parseMoney(rr["profit"]),
               };
             })
           : [],
         totals: {
-          revenue: parseMoney(totalsRaw.revenue),
-          expenses: parseMoney(totalsRaw.expenses),
-          profit: parseMoney(totalsRaw.profit),
+          revenue: parseMoney(totalsRaw["revenue"]),
+          expenses: parseMoney(totalsRaw["expenses"]),
+          profit: parseMoney(totalsRaw["profit"]),
         },
       };
     }
     case "cashflow": {
-      const totalsRaw = asRecord(r.totals);
+      const totalsRaw = asRecord(r["totals"]);
       return {
         report: "cashflow",
         period,
-        points: Array.isArray(r.points)
-          ? r.points.map((pt) => {
+        points: Arr.isArray(r["points"])
+          ? Arr.map(r["points"], (pt) => {
               const pr = asRecord(pt);
               return {
-                month: str(pr.month),
-                in: parseMoney(pr.in),
-                out: parseMoney(pr.out),
-                net: parseMoney(pr.net),
+                month: str(pr["month"]),
+                in: parseMoney(pr["in"]),
+                out: parseMoney(pr["out"]),
+                net: parseMoney(pr["net"]),
               };
             })
           : [],
         totals: {
-          in: parseMoney(totalsRaw.in),
-          out: parseMoney(totalsRaw.out),
-          net: parseMoney(totalsRaw.net),
+          in: parseMoney(totalsRaw["in"]),
+          out: parseMoney(totalsRaw["out"]),
+          net: parseMoney(totalsRaw["net"]),
         },
       };
     }
     case "receivables": {
-      const overdueRaw = asRecord(r.overdue);
+      const overdueRaw = asRecord(r["overdue"]);
       return {
         report: "receivables",
         period,
-        asOf: str(r.asOf, period.to),
-        buckets: Array.isArray(r.buckets)
-          ? r.buckets.map((b) => {
+        asOf: str(r["asOf"], period.to),
+        buckets: Arr.isArray(r["buckets"])
+          ? Arr.map(r["buckets"], (b) => {
               const br = asRecord(b);
               const bucket =
-                br.bucket === "1_30" ||
-                br.bucket === "31_60" ||
-                br.bucket === "61_90" ||
-                br.bucket === "over_90"
-                  ? br.bucket
+                br["bucket"] === "1_30" ||
+                br["bucket"] === "31_60" ||
+                br["bucket"] === "61_90" ||
+                br["bucket"] === "over_90"
+                  ? br["bucket"]
                   : "not_due";
               return {
                 bucket,
-                count: int(br.count),
-                total: parseMoney(br.total),
-                documents: Array.isArray(br.documents)
-                  ? br.documents.map((doc) => {
+                count: int(br["count"]),
+                total: parseMoney(br["total"]),
+                documents: Arr.isArray(br["documents"])
+                  ? Arr.map(br["documents"], (doc) => {
                       const dr = asRecord(doc);
-                      const c = asRecord(dr.contact);
+                      const c = asRecord(dr["contact"]);
                       return {
-                        id: str(dr.id),
-                        kind: str(dr.kind, "invoice"),
-                        number: optStr(dr.number),
-                        contact: { id: optStr(c.id), name: str(c.name) },
-                        currency: str(dr.currency, "CZK"),
-                        dueOn: optStr(dr.dueOn),
-                        daysOverdue: int(dr.daysOverdue),
-                        outstanding: parseMoney(dr.outstanding, str(dr.currency, "CZK")),
-                        outstandingCzk: parseMoney(dr.outstandingCzk, "CZK"),
+                        id: str(dr["id"]),
+                        kind: str(dr["kind"], "invoice"),
+                        number: optStr(dr["number"]),
+                        contact: { id: optStr(c["id"]), name: str(c["name"]) },
+                        currency: str(dr["currency"], "CZK"),
+                        dueOn: optStr(dr["dueOn"]),
+                        daysOverdue: int(dr["daysOverdue"]),
+                        outstanding: parseMoney(dr["outstanding"], str(dr["currency"], "CZK")),
+                        outstandingCzk: parseMoney(dr["outstandingCzk"], "CZK"),
                       };
                     })
                   : [],
               };
             })
           : [],
-        total: parseMoney(r.total),
-        overdue: { total: parseMoney(overdueRaw.total), count: int(overdueRaw.count) },
+        total: parseMoney(r["total"]),
+        overdue: { total: parseMoney(overdueRaw["total"]), count: int(overdueRaw["count"]) },
       };
     }
     case "vat_summary": {
-      const totalsRaw = asRecord(r.totals);
+      const totalsRaw = asRecord(r["totals"]);
       return {
         report: "vat_summary",
         period,
-        output: Array.isArray(r.output) ? r.output.map(parseVatLine) : [],
-        input: Array.isArray(r.input) ? r.input.map(parseVatLine) : [],
+        output: Arr.isArray(r["output"]) ? Arr.map(r["output"], parseVatLine) : [],
+        input: Arr.isArray(r["input"]) ? Arr.map(r["input"], parseVatLine) : [],
         totals: {
-          output: parseMoney(totalsRaw.output),
-          input: parseMoney(totalsRaw.input),
-          payable: parseMoney(totalsRaw.payable),
+          output: parseMoney(totalsRaw["output"]),
+          input: parseMoney(totalsRaw["input"]),
+          payable: parseMoney(totalsRaw["payable"]),
         },
       };
     }
@@ -821,23 +866,31 @@ export const normalizeReport = (raw: unknown, fallbackKind: ReportKind): ReportD
       return {
         report: "revenue",
         period,
-        groupBy: r.groupBy === "contact" || r.groupBy === "currency" ? r.groupBy : "month",
-        rows: Array.isArray(r.rows) ? r.rows.map(parseAmountRow) : [],
-        totals: parseAmountTotals(r.totals),
+        groupBy: r["groupBy"] === "contact" || r["groupBy"] === "currency" ? r["groupBy"] : "month",
+        rows: Arr.isArray(r["rows"]) ? Arr.map(r["rows"], parseAmountRow) : [],
+        totals: parseAmountTotals(r["totals"]),
       };
   }
-};
+});
 
 // --- Formatting & domain helpers -----------------------------------------------------------------
 
 export const canWrite = (ctx: PageContext): boolean =>
   ctx.workspace !== null && ctx.workspace.role !== "accountant" && !ctx.workspace.closed;
 
-export const moneyText = (locale: Locale, amount: string, currency: string): string =>
-  Format.formatMoney(locale, { amount, currency: currency as CurrencyCode });
+export const moneyText: {
+  (amount: string, currency: string): (locale: Locale) => string;
+  (locale: Locale, amount: string, currency: string): string;
+} = Fn.dual(3, (locale: Locale, amount: string, currency: string): string =>
+  Format.formatMoney(locale, { amount, currency }),
+);
 
-export const dateText = (locale: Locale, iso: string | null): string =>
-  iso === null || iso === "" ? "—" : Format.formatDate(locale, iso);
+export const dateText: {
+  (iso: string | null): (locale: Locale) => string;
+  (locale: Locale, iso: string | null): string;
+} = Fn.dual(2, (locale: Locale, iso: string | null): string =>
+  iso === null || iso === "" ? "—" : Format.formatDate({ locale, date: iso }),
+);
 
 export const settlementTone = (settlement: ExpenseSettlementLiteral): BadgeTone => {
   switch (settlement) {
@@ -859,12 +912,12 @@ export const formatBytes = (bytes: number): string => {
 };
 
 export const CURRENCIES: ReadonlyArray<CurrencyCode> = [
-  "CZK" as CurrencyCode,
-  "EUR" as CurrencyCode,
-  "USD" as CurrencyCode,
-  "GBP" as CurrencyCode,
-  "PLN" as CurrencyCode,
-  "CHF" as CurrencyCode,
+  CurrencyCode.make("CZK"),
+  CurrencyCode.make("EUR"),
+  CurrencyCode.make("USD"),
+  CurrencyCode.make("GBP"),
+  CurrencyCode.make("PLN"),
+  CurrencyCode.make("CHF"),
 ];
 
 export const VAT_TREATMENTS: ReadonlyArray<VatTreatment> = [
@@ -882,13 +935,6 @@ export const PAYMENT_METHODS: ReadonlyArray<PaymentMethod> = [
   "other",
 ];
 
-export const DOCUMENT_KINDS: ReadonlyArray<DocumentKind> = [
-  "invoice",
-  "proforma",
-  "payment_tax_document",
-  "credit_note",
-];
-
 /** Default Czech VAT rate percent for a treatment (post-2024-01-01). */
 export const vatRatePercent = (treatment: string): number => {
   if (treatment === "standard") return 21;
@@ -896,23 +942,31 @@ export const vatRatePercent = (treatment: string): number => {
   return 0;
 };
 
+const whitespace = /\s+/g;
+const userDecimal = /^-?\d+(\.\d+)?$/;
+const unsignedInteger = /^\d+$/;
+
 /** Parse a user-typed decimal string (accepts comma or dot). */
 export const parseUserDecimal = (raw: string): number | null => {
-  const normalized = raw.trim().replace(/\s+/g, "").replace(",", ".");
-  if (normalized === "" || !/^-?\d+(\.\d+)?$/.test(normalized)) return null;
+  const normalized = Str.replace(",", ".")(Str.replace(whitespace, "")(Str.trim(raw)));
+  if (normalized === "" || !userDecimal.test(normalized)) return null;
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
 };
 
 /** Round half away from zero to `decimals` places (matches Czech VAT rounding rule). */
-export const roundHalfAway = (value: number, decimals = 2): number => {
+const roundHalfAway = (value: number, decimals = 2): number => {
   const factor = 10 ** decimals;
   const sign = value < 0 ? -1 : 1;
   return (sign * Math.floor(Math.abs(value) * factor + 0.5 + Number.EPSILON)) / factor;
 };
 
-export const formatDecimalFixed = (value: number, decimals = 2): string =>
-  roundHalfAway(value, decimals).toFixed(decimals);
+export const formatDecimalFixed: {
+  (decimals: number): (value: number) => string;
+  (value: number, decimals: number): string;
+} = Fn.dual(2, (value: number, decimals: number): string =>
+  roundHalfAway(value, decimals).toFixed(decimals),
+);
 
 /** Live preview math for an expense's VAT lines, deductible VAT, and CZK FX equivalent. */
 export interface ExpenseMathPreview {
@@ -1004,174 +1058,143 @@ export const computeExpensePreview = (input: {
 
 // --- Report period helpers -----------------------------------------------------------------------
 
-const lastDayOfMonth = (year: number, month: number): number =>
-  new Date(Date.UTC(year, month, 0)).getUTCDate();
+const lastDayOfMonth = (year: string, month: number): number =>
+  DateTime.makeUnsafe(`${year}-${pad2(month)}-01T00:00:00Z`).pipe(
+    DateTime.endOf("month"),
+    DateTime.getPartUtc("day"),
+  );
 
-const pad2 = (n: number): string => String(n).padStart(2, "0");
+const quarterPeriod = /^(\d{4})-Q([1-4])$/;
+const monthPeriod = /^(\d{4})-(\d{2})$/;
+const uuidSeparator = /-/g;
+
+const pad2 = (n: number): string => Str.padStart(2, "0")(String(n));
 
 /** Converts a Period (`2026`, `2026-Q4`, `2026-11`) into inclusive `{ from, to }` IsoDates. */
 export const periodToRange = (period: ViewModels.Period): { from: IsoDate; to: IsoDate } => {
-  const qMatch = /^(\d{4})-Q([1-4])$/.exec(period);
+  const year = Str.slice(0, 4)(period);
+  const qMatch = quarterPeriod.exec(period);
   if (qMatch !== null) {
-    const y = Number(qMatch[1]);
     const q = Number(qMatch[2]);
     const startMonth = (q - 1) * 3 + 1;
     const endMonth = startMonth + 2;
     return {
-      from: `${y}-${pad2(startMonth)}-01` as IsoDate,
-      to: `${y}-${pad2(endMonth)}-${pad2(lastDayOfMonth(y, endMonth))}` as IsoDate,
+      from: IsoDate.make(`${year}-${pad2(startMonth)}-01`),
+      to: IsoDate.make(`${year}-${pad2(endMonth)}-${pad2(lastDayOfMonth(year, endMonth))}`),
     };
   }
-  const mMatch = /^(\d{4})-(\d{2})$/.exec(period);
+  const mMatch = monthPeriod.exec(period);
   if (mMatch !== null) {
-    const y = Number(mMatch[1]);
     const m = Number(mMatch[2]);
     return {
-      from: `${y}-${pad2(m)}-01` as IsoDate,
-      to: `${y}-${pad2(m)}-${pad2(lastDayOfMonth(y, m))}` as IsoDate,
+      from: IsoDate.make(`${year}-${pad2(m)}-01`),
+      to: IsoDate.make(`${year}-${pad2(m)}-${pad2(lastDayOfMonth(year, m))}`),
     };
   }
-  const y = Number(period.slice(0, 4)) || 2026;
   return {
-    from: `${y}-01-01` as IsoDate,
-    to: `${y}-12-31` as IsoDate,
+    from: IsoDate.make(`${year}-01-01`),
+    to: IsoDate.make(`${year}-12-31`),
   };
 };
 
-export const periodOptions = (
-  currentPeriod: ViewModels.Period,
-  locale: Locale,
-): ReadonlyArray<{ readonly value: ViewModels.Period; readonly label: string }> => {
-  const year = Number(currentPeriod.slice(0, 4)) || 2026;
-  const prev = year - 1;
-  const qLabel = (y: number, q: number) =>
-    locale === "cs" ? `${q}. čtvrtletí ${y}` : `Q${q} ${y}`;
-  const base: Array<{ readonly value: ViewModels.Period; readonly label: string }> = [
-    { value: String(year) as ViewModels.Period, label: `${year}` },
-    { value: `${year}-Q4` as ViewModels.Period, label: qLabel(year, 4) },
-    { value: `${year}-Q3` as ViewModels.Period, label: qLabel(year, 3) },
-    { value: `${year}-Q2` as ViewModels.Period, label: qLabel(year, 2) },
-    { value: `${year}-Q1` as ViewModels.Period, label: qLabel(year, 1) },
-    { value: String(prev) as ViewModels.Period, label: `${prev}` },
-  ];
-  if (!base.some((o) => o.value === currentPeriod)) {
-    base.unshift({ value: currentPeriod, label: currentPeriod });
-  }
-  return base;
-};
+export const periodOptions: {
+  (
+    locale: Locale,
+  ): (
+    currentPeriod: ViewModels.Period,
+  ) => ReadonlyArray<{ readonly value: ViewModels.Period; readonly label: string }>;
+  (
+    currentPeriod: ViewModels.Period,
+    locale: Locale,
+  ): ReadonlyArray<{ readonly value: ViewModels.Period; readonly label: string }>;
+} = Fn.dual(
+  2,
+  (
+    currentPeriod: ViewModels.Period,
+    locale: Locale,
+  ): ReadonlyArray<{ readonly value: ViewModels.Period; readonly label: string }> => {
+    const year = Str.slice(0, 4)(currentPeriod);
+    const qLabel = (q: number) => (locale === "cs" ? `${q}. čtvrtletí ${year}` : `Q${q} ${year}`);
+    const base: Array<{ readonly value: ViewModels.Period; readonly label: string }> = [
+      { value: ViewModels.Period.make(year), label: year },
+      { value: ViewModels.Period.make(`${year}-Q4`), label: qLabel(4) },
+      { value: ViewModels.Period.make(`${year}-Q3`), label: qLabel(3) },
+      { value: ViewModels.Period.make(`${year}-Q2`), label: qLabel(2) },
+      { value: ViewModels.Period.make(`${year}-Q1`), label: qLabel(1) },
+    ];
+    if (year !== "0000") {
+      const previous = Str.padStart(4, "0")(String(Number(year) - 1));
+      base.push({ value: ViewModels.Period.make(previous), label: previous });
+    }
+    if (!Arr.some(base, (o) => o.value === currentPeriod)) {
+      base.unshift({ value: currentPeriod, label: currentPeriod });
+    }
+    return base;
+  },
+);
 
 /** Generate an opaque idempotency key (alphanumeric, 8-128 chars). */
 export const newIdempotencyKey = (prefix: string): string => {
-  const rand =
-    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-      ? crypto.randomUUID().replace(/-/g, "")
-      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
-  return `${prefix}_${rand}`.slice(0, 64);
+  const rand = Str.replace(uuidSeparator, "")(SecureRandom.uuidV4Unsafe());
+  return Str.slice(0, 64)(`${prefix}_${rand}`);
 };
 
-export const todayIso = (): IsoDate => new Date().toISOString().slice(0, 10) as IsoDate;
+export const todayIso = (): IsoDate =>
+  IsoDate.make(DateTime.formatIsoDateUtc(DateTime.nowUnsafe()));
 
 /** Convert `ContactDefaultsRecord` into domain `ContactDefaults` for `OverrideForm` / `resolveBilling`. */
-export const toDomainContactDefaults = (d: ContactDefaultsRecord): ContactDefaults => ({
-  ...(d.currency !== undefined ? { currency: d.currency as CurrencyCode } : {}),
-  ...(d.language !== undefined ? { language: d.language } : {}),
-  ...(d.dueDays !== undefined ? { dueDays: d.dueDays } : {}),
-  ...(d.paymentMethod !== undefined ? { paymentMethod: d.paymentMethod as PaymentMethod } : {}),
-  ...(d.preferredSeriesByKind !== undefined
-    ? {
-        preferredSeriesByKind: d.preferredSeriesByKind as ContactDefaults["preferredSeriesByKind"],
-      }
-    : {}),
-  ...(d.defaultNote !== undefined ? { defaultNote: d.defaultNote } : {}),
-  ...(d.reminderPolicy !== undefined ? { reminderPolicy: d.reminderPolicy } : {}),
-});
+export const toDomainContactDefaults = (defaults: ContactDefaultsRecord): ContactDefaults =>
+  Option.getOrElse(Schema.decodeUnknownOption(ContactDefaults)(defaults), () => ({}));
 
 // --- Browser side-effect Commands (zero DOM access in update/view) -------------------------------
 
-const currentOrigin = (): string =>
-  typeof location === "undefined" || location.origin === "null"
-    ? "http://localhost"
-    : location.origin;
-
-const downloadFile = (path: string, filename: string) =>
-  Effect.tryPromise({
-    try: async () => {
-      const res = await fetch(`${currentOrigin()}${path}`, { credentials: "same-origin" });
-      if (!res.ok) {
-        throw Object.assign(new Error(`download ${res.status}`), { status: res.status });
-      }
-      const blob = await res.blob();
-      if (typeof document !== "undefined" && typeof URL.createObjectURL === "function") {
-        const objectUrl = URL.createObjectURL(blob);
-        const anchor = document.createElement("a");
-        anchor.href = objectUrl;
-        anchor.download = filename;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(objectUrl);
-      }
-    },
-    catch: (e) => e,
-  }).pipe(
-    Effect.map(() => ({ _tag: "Ok" as const })),
-    Effect.catch((error) => Effect.succeed({ _tag: "Err" as const, error })),
+/** Downloads a same-origin report or expense attachment. */
+export const downloadUrl = <M1, M2>({
+  path,
+  filename,
+  onSuccess,
+  onFailure,
+}: {
+  readonly path: string;
+  readonly filename: string;
+  readonly onSuccess: () => M1;
+  readonly onFailure: (failure: Failure) => M2;
+}) =>
+  downloadFile({ path, filename }).pipe(
+    Effect.match({ onSuccess, onFailure: (error) => onFailure(failureFromUnknown(error)) }),
   );
 
-/** Trigger a same-origin file download (report CSV/PDF or expense attachment) inside a Command. */
-export const downloadUrlCommand = <M1, M2>(
-  name: string,
-  path: string,
-  filename: string,
-  onSuccess: () => M1,
-  onFailure: (failure: Failure) => M2,
-): PageCommand<M1 | M2> =>
-  browserCommand<M1 | M2>(
-    name,
-    downloadFile(path, filename).pipe(
-      Effect.map((res) =>
-        res._tag === "Ok" ? onSuccess() : onFailure(failureFromUnknown(res.error)),
-      ),
-    ),
-  );
-
-/** Upload a multipart file attachment to an expense inside a Effect UI Command. */
-export const uploadAttachmentCommand = <M1, M2>(
-  name: string,
-  workspaceId: string,
-  expenseId: string,
-  file: File,
-  onSuccess: (attachment: ExpenseAttachmentRecord) => M1,
-  onFailure: (failure: Failure) => M2,
-): PageCommand<M1 | M2> =>
-  apiCommand<M1 | M2>(
-    name,
-    Effect.tryPromise({
-      try: async () => {
-        const form = new FormData();
-        form.append("file", file, file.name);
-        const res = await fetch(
-          `${currentOrigin()}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/expenses/${encodeURIComponent(expenseId)}/attachments`,
-          { method: "POST", credentials: "same-origin", body: form },
-        );
-        const json: unknown = res.headers.get("content-type")?.includes("json")
-          ? await res.json()
-          : null;
-        if (!res.ok) {
-          throw Object.assign(new Error(`upload ${res.status}`), { status: res.status, json });
-        }
-        return normalizeAttachment(json);
-      },
-      catch: (e) => e,
-    }).pipe(
-      Effect.map(onSuccess),
-      Effect.catch((e) => Effect.succeed(onFailure(failureFromUnknown(e)))),
-    ),
-  );
+/** Uploads a multipart file attachment to an expense. */
+export const uploadAttachment = <M1, M2>({
+  workspaceId,
+  expenseId,
+  file,
+  onSuccess,
+  onFailure,
+}: {
+  readonly workspaceId: string;
+  readonly expenseId: string;
+  readonly file: File;
+  readonly onSuccess: (attachment: ExpenseAttachmentRecord) => M1;
+  readonly onFailure: (failure: Failure) => M2;
+}) =>
+  Effect.suspend(() => {
+    const form = new FormData();
+    form.append("file", file, file.name);
+    const path = `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/expenses/${encodeURIComponent(expenseId)}/attachments`;
+    const request = HttpClientRequest.post(`${browserOrigin()}${path}`).pipe(
+      HttpClientRequest.bodyFormData(form),
+    );
+    return fetchBrowserOk(request).pipe(
+      Effect.flatMap((response) => response.json),
+      Effect.map(normalizeAttachment),
+      Effect.match({ onSuccess, onFailure: (error) => onFailure(failureFromUnknown(error)) }),
+    );
+  });
 
 /** Read an optional number from a string input for `Option.fromNullishOr`. */
 export const optInt = (raw: string): Option.Option<number> => {
-  const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) return Option.none();
+  const trimmed = Str.trim(raw);
+  if (!unsignedInteger.test(trimmed)) return Option.none();
   return Option.some(Number(trimmed));
 };

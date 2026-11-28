@@ -4,11 +4,15 @@
  * `contacts` table of packages/db. VAT-payer status is never inferred from a DIČ, so the view
  * carries no VAT-payer flag at all.
  */
-import type { ContactId, ContactRole, WorkspaceId } from "@kvitbit/domain/contract";
-import { ContactDefaults, ContactId as ContactIdSchema } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import type { ContactRole } from "@kvitbit/domain/contract";
+import {
+  ContactDefaults,
+  ContactId as ContactIdSchema,
+  WorkspaceId,
+} from "@kvitbit/domain/contract";
+import * as Schema from "effect/Schema";
 
-export const ContactRoleSchema = Schema.Literals(["customer", "supplier"]);
+const ContactRoleSchema = Schema.Literals(["customer", "supplier"]);
 
 const OptionalText = Schema.NullOr(Schema.String);
 /** A trimmed, non-empty name. */
@@ -43,18 +47,15 @@ const ContactFields = {
 };
 
 export const ContactRowSchema = Schema.Struct({
-  id: Schema.String,
-  workspaceId: Schema.String,
+  id: ContactIdSchema,
+  workspaceId: WorkspaceId,
   revision: Schema.Int,
   ...ContactFields,
   archivedAt: OptionalText,
   createdAt: Schema.String,
   updatedAt: Schema.String,
 });
-export interface ContactRow extends Omit<typeof ContactRowSchema.Type, "id" | "workspaceId"> {
-  readonly id: ContactId;
-  readonly workspaceId: WorkspaceId;
-}
+export type ContactRow = typeof ContactRowSchema.Type;
 
 /** The concrete `ContactView`: stored particulars and overrides (rule C4) plus `revision`. */
 export const ContactViewSchema = Schema.Struct({
@@ -90,7 +91,7 @@ export const toContactView = (row: ContactRow): ContactViewData => ({
  * falls back to the Workspace).
  */
 export const ContactSaveFields = Schema.Struct({
-  roles: Schema.optional(Schema.NonEmptyArray(ContactRoleSchema)),
+  roles: ContactRoleSchema.pipe(Schema.NonEmptyArray, Schema.optional),
   name: Schema.optional(Name),
   ico: Schema.optional(OptionalText),
   dic: Schema.optional(OptionalText),
@@ -103,7 +104,7 @@ export const ContactSaveFields = Schema.Struct({
       country: Schema.optional(Country),
     }),
   ),
-  billingEmails: Schema.optional(Schema.Array(Email)),
+  billingEmails: Email.pipe(Schema.Array, Schema.optional),
   phone: Schema.optional(OptionalText),
   note: Schema.optional(OptionalText),
   defaults: Schema.optional(ContactDefaults),

@@ -7,19 +7,28 @@ import type { Html } from "@effect/ui/html";
  */
 import {
   AccessMode,
-  type AccessPreset,
   ConsentDecision,
   ConsentResult,
   ConsentView,
   type ConsentWorkspace,
   Scope,
 } from "@kvitbit/api-contract";
+import { WorkspaceId } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
-import { Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure } from "../../app/api";
 import { defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { withAttributes } from "../../ui/html";
@@ -38,15 +47,16 @@ import {
 import { cn, ui } from "../../ui/styles";
 import { callApi, failureMessage, redirectLocation } from "./_shared";
 
-export type Route = RouteOf<"McpConsent">;
+export const Route = RouteCases.McpConsent;
+export type Route = typeof Route.Type;
 
 const ConsentRemote = Remote.remoteSchema(ConsentView);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   consentId: Schema.String,
   consent: ConsentRemote,
-  selectedWorkspaceId: Schema.NullOr(Schema.String),
+  selectedWorkspaceId: Schema.NullOr(WorkspaceId),
   accessMode: AccessMode,
   selectedScopes: Schema.Array(Scope),
   grantableScopes: Schema.Array(Scope),
@@ -61,7 +71,7 @@ export const Message = UiSchema.TaggedEnum({
   GotConsent: { seq: Remote.Seq, consent: ConsentView },
   FailedConsent: { seq: Remote.Seq, failure: Failure },
   ClickedRetry: {},
-  SelectedWorkspace: { workspaceId: Schema.String },
+  SelectedWorkspace: { workspaceId: WorkspaceId },
   SelectedPreset: { mode: AccessMode },
   ToggledScope: { scope: Scope },
   ClickedApprove: {},
@@ -91,7 +101,9 @@ const local = copy({
   },
 });
 
-const FetchConsent = defineApiCommand("McpConsentFetch", {
+const FetchConsent = defineApiCommand({
+  message: Message,
+  name: "McpConsentFetch",
   args: { consentId: Schema.String, seq: Remote.Seq },
   execute: ({ consentId, seq }) =>
     callApi(
@@ -101,7 +113,9 @@ const FetchConsent = defineApiCommand("McpConsentFetch", {
     ),
 });
 
-const DecideConsent = defineApiCommand("McpConsentDecide", {
+const DecideConsent = defineApiCommand({
+  message: Message,
+  name: "McpConsentDecide",
   args: { consentId: Schema.String, seq: Remote.Seq, payload: ConsentDecision },
   execute: ({ consentId, seq, payload }) =>
     callApi(
@@ -111,7 +125,9 @@ const DecideConsent = defineApiCommand("McpConsentDecide", {
     ),
 });
 
-const RedirectCmd = defineApiCommand("McpConsentRedirect", {
+const RedirectCmd = defineApiCommand({
+  message: Message,
+  name: "McpConsentRedirect",
   args: { url: Schema.String },
   execute: ({ url }) => redirectLocation(url, () => Message.Redirected()),
 });
@@ -151,7 +167,7 @@ const initPickerForWorkspace = (
   return picker;
 };
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
   const consent = Remote.load(Remote.idle);
   const seq = Remote.seqOf(consent);
   return {
@@ -172,7 +188,12 @@ export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message
   };
 };
 
-export const update = (
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (
   model: Model,
   message: Message,
   _ctx: PageContext,
@@ -208,7 +229,9 @@ export const update = (
     SelectedWorkspace: ({ workspaceId }) => {
       const consent = Remote.dataOf(model.consent);
       if (consent === undefined) return { model };
-      const ws = consent.workspaces.find((w) => w.id === workspaceId);
+      const ws = Arr.findFirst(consent.workspaces, (w) => w.id === workspaceId).pipe(
+        Option.getOrUndefined,
+      );
       const picker = initPickerForWorkspace(consent, ws);
       return {
         model: applyPicker(
@@ -222,7 +245,7 @@ export const update = (
       const next =
         mode === "custom"
           ? ViewModels.ScopePicker.chooseCustom(current)
-          : ViewModels.ScopePicker.choosePreset(current, mode as AccessPreset);
+          : ViewModels.ScopePicker.choosePreset(current, mode);
       return { model: applyPicker(model, next) };
     },
     ToggledScope: ({ scope }) => {
@@ -236,7 +259,7 @@ export const update = (
       const seq = model.submitSeq + 1;
       const payload: ConsentDecision = {
         _tag: "Approve",
-        workspace: model.selectedWorkspaceId as ConsentWorkspace["id"],
+        workspace: model.selectedWorkspaceId,
         grant: accessReq.value,
       };
       return {
@@ -266,7 +289,12 @@ export const update = (
     Redirected: () => ({ model }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, _ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   const consent = Remote.dataOf(model.consent);
   return consent !== undefined
@@ -274,7 +302,12 @@ export const title = (model: Model, ctx: PageContext): string => {
     : t.t("mcp.consent.permissions");
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
 
   const consentShellClass = "mx-auto flex w-full max-w-[680px] flex-col gap-4.5 px-5 pt-7 pb-16";
@@ -322,14 +355,18 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   }
 
   const consent = model.consent.data;
-  const currentWs = consent.workspaces.find((w) => w.id === model.selectedWorkspaceId);
+  const currentWs = Arr.findFirst(
+    consent.workspaces,
+    (w) => w.id === model.selectedWorkspaceId,
+  ).pipe(Option.getOrUndefined);
   const picker = pickerFromModel(model);
   const rows = ViewModels.ScopePicker.rows(picker);
   const canApprove =
     currentWs !== undefined &&
     Option.isSome(ViewModels.toAccessRequest(picker)) &&
     !model.submitting;
-  const presetItems = (["read", "read_write", "custom"] as const).filter(
+  const presetItems = Arr.filter(
+    ["read", "read_write", "custom"] as const,
     (m) => m === "custom" || ViewModels.presetAvailable(picker, m),
   );
 
@@ -341,7 +378,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             "inline-flex h-11 w-11 flex-none items-center justify-center rounded-control bg-primary-container font-display text-[1.125rem] text-on-primary-container",
           )
           .attr("aria-hidden", String(true))
-          .children([consent.client.name.slice(0, 1).toUpperCase()]),
+          .children([Str.toUpperCase(Str.slice(0, 1)(consent.client.name))]),
         h.div
           .class("flex flex-col gap-0.5")
           .children([
@@ -383,11 +420,12 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 label: t.t("mcp.consent.workspace"),
                 hint: t.t("mcp.consent.pickWorkspace"),
                 value: model.selectedWorkspaceId ?? "",
-                options: consent.workspaces.map((ws) => ({
+                options: Arr.map(consent.workspaces, (ws) => ({
                   value: ws.id,
-                  label: `${ws.name} (${t.translate(I18n.enumText("role", ws.role))})`,
+                  label: `${ws.name} (${t.translate(I18n.enumText({ name: "role", value: ws.role }))})`,
                 })),
-                onChange: (workspaceId) => Message.SelectedWorkspace({ workspaceId }),
+                onChange: (workspaceId) =>
+                  Message.SelectedWorkspace({ workspaceId: WorkspaceId.make(workspaceId) }),
               }),
               ...(currentWs?.role === "accountant"
                 ? [banner(h, { text: t.t("mcp.consent.accountantReadOnly"), tone: "info" })]
@@ -400,16 +438,22 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           card(h, [
             cardTitle(h, t.t("mcp.consent.permissions"), [
               ...(currentWs !== undefined
-                ? [badge(h, t.translate(I18n.enumText("role", currentWs.role)), "outline")]
+                ? [
+                    badge(
+                      h,
+                      t.translate(I18n.enumText({ name: "role", value: currentWs.role })),
+                      "outline",
+                    ),
+                  ]
                 : []),
             ]),
             h.div.class(ui.stack).children([
               segmented(h, {
                 label: t.t("mcp.consent.permissions"),
                 selected: model.accessMode,
-                items: presetItems.map((m) => ({
+                items: Arr.map(presetItems, (m) => ({
                   id: m,
-                  label: t.translate(I18n.enumText("accessMode", m)),
+                  label: t.translate(I18n.enumText({ name: "accessMode", value: m })),
                 })),
                 onSelect: (id) =>
                   Message.SelectedPreset({
@@ -437,10 +481,12 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     ]),
                   ]),
                   h.tbody.children(
-                    rows.map((row) => {
-                      const areaLabel = t.translate(I18n.enumText("scopeArea", row.area));
-                      const readScope = `${row.area}:read` as Scope;
-                      const writeScope = `${row.area}:write` as Scope;
+                    Arr.map(rows, (row) => {
+                      const areaLabel = t.translate(
+                        I18n.enumText({ name: "scopeArea", value: row.area }),
+                      );
+                      const readScope: Scope = `${row.area}:read`;
+                      const writeScope: Scope = `${row.area}:write`;
                       return h.tr
                         .key(row.area)
                         .class("[&:last-child>td]:border-b-0")
@@ -518,3 +564,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ]),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

@@ -8,22 +8,36 @@ import type { Html } from "@effect/ui/html";
  * - Create/Edit form with IČO-first ARES lookup, duplicate IČO handling, billing emails list,
  *   and per-field billing override editor
  */
-import type {
+import {
+  type ContactDefaults,
   ContactId,
   ContactInput,
   CurrencyCode,
+  DocumentId,
+  ExpenseId,
   PaymentMethod,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { Format, ViewModels } from "@kvitbit/ui-port";
-import { Option, Result, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure, request } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
+import type { Markup } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import {
   badge,
@@ -69,7 +83,8 @@ import {
   toDomainContactDefaults,
 } from "./shared";
 
-export type Route = RouteOf<"Contacts" | "Contact">;
+export const Route = Schema.Union([RouteCases.Contacts, RouteCases.Contact]);
+export type Route = typeof Route.Type;
 
 const tLocal = copy({
   cs: {
@@ -191,14 +206,14 @@ const ContactEditor = Schema.Struct({
 type ContactEditor = typeof ContactEditor.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   search: Schema.String,
   roleFilter: Schema.NullOr(Schema.Literals(["customer", "supplier"])),
   showArchived: Schema.Boolean,
-  list: Remote.remoteSchema(Schema.Array(ContactRecord)),
+  list: ContactRecord.pipe(Schema.Array, Remote.remoteSchema),
   detail: Remote.remoteSchema(ContactRecord),
-  relatedDocs: Remote.remoteSchema(Schema.Array(RelatedDocumentRecord)),
-  relatedExpenses: Remote.remoteSchema(Schema.Array(ExpenseSummaryRecord)),
+  relatedDocs: RelatedDocumentRecord.pipe(Schema.Array, Remote.remoteSchema),
+  relatedExpenses: ExpenseSummaryRecord.pipe(Schema.Array, Remote.remoteSchema),
   editor: Schema.NullOr(ContactEditor),
   refreshingAres: Schema.Boolean,
   confirmArchive: Schema.Boolean,
@@ -293,18 +308,20 @@ const loadListCommand = (
   role: "customer" | "supplier" | null,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsSearch",
     request(
-      (client) =>
-        client.contacts.search({
-          params: { workspaceId: workspaceId as WorkspaceId },
-          query: {
-            ...(text.trim() === "" ? {} : { text: text.trim() }),
-            ...(role === null ? {} : { role }),
-          },
-        }),
+      (client) => {
+        const trimmed = Str.trim(text);
+        const textFilter = trimmed === "" ? undefined : { text: trimmed };
+        const roleFilter = role === null ? undefined : { role };
+        return client.contacts.search({
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
+          query: { ...textFilter, ...roleFilter },
+        });
+      },
       (pageRes): Message =>
-        Message.LoadedList({ seq, contacts: pageRes.items.map(normalizeContact) }),
+        Message.LoadedList({ seq, contacts: Arr.map(pageRes.items, normalizeContact) }),
       (failure): Message => Message.FailedList({ seq, failure }),
     ),
   );
@@ -315,13 +332,14 @@ const loadDetailCommand = (
   seq: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsGet",
     request(
       (client) =>
         client.contacts.get({
           params: {
-            workspaceId: workspaceId as WorkspaceId,
-            contactId: contactId as ContactId,
+            workspaceId: WorkspaceId.make(workspaceId),
+            contactId: ContactId.make(contactId),
           },
         }),
       (raw): Message => Message.LoadedDetail({ seq, contact: normalizeContact(raw) }),
@@ -329,36 +347,56 @@ const loadDetailCommand = (
     ),
   );
 
+const RelatedDocumentFields = Schema.Struct({
+  id: Schema.optionalKey(Schema.String),
+  number: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
+  kind: Schema.optionalKey(Schema.String),
+  status: Schema.optionalKey(Schema.String),
+  settlement: Schema.optionalKey(Schema.String),
+  dates: Schema.optionalKey(Schema.Struct({ issuedOn: Schema.optionalKey(Schema.String) })),
+  totals: Schema.optionalKey(
+    Schema.Struct({
+      gross: Schema.optionalKey(
+        Schema.Struct({
+          amount: Schema.optionalKey(
+            Schema.Union([Schema.String, Schema.Finite, Schema.BigDecimal]),
+          ),
+          currency: Schema.optionalKey(Schema.String),
+        }),
+      ),
+    }),
+  ),
+});
+const decodeRelatedDocument = Schema.decodeUnknownOption(RelatedDocumentFields);
+
 const loadRelatedDocsCommand = (
   workspaceId: string,
   contactId: string,
   seq: number,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsRelatedDocs",
     request(
       (client) =>
         client.documents.list({
-          params: { workspaceId: workspaceId as WorkspaceId },
-          query: { contact: contactId as ContactId, limit: 10 },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
+          query: { contact: ContactId.make(contactId), limit: 10 },
         }),
       (pageRes): Message =>
         Message.LoadedRelatedDocs({
           seq,
-          docs: pageRes.items.map((item) => {
-            const r = item as unknown as Record<string, unknown>;
-            const totals = (r.totals as Record<string, unknown> | undefined) ?? {};
-            const gross = (totals.gross as Record<string, unknown> | undefined) ?? {};
-            const dates = (r.dates as Record<string, unknown> | undefined) ?? {};
+          docs: Arr.map(pageRes.items, (item) => {
+            const r = Option.getOrUndefined(decodeRelatedDocument(item));
             return {
-              id: typeof r.id === "string" ? r.id : "",
-              number: typeof r.number === "string" ? r.number : null,
-              kind: typeof r.kind === "string" ? r.kind : "invoice",
-              status: typeof r.status === "string" ? r.status : "issued",
-              settlement: typeof r.settlement === "string" ? r.settlement : "unpaid",
-              issuedOn: typeof dates.issuedOn === "string" ? dates.issuedOn : null,
-              totalAmount: decimalToString(gross.amount),
-              currency: typeof gross.currency === "string" ? gross.currency : "CZK",
+              id: r?.id ?? "",
+              number: r?.number ?? null,
+              kind: r?.kind ?? "invoice",
+              status: r?.status ?? "issued",
+              settlement: r?.settlement ?? "unpaid",
+              issuedOn: r?.dates?.issuedOn ?? null,
+              totalAmount: decimalToString(r?.totals?.gross?.amount),
+              currency: r?.totals?.gross?.currency ?? "CZK",
             };
           }),
         }),
@@ -368,17 +406,18 @@ const loadRelatedDocsCommand = (
 
 const loadRelatedExpensesCommand = (workspaceId: string, seq: number): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsRelatedExpenses",
     request(
       (client) =>
         client.expenses.list({
-          params: { workspaceId: workspaceId as WorkspaceId },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           query: { limit: 25 },
         }),
       (pageRes): Message =>
         Message.LoadedRelatedExpenses({
           seq,
-          expenses: pageRes.items.map(normalizeExpenseSummary),
+          expenses: Arr.map(pageRes.items, normalizeExpenseSummary),
         }),
       (failure): Message => Message.FailedRelatedExpenses({ seq, failure }),
     ),
@@ -391,12 +430,13 @@ const lookupAresCommand = (
   role?: ContactRoleLiteral,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsLookupAres",
     request(
       (client) =>
         client.contacts.fromIco({
-          params: { workspaceId: workspaceId as WorkspaceId },
-          payload: { ico, ...(role !== undefined ? { role } : {}) },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
+          payload: role === undefined ? { ico } : { ico, role },
         }),
       (raw): Message => Message.LoadedAresLookup({ seq, contact: normalizeContact(raw) }),
       (failure): Message => Message.FailedAresLookup({ seq, failure }),
@@ -405,11 +445,12 @@ const lookupAresCommand = (
 
 const refreshAresCommand = (workspaceId: string, ico: string): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsRefreshAres",
     request(
       (client) =>
         client.contacts.fromIco({
-          params: { workspaceId: workspaceId as WorkspaceId },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           payload: { ico },
         }),
       (raw): Message => Message.RefreshedAres({ contact: normalizeContact(raw) }),
@@ -423,62 +464,78 @@ const buildContactPayload = (ed: ContactEditor): ContactInput => {
   if (ed.isSupplier) roles.push("supplier");
 
   const dueDaysOpt = optInt(ed.dueDaysOverride);
-  const offsets = ed.reminderOffsets
-    .split(",")
-    .map((s) => Number(s.trim()))
-    .filter((n) => Number.isInteger(n) && n >= 0);
+  const offsets = Arr.filter(
+    Arr.map(Str.split(ed.reminderOffsets, ","), (s) => Number(Str.trim(s))),
+    (n) => Number.isInteger(n) && n >= 0,
+  );
 
-  const defaults: Record<string, unknown> = {
-    ...(ed.currencyOverride !== "" ? { currency: ed.currencyOverride } : {}),
-    ...(ed.languageOverride === "cs" || ed.languageOverride === "en"
-      ? { language: ed.languageOverride }
-      : {}),
-    ...(Option.isSome(dueDaysOpt) ? { dueDays: dueDaysOpt.value } : {}),
-    ...(ed.paymentMethodOverride !== "" ? { paymentMethod: ed.paymentMethodOverride } : {}),
-    ...(ed.defaultNoteOverride.trim() !== "" ? { defaultNote: ed.defaultNoteOverride.trim() } : {}),
-    reminderPolicy:
-      ed.reminderMode === "disabled"
-        ? { mode: "disabled" }
-        : ed.reminderMode === "custom"
-          ? { mode: "custom", offsetsDays: offsets }
-          : { mode: "inherit" },
-  };
+  const reminderPolicy: ContactDefaults["reminderPolicy"] =
+    ed.reminderMode === "disabled"
+      ? { mode: "disabled" }
+      : ed.reminderMode === "custom"
+        ? { mode: "custom", offsetsDays: offsets }
+        : { mode: "inherit" };
 
-  return {
+  const currency =
+    ed.currencyOverride === "" ? undefined : { currency: CurrencyCode.make(ed.currencyOverride) };
+  const language =
+    ed.languageOverride === "cs" || ed.languageOverride === "en"
+      ? ({ language: ed.languageOverride } as const)
+      : undefined;
+  const dueDays = Option.isSome(dueDaysOpt) ? { dueDays: dueDaysOpt.value } : undefined;
+  const method = Schema.is(PaymentMethod)(ed.paymentMethodOverride)
+    ? { paymentMethod: ed.paymentMethodOverride }
+    : undefined;
+  const note = Str.trim(ed.defaultNoteOverride);
+  const defaultNote = note === "" ? undefined : { defaultNote: note };
+  const defaults = {
+    ...currency,
+    ...language,
+    ...dueDays,
+    ...method,
+    ...defaultNote,
+    reminderPolicy,
+  } satisfies ContactDefaults;
+
+  return ContactInput.make({
     roles: roles.length > 0 ? roles : ["customer"],
-    name: ed.name.trim(),
-    ico: ed.ico.trim() === "" ? null : Format.normalizeIco(ed.ico),
-    dic: ed.dic.trim() === "" ? null : Format.normalizeVatId(ed.dic),
-    legalForm: ed.legalForm.trim() === "" ? null : ed.legalForm.trim(),
+    name: Str.trim(ed.name),
+    ico: Str.trim(ed.ico) === "" ? null : Format.normalizeIco(ed.ico),
+    dic: Str.trim(ed.dic) === "" ? null : Format.normalizeVatId(ed.dic),
+    legalForm: Str.trim(ed.legalForm) === "" ? null : Str.trim(ed.legalForm),
     address: {
-      street: ed.street.trim() === "" ? null : ed.street.trim(),
-      city: ed.city.trim() === "" ? null : ed.city.trim(),
-      postalCode: ed.postalCode.trim() === "" ? null : ed.postalCode.trim(),
-      country: (ed.country.trim() || "CZ").toUpperCase().slice(0, 2),
+      street: Str.trim(ed.street) === "" ? null : Str.trim(ed.street),
+      city: Str.trim(ed.city) === "" ? null : Str.trim(ed.city),
+      postalCode: Str.trim(ed.postalCode) === "" ? null : Str.trim(ed.postalCode),
+      country: Str.slice(0, 2)(Str.toUpperCase(Str.trim(ed.country) || "CZ")),
     },
-    billingEmails: ed.billingEmails.map((e) => e.trim()).filter((e) => e !== ""),
-    phone: ed.phone.trim() === "" ? null : ed.phone.trim(),
-    note: ed.note.trim() === "" ? null : ed.note.trim(),
+    billingEmails: Arr.filter(
+      Arr.map(ed.billingEmails, (e) => Str.trim(e)),
+      (e) => e !== "",
+    ),
+    phone: Str.trim(ed.phone) === "" ? null : Str.trim(ed.phone),
+    note: Str.trim(ed.note) === "" ? null : Str.trim(ed.note),
     defaults,
-  } as unknown as ContactInput;
+  });
 };
 
 const saveContactCommand = (workspaceId: string, ed: ContactEditor): PageCommand<Message> => {
   const payload = buildContactPayload(ed);
   return apiCommand(
+    Message,
     "ContactsSave",
     request(
       (client) =>
         ed.id === null
           ? client.contacts.create({
-              params: { workspaceId: workspaceId as WorkspaceId },
+              params: { workspaceId: WorkspaceId.make(workspaceId) },
               headers: { "idempotency-key": ed.idempotencyKey },
               payload,
             })
           : client.contacts.update({
               params: {
-                workspaceId: workspaceId as WorkspaceId,
-                contactId: ed.id as ContactId,
+                workspaceId: WorkspaceId.make(workspaceId),
+                contactId: ContactId.make(ed.id),
               },
               headers: { "if-match": `"${ed.revision ?? 1}"` },
               payload,
@@ -491,13 +548,14 @@ const saveContactCommand = (workspaceId: string, ed: ContactEditor): PageCommand
 
 const archiveContactCommand = (workspaceId: string, contactId: string): PageCommand<Message> =>
   apiCommand(
+    Message,
     "ContactsArchive",
     request(
       (client) =>
         client.contacts.archive({
           params: {
-            workspaceId: workspaceId as WorkspaceId,
-            contactId: contactId as ContactId,
+            workspaceId: WorkspaceId.make(workspaceId),
+            contactId: ContactId.make(contactId),
           },
         }),
       (): Message => Message.ArchivedContact(),
@@ -540,7 +598,7 @@ const emptyEditor = (): ContactEditor => ({
 });
 
 const editorFromContact = (c: ContactRecord): ContactEditor => {
-  const rp = c.defaults.reminderPolicy;
+  const rp = c.defaults.reminderPolicy ?? { mode: "inherit" as const };
   return {
     id: c.id,
     revision: c.revision,
@@ -566,8 +624,9 @@ const editorFromContact = (c: ContactRecord): ContactEditor => {
     dueDaysOverride: c.defaults.dueDays === undefined ? "" : String(c.defaults.dueDays),
     paymentMethodOverride: c.defaults.paymentMethod ?? "",
     defaultNoteOverride: c.defaults.defaultNote ?? "",
-    reminderMode: rp?.mode ?? "inherit",
-    reminderOffsets: rp?.mode === "custom" ? rp.offsetsDays.join(", ") : "7, 14",
+    reminderMode: rp.mode,
+    reminderOffsets:
+      rp.mode === "custom" ? Arr.join(Arr.map(rp.offsetsDays, String), ", ") : "7, 14",
     idempotencyKey: newIdempotencyKey("cnt"),
     saving: false,
     error: null,
@@ -576,7 +635,10 @@ const editorFromContact = (c: ContactRecord): ContactEditor => {
 
 // --- Init & Update -------------------------------------------------------------------------------
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const wsId = ctx.workspace?.id;
   if (route._tag === "Contacts") {
     const search = route.query.text ?? "";
@@ -649,15 +711,14 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
             loadRelatedExpensesCommand(wsId, Remote.seqOf(relatedExpenses)),
           ],
   };
-};
+});
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   const wsId = ctx.workspace?.id;
 
   return Message.match(message, {
@@ -821,7 +882,7 @@ export const update = (
 
     ChangedEmail: ({ index, value }) => {
       if (model.editor === null) return { model };
-      const next = model.editor.billingEmails.map((e, i) => (i === index ? value : e));
+      const next = Arr.map(model.editor.billingEmails, (e, i) => (i === index ? value : e));
       return {
         model: { ...model, editor: { ...model.editor, billingEmails: next } },
       };
@@ -839,7 +900,7 @@ export const update = (
 
     ClickedRemoveEmail: ({ index }) => {
       if (model.editor === null) return { model };
-      const next = model.editor.billingEmails.filter((_, i) => i !== index);
+      const next = Arr.filter(model.editor.billingEmails, (_, i) => i !== index);
       return {
         model: {
           ...model,
@@ -915,7 +976,7 @@ export const update = (
 
     SubmittedEditor: () => {
       if (model.editor === null || model.editor.saving || wsId === undefined) return { model };
-      if (model.editor.name.trim() === "") {
+      if (Str.trim(model.editor.name) === "") {
         return {
           model: {
             ...model,
@@ -923,7 +984,7 @@ export const update = (
           },
         };
       }
-      if (!model.editor.isCustomer && !model.editor.isSupplier) {
+      if (!(model.editor.isCustomer || model.editor.isSupplier)) {
         return {
           model: {
             ...model,
@@ -948,7 +1009,7 @@ export const update = (
         href({
           _tag: "Contact",
           ws: route.ws,
-          id: contact.id as ContactId,
+          id: ContactId.make(contact.id),
           mode: "view",
         }),
         false,
@@ -991,22 +1052,28 @@ export const update = (
       outMessage: Intent_.toast(textOf(tr, failure.text), "error"),
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
-};
+});
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, (model: Model, ctx: PageContext): string => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   if (route._tag === "Contacts") return tr.t("contacts.list.title");
   if (route.id === "new") return tr.t("contacts.list.new");
   const detail = Remote.dataOf(model.detail);
   return detail?.name ?? tr.t("contacts.editor.title");
-};
+});
 
 // --- View ----------------------------------------------------------------------------------------
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message>;
+} = Fn.dual(3, (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const tr = translator(ctx.locale);
-  const route = model.route as Route;
+  const route = model.route;
   const writable = canWrite(ctx);
 
   // --- List view ---
@@ -1017,7 +1084,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         ? undefined
         : model.showArchived
           ? rawContacts
-          : rawContacts.filter((c) => !c.archived);
+          : Arr.filter(rawContacts, (c) => !c.archived);
 
     const headers = [
       tLocal(ctx.locale, "colName"),
@@ -1043,18 +1110,19 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         });
       }
       if (visibleContacts === undefined || visibleContacts.length === 0) {
+        const action = writable
+          ? {
+              action: linkButton(h, {
+                label: tr.t("contacts.list.empty.cta"),
+                href: href({ _tag: "Contact", ws: route.ws, id: "new", mode: "edit" }),
+                variant: "primary",
+              }),
+            }
+          : undefined;
         return emptyState(h, {
           title: tr.t("contacts.list.empty.title"),
           body: tr.t("contacts.list.empty.body"),
-          ...(writable
-            ? {
-                action: linkButton(h, {
-                  label: tr.t("contacts.list.empty.cta"),
-                  href: href({ _tag: "Contact", ws: route.ws, id: "new", mode: "edit" }),
-                  variant: "primary",
-                }),
-              }
-            : {}),
+          ...action,
         });
       }
       return table(h, {
@@ -1075,7 +1143,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       href({
                         _tag: "Contact",
                         ws: route.ws,
-                        id: c.id as ContactId,
+                        id: ContactId.make(c.id),
                         mode: "view",
                       }),
                     )
@@ -1091,7 +1159,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               h.div
                 .class(ui.row)
                 .children([
-                  ...c.roles.map((r) =>
+                  ...Arr.map(c.roles, (r) =>
                     badge(
                       h,
                       enumLabel(tr, "contactRole", r),
@@ -1119,13 +1187,15 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           {
             header: tLocal(ctx.locale, "colLocation"),
             cell: (c) =>
-              h.span
-                .class(ui.muted)
-                .children([
-                  [c.address.city, c.address.country]
-                    .filter((x) => x !== null && x !== "")
-                    .join(", ") || "—",
-                ]),
+              h.span.class(ui.muted).children([
+                Arr.join(
+                  Arr.filter(
+                    [c.address.city, c.address.country],
+                    (x): x is string => x !== null && x !== "",
+                  ),
+                  ", ",
+                ) || "—",
+              ]),
           },
           {
             header: tLocal(ctx.locale, "colEmail"),
@@ -1221,7 +1291,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     return page(h, [
       pageHeader(h, {
         title:
-          route.id === "new" ? tr.t("contacts.list.new") : ed.name || tr.t("contacts.editor.title"),
+          route.id === "new"
+            ? tr.t("contacts.list.new")
+            : ed.name === ""
+              ? tr.t("contacts.editor.title")
+              : ed.name,
         eyebrow: linkButton(h, {
           label: tLocal(ctx.locale, "backToList"),
           href: href({ _tag: "Contacts", ws: route.ws, query: {} }),
@@ -1352,7 +1426,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             h.div.class(ui.stack).children([
               h.span.class(ui.fieldLabel).children([tr.t("contacts.editor.invoicingEmails")]),
               h.div.class("flex flex-col gap-2").children(
-                ed.billingEmails.map((email, idx) =>
+                Arr.map(ed.billingEmails, (email, idx) =>
                   h.div.class("flex items-end gap-2 [&>[data-slot=field]]:flex-1").children([
                     textField(h, {
                       id: `contact-email-${idx}`,
@@ -1416,7 +1490,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   value: ed.currencyOverride,
                   options: [
                     { value: "", label: tr.t("contacts.override.workspaceDefault") },
-                    ...CURRENCIES.map((c) => ({ value: c, label: c })),
+                    ...Arr.map(CURRENCIES, (c) => ({ value: c, label: c })),
                   ],
                   onChange: (value) =>
                     Message.ChangedEditorField({ field: "currencyOverride", value }),
@@ -1526,7 +1600,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   value: ed.paymentMethodOverride,
                   options: [
                     { value: "", label: tr.t("contacts.override.workspaceDefault") },
-                    ...PAYMENT_METHODS.map((pm) => ({
+                    ...Arr.map(PAYMENT_METHODS, (pm) => ({
                       value: pm,
                       label: enumLabel(tr, "paymentMethod", pm),
                     })),
@@ -1561,18 +1635,27 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     ),
                   ]),
                 h.div.class(ui.stack).children([
-                  selectField(h, {
+                  selectField<
+                    Message,
+                    ReadonlyArray<{
+                      readonly value: ContactEditor["reminderMode"];
+                      readonly label: string;
+                    }>
+                  >(h, {
                     id: "contact-def-reminders",
                     label: tr.t("contacts.editor.defaults.reminders"),
                     value: ed.reminderMode,
-                    options: [
-                      { value: "inherit", label: enumLabel(tr, "reminderMode", "inherit") },
-                      { value: "disabled", label: enumLabel(tr, "reminderMode", "disabled") },
-                      { value: "custom", label: enumLabel(tr, "reminderMode", "custom") },
-                    ],
+                    options: Arr.map(
+                      ["inherit", "disabled", "custom"] as const,
+                      (value) =>
+                        ({
+                          value,
+                          label: enumLabel(tr, "reminderMode", value),
+                        }) as const,
+                    ),
                     onChange: (value) =>
                       Message.ChangedReminderMode({
-                        mode: value as "inherit" | "disabled" | "custom",
+                        mode: value,
                       }),
                   }),
                   ...(ed.reminderMode === "custom"
@@ -1632,10 +1715,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     kind: "invoice",
     contact: toDomainContactDefaults(contact.defaults),
     workspace: {
-      currency: "CZK" as CurrencyCode,
+      currency: CurrencyCode.make("CZK"),
       language: "cs",
       dueDays: 14,
-      paymentMethod: "bank_transfer" as PaymentMethod,
+      paymentMethod: "bank_transfer",
     },
   });
   const resolvedReminders = ViewModels.resolveReminders(
@@ -1644,21 +1727,33 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   );
 
   const docs = Remote.dataOf(model.relatedDocs) ?? [];
-  const expenses = (Remote.dataOf(model.relatedExpenses) ?? []).filter(
+  const expenses = Arr.filter(
+    Remote.dataOf(model.relatedExpenses) ?? [],
     (ex) =>
-      ex.supplierName !== null && ex.supplierName.toLowerCase() === contact.name.toLowerCase(),
+      ex.supplierName !== null &&
+      Str.toLowerCase(ex.supplierName) === Str.toLowerCase(contact.name),
   );
 
   const sourceBadge = (source: ViewModels.SettingSource) =>
     badge(h, enumLabel(tr, "settingSource", source), source === "contact" ? "proforma" : "neutral");
 
-  const addressLine = [
-    contact.address.street,
-    [contact.address.postalCode, contact.address.city].filter(Boolean).join(" "),
-    contact.address.country,
-  ]
-    .filter((p) => p !== null && p !== "")
-    .join(", ");
+  const addressLine = Arr.join(
+    Arr.filter(
+      [
+        contact.address.street,
+        Arr.join(
+          Arr.filter(
+            [contact.address.postalCode, contact.address.city],
+            (value): value is string => value !== null && value !== "",
+          ),
+          " ",
+        ),
+        contact.address.country,
+      ],
+      (p): p is string => p !== null && p !== "",
+    ),
+    ", ",
+  );
 
   return page(h, [
     pageHeader(h, {
@@ -1678,7 +1773,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   _tag: "DocumentNew",
                   ws: route.ws,
                   kind: "invoice",
-                  from: { _tag: "Contact", id: contact.id as ContactId },
+                  from: { _tag: "Contact", id: ContactId.make(contact.id) },
                 }),
                 variant: "primary",
               }),
@@ -1696,7 +1791,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 href: href({
                   _tag: "Contact",
                   ws: route.ws,
-                  id: contact.id as ContactId,
+                  id: ContactId.make(contact.id),
                   mode: "edit",
                 }),
               }),
@@ -1716,7 +1811,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     h.div
       .class(ui.row)
       .children([
-        ...contact.roles.map((r) =>
+        ...Arr.map(contact.roles, (r) =>
           badge(h, enumLabel(tr, "contactRole", r), r === "customer" ? "proforma" : "neutral"),
         ),
         ...(contact.archived
@@ -1735,14 +1830,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             [tr.t("common.field.address"), addressLine || "—"],
             [
               tr.t("contacts.editor.invoicingEmails"),
-              contact.billingEmails.length > 0 ? contact.billingEmails.join(", ") : "—",
+              contact.billingEmails.length > 0 ? Arr.join(contact.billingEmails, ", ") : "—",
             ],
             [tr.t("common.field.phone"), contact.phone ?? "—"],
             [tr.t("common.field.note"), contact.note ?? "—"],
             [
               tLocal(ctx.locale, "registrySynced"),
               contact.registryFetchedAt !== null
-                ? Format.formatDateTime(ctx.locale, contact.registryFetchedAt)
+                ? Format.formatDateTime({ locale: ctx.locale, instant: contact.registryFetchedAt })
                 : "—",
             ],
           ]),
@@ -1800,7 +1895,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     ? tLocal(ctx.locale, "remindersDisabled")
                     : resolvedReminders.source === "contact"
                       ? tLocal(ctx.locale, "remindersCustom", {
-                          offsets: resolvedReminders.value.join(", "),
+                          offsets: Arr.join(Arr.map(resolvedReminders.value, String), ", "),
                         })
                       : tLocal(ctx.locale, "remindersInherit"),
                 ]),
@@ -1828,11 +1923,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       href({
                         _tag: "Document",
                         ws: route.ws,
-                        id: d.id as never,
+                        id: DocumentId.make(d.id),
                         tab: "preview",
                       }),
                     )
-                    .children([mono(h, d.number ?? d.id.slice(0, 8))]),
+                    .children([mono(h, d.number ?? Str.slice(0, 8)(d.id))]),
               },
               {
                 header: tLocal(ctx.locale, "docDate"),
@@ -1869,11 +1964,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       href({
                         _tag: "Expense",
                         ws: route.ws,
-                        id: ex.id as never,
+                        id: ExpenseId.make(ex.id),
                         mode: "view",
                       }),
                     )
-                    .children([mono(h, ex.supplierDocumentNumber ?? ex.id.slice(0, 8))]),
+                    .children([mono(h, ex.supplierDocumentNumber ?? Str.slice(0, 8)(ex.id))]),
               },
               {
                 header: tLocal(ctx.locale, "docDate"),
@@ -1922,4 +2017,4 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         })
       : h.text(""),
   ]);
-};
+});

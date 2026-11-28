@@ -1,4 +1,8 @@
 import type { Html } from "@effect/ui/html";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
 import { type Attribute, type Markup, withAttributes } from "./html";
 import { icon } from "./icons";
 import {
@@ -66,7 +70,7 @@ export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
 
 export interface ButtonOptions<M> {
   readonly label: string;
-  readonly onClick?: M;
+  readonly onClick?: M | undefined;
   readonly variant?: ButtonVariant;
   readonly small?: boolean;
   readonly disabled?: boolean;
@@ -78,7 +82,7 @@ export interface ButtonOptions<M> {
   readonly className?: string;
 }
 
-export const button = <M>(h: Html.H<M>, o: ButtonOptions<M>): Markup<M> => {
+const buttonImpl = <M>(h: Html.H<M>, o: ButtonOptions<M>): Markup<M> => {
   const variant = o.variant ?? "secondary";
   const inactive = o.disabled === true || o.busy === true;
   return withAttributes(
@@ -113,8 +117,13 @@ export const button = <M>(h: Html.H<M>, o: ButtonOptions<M>): Markup<M> => {
   ]);
 };
 
+export const button: {
+  <M>(o: ButtonOptions<M>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, o: ButtonOptions<M>): Markup<M>;
+} = Fn.dual(2, buttonImpl);
+
 /** An in-app link styled as a button; the Shell intercepts the click (internal navigation). */
-export const linkButton = <M>(
+const linkButtonImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly label: string;
@@ -141,6 +150,26 @@ export const linkButton = <M>(
       .children([o.label]),
   ]);
 };
+
+export const linkButton: {
+  <M>(o: {
+    readonly label: string;
+    readonly href: string;
+    readonly variant?: ButtonVariant;
+    readonly small?: boolean;
+    readonly className?: string;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly label: string;
+      readonly href: string;
+      readonly variant?: ButtonVariant;
+      readonly small?: boolean;
+      readonly className?: string;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, linkButtonImpl);
 
 export interface FieldOptions<M> {
   readonly id: string;
@@ -200,7 +229,7 @@ const fieldShell = <M>(
         : []),
   ]);
 
-export const textField = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
+const textFieldImpl = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
   fieldShell(
     h,
     o,
@@ -235,7 +264,12 @@ export const textField = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
       ]),
   );
 
-export const textArea = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
+export const textField: {
+  <M>(o: FieldOptions<M>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M>;
+} = Fn.dual(2, textFieldImpl);
+
+const textAreaImpl = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
   fieldShell(
     h,
     o,
@@ -261,12 +295,22 @@ export const textArea = <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M> =>
       ]),
   );
 
-export interface SelectOptions<M> {
+export const textArea: {
+  <M>(o: FieldOptions<M>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, o: FieldOptions<M>): Markup<M>;
+} = Fn.dual(2, textAreaImpl);
+
+interface SelectEntry {
+  readonly value: string;
+  readonly label: string;
+}
+
+interface SelectOptions<M, Options extends ReadonlyArray<SelectEntry>> {
   readonly id: string;
   readonly label: string;
   readonly value: string;
-  readonly options: ReadonlyArray<{ readonly value: string; readonly label: string }>;
-  readonly onChange: (value: string) => M;
+  readonly options: Options;
+  readonly onChange: (value: NoInfer<Options[number]["value"]>) => M;
   readonly hint?: string;
   readonly error?: string | undefined;
   readonly disabled?: boolean;
@@ -283,14 +327,31 @@ const encodeSelectValue = (value: string): string => (value === "" ? EMPTY_SELEC
 const decodeSelectValue = (value: string | null): string =>
   value === null || value === EMPTY_SELECT_VALUE ? "" : value;
 
-export const selectField = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> =>
-  fieldShell(h, o, select(h, o));
+const selectFieldImpl = <M, const Options extends ReadonlyArray<SelectEntry>>(
+  h: Html.H<M>,
+  o: SelectOptions<M, Options>,
+): Markup<M> => fieldShell(h, o, select(h, o));
+
+export const selectField: {
+  <M, const Options extends ReadonlyArray<SelectEntry>>(
+    o: SelectOptions<M, Options>,
+  ): (h: Html.H<M>) => Markup<M>;
+  <M, const Options extends ReadonlyArray<SelectEntry>>(
+    h: Html.H<M>,
+    o: SelectOptions<M, Options>,
+  ): Markup<M>;
+} = Fn.dual(2, selectFieldImpl);
 
 /** A bare select (no label wrapper), e.g. for toolbars. Needs an accessible name via `label`. */
-export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> => {
+const selectImpl = <M, const Options extends ReadonlyArray<SelectEntry>>(
+  h: Html.H<M>,
+  o: SelectOptions<M, Options>,
+): Markup<M> => {
   const encoded = encodeSelectValue(o.value);
-  const current = o.options.find((option) => option.value === o.value);
-  const items = o.options.map((option) => {
+  const current = Option.getOrUndefined(
+    Arr.findFirst(o.options, (option) => option.value === o.value),
+  );
+  const items = Arr.map<ReadonlyArray<SelectEntry>, Markup<M>>(o.options, (option) => {
     const itemValue = encodeSelectValue(option.value);
     return UiSelectItem(h)
       .key(itemValue)
@@ -324,7 +385,10 @@ export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> => {
       (node) =>
         node.on("valuechange", ({ value }) => {
           const decoded = decodeSelectValue(value);
-          return decoded === o.value ? undefined : o.onChange(decoded);
+          const match = Option.getOrUndefined(
+            Arr.findFirst(o.options, (entry) => entry.value === decoded),
+          );
+          return decoded === o.value || match === undefined ? undefined : o.onChange(match.value);
         }),
     ],
   ).children([
@@ -381,7 +445,17 @@ export const select = <M>(h: Html.H<M>, o: SelectOptions<M>): Markup<M> => {
   ]);
 };
 
-export const checkbox = <M>(
+export const select: {
+  <M, const Options extends ReadonlyArray<SelectEntry>>(
+    o: SelectOptions<M, Options>,
+  ): (h: Html.H<M>) => Markup<M>;
+  <M, const Options extends ReadonlyArray<SelectEntry>>(
+    h: Html.H<M>,
+    o: SelectOptions<M, Options>,
+  ): Markup<M>;
+} = Fn.dual(2, selectImpl);
+
+const checkboxImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly id: string;
@@ -422,12 +496,37 @@ export const checkbox = <M>(
     h.span.id(`${o.id}-label`).children([o.label]),
   ]);
 
+export const checkbox: {
+  <M>(o: {
+    readonly id: string;
+    readonly label: string;
+    readonly checked: boolean;
+    readonly onToggle: (checked: boolean) => M;
+    readonly disabled?: boolean;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly id: string;
+      readonly label: string;
+      readonly checked: boolean;
+      readonly onToggle: (checked: boolean) => M;
+      readonly disabled?: boolean;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, checkboxImpl);
+
 export type BadgeTone = "neutral" | "paid" | "proforma" | "overdue" | "draft" | "error" | "outline";
 
-export const badge = <M>(h: Html.H<M>, label: string, tone: BadgeTone = "neutral"): Markup<M> =>
+const badgeImpl = <M>(h: Html.H<M>, label: string, tone: BadgeTone = "neutral"): Markup<M> =>
   h.span.class(badgeVariants({ tone })).children([label]);
 
-export const card = <M>(
+export const badge: {
+  <M>(label: string, tone?: BadgeTone): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, label: string, tone?: BadgeTone): Markup<M>;
+} = Fn.dual((args) => Predicate.isObject(args[0]), badgeImpl);
+
+const cardImpl = <M>(
   h: Html.H<M>,
   children: ReadonlyArray<Child<M>>,
   attrs: Attrs = [],
@@ -440,7 +539,23 @@ export const card = <M>(
     ...attrs,
   ]).children(children);
 
-export const cardTitle = <M>(
+export const card: {
+  <M>(
+    children: ReadonlyArray<Child<M>>,
+    attrs?: Attrs,
+    flat?: boolean,
+    className?: string,
+  ): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    children: ReadonlyArray<Child<M>>,
+    attrs?: Attrs,
+    flat?: boolean,
+    className?: string,
+  ): Markup<M>;
+} = Fn.dual((args) => !Arr.isArray(args[0]), cardImpl);
+
+const cardTitleImpl = <M>(
   h: Html.H<M>,
   title: string,
   actions: ReadonlyArray<Child<M>> = [],
@@ -453,7 +568,12 @@ export const cardTitle = <M>(
       ...(actions.length === 0 ? [] : [h.div.class(ui.row).children(actions)]),
     ]);
 
-export const page = <M>(
+export const cardTitle: {
+  <M>(title: string, actions?: ReadonlyArray<Child<M>>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, title: string, actions?: ReadonlyArray<Child<M>>): Markup<M>;
+} = Fn.dual((args) => Predicate.isObject(args[0]), cardTitleImpl);
+
+const pageImpl = <M>(
   h: Html.H<M>,
   children: ReadonlyArray<Child<M>>,
   attrs: Attrs = [],
@@ -466,7 +586,12 @@ export const page = <M>(
     ...attrs,
   ]).children(children);
 
-export const pageHeader = <M>(
+export const page: {
+  <M>(children: ReadonlyArray<Child<M>>, attrs?: Attrs): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, children: ReadonlyArray<Child<M>>, attrs?: Attrs): Markup<M>;
+} = Fn.dual((args) => !Arr.isArray(args[0]), pageImpl);
+
+const pageHeaderImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly title: string;
@@ -490,6 +615,24 @@ export const pageHeader = <M>(
         : [h.div.class("flex flex-wrap gap-2").children(o.actions)]),
     ]);
 
+export const pageHeader: {
+  <M>(o: {
+    readonly title: string;
+    readonly subtitle?: string | undefined;
+    readonly actions?: ReadonlyArray<Child<M>>;
+    readonly eyebrow?: Markup<M>;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly title: string;
+      readonly subtitle?: string | undefined;
+      readonly actions?: ReadonlyArray<Child<M>>;
+      readonly eyebrow?: Markup<M>;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, pageHeaderImpl);
+
 export interface Column<Row, M> {
   readonly header: string;
   readonly cell: (row: Row) => Child<M>;
@@ -497,7 +640,7 @@ export interface Column<Row, M> {
   readonly numeric?: boolean;
 }
 
-export const table = <Row, M>(
+const tableImpl = <Row, M>(
   h: Html.H<M>,
   o: {
     readonly caption: string;
@@ -516,7 +659,7 @@ export const table = <Row, M>(
         h.caption.class("sr-only").children([o.caption]),
         h.thead.children([
           h.tr.children(
-            o.columns.map((c) =>
+            Arr.map(o.columns, (c) =>
               h.th
                 .class(
                   cn(
@@ -530,7 +673,7 @@ export const table = <Row, M>(
           ),
         ]),
         h.tbody.children(
-          o.rows.map((row) =>
+          Arr.map(o.rows, (row) =>
             withAttributes(
               h.tr
                 .key(o.rowKey(row))
@@ -547,7 +690,7 @@ export const table = <Row, M>(
                     (element) => element.attr("data-href", "1"),
                   ],
             ).children(
-              o.columns.map((c) =>
+              Arr.map(o.columns, (c) =>
                 h.td
                   .class(
                     cn(
@@ -564,12 +707,28 @@ export const table = <Row, M>(
       ]),
     ]);
 
+export const table: {
+  <Row, M>(o: {
+    readonly caption: string;
+    readonly columns: ReadonlyArray<Column<Row, M>>;
+    readonly rows: ReadonlyArray<Row>;
+    readonly rowKey: (row: Row) => string;
+    readonly onRowClick?: (row: Row) => M;
+  }): (h: Html.H<M>) => Markup<M>;
+  <Row, M>(
+    h: Html.H<M>,
+    o: {
+      readonly caption: string;
+      readonly columns: ReadonlyArray<Column<Row, M>>;
+      readonly rows: ReadonlyArray<Row>;
+      readonly rowKey: (row: Row) => string;
+      readonly onRowClick?: (row: Row) => M;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, tableImpl);
+
 /** A loading table that mirrors the loaded chrome (zero-CLS): same headers, same row height. */
-export const skeletonTable = <M>(
-  h: Html.H<M>,
-  headers: ReadonlyArray<string>,
-  rows = 6,
-): Markup<M> =>
+const skeletonTableImpl = <M>(h: Html.H<M>, headers: ReadonlyArray<string>, rows = 6): Markup<M> =>
   h.div
     .class(
       "overflow-x-auto rounded-panel border border-outline-variant bg-surface-container-lowest",
@@ -579,7 +738,7 @@ export const skeletonTable = <M>(
       h.table.class("w-full border-collapse text-[0.8125rem]").children([
         h.thead.children([
           h.tr.children(
-            headers.map((x) =>
+            Arr.map(headers, (x) =>
               h.th
                 .class(
                   "whitespace-nowrap border-b border-outline-variant bg-surface-container-low px-3 py-2 text-left text-[0.75rem] font-medium text-on-surface-variant",
@@ -595,7 +754,7 @@ export const skeletonTable = <M>(
               .key(`s${i}`)
               .class("[&:last-child>td]:border-b-0")
               .children(
-                headers.map(() =>
+                Arr.map(headers, () =>
                   h.td
                     .class("h-11 border-b border-outline-variant px-3 py-2.5 align-middle")
                     .children([h.span.class("kb-skeleton block w-[70%]").children(["\u00A0"])]),
@@ -606,19 +765,29 @@ export const skeletonTable = <M>(
       ]),
     ]);
 
-export const skeleton = <M>(h: Html.H<M>, width = "100%", height = "1em"): Markup<M> =>
+export const skeletonTable: {
+  <M>(headers: ReadonlyArray<string>, rows?: number): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, headers: ReadonlyArray<string>, rows?: number): Markup<M>;
+} = Fn.dual((args) => !Arr.isArray(args[0]), skeletonTableImpl);
+
+const skeletonImpl = <M>(h: Html.H<M>, width = "100%", height = "1em"): Markup<M> =>
   h.span
     .class("kb-skeleton block")
     .style({ width, height })
     .attr("aria-hidden", String(true))
     .children(["\u00A0"]);
 
-export const emptyState = <M>(
+export const skeleton: {
+  <M>(width?: string, height?: string): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, width?: string, height?: string): Markup<M>;
+} = Fn.dual((args) => Predicate.isObject(args[0]), skeletonImpl);
+
+const emptyStateImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly title: string;
     readonly body?: string;
-    readonly action?: Markup<M>;
+    readonly action?: Markup<M> | undefined;
     readonly art?: Markup<M>;
   },
 ): Markup<M> =>
@@ -631,12 +800,30 @@ export const emptyState = <M>(
       ...(o.action === undefined ? [] : [o.action]),
     ]);
 
-export const banner = <M>(
+export const emptyState: {
+  <M>(o: {
+    readonly title: string;
+    readonly body?: string;
+    readonly action?: Markup<M> | undefined;
+    readonly art?: Markup<M>;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly title: string;
+      readonly body?: string;
+      readonly action?: Markup<M> | undefined;
+      readonly art?: Markup<M>;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, emptyStateImpl);
+
+const bannerImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly text: string;
     readonly tone?: "neutral" | "error" | "info";
-    readonly action?: Markup<M>;
+    readonly action?: Markup<M> | undefined;
   },
 ): Markup<M> =>
   h.div
@@ -647,7 +834,23 @@ export const banner = <M>(
       ...(o.action === undefined ? [] : [o.action]),
     ]);
 
-export const tabs = <M>(
+export const banner: {
+  <M>(o: {
+    readonly text: string;
+    readonly tone?: "neutral" | "error" | "info";
+    readonly action?: Markup<M> | undefined;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly text: string;
+      readonly tone?: "neutral" | "error" | "info";
+      readonly action?: Markup<M> | undefined;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, bannerImpl);
+
+const tabsImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly label: string;
@@ -669,7 +872,7 @@ export const tabs = <M>(
         .attr("data-slot", "tabs")
         .attr("aria-label", o.label)
         .children([
-          ...o.items.map((it) =>
+          ...Arr.map(o.items, (it) =>
             UiTabsTab(h)
               .key(it.id)
               .value(it.id)
@@ -692,17 +895,48 @@ export const tabs = <M>(
         ]),
     ]);
 
-export const segmented = <M>(
-  h: Html.H<M>,
-  o: {
+export const tabs: {
+  <M>(o: {
     readonly label: string;
-    readonly items: ReadonlyArray<{ readonly id: string; readonly label: string }>;
+    readonly items: ReadonlyArray<{
+      readonly id: string;
+      readonly label: string;
+      readonly href: string;
+    }>;
     readonly selected: string;
-    readonly onSelect: (id: string) => M;
-    readonly fill?: boolean;
-    readonly sizing?: "equal" | "auto";
-    readonly className?: string;
-  },
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly label: string;
+      readonly items: ReadonlyArray<{
+        readonly id: string;
+        readonly label: string;
+        readonly href: string;
+      }>;
+      readonly selected: string;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, tabsImpl);
+
+interface SegmentChoice {
+  readonly id: string;
+  readonly label: string;
+}
+
+interface SegmentedOptions<M, Items extends ReadonlyArray<SegmentChoice>> {
+  readonly label: string;
+  readonly items: Items;
+  readonly selected: string;
+  readonly onSelect: (id: NoInfer<Items[number]["id"]>) => M;
+  readonly fill?: boolean;
+  readonly sizing?: "equal" | "auto";
+  readonly className?: string;
+}
+
+const segmentedImpl = <M, const Items extends ReadonlyArray<SegmentChoice>>(
+  h: Html.H<M>,
+  o: SegmentedOptions<M, Items>,
 ): Markup<M> =>
   UiSegmentedControl(h)
     .class(
@@ -715,14 +949,17 @@ export const segmented = <M>(
     .attr("aria-label", o.label)
     .value(o.selected)
     .attr("value", o.selected)
-    .on("valuechange", ({ value }) =>
-      value !== null && value !== o.selected ? o.onSelect(value) : undefined,
-    )
+    .on("valuechange", ({ value }) => {
+      const item = Option.getOrUndefined(
+        Arr.findFirst(o.items, (candidate) => candidate.id === value),
+      );
+      return item === undefined || item.id === o.selected ? undefined : o.onSelect(item.id);
+    })
     .children([
       UiSegmentedControlIndicator(h).class(
         "pointer-events-none absolute top-[var(--segmented-control-indicator-top,0)] left-[var(--segmented-control-indicator-left,0)] -z-10 h-[var(--segmented-control-indicator-height,0)] w-[var(--segmented-control-indicator-width,0)] bg-primary-container transition-[top,left,width,height] duration-[180ms] ease-out data-[activation-direction=none]:transition-none",
       ),
-      ...o.items.map((it) =>
+      ...Arr.map<ReadonlyArray<SegmentChoice>, Markup<M>>(o.items, (it) =>
         UiSegmentedControlItem(h)
           .key(it.id)
           .class(segmentedButtonVariants({ sizing: o.sizing ?? "equal" }))
@@ -734,7 +971,17 @@ export const segmented = <M>(
       ),
     ]);
 
-export const toggleChip = <M>(
+export const segmented: {
+  <M, const Items extends ReadonlyArray<SegmentChoice>>(
+    o: SegmentedOptions<M, Items>,
+  ): (h: Html.H<M>) => Markup<M>;
+  <M, const Items extends ReadonlyArray<SegmentChoice>>(
+    h: Html.H<M>,
+    o: SegmentedOptions<M, Items>,
+  ): Markup<M>;
+} = Fn.dual(2, segmentedImpl);
+
+const toggleChipImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly label: string;
@@ -761,7 +1008,25 @@ export const toggleChip = <M>(
     ]).children([o.label]),
   ]);
 
-export const searchInput = <M>(
+export const toggleChip: {
+  <M>(o: {
+    readonly label: string;
+    readonly pressed: boolean;
+    readonly onPress: M;
+    readonly disabled?: boolean;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly label: string;
+      readonly pressed: boolean;
+      readonly onPress: M;
+      readonly disabled?: boolean;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, toggleChipImpl);
+
+const searchInputImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly value: string;
@@ -788,10 +1053,36 @@ export const searchInput = <M>(
       ]),
     ]);
 
-export const separator = <M>(
-  h: Html.H<M>,
-  o: { readonly orientation?: "horizontal" | "vertical"; readonly decorative?: boolean } = {},
-): Markup<M> =>
+export const searchInput: {
+  <M>(o: {
+    readonly value: string;
+    readonly placeholder: string;
+    readonly onInput: (value: string) => M;
+    readonly name?: string;
+    readonly ariaLabel?: string;
+    readonly className?: string;
+    readonly inputClassName?: string;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly value: string;
+      readonly placeholder: string;
+      readonly onInput: (value: string) => M;
+      readonly name?: string;
+      readonly ariaLabel?: string;
+      readonly className?: string;
+      readonly inputClassName?: string;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, searchInputImpl);
+
+type SeparatorOptions = {
+  readonly orientation?: "horizontal" | "vertical";
+  readonly decorative?: boolean;
+};
+
+const separatorImpl = <M>(h: Html.H<M>, o: SeparatorOptions = {}): Markup<M> =>
   withAttributes(UiSeparator(h).class(ui.divider), [
     (node) =>
       o.orientation === undefined
@@ -800,7 +1091,16 @@ export const separator = <M>(
     (node) => (o.decorative === true ? node.decorative(true).attr("decorative", "") : node),
   ]);
 
-export const kpi = <M>(
+export const separator: {
+  <M>(h: Html.H<M>): Markup<M>;
+  <M>(o: SeparatorOptions): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, o: SeparatorOptions): Markup<M>;
+} = Fn.dual(
+  (args) => Predicate.isObject(args[0]) && Reflect.get(args[0], "div") !== undefined,
+  separatorImpl,
+);
+
+const kpiImpl = <M>(
   h: Html.H<M>,
   o: { readonly label: string; readonly value: string; readonly note?: Markup<M> | string },
 ): Markup<M> =>
@@ -814,15 +1114,36 @@ export const kpi = <M>(
       ]),
   ]);
 
-export const dl = <M>(h: Html.H<M>, rows: ReadonlyArray<readonly [string, Child<M>]>): Markup<M> =>
+export const kpi: {
+  <M>(o: {
+    readonly label: string;
+    readonly value: string;
+    readonly note?: Markup<M> | string | undefined;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly label: string;
+      readonly value: string;
+      readonly note?: Markup<M> | string | undefined;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, kpiImpl);
+
+const dlImpl = <M>(h: Html.H<M>, rows: ReadonlyArray<readonly [string, Child<M>]>): Markup<M> =>
   h.dl
     .class("grid grid-cols-[minmax(120px,max-content)_1fr] gap-x-4 gap-y-1.5 text-[0.8125rem]")
     .children(
-      rows.flatMap(([k, v]) => [
+      Arr.flatMap(rows, ([k, v]) => [
         h.dt.class("text-on-surface-variant").children([k]),
         h.dd.class("m-0").children([v]),
       ]),
     );
+
+export const dl: {
+  <M>(rows: ReadonlyArray<readonly [string, Child<M>]>): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, rows: ReadonlyArray<readonly [string, Child<M>]>): Markup<M>;
+} = Fn.dual(2, dlImpl);
 
 const DIALOG_BACKDROP_CLASS =
   "fixed inset-0 bg-[color-mix(in_srgb,var(--md-sys-color-scrim)_40%,transparent)] transition-opacity duration-160 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0";
@@ -832,7 +1153,7 @@ const DIALOG_TITLE_CLASS =
   "mb-3 block font-display text-[0.9375rem] leading-5 font-[var(--kb-font-display-weight)] tracking-[-0.01em]";
 
 /** A modal dialog powered by `@ui-sdk/web/dialog` (or `alert-dialog` when `alert` is true). */
-export const dialog = <M>(
+const dialogImpl = <M>(
   h: Html.H<M>,
   o: {
     readonly id: string;
@@ -848,7 +1169,7 @@ export const dialog = <M>(
       .id(`${o.id}-root`)
       .open(true)
       .attr("open", "")
-      .on("openchange", ({ value }) => (!value ? o.onClose : (undefined as unknown as M)))
+      .on("openchange", ({ value }) => (value === false ? o.onClose : undefined))
       .children([
         UiAlertDialogBackdrop(h).class(DIALOG_BACKDROP_CLASS),
         UiAlertDialogContent(h)
@@ -868,7 +1189,7 @@ export const dialog = <M>(
     .id(`${o.id}-root`)
     .open(true)
     .attr("open", "")
-    .on("openchange", ({ value }) => (!value ? o.onClose : (undefined as unknown as M)))
+    .on("openchange", ({ value }) => (value === false ? o.onClose : undefined))
     .children([
       UiDialogBackdrop(h).class(DIALOG_BACKDROP_CLASS),
       UiDialogContent(h)
@@ -885,7 +1206,39 @@ export const dialog = <M>(
     ]);
 };
 
-export const mono = <M>(h: Html.H<M>, value: string): Markup<M> =>
+export const dialog: {
+  <M>(o: {
+    readonly id: string;
+    readonly alert?: boolean;
+    readonly title: string;
+    readonly body: ReadonlyArray<Child<M>>;
+    readonly actions: ReadonlyArray<Markup<M>>;
+    readonly onClose: M;
+  }): (h: Html.H<M>) => Markup<M>;
+  <M>(
+    h: Html.H<M>,
+    o: {
+      readonly id: string;
+      readonly alert?: boolean;
+      readonly title: string;
+      readonly body: ReadonlyArray<Child<M>>;
+      readonly actions: ReadonlyArray<Markup<M>>;
+      readonly onClose: M;
+    },
+  ): Markup<M>;
+} = Fn.dual(2, dialogImpl);
+
+const monoImpl = <M>(h: Html.H<M>, value: string): Markup<M> =>
   h.span.class(ui.mono).children([value]);
-export const amount = <M>(h: Html.H<M>, value: string): Markup<M> =>
+
+export const mono: {
+  <M>(value: string): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, value: string): Markup<M>;
+} = Fn.dual(2, monoImpl);
+const amountImpl = <M>(h: Html.H<M>, value: string): Markup<M> =>
   h.span.class(ui.num).children([value]);
+
+export const amount: {
+  <M>(value: string): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, value: string): Markup<M>;
+} = Fn.dual(2, amountImpl);

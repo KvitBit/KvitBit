@@ -1,19 +1,23 @@
 import { describe, expect, mock, test } from "bun:test";
-import type {
+import {
   CurrencyCode,
-  DashboardView,
+  type DashboardView,
   DeliveryId,
   DocumentId,
   IsoDate,
   ShareViewId,
   WorkspaceId,
   WorkspaceSlug,
-  WorkspaceSummary,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
 import { Remote as RemoteOps, sessionCookie, UiError } from "@kvitbit/ui-port/api";
 import { formatMoney, formatMonth } from "@kvitbit/ui-port/format";
-import type { Period, Route } from "@kvitbit/ui-port/view-models";
-import { BigDecimal, Effect } from "effect";
+import { Period, type Route } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import type { ReactElement } from "react";
 import { makeApiRunner } from "../../runtime/api-runtime";
 import { expoRouterStandIn } from "../../testing/expo-router-stand-in";
@@ -35,16 +39,15 @@ import {
 mock.module("expo-router", () => expoRouterStandIn());
 
 const { allText, findAll, hostTree } = await import("../../testing/element-tree");
-type HostProps = import("../../testing/element-tree").HostProps;
 const { TestProviders } = await import("../../testing/providers");
 const { DashboardContent } = await import("./dashboard-screen");
 
-const CZK = "CZK" as CurrencyCode;
+const CZK = CurrencyCode.make("CZK");
 const money = (n: number) => ({ amount: BigDecimal.fromNumberUnsafe(n), currency: CZK });
 
 const baseWorkspace: WorkspaceSummary = {
-  id: "ws_1" as WorkspaceId,
-  slug: "acme" as WorkspaceSlug,
+  id: WorkspaceId.make("01937c7a-0000-7000-8000-ee92e8791c13"),
+  slug: WorkspaceSlug.make("acme"),
   name: "Acme s.r.o.",
   role: "owner",
   memberCount: 2,
@@ -53,14 +56,14 @@ const baseWorkspace: WorkspaceSummary = {
 };
 
 const sampleDashboard: DashboardView = {
-  period: { from: "2026-11-01" as IsoDate, to: "2026-11-30" as IsoDate },
+  period: { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") },
   revenue: money(125000),
   unpaid: money(32000),
   overdue: { total: money(14500), count: 2 },
   expenses: money(41200),
   incompleteExpenses: 3,
   cashflow: Array.from({ length: 12 }, (_, index) => ({
-    month: index === 0 ? "2025-12" : `2026-${String(index).padStart(2, "0")}`,
+    month: index === 0 ? "2025-12" : `2026-${Str.padStart(2, "0")(String(index))}`,
     in: money(125000),
     out: money(41200),
     net: money(83800),
@@ -68,7 +71,7 @@ const sampleDashboard: DashboardView = {
 };
 
 const sampleDoc: DashboardDocument = {
-  id: "doc_1" as DocumentId,
+  id: DocumentId.make("01937c7a-0000-7000-8000-dcee443a501c"),
   kind: "invoice",
   number: "2026-0042",
   status: "issued",
@@ -76,19 +79,19 @@ const sampleDoc: DashboardDocument = {
   settlement: "partially_paid",
   overdue: true,
   contactName: "Novák s.r.o.",
-  issuedOn: "2026-10-15" as IsoDate,
-  dueOn: "2026-10-29" as IsoDate,
+  issuedOn: IsoDate.make("2026-10-15"),
+  dueOn: IsoDate.make("2026-10-29"),
   total: money(14500),
 };
 
-const activityId = (n: number) => `01937c7a-0000-7000-8000-${String(n).padStart(12, "0")}`;
+const activityId = (n: number) => `01937c7a-0000-7000-8000-${Str.padStart(12, "0")(String(n))}`;
 
 test("finds the latest workspace activity across pages, including historical link views", async () => {
   const recent = activityId(11);
   const old = activityId(12);
   const draft = activityId(13);
   const other = activityId(14);
-  const workspaceId = activityId(1) as WorkspaceId;
+  const workspaceId = WorkspaceId.make(activityId(1));
   const doc = (id: string, status: "issued" | "draft" = "issued") => ({
     ...sampleDoc,
     id,
@@ -107,7 +110,7 @@ test("finds the latest workspace activity across pages, including historical lin
     port: 0,
     fetch: async (request) => {
       const { pathname, searchParams } = new URL(request.url);
-      const path = pathname.split("/documents")[1] ?? "";
+      const path = Str.split("/documents")(pathname)[1] ?? "";
       const cursor = searchParams.get("cursor");
       if (path === "") {
         docCursors.push(cursor);
@@ -123,12 +126,12 @@ test("finds the latest workspace activity across pages, including historical lin
       peak = Math.max(peak, ++active);
       await Bun.sleep(5);
       active -= 1;
-      if (path.endsWith("/payments")) {
+      if (Str.endsWith("/payments")(path)) {
         const payment = { id: activityId(21), createdAt: at(24) };
-        return Response.json(path.includes(old) ? [payment, payment] : []);
+        return Response.json(Str.includes(old)(path) ? [payment, payment] : []);
       }
-      if (path.endsWith("/views")) {
-        if (!path.includes(old)) return Response.json({ items: [], nextCursor: null });
+      if (Str.endsWith("/views")(path)) {
+        if (!Str.includes(old)(path)) return Response.json({ items: [], nextCursor: null });
         viewCursors.push(cursor);
         return Response.json({
           items:
@@ -141,7 +144,7 @@ test("finds the latest workspace activity across pages, including historical lin
           nextCursor: cursor === null ? "views-next" : null,
         });
       }
-      const id = path.slice(1);
+      const id = Str.slice(1)(path);
       const sentOn = id === old ? 23 : id === recent ? 22 : 21;
       const amount = { amount: "0", currency: "CZK" };
       return Response.json({
@@ -202,8 +205,10 @@ test("finds the latest workspace activity across pages, including historical lin
   try {
     const client = await runner.run(Effect.succeed);
     if (client._tag === "Err") throw new Error("Could not get the API client");
-    const events = await Effect.runPromise(loadWorkspaceActivity(client.value, workspaceId));
-    expect(events.map(({ id, document }) => [id, document.id])).toEqual([
+    const events = await Effect.runPromise(
+      loadWorkspaceActivity({ api: client.value, workspaceId }),
+    );
+    expect(Arr.map(events, ({ id, document }) => [id, document.id])).toEqual([
       [`viewed:${activityId(32)}`, old],
       [`viewed:${activityId(33)}`, old],
       [`paid:${activityId(21)}`, old],
@@ -212,8 +217,8 @@ test("finds the latest workspace activity across pages, including historical lin
     ]);
     expect(docCursors).toEqual([null, "doc-next"]);
     expect(viewCursors).toEqual([null, "views-next"]);
-    expect(activityRequests.filter((path) => path === `/${recent}`)).toHaveLength(1);
-    expect(activityRequests.some((path) => path.includes(draft))).toBe(false);
+    expect(Arr.filter(activityRequests, (path) => path === `/${recent}`)).toHaveLength(1);
+    expect(Arr.some(activityRequests, (path) => Str.includes(draft)(path))).toBe(false);
     expect(peak).toBeGreaterThan(1);
     expect(peak).toBeLessThanOrEqual(4);
   } finally {
@@ -245,7 +250,7 @@ const renderDashboard = (overrides: Partial<DashboardContentProps> = {}) =>
     <DashboardContent
       workspace={baseWorkspace}
       preset="this_month"
-      reportPeriod={"2026-11" as Period}
+      reportPeriod={Period.make("2026-11")}
       onSelectPreset={() => undefined}
       dashboard={RemoteOps.ready(sampleDashboard)}
       onRetryDashboard={() => undefined}
@@ -260,36 +265,36 @@ const renderDashboard = (overrides: Partial<DashboardContentProps> = {}) =>
       {...overrides}
     />,
     within,
-  ) as ReactElement<HostProps>;
+  );
 
 describe("dashboard model", () => {
   test("computes period ranges including January -> December rollover", () => {
-    expect(periodRange("this_month", "2026-11-24" as IsoDate)).toEqual({
-      from: "2026-11-01" as IsoDate,
-      to: "2026-11-30" as IsoDate,
-      reportPeriod: "2026-11" as Period,
+    expect(periodRange("this_month", IsoDate.make("2026-11-24"))).toEqual({
+      from: IsoDate.make("2026-11-01"),
+      to: IsoDate.make("2026-11-30"),
+      reportPeriod: Period.make("2026-11"),
     });
-    expect(periodRange("last_month", "2026-01-10" as IsoDate)).toEqual({
-      from: "2025-12-01" as IsoDate,
-      to: "2025-12-31" as IsoDate,
-      reportPeriod: "2025-12" as Period,
+    expect(periodRange("last_month", IsoDate.make("2026-01-10"))).toEqual({
+      from: IsoDate.make("2025-12-01"),
+      to: IsoDate.make("2025-12-31"),
+      reportPeriod: Period.make("2025-12"),
     });
-    expect(periodRange("this_quarter", "2026-11-24" as IsoDate)).toEqual({
-      from: "2026-10-01" as IsoDate,
-      to: "2026-12-31" as IsoDate,
-      reportPeriod: "2026-Q4" as Period,
+    expect(periodRange("this_quarter", IsoDate.make("2026-11-24"))).toEqual({
+      from: IsoDate.make("2026-10-01"),
+      to: IsoDate.make("2026-12-31"),
+      reportPeriod: Period.make("2026-Q4"),
     });
-    expect(periodRange("this_year", "2026-11-24" as IsoDate)).toEqual({
-      from: "2026-01-01" as IsoDate,
-      to: "2026-12-31" as IsoDate,
-      reportPeriod: "2026" as Period,
+    expect(periodRange("this_year", IsoDate.make("2026-11-24"))).toEqual({
+      from: IsoDate.make("2026-01-01"),
+      to: IsoDate.make("2026-12-31"),
+      reportPeriod: Period.make("2026"),
     });
   });
 
   test("parses valid DocumentSummary objects and drops malformed entries", () => {
     const parsed = parseDocumentSummaries([
       {
-        id: "doc_1",
+        id: "01937c7a-0000-7000-8000-dcee443a501c",
         kind: "invoice",
         number: "2026-0001",
         status: "issued",
@@ -307,9 +312,9 @@ describe("dashboard model", () => {
     expect(parsed).toHaveLength(1);
     expect(parsed[0]?.number).toBe("2026-0001");
     expect(parsed[0]?.contactName).toBe("Beta a.s.");
-    expect(BigDecimal.format(parsed[0]?.total.amount ?? BigDecimal.fromNumberUnsafe(0))).toBe(
-      "12100.5",
-    );
+    expect(
+      (parsed[0]?.total.amount ?? BigDecimal.fromNumberUnsafe(0)).pipe(BigDecimal.format),
+    ).toBe("12100.5");
   });
 
   test("computes cashflow bar ratios safely", () => {
@@ -341,16 +346,16 @@ describe("dashboard model", () => {
       report: "receivables",
       period: sampleDashboard.period,
       asOf: sampleDashboard.period.to,
-      buckets: buckets.map(({ bucket, days }) => ({
+      buckets: Arr.map(buckets, ({ bucket, days }) => ({
         bucket,
         count: days.length,
         total: overdueBalance,
-        documents: days.map((daysOverdue) => ({ ...sampleReceivable, daysOverdue })),
+        documents: Arr.map(days, (daysOverdue) => ({ ...sampleReceivable, daysOverdue })),
       })),
       total: overdueBalance,
       overdue: { count: 9, total: overdueBalance },
     });
-    expect(result.map(({ daysOverdue }) => daysOverdue)).toEqual([154, 91, 46, 39, 30]);
+    expect(Arr.map(result, ({ daysOverdue }) => daysOverdue)).toEqual([154, 91, 46, 39, 30]);
     expect(result[0]?.outstanding).toEqual(overdueBalance);
   });
 
@@ -391,15 +396,23 @@ describe("DashboardContent", () => {
       accessibilityLabel?: string;
       onPress?: () => void;
     }>(tree, "Pressable");
-    pressables.find((p) => p.props.testID === "dashboard-action-new-invoice")?.props.onPress?.();
-    pressables
-      .find((p) => p.props.testID === "dashboard-action-capture-expense")
-      ?.props.onPress?.();
-    pressables.find((p) => p.props.testID === "dashboard-action-add-contact")?.props.onPress?.();
-    pressables.find((p) => p.props.accessibilityLabel === "Unpaid")?.props.onPress?.();
-    pressables.find((p) => p.props.accessibilityLabel === "Overdue")?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.testID === "dashboard-action-new-invoice"),
+    )?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.testID === "dashboard-action-capture-expense"),
+    )?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.testID === "dashboard-action-add-contact"),
+    )?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.accessibilityLabel === "Unpaid"),
+    )?.props.onPress?.();
+    Option.getOrUndefined(
+      Arr.findFirst(pressables, (p) => p.props.accessibilityLabel === "Overdue"),
+    )?.props.onPress?.();
 
-    expect(visited.map((r) => r._tag)).toEqual([
+    expect(Arr.map(visited, (r) => r._tag)).toEqual([
       "DocumentNew",
       "ExpenseCapture",
       "Contact",
@@ -410,7 +423,7 @@ describe("DashboardContent", () => {
       _tag: "Reports",
       ws: baseWorkspace.slug,
       report: "receivables",
-      period: "2026-11" as Period,
+      period: Period.make("2026-11"),
     };
     expect(visited.slice(-2)).toEqual([report, report]);
   });
@@ -428,9 +441,12 @@ describe("DashboardContent", () => {
     expect(text).not.toContain("Quick actions");
     for (const label of labels) {
       expect(text).toContain(label);
-      findAll<{ onPress?: () => void }>(tree, "Pressable")
-        .find((p) => allText(p) === label)
-        ?.props.onPress?.();
+      Option.getOrUndefined(
+        Arr.findFirst(
+          findAll<{ onPress?: () => void }>(tree, "Pressable"),
+          (p) => allText(p) === label,
+        ),
+      )?.props.onPress?.();
     }
     const ws = baseWorkspace.slug;
     expect(visited).toEqual([
@@ -450,26 +466,28 @@ describe("DashboardContent", () => {
   });
 
   test("shows workspace activity independently of the recent documents list", () => {
+    const deliveryId = DeliveryId.make("01937c7a-0000-7000-8000-7632f070ecb7");
+    const viewId = ShareViewId.make("01937c7a-0000-7000-8000-6ecac27ee677");
     const events = documentActivity(
       sampleDoc,
       {
         deliveries: [
           {
-            id: "sent_1" as DeliveryId,
+            id: deliveryId,
             to: [],
             purpose: "document",
             status: "sent",
             at: "2026-11-08T09:00:00Z",
           },
           {
-            id: "failed_1" as DeliveryId,
+            id: DeliveryId.make("01937c7a-0000-7000-8000-8bd4fbe392b0"),
             to: [],
             purpose: "document",
             status: "failed",
             at: "2026-11-09T09:00:00Z",
           },
           {
-            id: "reminder_1" as DeliveryId,
+            id: DeliveryId.make("01937c7a-0000-7000-8000-fd21202fbc6c"),
             to: [],
             purpose: "reminder",
             status: "sent",
@@ -481,9 +499,20 @@ describe("DashboardContent", () => {
         { id: "partial_1", createdAt: "2026-11-10T09:00:00Z" },
         { id: "malformed_1", createdAt: "invalid" },
       ],
-      [{ id: "view_1" as ShareViewId, kind: "view", at: "2026-11-09T11:00:00Z", device: "mobile" }],
+      [
+        {
+          id: viewId,
+          kind: "view",
+          at: "2026-11-09T11:00:00Z",
+          device: "mobile",
+        },
+      ],
     );
-    expect(events.map(({ id }) => id)).toEqual(["sent:sent_1", "viewed:view_1", "paid:partial_1"]);
+    expect(Arr.map(events, ({ id }) => id)).toEqual([
+      `sent:${deliveryId}`,
+      `viewed:${viewId}`,
+      "paid:partial_1",
+    ]);
     const text = allText(
       renderDashboard({
         activity: RemoteOps.ready(events),
@@ -514,8 +543,10 @@ describe("DashboardContent", () => {
     });
 
     expect(allText(tree)).toContain("Try again");
-    const retryBtn = findAll<{ onPress?: () => void; children?: unknown }>(tree, "Pressable").find(
-      (p) => allText(p).includes("Try again"),
+    const retryBtn = Option.getOrUndefined(
+      Arr.findFirst(findAll<{ onPress?: () => void; children?: unknown }>(tree, "Pressable"), (p) =>
+        Str.includes("Try again")(allText(p)),
+      ),
     );
     retryBtn?.props.onPress?.();
     expect(retried).toBe(1);

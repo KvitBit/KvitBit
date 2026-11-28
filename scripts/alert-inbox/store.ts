@@ -1,3 +1,6 @@
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 /**
  * Scoped, typed-Effect SQLite store for processed and in-flight alert emails.
  *
@@ -32,15 +35,21 @@ import {
   statSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { Data, Effect, type Scope } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import type * as Scope from "effect/Scope";
+import * as Str from "effect/String";
 
-export type AlertRecordStatus = "claiming" | "created" | "duplicate" | "rejected" | "retry";
+type AlertRecordStatus = "claiming" | "created" | "duplicate" | "rejected" | "retry";
 export type SchedulerQueue = "fresh" | "retry";
 
-export class AlertStoreError extends Data.TaggedError("AlertStoreError")<{
-  readonly operation: string;
-  readonly reason: string;
-}> {}
+export class AlertStoreError extends Schema.TaggedError<
+  AlertStoreError,
+  { readonly brand: unique symbol }
+>()("AlertStoreError", {
+  operation: Schema.String,
+  reason: Schema.String,
+}) {}
 
 export interface ProcessedAlertRecord {
   readonly objectKey: string;
@@ -57,14 +66,14 @@ export interface ProcessedAlertRecord {
   readonly processedAt: string;
 }
 
-export interface ExistingAlertMatch {
+interface ExistingAlertMatch {
   readonly objectKey: string;
   readonly status: "claiming" | "created";
   readonly issueNumber: number | null;
   readonly matchedBy: "delivery_hash" | "dedup_key" | "message_id";
 }
 
-export type ClaimAcquisitionResult =
+type ClaimAcquisitionResult =
   | {
       readonly outcome: "acquired";
       readonly needsReconcile: boolean;
@@ -145,16 +154,16 @@ export interface AlertInboxStoreService {
     readonly nextRetryAt: string;
     readonly nowIso: string;
   }) => Effect.Effect<void, AlertStoreError>;
-  readonly getLastScheduledQueue: () => Effect.Effect<SchedulerQueue | null, AlertStoreError>;
+  readonly getLastScheduledQueue: Effect.Effect<SchedulerQueue | null, AlertStoreError>;
   readonly setLastScheduledQueue: (queue: SchedulerQueue) => Effect.Effect<void, AlertStoreError>;
-  readonly listAll: () => Effect.Effect<ReadonlyArray<ProcessedAlertRecord>, AlertStoreError>;
+  readonly listAll: Effect.Effect<ReadonlyArray<ProcessedAlertRecord>, AlertStoreError>;
 }
 
 const wrapDb = <A>(operation: string, thunk: () => A): Effect.Effect<A, AlertStoreError> =>
   Effect.try({
     try: thunk,
     catch: (error) =>
-      new AlertStoreError({
+      AlertStoreError.make({
         operation,
         reason: error instanceof Error ? error.message : String(error),
       }),
@@ -204,7 +213,7 @@ const loadNativeFlock = (): NativeFlock => {
       flock: (fd, op) => lib.symbols.flock(fd, op),
       getErrno: () => {
         const ptr = lib.symbols.__error();
-        return ptr ? read.i32(ptr, 0) : -1;
+        return ptr === null || ptr === 0 ? -1 : read.i32(ptr, 0);
       },
     };
   } else {
@@ -216,7 +225,7 @@ const loadNativeFlock = (): NativeFlock => {
       flock: (fd, op) => lib.symbols.flock(fd, op),
       getErrno: () => {
         const ptr = lib.symbols.__errno_location();
-        return ptr ? read.i32(ptr, 0) : -1;
+        return ptr === null || ptr === 0 ? -1 : read.i32(ptr, 0);
       },
     };
   }
@@ -258,20 +267,20 @@ const tryAcquireLockHandle = (
       return null;
     }
 
-    while (true) {
-      const rc = native.flock(fd, LOCK_EX | LOCK_NB);
-      if (rc === 0) {
-        activeInProcessApplyLocks.add(lockKey);
-        return { lockKey, fd };
-      }
-      const err = native.getErrno();
-      if (err === EINTR) continue;
-      if (err === EWOULDBLOCK) {
-        closeSync(fd);
-        return null;
-      }
-      throw new Error(`flock(${canonicalDbPath}) failed with errno ${err}`);
+    let result = native.flock(fd, LOCK_EX | LOCK_NB);
+    while (result !== 0 && native.getErrno() === EINTR) {
+      result = native.flock(fd, LOCK_EX | LOCK_NB);
     }
+    if (result === 0) {
+      activeInProcessApplyLocks.add(lockKey);
+      return { lockKey, fd };
+    }
+    const errno = native.getErrno();
+    if (errno === EWOULDBLOCK) {
+      closeSync(fd);
+      return null;
+    }
+    throw new Error(`flock(${canonicalDbPath}) failed with errno ${errno}`);
   } catch (error) {
     try {
       closeSync(fd);
@@ -372,17 +381,17 @@ const hasCurrentSchema = (db: Database): boolean => {
       "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'processed_alert' LIMIT 1",
     )
     .get();
-  if (!tableRow || typeof tableRow.sql !== "string") return false;
+  if (!(tableRow !== null && Predicate.isString(tableRow.sql))) return false;
   const cols = new Set(
-    db
-      .query<{ name: string }, []>("PRAGMA table_info(processed_alert)")
-      .all()
-      .map((c) => c.name),
+    Arr.map(
+      db.query<{ name: string }, []>("PRAGMA table_info(processed_alert)").all(),
+      (c) => c.name,
+    ),
   );
   for (const required of REQUIRED_COLUMNS) {
     if (!cols.has(required)) return false;
   }
-  return tableRow.sql.includes("'claiming'") && tableRow.sql.includes("'retry'");
+  return Str.includes("'claiming'")(tableRow.sql) && Str.includes("'retry'")(tableRow.sql);
 };
 
 const initializeOrMigrateSchema = (db: Database): void => {
@@ -393,7 +402,7 @@ const initializeOrMigrateSchema = (db: Database): void => {
       )
       .get();
 
-    if (!existing) {
+    if (!(existing !== null)) {
       db.exec(CREATE_PROCESSED_ALERT_TABLE_SQL);
       db.exec(CREATE_INDEXES_AND_META_SQL);
       return;
@@ -401,10 +410,10 @@ const initializeOrMigrateSchema = (db: Database): void => {
 
     if (!hasCurrentSchema(db)) {
       const existingCols = new Set(
-        db
-          .query<{ name: string }, []>("PRAGMA table_info(processed_alert)")
-          .all()
-          .map((c) => c.name),
+        Arr.map(
+          db.query<{ name: string }, []>("PRAGMA table_info(processed_alert)").all(),
+          (c) => c.name,
+        ),
       );
       for (const legacyRequired of [
         "object_key",
@@ -514,7 +523,7 @@ const resolveAndValidateDbPath = (path: string, readonly: boolean): string | nul
   return canonicalPath;
 };
 
-export const openAlertInboxStore = (
+const openAlertInboxStoreImpl = (
   path: string,
   readonly = false,
 ): Effect.Effect<AlertInboxStoreService, AlertStoreError, Scope.Scope> =>
@@ -905,24 +914,23 @@ export const openAlertInboxStore = (
             );
           }),
 
-        getLastScheduledQueue: () =>
-          wrapDb("getLastScheduledQueue", () => {
-            const metaExists = db
-              .query<{ name: string }, []>(
-                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alert_inbox_meta' LIMIT 1",
-              )
-              .get();
-            if (!metaExists) return null;
-            const row = db
-              .query<{ value: string }, []>(
-                "SELECT value FROM alert_inbox_meta WHERE key = 'last_scheduled_queue' LIMIT 1",
-              )
-              .get();
-            if (row?.value === "fresh" || row?.value === "retry") {
-              return row.value;
-            }
-            return null;
-          }),
+        getLastScheduledQueue: wrapDb("getLastScheduledQueue", () => {
+          const metaExists = db
+            .query<{ name: string }, []>(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'alert_inbox_meta' LIMIT 1",
+            )
+            .get();
+          if (!(metaExists !== null)) return null;
+          const row = db
+            .query<{ value: string }, []>(
+              "SELECT value FROM alert_inbox_meta WHERE key = 'last_scheduled_queue' LIMIT 1",
+            )
+            .get();
+          if (row?.value === "fresh" || row?.value === "retry") {
+            return row.value;
+          }
+          return null;
+        }),
 
         setLastScheduledQueue: (queue) =>
           wrapDb("setLastScheduledQueue", () => {
@@ -932,14 +940,18 @@ export const openAlertInboxStore = (
             `).run(queue);
           }),
 
-        listAll: () =>
-          wrapDb("listAll", () =>
-            db
-              .query<ProcessedAlertRecord, []>(
-                `SELECT ${SELECT_COLUMNS} FROM processed_alert ORDER BY processed_at ASC, object_key ASC`,
-              )
-              .all(),
-          ),
+        listAll: wrapDb("listAll", () =>
+          db
+            .query<ProcessedAlertRecord, []>(
+              `SELECT ${SELECT_COLUMNS} FROM processed_alert ORDER BY processed_at ASC, object_key ASC`,
+            )
+            .all(),
+        ),
       }),
     ),
   );
+
+export const openAlertInboxStore: {
+  (readonly?: boolean): (path: string) => ReturnType<typeof openAlertInboxStoreImpl>;
+  (path: string, readonly?: boolean): ReturnType<typeof openAlertInboxStoreImpl>;
+} = Fn.dual((args) => Predicate.isString(args[0]), openAlertInboxStoreImpl);

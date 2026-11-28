@@ -3,23 +3,33 @@
  * the server only through `KvitbitApi`; Better Auth routes under `/api/auth` go through the
  * AuthClient port instead.
  */
+
 import { Api } from "@kvitbit/api-contract";
 import type { WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option, type Redacted } from "effect";
-import {
-  FetchHttpClient,
-  HttpClient,
-  HttpClientError,
-  HttpClientRequest,
-  type HttpClientResponse,
-} from "effect/http";
-import { HttpApiClient } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as HttpApiClient from "effect/http-api/HttpApiClient";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import type * as Redacted from "effect/Redacted";
+
 import { annotateFailedResponse, isUiError } from "./errors";
+
+const STRONG_ETAG = /^"(0|[1-9]\d{0,9})"$/;
 
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
 export class KvitbitApi extends Context.Service<KvitbitApi, KvitbitApiClient>()(
-  "ui-port/KvitbitApi",
+  "@kvitbit/ui-port/api/client/KvitbitApi",
 ) {}
 
 /**
@@ -51,7 +61,7 @@ export interface KvitbitApiConfig {
 }
 
 /** What the last response of a call said, beyond its decoded body (ui-port-contracts 2.3). */
-export interface ObservedResponse {
+interface ObservedResponse {
   readonly status: number;
   readonly requestId: string | null;
   /** Parsed from a strong `ETag: "<revision>"`. */
@@ -71,7 +81,7 @@ export interface ResponseCell {
 }
 
 export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
-  "ui-port/ResponseObserver",
+  "@kvitbit/ui-port/api/client/ResponseObserver",
 ) {}
 
 export const emptyResponseCell = (): ResponseCell => ({ current: null });
@@ -81,19 +91,19 @@ interface ExchangeCell {
   response: ObservedResponse | null;
 }
 
-class Exchange extends Context.Service<Exchange, ExchangeCell>()("ui-port/Exchange") {}
+class Exchange extends Context.Service<Exchange, ExchangeCell>()(
+  "@kvitbit/ui-port/api/client/Exchange",
+) {}
 
 const parseEtag = (value: string | undefined): number | null => {
-  const match = value === undefined ? null : /^"(0|[1-9]\d{0,9})"$/.exec(value);
+  const match = value === undefined ? null : STRONG_ETAG.exec(value);
   return match?.[1] === undefined ? null : Number(match[1]);
 };
 
-export const observeResponse = (
-  response: HttpClientResponse.HttpClientResponse,
-): ObservedResponse => ({
+const observeResponse = (response: HttpClientResponse.HttpClientResponse): ObservedResponse => ({
   status: response.status,
   requestId: response.headers["x-request-id"] ?? null,
-  etag: parseEtag(response.headers.etag),
+  etag: parseEtag(response.headers["etag"]),
   replayed: response.headers["idempotent-replayed"] === "true",
 });
 
@@ -101,11 +111,9 @@ const recordResponse = HttpClient.transformResponse(
   Effect.tap((response: HttpClientResponse.HttpClientResponse) =>
     Effect.serviceOption(Exchange).pipe(
       Effect.flatMap((cell) =>
-        Option.isSome(cell)
-          ? Effect.sync(() => {
-              cell.value.response = observeResponse(response);
-            })
-          : Effect.void,
+        Effect.sync(() => {
+          if (Option.isSome(cell)) cell.value.response = observeResponse(response);
+        }),
       ),
     ),
   ),
@@ -123,7 +131,7 @@ const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effe
     return decoded.pipe(
       Effect.tapError((error) =>
         Effect.sync(() => {
-          if (!isUiError(error) && !HttpClientError.isHttpClientError(error)) {
+          if (!(isUiError(error) || HttpClientError.isHttpClientError(error))) {
             annotateFailedResponse(error, response);
           }
         }),
@@ -135,44 +143,63 @@ const decodingResponse = <A, E, R>(decoded: Effect.Effect<A, E, R>): Effect.Effe
 const publishResponse = (exchange: ExchangeCell) =>
   Effect.serviceOption(ResponseObserver).pipe(
     Effect.flatMap((cell) =>
-      Option.isSome(cell) && exchange.response !== null
-        ? Effect.sync(() => {
-            cell.value.current = exchange.response;
-          })
-        : Effect.void,
+      Effect.sync(() => {
+        if (Option.isSome(cell) && exchange.response !== null) {
+          cell.value.current = exchange.response;
+        }
+      }),
     ),
   );
 
 /** Gives every endpoint call of a client its own exchange cell (groups are nested records). */
-const withExchanges = (client: object): object =>
-  Object.fromEntries(
-    Object.entries(client).map(([name, member]: [string, unknown]) => [
-      name,
-      typeof member === "function"
-        ? (...args: ReadonlyArray<unknown>) => {
-            const call: unknown = member(...args);
-            return Effect.isEffect(call)
-              ? Effect.suspend(() => {
-                  const exchange: ExchangeCell = { response: null };
-                  return Effect.provideService(call, Exchange, exchange).pipe(
-                    Effect.tap(() => publishResponse(exchange)),
-                  );
-                })
-              : call;
-          }
-        : typeof member === "object" && member !== null
-          ? withExchanges(member)
-          : member,
-    ]),
-  );
+const withExchange = <A, E, R>(call: Effect.Effect<A, E, R>) =>
+  Effect.suspend(() => {
+    const exchange: ExchangeCell = { response: null };
+    return Effect.tap(Effect.provideService(call, Exchange, exchange), () =>
+      publishResponse(exchange),
+    );
+  });
+
+type MemberOf<T> = T extends object ? T[keyof T] : never;
+type ClientMember = MemberOf<KvitbitApiClient>;
+type Endpoint = MemberOf<ClientMember>;
+type EndpointCall = ReturnType<Endpoint>;
+
+const wrapEndpoint = (endpoint: Endpoint): Endpoint =>
+  new Proxy(endpoint, {
+    apply(target, receiver, args) {
+      // The proxy forwards a call made through the generated client's endpoint signature.
+      const call: Effect.Effect<unknown, Effect.Error<EndpointCall>> = Reflect.apply(
+        target,
+        receiver,
+        args,
+      );
+      return withExchange(call);
+    },
+  });
+
+const withExchanges = <Client extends Readonly<Record<string, ClientMember | Endpoint>>>(
+  client: Client,
+): Client => ({
+  ...client,
+  ...Rec.fromEntries(
+    Arr.map(
+      Rec.toEntries<string, ClientMember | Endpoint>(client),
+      ([name, member]): readonly [string, ClientMember | Endpoint] => [
+        name,
+        Predicate.isFunction(member) ? wrapEndpoint(member) : withExchanges(member),
+      ],
+    ),
+  ),
+});
 
 /** The request pipeline every KvitbitApi call goes through. */
-export const configureClient =
+const configureClient =
   (config: KvitbitApiConfig) =>
   (client: HttpClient.HttpClient): HttpClient.HttpClient => {
-    const base = (config.transformClient ? config.transformClient(client) : client).pipe(
-      recordResponse,
-    );
+    const base = (
+      config.transformClient === undefined ? client : config.transformClient(client)
+    ).pipe(recordResponse);
     const credentials = config.credentials;
     // FetchHttpClient reads RequestInit from the requesting fiber, so set fetch credentials per
     // request, keeping any options the adapter already set. Bearer mode omits cookies so a
@@ -200,7 +227,7 @@ export const configureClient =
     );
   };
 
-export const make = (
+const make = (
   config: KvitbitApiConfig,
 ): Effect.Effect<KvitbitApiClient, never, HttpClient.HttpClient> =>
   Effect.map(
@@ -210,7 +237,7 @@ export const make = (
       transformResponse: decodingResponse,
     }),
     // same shape, each endpoint call now running in its own exchange
-    (client) => withExchanges(client) as KvitbitApiClient,
+    withExchanges,
   );
 
 /** KvitbitApi over the adapter's `HttpClient` (tests inject a mock transport here). */
@@ -226,8 +253,34 @@ export const layerFetch = (config: KvitbitApiConfig): Layer.Layer<KvitbitApi> =>
  * Workspace binding. Every Workspace endpoint takes `workspaceId` as a path parameter (the contract
  * declares no Workspace header); API calls always use the id, never the slug.
  */
-export const inWorkspace = <P extends object = Record<never, never>>(
+interface WorkspaceParams {
+  readonly workspaceId: WorkspaceId;
+}
+
+function workspaceParams(workspaceId: WorkspaceId): WorkspaceParams;
+function workspaceParams<P extends object>(
+  workspaceId: WorkspaceId,
+  params: P,
+): P & WorkspaceParams;
+function workspaceParams<P extends object>(
+  workspaceId: WorkspaceId,
+  params: P | undefined,
+): Partial<P> & WorkspaceParams;
+function workspaceParams<P extends object>(
   workspaceId: WorkspaceId,
   params?: P,
-): P & { readonly workspaceId: WorkspaceId } =>
-  ({ ...(params ?? {}), workspaceId }) as P & { readonly workspaceId: WorkspaceId };
+): Partial<P> & WorkspaceParams {
+  const extra: Partial<P> = params ?? {};
+  return { ...extra, workspaceId };
+}
+
+export const inWorkspace: {
+  (params?: undefined): (workspaceId: WorkspaceId) => WorkspaceParams;
+  (workspaceId: WorkspaceId, params?: undefined): WorkspaceParams;
+  <P extends object>(params: P): (workspaceId: WorkspaceId) => P & WorkspaceParams;
+  <P extends object>(workspaceId: WorkspaceId, params: P): P & WorkspaceParams;
+  <P extends object>(
+    params: P | undefined,
+  ): (workspaceId: WorkspaceId) => Partial<P> & WorkspaceParams;
+  <P extends object>(workspaceId: WorkspaceId, params: P | undefined): Partial<P> & WorkspaceParams;
+} = Fn.dual((args) => Predicate.isString(args[0]), workspaceParams);

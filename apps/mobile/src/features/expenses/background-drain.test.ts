@@ -1,8 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import type { ExpenseId, WorkspaceSummary } from "@kvitbit/domain/contract";
-import { WorkspaceSummary as WorkspaceSummarySchema } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
-import configFactory from "../../../app.config";
+import {
+  ExpenseId,
+  type WorkspaceSummary,
+  WorkspaceSummary as WorkspaceSummarySchema,
+} from "@kvitbit/domain/contract";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { buildAppConfig } from "../../../app.config";
 import {
   BACKGROUND_CAPTURE_DRAIN_TASK,
   BACKGROUND_DRAIN_MIN_INTERVAL_MINUTES,
@@ -13,12 +19,12 @@ import {
 import * as webBackgroundDrain from "../../platform/capture/background-drain.web";
 import type { CaptureStorage } from "../../platform/capture/capture-storage-port";
 import { done } from "../../platform/transfer/http";
-import type { ApiRunner } from "../../runtime/api-runtime";
+import { type ApiRunner, credentialsFor, makeApiRunner } from "../../runtime/api-runtime";
 import { runBackgroundCaptureDrain } from "./background-drain";
 import { type CaptureFields, makeCaptureQueue } from "./capture-queue";
 import { readReceipt } from "./receipt-file";
 
-const writableWorkspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSummarySchema)({
+const writableWorkspace: WorkspaceSummary = Schema.decodeEffect(WorkspaceSummarySchema)({
   id: "01937c7a-0000-7000-8000-000000000001",
   slug: "acme",
   role: "member",
@@ -26,8 +32,8 @@ const writableWorkspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSu
   name: "Acme",
   memberCount: 2,
   taxRegime: "vat_payer",
-});
-const accountantWorkspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSummarySchema)({
+}).pipe(Effect.runSync);
+const accountantWorkspace: WorkspaceSummary = Schema.decodeEffect(WorkspaceSummarySchema)({
   id: "01937c7a-0000-7000-8000-000000000002",
   slug: "readonly",
   role: "accountant",
@@ -35,8 +41,8 @@ const accountantWorkspace: WorkspaceSummary = Schema.decodeUnknownSync(Workspace
   name: "Readonly",
   memberCount: 2,
   taxRegime: "vat_payer",
-});
-const closedWorkspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSummarySchema)({
+}).pipe(Effect.runSync);
+const closedWorkspace: WorkspaceSummary = Schema.decodeEffect(WorkspaceSummarySchema)({
   id: "01937c7a-0000-7000-8000-000000000003",
   slug: "closed-co",
   role: "owner",
@@ -44,9 +50,9 @@ const closedWorkspace: WorkspaceSummary = Schema.decodeUnknownSync(WorkspaceSumm
   name: "Closed Co",
   memberCount: 1,
   taxRegime: "vat_payer",
-});
+}).pipe(Effect.runSync);
 
-const expenseId = "01937c7a-0000-7000-8000-000000000101" as ExpenseId;
+const expenseId = ExpenseId.make("01937c7a-0000-7000-8000-000000000101");
 const fields: CaptureFields = { supplierName: "Shop", total: "100", currency: "CZK", note: "" };
 const sampleBytes = Uint8Array.of(37, 80, 68, 70, 45, 49, 46, 52);
 
@@ -57,40 +63,47 @@ function makeQueueFixture() {
   const locks = new Map<string, Promise<unknown>>();
   const storage: CaptureStorage = {
     load: async (key) => journal.get(key) ?? null,
-    save: async (key, value, previous) => {
-      expect(journal.get(key) ?? "[]").toBe(previous);
-      journal.set(key, value);
-    },
-    lock: async (key, work) => {
-      const prev = locks.get(key);
-      const next = Promise.resolve(prev)
+    save: (key, value, previous) =>
+      Effect.sync(() => {
+        if ((journal.get(key) ?? "[]") !== previous) {
+          throw new Error("Compare-and-set used an outdated journal value");
+        }
+        journal.set(key, value);
+      }).pipe(Effect.runPromise),
+    lock: (key, work) => {
+      const previous = locks.get(key);
+      const next = Promise.resolve(previous)
         .catch(() => undefined)
         .then(work);
       locks.set(key, next);
       const clear = () => {
         if (locks.get(key) === next) locks.delete(key);
       };
-      void next.then(clear, clear);
+      next.then(clear, clear);
       return next;
     },
   };
   const queue = makeCaptureQueue({
     storage,
-    key: async () => `01937c7a-0000-7000-8000-${String(++nextKey).padStart(12, "0")}`,
+    key: async () => `01937c7a-0000-7000-8000-${Str.padStart(12, "0")(String(++nextKey))}`,
     read: (file) =>
-      readReceipt(file, async (ref) => {
-        const found = bytes.get(ref);
-        if (found === undefined) throw new Error("Missing receipt bytes");
-        return found.slice();
-      }),
-    saveBytes: async (key, _name, data) => {
-      const ref = `saved:${key}`;
-      bytes.set(ref, data.slice());
-      return ref;
-    },
-    removeBytes: async (ref) => {
-      bytes.delete(ref);
-    },
+      readReceipt(file, (ref) =>
+        Effect.sync(() => {
+          const found = bytes.get(ref);
+          if (found === undefined) throw new Error("Missing receipt bytes");
+          return found.slice();
+        }).pipe(Effect.runPromise),
+      ),
+    saveBytes: (key, _name, data) =>
+      Effect.sync(() => {
+        const ref = `saved:${key}`;
+        bytes.set(ref, data.slice());
+        return ref;
+      }).pipe(Effect.runPromise),
+    removeBytes: (ref) =>
+      Effect.sync(() => {
+        bytes.delete(ref);
+      }).pipe(Effect.runPromise),
   });
   return { queue, bytes };
 }
@@ -99,41 +112,29 @@ function makeFakeApi(
   workspaces: readonly WorkspaceSummary[],
   onRecord: (workspaceId: string, key: string) => Promise<ExpenseId> | ExpenseId,
 ): ApiRunner & { readonly dispose: () => Promise<void> } {
-  let disposed = false;
-  return {
-    origin: "https://kvitbit.cz",
-    credentials: { _tag: "Bearer", token: "tok" },
-    run: async (call) => {
-      expect(disposed).toBe(false);
-      const fakeClient = {
-        myWorkspaces: {
-          listMine: () => ({ _fake: "listMine" }),
-        },
-        expenses: {
-          record: (args: {
-            params: { workspaceId: string };
-            headers: { "idempotency-key": string };
-          }) => ({ _fake: "record", args }),
-        },
-      };
-      const op = call(fakeClient as never) as unknown as
-        | { _fake: "listMine" }
-        | {
-            _fake: "record";
-            args: { params: { workspaceId: string }; headers: { "idempotency-key": string } };
-          };
-      if (op._fake === "listMine") {
-        return { _tag: "Ok", value: workspaces as never, meta: { etag: null, replayed: false } };
-      }
-      const id = await onRecord(op.args.params.workspaceId, op.args.headers["idempotency-key"]);
-      return {
-        _tag: "Ok",
-        value: { id, revision: 1, status: "incomplete", currency: "CZK" } as never,
-        meta: { etag: 1, replayed: false },
-      };
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const pathname = new URL(request.url).pathname;
+      if (pathname === "/api/v1/workspaces") return Response.json(workspaces);
+      const workspaceId = Str.split("/")(pathname)[4];
+      const key = request.headers.get("idempotency-key");
+      if (workspaceId === undefined || key === null) return new Response(null, { status: 400 });
+      const id = await onRecord(workspaceId, key);
+      return Response.json(
+        { id, revision: 1, status: "incomplete", currency: "CZK" },
+        { status: 201 },
+      );
     },
+  });
+  server.unref();
+  const runner = makeApiRunner(server.url.origin, credentialsFor("tok"), () => "en");
+  return {
+    ...runner,
     dispose: async () => {
-      disposed = true;
+      await runner.dispose();
+      server.stop(true);
     },
   };
 }
@@ -195,28 +196,30 @@ describe("headless Android background capture drain", () => {
       usesBearer: true,
       readToken: async () => "bearer-user-1",
       isOnline: async () => true,
-      authFetch: (_origin, getToken) => async (path) => {
-        expect(path).toBe("/get-session");
-        expect(getToken()).toBe("bearer-user-1");
-        return {
-          status: 200,
-          ok: true,
-          token: null,
-          body: {
-            user: { id: "user-1", email: "u1@example.com", name: "U1", emailVerified: true },
-          },
-        };
-      },
+      authFetch: (_origin, getToken) => (path) =>
+        Effect.sync(() => {
+          expect(path).toBe("/get-session");
+          expect(getToken()).toBe("bearer-user-1");
+          return {
+            status: 200,
+            ok: true,
+            token: null,
+            body: {
+              user: { id: "user-1", email: "u1@example.com", name: "U1", emailVerified: true },
+            },
+          };
+        }).pipe(Effect.runPromise),
       createApi: () =>
         makeFakeApi([writableWorkspace, accountantWorkspace, closedWorkspace], (wsId) => {
           recordedWorkspaces.push(wsId);
           return expenseId;
         }),
       createTransfer: () => ({
-        upload: async (req) => {
-          uploadedPaths.push(req.path);
-          return done({});
-        },
+        upload: (req) =>
+          Effect.sync(() => {
+            uploadedPaths.push(req.path);
+            return done({});
+          }).pipe(Effect.runPromise),
       }),
       queue,
     });
@@ -280,10 +283,11 @@ describe("headless Android background capture drain", () => {
           return expenseId;
         }),
       createTransfer: () => ({
-        upload: async () => {
-          uploads += 1;
-          return done({});
-        },
+        upload: () =>
+          Effect.sync(() => {
+            uploads += 1;
+            return done({});
+          }).pipe(Effect.runPromise),
       }),
       queue,
     });
@@ -328,14 +332,8 @@ describe("headless Android background capture drain", () => {
     let activeRecords = 0;
     let maxConcurrentRecords = 0;
     let totalRecords = 0;
-    let releaseFirstRecord!: () => void;
-    const firstRecordStarted = new Promise<void>((resolve) => {
-      releaseFirstRecord = resolve;
-    });
-    let allowFinishRecord!: () => void;
-    const waitToFinishRecord = new Promise<void>((resolve) => {
-      allowFinishRecord = resolve;
-    });
+    const firstRecordStarted = Deferred.makeUnsafe<void>();
+    const waitToFinishRecord = Deferred.makeUnsafe<void>();
 
     const foreground = queue.drain(
       { scope, canWrite: () => true },
@@ -344,8 +342,8 @@ describe("headless Android background capture drain", () => {
           totalRecords += 1;
           activeRecords += 1;
           maxConcurrentRecords = Math.max(maxConcurrentRecords, activeRecords);
-          releaseFirstRecord();
-          await waitToFinishRecord;
+          Deferred.succeed(firstRecordStarted, undefined).pipe(Effect.runSync);
+          await Deferred.await(waitToFinishRecord).pipe(Effect.runPromise);
           activeRecords -= 1;
           return done(expenseId);
         },
@@ -354,7 +352,7 @@ describe("headless Android background capture drain", () => {
       { reconnect: true, signedIn: true },
     );
 
-    await firstRecordStarted;
+    await Deferred.await(firstRecordStarted).pipe(Effect.runPromise);
 
     const background = runBackgroundCaptureDrain({
       origin: "https://kvitbit.cz",
@@ -379,7 +377,7 @@ describe("headless Android background capture drain", () => {
       queue,
     });
 
-    allowFinishRecord();
+    Deferred.succeed(waitToFinishRecord, undefined).pipe(Effect.runSync);
     const [fgResult, bgResult] = await Promise.all([foreground, background]);
 
     expect(maxConcurrentRecords).toBe(1);
@@ -390,10 +388,11 @@ describe("headless Android background capture drain", () => {
 
   test("short-circuits when signed out or offline without API calls", async () => {
     let authCalls = 0;
-    const authFetch = () => async () => {
-      authCalls += 1;
-      return { status: 200, ok: true, token: null, body: null };
-    };
+    const authFetch = () => () =>
+      Effect.sync(() => {
+        authCalls += 1;
+        return { status: 200, ok: true, token: null, body: null };
+      }).pipe(Effect.runPromise);
 
     expect(
       await runBackgroundCaptureDrain({
@@ -427,12 +426,14 @@ describe("Android WorkManager background task registration and web fallback", ()
       availableStatus: 2,
       isTaskDefined: (name) => name === BACKGROUND_CAPTURE_DRAIN_TASK,
       isTaskRegisteredAsync: async (name) => registered.has(name),
-      registerTaskAsync: async (name, options) => {
-        registered.set(name, options);
-      },
-      unregisterTaskAsync: async (name) => {
-        registered.delete(name);
-      },
+      registerTaskAsync: (name, options) =>
+        Effect.sync(() => {
+          registered.set(name, options);
+        }).pipe(Effect.runPromise),
+      unregisterTaskAsync: (name) =>
+        Effect.sync(() => {
+          registered.delete(name);
+        }).pipe(Effect.runPromise),
     };
 
     expect(await registerBackgroundCaptureDrain(bridge)).toBe(true);
@@ -451,15 +452,15 @@ describe("Android WorkManager background task registration and web fallback", ()
   });
 
   test("app.config.ts includes expo-background-task plugin", () => {
-    const resolved = configFactory(
-      {
+    const resolved = buildAppConfig({
+      context: {
         config: { name: "Kvitbit", slug: "kvitbit", version: "0.1.0", plugins: [] },
         projectRoot: "/tmp",
         staticConfigPath: null,
         packageJsonPath: null,
       },
-      {},
-    );
+      env: {},
+    });
     expect(resolved.plugins).toContain("expo-background-task");
   });
 });

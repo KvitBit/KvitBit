@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { Html, HtmlServer } from "@effect/ui/html";
-import type { ViewModels } from "@kvitbit/ui-port";
-import { Effect } from "effect";
+import { IsoDate } from "@kvitbit/domain";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+
 import * as Reports from "../../src/page/records/reports";
-import { periodToRange, type ReportDataRecord } from "../../src/page/records/shared";
+import { periodOptions, periodToRange, type ReportDataRecord } from "../../src/page/records/shared";
 import { ctxFor, DEMO_WORKSPACES, renderPath, signedIn, WS } from "../support";
+
+const dataSlotBarPattern =
+  /data-slot="bar-chart-label"[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/;
 
 const SAMPLE_REVENUE: ReportDataRecord = {
   report: "revenue",
@@ -61,18 +66,42 @@ const SAMPLE_VAT: ReportDataRecord = {
 
 describe("Reports Suite page TEA", () => {
   test("periodToRange converts year, quarter, and month periods accurately", () => {
-    expect(periodToRange("2026" as ViewModels.Period)).toEqual({
-      from: "2026-01-01" as never,
-      to: "2026-12-31" as never,
+    expect(periodToRange("2026")).toEqual({
+      from: IsoDate.make("2026-01-01"),
+      to: IsoDate.make("2026-12-31"),
     });
-    expect(periodToRange("2026-Q2" as ViewModels.Period)).toEqual({
-      from: "2026-04-01" as never,
-      to: "2026-06-30" as never,
+    expect(periodToRange("2026-Q2")).toEqual({
+      from: IsoDate.make("2026-04-01"),
+      to: IsoDate.make("2026-06-30"),
     });
-    expect(periodToRange("2024-02" as ViewModels.Period)).toEqual({
-      from: "2024-02-01" as never,
-      to: "2024-02-29" as never,
+    expect(periodToRange("2024-02")).toEqual({
+      from: IsoDate.make("2024-02-01"),
+      to: IsoDate.make("2024-02-29"),
     });
+    expect(periodToRange("0999-01")).toEqual({
+      from: IsoDate.make("0999-01-01"),
+      to: IsoDate.make("0999-01-31"),
+    });
+    expect(periodToRange("0000-02")).toEqual({
+      from: IsoDate.make("0000-02-01"),
+      to: IsoDate.make("0000-02-29"),
+    });
+  });
+
+  test("renders early-year report links with four-digit selector options", async () => {
+    const [year, month] = await Promise.all([
+      renderPath(`/w/${WS}/reports/revenue?period=1000`, { locale: "en" }),
+      renderPath(`/w/${WS}/reports/revenue?period=0999-01`, { locale: "en" }),
+    ]);
+    expect(year.html).toContain('value="0999"');
+    expect(month.html).toContain('value="0999-01"');
+    expect(Arr.map(periodOptions("0000", "en"), (option) => option.value)).toEqual([
+      "0000",
+      "0000-Q4",
+      "0000-Q3",
+      "0000-Q2",
+      "0000-Q1",
+    ]);
   });
 
   test("groupBy switch bumps seq and drops stale responses", () => {
@@ -80,9 +109,9 @@ describe("Reports Suite page TEA", () => {
       _tag: "Reports",
       ws: WS,
       report: "revenue",
-      period: "2026" as ViewModels.Period,
+      period: "2026",
     };
-    const ctx = ctxFor(route, { locale: "cs" });
+    const ctx = ctxFor({ route, locale: "cs" });
     let { model } = Reports.init(route, ctx);
     expect(model.data._tag).toBe("Loading");
 
@@ -117,9 +146,9 @@ describe("Reports Suite page TEA", () => {
       _tag: "Reports",
       ws: WS,
       report: "cashflow",
-      period: "2026" as ViewModels.Period,
+      period: "2026",
     };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Reports.init(route, ctx);
     const next = Reports.update(model, Reports.Message.ChangedPeriod({ period: "2026-Q4" }), ctx);
     expect(next.outMessage).toEqual({
@@ -134,9 +163,9 @@ describe("Reports Suite page TEA", () => {
       _tag: "Reports",
       ws: WS,
       report: "vat_summary",
-      period: "2026-Q4" as ViewModels.Period,
+      period: "2026-Q4",
     };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     let { model } = Reports.init(route, ctx);
     model = Reports.update(
       model,
@@ -171,9 +200,9 @@ describe("Reports Suite page TEA", () => {
       _tag: "Reports",
       ws: WS,
       report: "revenue",
-      period: "2026" as ViewModels.Period,
+      period: "2026",
     };
-    const ctx = ctxFor(route, { locale: "en" });
+    const ctx = ctxFor({ route, locale: "en" });
     const { model } = Reports.init(route, ctx);
     const grouped = Reports.update(
       model,
@@ -187,7 +216,7 @@ describe("Reports Suite page TEA", () => {
         report: {
           ...SAMPLE_REVENUE,
           groupBy: "contact",
-          rows: SAMPLE_REVENUE.rows.map((row) => ({ ...row, key: "contact-1", label })),
+          rows: Arr.map(SAMPLE_REVENUE.rows, (row) => ({ ...row, key: "contact-1", label })),
         },
       }),
       ctx,
@@ -199,12 +228,10 @@ describe("Reports Suite page TEA", () => {
     }).make({
       init: () => loaded.model,
       update: ($) => $.model,
-      view: (h, model) => Reports.view(model, ctx, h),
+      view: (h, current) => Reports.view(current, ctx, h),
     });
     const { html } = await Effect.runPromise(HtmlServer.renderToHtml(report, {}));
-    expect(html).toMatch(
-      /data-slot="bar-chart-label"[^>]*>&lt;contact-label[^>]*A &amp; B&lt;\/contact-label&gt;<\/span>/,
-    );
+    expect(html).toMatch(dataSlotBarPattern);
     expect(html).toContain(
       'title="&lt;contact-label class=&quot;vip&quot;&gt;A &amp; B&lt;/contact-label&gt;: 242000"',
     );
@@ -213,8 +240,10 @@ describe("Reports Suite page TEA", () => {
 
   test("SSR renders all report tabs in cs and en including non-VAT payer workspace", async () => {
     const tabs = ["revenue", "expenses", "cashflow", "receivables", "vat-summary"] as const;
-    for (const tab of tabs) {
-      const res = await renderPath(`/w/${WS}/reports/${tab}?period=2026`, { locale: "cs" });
+    const reports = await Promise.all(
+      Arr.map(tabs, (tab) => renderPath(`/w/${WS}/reports/${tab}?period=2026`, { locale: "cs" })),
+    );
+    for (const res of reports) {
       expect(res.title).toContain("Přehledy");
       expect(res.html).toContain('data-slot="tabs"');
     }

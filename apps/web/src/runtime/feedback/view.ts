@@ -1,3 +1,5 @@
+import * as EffectRecord from "effect/Record";
+
 import css from "./feedback-overlay.css?inline";
 
 const create = <K extends keyof HTMLElementTagNameMap>(
@@ -6,7 +8,7 @@ const create = <K extends keyof HTMLElementTagNameMap>(
   ...children: ReadonlyArray<Node | string>
 ): HTMLElementTagNameMap[K] => {
   const element = document.createElement(tag);
-  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+  for (const [name, value] of EffectRecord.toEntries(attributes)) element.setAttribute(name, value);
   element.append(...children);
   return element;
 };

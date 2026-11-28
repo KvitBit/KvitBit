@@ -1,41 +1,74 @@
 /** `DocumentsRepo` over `documents`, `document_lines`, and `document_relations`. */
-import { DocumentsRepo } from "@kvitbit/core";
-import type {
+
+import { DocumentsModule, DocumentsRepo } from "@kvitbit/core";
+import { StoreUnavailable } from "@kvitbit/core/ports";
+import {
   ContactId,
   CurrencyCode,
   DocumentId,
   DocumentKind,
-  DocumentRelation,
+  type DocumentRelation,
   DocumentSettlement,
   DocumentStatus,
   IsoDate,
   LineId,
   Locale,
+  NotFound,
   NumberingSeriesId,
   PaymentMethod,
   PriceListItemId,
   ScheduleId,
   VatTreatment,
-  WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { NotFound } from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
-import type { Fragment } from "effect/sql/Statement";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as Statement from "effect/sql/Statement";
 import {
-  decodeVatBreakdown,
+  decodeStored,
+  decodeWorkspaceId,
+  encodeJson,
   encodeVatBreakdown,
   formatDecimal,
   formatNullableDecimal,
   parseDecimal,
   parseJson,
   parseNullableDecimal,
+  StoredUuid,
   toJsonb,
   toPgDate,
+  VatBreakdownJson,
 } from "../codec";
 import { writeErrors } from "../errors";
-import { col, type DbRow, makeTable, type TableSpec } from "../table";
+import { col, type DbRow, type DbValue, makeTable, type TableSpec } from "../table";
 import { selectReportRows } from "./reportArchivePages";
+
+const readNullablePriceListItemId = decodeStored(Schema.NullOr(PriceListItemId));
+const readNullableText = decodeStored(Schema.NullOr(Schema.String));
+const readNullableVatTreatment = decodeStored(Schema.NullOr(VatTreatment));
+const readNullableDocumentId = decodeStored(Schema.NullOr(DocumentId));
+const readNullableIsoDate = decodeStored(Schema.NullOr(IsoDate));
+const readNullableNumberingSeriesId = decodeStored(Schema.NullOr(NumberingSeriesId));
+const readNullableScheduleId = decodeStored(Schema.NullOr(ScheduleId));
+const readText = decodeStored(Schema.String);
+const readLineUuid = decodeStored(StoredUuid);
+const readVatTreatment = decodeStored(VatTreatment);
+const readDocumentId = decodeStored(DocumentId);
+const readFxSource = decodeStored(Schema.Literals(["cnb", "manual"]));
+const readDocumentKind = decodeStored(DocumentKind);
+const readDocumentStatus = decodeStored(DocumentStatus);
+const readContactId = decodeStored(ContactId);
+const readCurrencyCode = decodeStored(CurrencyCode);
+const readLocale = decodeStored(Locale);
+const readPaymentMethod = decodeStored(PaymentMethod);
+const readIsoDate = decodeStored(IsoDate);
+const readPaymentRounding = decodeStored(Schema.Literals(["none", "whole_unit"]));
+const readRemindersChoice = decodeStored(Schema.Literals(["on", "off", "inherit"]));
+const readDocumentSettlement = decodeStored(DocumentSettlement);
 
 type DocumentRecord = Effect.Success<ReturnType<DocumentsRepo["Service"]["get"]>>;
 type LineRecord = DocumentRecord["lines"][number];
@@ -43,27 +76,42 @@ type LinkRecord = DocumentRecord["links"][number];
 
 const isOverdueRow = (row: DocumentRecord, today: string): boolean =>
   (row.kind === "invoice" ||
-    (row.kind === "proforma" && !row.links.some((l) => l.relation === "final_invoice_for"))) &&
+    (row.kind === "proforma" && !Arr.some(row.links, (l) => l.relation === "final_invoice_for"))) &&
   row.status === "issued" &&
   (row.settlement === "unpaid" || row.settlement === "partially_paid") &&
   row.dueOn < today;
 
-const decodeItemPrice = (raw: unknown): LineRecord["itemPrice"] => {
-  if (raw === null || raw === undefined) return null;
-  const parsed = parseJson<{ readonly currency: CurrencyCode; readonly net: string }>(raw);
+const readItemPrice = parseJson(Schema.Struct({ currency: CurrencyCode, net: Schema.String }));
+const readFxOverride = parseJson(
+  Schema.Struct({ manual: Schema.Struct({ rate: Schema.String, quantity: Schema.Finite }) }),
+);
+// Document updates write the snapshots back, so validate without dropping stored fields.
+const {
+  contact: ContactSnapshot,
+  issuer: IssuerSnapshot,
+  given: Given,
+} = DocumentsModule.DocumentRecord.fields;
+const readContact = parseJson(
+  Schema.Unknown.pipe(Schema.refine(Schema.is(Schema.NullOr(ContactSnapshot)))),
+);
+const readIssuer = parseJson(
+  Schema.Unknown.pipe(Schema.refine(Schema.is(Schema.NullOr(IssuerSnapshot)))),
+);
+const readGiven = parseJson(Schema.Unknown.pipe(Schema.refine(Schema.is(Given))));
+const readVatBreakdown = parseJson(VatBreakdownJson);
+
+const decodeItemPrice = (raw: DbValue): LineRecord["itemPrice"] => {
+  if (Predicate.isNullish(raw)) return null;
+  const parsed = readItemPrice(raw);
   return { currency: parsed.currency, net: parseDecimal(parsed.net) };
 };
 
 const encodeItemPrice = (value: LineRecord["itemPrice"]): string | null =>
-  value === null
-    ? null
-    : JSON.stringify({ currency: value.currency, net: formatDecimal(value.net) });
+  value === null ? null : encodeJson({ currency: value.currency, net: formatDecimal(value.net) });
 
-const decodeFxOverride = (raw: unknown): DocumentRecord["fxOverride"] => {
-  if (raw === null || raw === undefined) return null;
-  const parsed = parseJson<{
-    readonly manual: { readonly rate: string; readonly quantity: number };
-  }>(raw);
+const decodeFxOverride = (raw: DbValue): DocumentRecord["fxOverride"] => {
+  if (Predicate.isNullish(raw)) return null;
+  const parsed = readFxOverride(raw);
   return {
     manual: { rate: parseDecimal(parsed.manual.rate), quantity: Number(parsed.manual.quantity) },
   };
@@ -72,7 +120,7 @@ const decodeFxOverride = (raw: unknown): DocumentRecord["fxOverride"] => {
 const encodeFxOverride = (value: DocumentRecord["fxOverride"]): string | null =>
   value === null
     ? null
-    : JSON.stringify({
+    : encodeJson({
         manual: { rate: formatDecimal(value.manual.rate), quantity: value.manual.quantity },
       });
 
@@ -83,60 +131,62 @@ const spec: TableSpec<DocumentRecord> = {
   constraints: {
     documents_number_unique: "documents_number_per_kind",
   },
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "kind",
-    "status",
-    "locked",
-    col.instant("locked_at"),
-    "number",
-    "series_id",
-    "contact_id",
-    "contact_snapshot",
-    "issuer_snapshot",
-    "given",
-    "currency",
-    "language",
-    "payment_method",
-    "note",
-    col.date("issued_on"),
-    col.date("taxable_supply_on"),
-    col.date("due_on"),
-    "prices_include_vat",
-    "variable_symbol",
-    "order_number",
-    "vat_breakdown",
-    col.numeric("fx_rate"),
-    "fx_quantity",
-    col.date("fx_fixing_date"),
-    "fx_source",
-    "fx_override",
-    "tax_document",
-    "payment_rounding",
-    "reminders_choice",
-    "reminders_on",
-    col.numeric("paid_amount"),
-    "payments",
-    "settlement",
-    "schedule_id",
-    col.date("occurrence"),
-    col.date("cancelled_on"),
-    "corrected_number",
-    "correction_reason",
-    "cancellation_reason",
-    col.instant("created_at"),
-    col.instant("updated_at"),
-    col.instant("issued_at"),
-  ].join(", "),
-  decode: (rows) =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      const ids = rows.map((r) => r.id as string);
-      const workspaceId = rows[0]?.workspace_id as string;
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "kind",
+      "status",
+      "locked",
+      col.instant("locked_at"),
+      "number",
+      "series_id",
+      "contact_id",
+      "contact_snapshot",
+      "issuer_snapshot",
+      "given",
+      "currency",
+      "language",
+      "payment_method",
+      "note",
+      col.date("issued_on"),
+      col.date("taxable_supply_on"),
+      col.date("due_on"),
+      "prices_include_vat",
+      "variable_symbol",
+      "order_number",
+      "vat_breakdown",
+      col.numeric("fx_rate"),
+      "fx_quantity",
+      col.date("fx_fixing_date"),
+      "fx_source",
+      "fx_override",
+      "tax_document",
+      "payment_rounding",
+      "reminders_choice",
+      "reminders_on",
+      col.numeric("paid_amount"),
+      "payments",
+      "settlement",
+      "schedule_id",
+      col.date("occurrence"),
+      col.date("cancelled_on"),
+      "corrected_number",
+      "correction_reason",
+      "cancellation_reason",
+      col.instant("created_at"),
+      col.instant("updated_at"),
+      col.instant("issued_at"),
+    ],
+    ", ",
+  ),
+  decode: Effect.fn("decode")(function* (rows) {
+    const sql = yield* SqlClient.SqlClient;
+    const ids = Arr.map(rows, (r) => readText(r["id"]));
+    const workspaceId = decodeWorkspaceId(rows[0]?.["workspace_id"]);
 
-      const lineRows = yield* sql<DbRow>`
+    const lineRows = yield* sql<DbRow>`
         select
           id, document_id, position, price_list_item_id, description,
           quantity::text as quantity, unit, unit_price::text as unit_price,
@@ -149,115 +199,130 @@ const spec: TableSpec<DocumentRecord> = {
         order by position asc
       `;
 
-      const relRows = yield* sql<{
-        readonly from_document_id: string;
-        readonly to_document_id: DocumentId;
-        readonly relation: DocumentRelation;
-      }>`
+    const relRows = yield* sql<{
+      readonly from_document_id: string;
+      readonly to_document_id: DocumentId;
+      readonly relation: DocumentRelation;
+    }>`
         select from_document_id, to_document_id, relation
         from document_relations
         where workspace_id = ${workspaceId} and from_document_id in ${sql.in(ids)}
         order by created_at asc, to_document_id asc
       `;
 
-      const linesByDoc = new Map<string, LineRecord[]>();
-      for (const lr of lineRows) {
-        const docId = lr.document_id as string;
-        let list = linesByDoc.get(docId);
-        if (list === undefined) {
-          list = [];
-          linesByDoc.set(docId, list);
-        }
-        list.push({
-          id: lr.id as LineId,
-          item: (lr.price_list_item_id as PriceListItemId | null) ?? null,
-          description: lr.description as string,
-          quantity: parseDecimal(lr.quantity),
-          unit: (lr.unit as string | null) ?? null,
-          unitPrice: parseDecimal(lr.unit_price),
-          itemPrice: decodeItemPrice(lr.item_price),
-          vat: (lr.given_vat as VatTreatment | null) ?? null,
-          itemVat: (lr.item_vat as VatTreatment | null) ?? null,
-          treatment: lr.vat as VatTreatment,
-          ratePercent: parseDecimal(lr.rate_percent),
-          amount: parseDecimal(lr.amount),
-          deducts: (lr.deducts_document_id as DocumentId | null) ?? null,
-          deductedVat: parseNullableDecimal(lr.deducted_vat),
-          deductedVatCzk: parseNullableDecimal(lr.deducted_vat_czk),
+    const linesByDoc = new Map<string, LineRecord[]>();
+    for (const lr of lineRows) {
+      const docId = readText(lr["document_id"]);
+      let list = linesByDoc.get(docId);
+      if (list === undefined) {
+        list = [];
+        linesByDoc.set(docId, list);
+      }
+      list.push({
+        id: LineId.make(readLineUuid(lr["id"]), { disableChecks: true }),
+        item: readNullablePriceListItemId(lr["price_list_item_id"] ?? null),
+        description: readText(lr["description"]),
+        quantity: parseDecimal(lr["quantity"]),
+        unit: readNullableText(lr["unit"] ?? null),
+        unitPrice: parseDecimal(lr["unit_price"]),
+        itemPrice: decodeItemPrice(lr["item_price"]),
+        vat: readNullableVatTreatment(lr["given_vat"] ?? null),
+        itemVat: readNullableVatTreatment(lr["item_vat"] ?? null),
+        treatment: readVatTreatment(lr["vat"]),
+        ratePercent: parseDecimal(lr["rate_percent"]),
+        amount: parseDecimal(lr["amount"]),
+        deducts: readNullableDocumentId(lr["deducts_document_id"] ?? null),
+        deductedVat: parseNullableDecimal(lr["deducted_vat"]),
+        deductedVatCzk: parseNullableDecimal(lr["deducted_vat_czk"]),
+      });
+    }
+
+    const linksByDoc = new Map<string, LinkRecord[]>();
+    for (const rr of relRows) {
+      let list = linksByDoc.get(rr.from_document_id);
+      if (list === undefined) {
+        list = [];
+        linksByDoc.set(rr.from_document_id, list);
+      }
+      list.push({ relation: rr.relation, id: rr.to_document_id });
+    }
+
+    const decoded: DocumentRecord[] = [];
+    for (const row of rows) {
+      const docId = readDocumentId(row["id"]);
+      const contact = readContact(row["contact_snapshot"] ?? null);
+      const issuer = readIssuer(row["issuer_snapshot"] ?? null);
+      if (contact === null || issuer === null) {
+        // Current contact or issuer data cannot replace a missing historical snapshot.
+        return yield* StoreUnavailable.make({
+          cause: new Error(`Document ${docId} has a missing contact or issuer snapshot`),
         });
       }
-
-      const linksByDoc = new Map<string, LinkRecord[]>();
-      for (const rr of relRows) {
-        let list = linksByDoc.get(rr.from_document_id);
-        if (list === undefined) {
-          list = [];
-          linksByDoc.set(rr.from_document_id, list);
-        }
-        list.push({ relation: rr.relation, id: rr.to_document_id });
-      }
-
-      return rows.map((row): DocumentRecord => {
-        const docId = row.id as DocumentId;
-        const fx =
-          row.fx_rate != null && row.fx_quantity != null && row.fx_source != null
-            ? {
-                rate: parseDecimal(row.fx_rate),
-                quantity: Number(row.fx_quantity),
-                fixingDate: (row.fx_fixing_date as IsoDate | null) ?? null,
-                source: row.fx_source as "cnb" | "manual",
-              }
-            : null;
-        return {
-          id: docId,
-          workspaceId: row.workspace_id as WorkspaceId,
-          revision: Number(row.revision),
-          kind: row.kind as DocumentKind,
-          status: row.status as DocumentStatus,
-          locked: Boolean(row.locked),
-          lockedAt: (row.locked_at as string | null) ?? null,
-          number: (row.number as string | null) ?? null,
-          seriesId: (row.series_id as NumberingSeriesId | null) ?? null,
-          contactId: row.contact_id as ContactId,
-          contact: parseJson<DocumentRecord["contact"]>(row.contact_snapshot),
-          issuer: parseJson<DocumentRecord["issuer"]>(row.issuer_snapshot),
-          given: parseJson<DocumentRecord["given"]>(row.given),
-          currency: row.currency as CurrencyCode,
-          language: row.language as Locale,
-          paymentMethod: row.payment_method as PaymentMethod,
-          note: (row.note as string | null) ?? null,
-          issuedOn: row.issued_on as IsoDate,
-          taxableSupplyOn: (row.taxable_supply_on as IsoDate | null) ?? null,
-          dueOn: row.due_on as IsoDate,
-          pricesIncludeVat: Boolean(row.prices_include_vat),
-          variableSymbol: (row.variable_symbol as string | null) ?? null,
-          orderNumber: (row.order_number as string | null) ?? null,
-          lines: linesByDoc.get(docId) ?? [],
-          totals: decodeVatBreakdown(parseJson<unknown>(row.vat_breakdown)),
-          fx,
-          fxOverride: decodeFxOverride(row.fx_override),
-          taxDocument: Boolean(row.tax_document),
-          paymentRounding: row.payment_rounding as "none" | "whole_unit",
-          remindersChoice: row.reminders_choice as "on" | "off" | "inherit",
-          remindersOn: Boolean(row.reminders_on),
-          links: linksByDoc.get(docId) ?? [],
-          paidAmount: parseDecimal(row.paid_amount),
-          payments: Number(row.payments),
-          settlement: row.settlement as DocumentSettlement,
-          scheduleId: (row.schedule_id as ScheduleId | null) ?? null,
-          occurrence: (row.occurrence as IsoDate | null) ?? null,
-          cancelledOn: (row.cancelled_on as IsoDate | null) ?? null,
-          correctedNumber: (row.corrected_number as string | null) ?? null,
-          reason:
-            (row.correction_reason as string | null) ??
-            (row.cancellation_reason as string | null) ??
-            null,
-          createdAt: row.created_at as string,
-          updatedAt: row.updated_at as string,
-          issuedAt: (row.issued_at as string | null) ?? null,
-        };
+      const fx =
+        row["fx_rate"] !== null &&
+        row["fx_rate"] !== undefined &&
+        row["fx_quantity"] !== null &&
+        row["fx_quantity"] !== undefined &&
+        row["fx_source"] !== null &&
+        row["fx_source"] !== undefined
+          ? {
+              rate: parseDecimal(row["fx_rate"]),
+              quantity: Number(row["fx_quantity"]),
+              fixingDate: readNullableIsoDate(row["fx_fixing_date"] ?? null),
+              source: readFxSource(row["fx_source"]),
+            }
+          : null;
+      decoded.push({
+        id: docId,
+        workspaceId: decodeWorkspaceId(row["workspace_id"]),
+        revision: Number(row["revision"]),
+        kind: readDocumentKind(row["kind"]),
+        status: readDocumentStatus(row["status"]),
+        locked: Boolean(row["locked"]),
+        lockedAt: readNullableText(row["locked_at"] ?? null),
+        number: readNullableText(row["number"] ?? null),
+        seriesId: readNullableNumberingSeriesId(row["series_id"] ?? null),
+        contactId: readContactId(row["contact_id"]),
+        contact,
+        issuer,
+        given: readGiven(row["given"]),
+        currency: readCurrencyCode(row["currency"]),
+        language: readLocale(row["language"]),
+        paymentMethod: readPaymentMethod(row["payment_method"]),
+        note: readNullableText(row["note"] ?? null),
+        issuedOn: readIsoDate(row["issued_on"]),
+        taxableSupplyOn: readNullableIsoDate(row["taxable_supply_on"] ?? null),
+        dueOn: readIsoDate(row["due_on"]),
+        pricesIncludeVat: Boolean(row["prices_include_vat"]),
+        variableSymbol: readNullableText(row["variable_symbol"] ?? null),
+        orderNumber: readNullableText(row["order_number"] ?? null),
+        lines: linesByDoc.get(docId) ?? [],
+        totals: readVatBreakdown(row["vat_breakdown"]),
+        fx,
+        fxOverride: decodeFxOverride(row["fx_override"]),
+        taxDocument: Boolean(row["tax_document"]),
+        paymentRounding: readPaymentRounding(row["payment_rounding"]),
+        remindersChoice: readRemindersChoice(row["reminders_choice"]),
+        remindersOn: Boolean(row["reminders_on"]),
+        links: linksByDoc.get(docId) ?? [],
+        paidAmount: parseDecimal(row["paid_amount"]),
+        payments: Number(row["payments"]),
+        settlement: readDocumentSettlement(row["settlement"]),
+        scheduleId: readNullableScheduleId(row["schedule_id"] ?? null),
+        occurrence: readNullableIsoDate(row["occurrence"] ?? null),
+        cancelledOn: readNullableIsoDate(row["cancelled_on"] ?? null),
+        correctedNumber: readNullableText(row["corrected_number"] ?? null),
+        reason:
+          readNullableText(row["correction_reason"] ?? null) ??
+          readNullableText(row["cancellation_reason"] ?? null) ??
+          null,
+        createdAt: readText(row["created_at"]),
+        updatedAt: readText(row["updated_at"]),
+        issuedAt: readNullableText(row["issued_at"] ?? null),
       });
-    }),
+    }
+    return decoded;
+  }),
   encode: (row) => ({
     id: row.id,
     workspace_id: row.workspaceId,
@@ -282,14 +347,14 @@ const spec: TableSpec<DocumentRecord> = {
     prices_include_vat: row.pricesIncludeVat,
     variable_symbol: row.variableSymbol,
     order_number: row.orderNumber,
-    vat_breakdown: JSON.stringify(encodeVatBreakdown(row.totals)),
+    vat_breakdown: encodeJson(encodeVatBreakdown(row.totals)),
     total_net: formatDecimal(row.totals.net.amount),
     total_vat: formatDecimal(row.totals.vat.amount),
     total_gross: formatDecimal(row.totals.gross.amount),
-    fx_rate: row.fx ? formatDecimal(row.fx.rate) : null,
-    fx_quantity: row.fx ? row.fx.quantity : null,
-    fx_fixing_date: row.fx ? row.fx.fixingDate : null,
-    fx_source: row.fx ? row.fx.source : null,
+    fx_rate: formatNullableDecimal(row.fx?.rate ?? null),
+    fx_quantity: row.fx?.quantity ?? null,
+    fx_fixing_date: row.fx?.fixingDate ?? null,
+    fx_source: row.fx?.source ?? null,
     fx_override: encodeFxOverride(row.fxOverride),
     tax_document: row.taxDocument,
     payment_rounding: row.paymentRounding,
@@ -308,52 +373,51 @@ const spec: TableSpec<DocumentRecord> = {
     updated_at: row.updatedAt,
     issued_at: row.issuedAt,
   }),
-  writeChildren: (row, mode) =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      if (mode === "update") {
-        yield* sql`
+  writeChildren: Effect.fn("writeChildren")(function* (row, mode) {
+    const sql = yield* SqlClient.SqlClient;
+    if (mode === "update") {
+      yield* sql`
           delete from document_lines
           where workspace_id = ${row.workspaceId} and document_id = ${row.id}
         `;
-        yield* sql`
+      yield* sql`
           delete from document_relations
           where workspace_id = ${row.workspaceId} and from_document_id = ${row.id}
         `;
-      }
-      if (row.lines.length > 0) {
-        const lineRows = row.lines.map((l, idx) => ({
-          id: l.id,
-          workspace_id: row.workspaceId,
-          document_id: row.id,
-          position: idx,
-          price_list_item_id: l.item,
-          description: l.description,
-          quantity: formatDecimal(l.quantity),
-          unit: l.unit,
-          unit_price: formatDecimal(l.unitPrice),
-          item_price: encodeItemPrice(l.itemPrice),
-          given_vat: l.vat,
-          item_vat: l.itemVat,
-          vat: l.treatment,
-          rate_percent: formatDecimal(l.ratePercent),
-          amount: formatDecimal(l.amount),
-          deducts_document_id: l.deducts,
-          deducted_vat: formatNullableDecimal(l.deductedVat),
-          deducted_vat_czk: formatNullableDecimal(l.deductedVatCzk),
-        })) as unknown as [Record<string, unknown>, ...Record<string, unknown>[]];
-        yield* sql`insert into document_lines ${sql.insert(lineRows)}`;
-      }
-      if (row.links.length > 0) {
-        const relRows = row.links.map((link) => ({
-          workspace_id: row.workspaceId,
-          from_document_id: row.id,
-          to_document_id: link.id,
-          relation: link.relation,
-        })) as unknown as [Record<string, unknown>, ...Record<string, unknown>[]];
-        yield* sql`insert into document_relations ${sql.insert(relRows)}`;
-      }
-    }),
+    }
+    if (Arr.isReadonlyArrayNonEmpty(row.lines)) {
+      const lineRows = Arr.map(row.lines, (l, idx) => ({
+        id: l.id,
+        workspace_id: row.workspaceId,
+        document_id: row.id,
+        position: idx,
+        price_list_item_id: l.item,
+        description: l.description,
+        quantity: formatDecimal(l.quantity),
+        unit: l.unit,
+        unit_price: formatDecimal(l.unitPrice),
+        item_price: encodeItemPrice(l.itemPrice),
+        given_vat: l.vat,
+        item_vat: l.itemVat,
+        vat: l.treatment,
+        rate_percent: formatDecimal(l.ratePercent),
+        amount: formatDecimal(l.amount),
+        deducts_document_id: l.deducts,
+        deducted_vat: formatNullableDecimal(l.deductedVat),
+        deducted_vat_czk: formatNullableDecimal(l.deductedVatCzk),
+      }));
+      yield* sql`insert into document_lines ${sql.insert(lineRows)}`;
+    }
+    if (Arr.isReadonlyArrayNonEmpty(row.links)) {
+      const relRows = Arr.map(row.links, (link) => ({
+        workspace_id: row.workspaceId,
+        from_document_id: row.id,
+        to_document_id: link.id,
+        relation: link.relation,
+      }));
+      yield* sql`insert into document_relations ${sql.insert(relRows)}`;
+    }
+  }),
 };
 
 export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlClient> =
@@ -364,19 +428,22 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
       const table = makeTable(sql, spec);
 
       return DocumentsRepo.of({
-        get: (workspaceId, id) => table.get(workspaceId, id),
-        getMany: (workspaceId, ids) =>
+        get: Effect.fn("DocumentsRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+        getMany: Effect.fn("DocumentsRepo.getMany")((workspaceId, ids) =>
           ids.length === 0
             ? Effect.succeed([])
             : table.select(workspaceId, sql`id in ${sql.in(ids)}`),
-        getForUpdate: (workspaceId, id, expectedRevision) =>
+        ),
+        getForUpdate: Effect.fn("DocumentsRepo.getForUpdate")((workspaceId, id, expectedRevision) =>
           table.getForUpdate(workspaceId, id, expectedRevision),
-        lock: (workspaceId, id) => table.lock(workspaceId, id),
+        ),
+        lock: Effect.fn("DocumentsRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
         insert: table.insert,
         update: table.update,
-        remove: (workspaceId, id, expectedRevision) =>
+        remove: Effect.fn("DocumentsRepo.remove")((workspaceId, id, expectedRevision) =>
           table.remove(workspaceId, id, expectedRevision),
-        linkSchedule: (workspaceId, id, link) =>
+        ),
+        linkSchedule: Effect.fn("DocumentsRepo.linkSchedule")((workspaceId, id, link) =>
           sql
             .withTransaction(
               sql<{ readonly id: string }>`
@@ -391,13 +458,17 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
             .pipe(
               Effect.catch(writeErrors("documents")),
               Effect.flatMap((rows) =>
-                rows.length === 0
-                  ? Effect.fail(new NotFound({ entity: "Document", id }))
-                  : Effect.void,
+                Effect.asVoid(
+                  Effect.when(
+                    NotFound.make({ entity: "Document", id }),
+                    Effect.succeed(rows.length === 0),
+                  ),
+                ),
               ),
             ),
-        search: (workspaceId, s, page) => {
-          const filters: Fragment[] = [];
+        ),
+        search: Effect.fn("DocumentsRepo.search")((workspaceId, s, page) => {
+          const filters: Statement.Fragment[] = [];
           if (s.kind !== undefined) filters.push(sql`kind = ${s.kind}`);
           if (s.status !== undefined) filters.push(sql`status = ${s.status}`);
           if (s.settlement !== undefined) filters.push(sql`settlement = ${s.settlement}`);
@@ -418,7 +489,7 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
             : sql`order by issued_on desc, id desc limit ${page.limit + 1}`;
           return Effect.map(table.select(workspaceId, where, tail), (rows) => {
             const filtered = needsMemoryFilter
-              ? rows.filter((row) => {
+              ? Arr.filter(rows, (row) => {
                   if (
                     s.overdue !== undefined &&
                     isOverdueRow(row, s.overdue.today) !== s.overdue.value
@@ -426,9 +497,9 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
                     return false;
                   }
                   if (s.text !== undefined && s.text !== "") {
-                    const needle = s.text.toLowerCase();
-                    const hay = `${row.number ?? ""}\n${row.contact.name}`.toLowerCase();
-                    if (!hay.includes(needle)) return false;
+                    const needle = Str.toLowerCase(s.text);
+                    const hay = Str.toLowerCase(`${row.number ?? ""}\n${row.contact.name}`);
+                    if (!Str.includes(needle)(hay)) return false;
                   }
                   return true;
                 })
@@ -438,8 +509,8 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
               more: filtered.length > page.limit,
             };
           });
-        },
-        reportable: (workspaceId, range) =>
+        }),
+        reportable: Effect.fn("DocumentsRepo.reportable")((workspaceId, range) =>
           selectReportRows(
             sql,
             "documents",
@@ -453,21 +524,26 @@ export const DocumentsRepoSql: Layer.Layer<DocumentsRepo, never, SqlClient.SqlCl
                   and coalesce(taxable_supply_on, issued_on) <= ${toPgDate(range.to)}::date`,
             (where) => table.select(workspaceId, where),
           ),
-        receivable: (workspaceId) =>
+        ),
+        receivable: Effect.fn("DocumentsRepo.receivable")((workspaceId) =>
           table.select(
             workspaceId,
             sql`status = 'issued'
               and kind in ('invoice', 'proforma')
               and settlement in ('unpaid', 'partially_paid')`,
           ),
-        draftsUsingBankAccount: (workspaceId, bankAccountId) =>
-          Effect.map(table.select(workspaceId, sql`status = 'draft'`), (rows) =>
-            rows.filter(
-              (row) =>
-                row.given.bankAccount === bankAccountId ||
-                row.issuer.bankAccount?.id === bankAccountId,
+        ),
+        draftsUsingBankAccount: Effect.fn("DocumentsRepo.draftsUsingBankAccount")(
+          (workspaceId, bankAccountId) =>
+            Effect.map(table.select(workspaceId, sql`status = 'draft'`), (rows) =>
+              Arr.filter(
+                rows,
+                (row) =>
+                  row.given.bankAccount === bankAccountId ||
+                  row.issuer.bankAccount?.id === bankAccountId,
+              ),
             ),
-          ),
+        ),
       });
     }),
   );

@@ -8,7 +8,8 @@ import {
 import { formatDate, formatDateTime, formatMoney, formatMonth } from "@kvitbit/ui-port/format";
 import { type EnumKey, enumKey } from "@kvitbit/ui-port/i18n";
 import type { Period, Route } from "@kvitbit/ui-port/view-models";
-import { Effect } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
 import { useFocusEffect } from "expo-router";
 import { AlertCircle, Camera, FilePlus2, FileText, MailPlus, UserPlus } from "lucide-react-native";
 import { useCallback, useMemo, useRef, useState } from "react";
@@ -104,7 +105,7 @@ export function DashboardContent(props: DashboardContentProps) {
 
   const header = (
     <>
-      {props.userName ? (
+      {props.userName !== null && props.userName !== undefined && props.userName !== "" ? (
         <Text variant="titleMedium" color="onSurfaceVariant">
           {t("dashboard.greeting", { name: props.userName })}
         </Text>
@@ -328,7 +329,7 @@ export function DashboardContent(props: DashboardContentProps) {
                       </View>
                     </View>
                     <View className="gap-3">
-                      {data.cashflow.map((point) => {
+                      {Arr.map(data.cashflow, (point) => {
                         const inPct = Math.round(
                           cashflowBarRatio(point.in.amount, cashflowMax) * 100,
                         );
@@ -379,12 +380,12 @@ export function DashboardContent(props: DashboardContentProps) {
               </Card>
             ) : (
               <Card className="gap-0 p-1">
-                {docs.map((doc) => (
+                {Arr.map(docs, (doc) => (
                   <ListRow
                     key={doc.id}
                     leading={FileText}
-                    title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                    subtitle={`${doc.contact.name}${doc.dueOn === null ? "" : ` · ${formatDate(locale, doc.dueOn)}`}`}
+                    title={doc.number ?? t(enumKey({ name: "documentKind", value: doc.kind }))}
+                    subtitle={`${doc.contact.name}${doc.dueOn === null ? "" : ` · ${formatDate({ locale, date: doc.dueOn })}`}`}
                     trailing={formatMoney(locale, doc.outstanding)}
                     badge={<Badge tone="warning" label={t("enum.badge.overdue")} />}
                     onPress={() =>
@@ -407,19 +408,21 @@ export function DashboardContent(props: DashboardContentProps) {
               </Card>
             ) : (
               <Card className="gap-0 p-1">
-                {events.map(({ id, document, kind, at }) => (
+                {Arr.map(events, ({ id, document, kind, at }) => (
                   <ListRow
                     key={id}
                     leading={FileText}
-                    title={document.number ?? t(enumKey("documentKind", document.kind))}
-                    subtitle={formatDateTime(locale, at)}
+                    title={
+                      document.number ?? t(enumKey({ name: "documentKind", value: document.kind }))
+                    }
+                    subtitle={formatDateTime({ locale, instant: at })}
                     badge={
                       <Badge
                         tone={kind === "paid" ? "success" : "info"}
                         label={
                           kind === "paid"
                             ? local({ cs: "Platba zaznamenána", en: "Payment recorded" })
-                            : t(enumKey("badge", kind))
+                            : t(enumKey({ name: "badge", value: kind }))
                         }
                       />
                     }
@@ -452,14 +455,14 @@ export function DashboardContent(props: DashboardContentProps) {
               </Card>
             ) : (
               <Card className="gap-0 p-1">
-                {docs.map((doc) => {
+                {Arr.map(docs, (doc) => {
                   const badge = badgeForDocument(doc);
                   return (
                     <ListRow
                       key={doc.id}
                       leading={FileText}
-                      title={doc.number ?? t(enumKey("documentKind", doc.kind))}
-                      subtitle={`${doc.contactName} · ${formatDate(locale, doc.issuedOn)}`}
+                      title={doc.number ?? t(enumKey({ name: "documentKind", value: doc.kind }))}
+                      subtitle={`${doc.contactName} · ${formatDate({ locale, date: doc.issuedOn })}`}
                       trailing={formatMoney(locale, doc.total)}
                       badge={<Badge tone={badge.tone} label={t(badge.key)} />}
                       onPress={() =>
@@ -486,44 +489,59 @@ function WorkspaceDashboard({ workspace }: { readonly workspace: WorkspaceSummar
   const session = useSession();
   const { t } = useI18n();
   const [preset, setPreset] = useState<DashboardPeriodPreset>("this_month");
-  const visited = useRef(false);
+  const visited = useRef<boolean>(false);
   const today = useMemo(() => pragueToday(), []);
   const range = useMemo(() => periodRange(preset, today), [preset, today]);
 
   const dashboard = useRemote(
-    (api) =>
-      api.reports.dashboard({
-        params: inWorkspace(workspace.id),
-        query: { from: range.from, to: range.to },
-      }),
-    [workspace.id, range.from, range.to],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        api.reports.dashboard({
+          params: inWorkspace(workspace.id),
+          query: { from: range.from, to: range.to },
+        }),
+      [workspace.id, range.from, range.to],
+    ),
   );
 
   const overdueDocs = useRemote(
-    (api) => loadOverdueDocuments(api, workspace.id, { from: today, to: today }),
-    [workspace.id, today],
+    useCallback(
+      (api: KvitbitApiClient) =>
+        loadOverdueDocuments({ api, workspaceId: workspace.id, query: { from: today, to: today } }),
+      [workspace.id, today],
+    ),
   );
 
-  const recentDocs = useRemote((api) => loadRecentDocuments(api, workspace.id), [workspace.id]);
+  const recentDocs = useRemote(
+    useCallback(
+      (api: KvitbitApiClient) => loadRecentDocuments({ api, workspaceId: workspace.id }),
+      [workspace.id],
+    ),
+  );
 
   const loadActivity = useCallback(
-    (api: KvitbitApiClient) => loadWorkspaceActivity(api, workspace.id),
+    (api: KvitbitApiClient) => loadWorkspaceActivity({ api, workspaceId: workspace.id }),
     [workspace.id],
   );
   const activity = usePagedFeed(loadActivity);
 
+  const canWrite = canWriteWorkspace(workspace);
   const hasExpenses = useRemote(
-    canWriteWorkspace(workspace)
-      ? (api) =>
-          Effect.map(
-            api.expenses.list({ params: inWorkspace(workspace.id), query: { limit: 1 } }),
-            (page) => page.items.length > 0 || page.nextCursor !== null,
-          )
-      : null,
-    [workspace.id, workspace.role, workspace.closed],
+    useMemo(
+      () =>
+        canWrite
+          ? (api: KvitbitApiClient) =>
+              Effect.map(
+                api.expenses.list({ params: inWorkspace(workspace.id), query: { limit: 1 } }),
+                (page) => page.items.length > 0 || page.nextCursor !== null,
+              )
+          : null,
+      [workspace.id, canWrite],
+    ),
   );
 
-  const refreshing = [dashboard.state, overdueDocs.state, recentDocs.state, hasExpenses.state].some(
+  const refreshing = Arr.some(
+    [dashboard.state, overdueDocs.state, recentDocs.state, hasExpenses.state],
     (state) => RemoteOps.isBusy<unknown, unknown>(state),
   );
 

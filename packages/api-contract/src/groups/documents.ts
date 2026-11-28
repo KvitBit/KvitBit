@@ -21,8 +21,10 @@ import {
   ShareViewEvent,
   Unavailable,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
+import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
+import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
+import * as OpenApi from "effect/http-api/OpenApi";
+import * as Schema from "effect/Schema";
 import { RevisionedEdgeErrors } from "../edge-errors";
 import {
   Accepted,
@@ -43,13 +45,14 @@ const DocParams = { ...WorkspaceParams, documentId: DocumentId };
 
 /** Core `SendOptions`; `purpose` defaults to "document" (G11). */
 export const SendInput = Schema.Struct({
-  to: Schema.optionalKey(Schema.Array(Schema.String)),
+  to: Schema.String.pipe(Schema.Array, Schema.optionalKey),
   language: Schema.optionalKey(Locale),
   reminders: Schema.optionalKey(Schema.Boolean), // absent: Document → Contact → Workspace (rule D16)
   purpose: Schema.optionalKey(DeliveryPurpose),
 });
 export type SendInput = typeof SendInput.Type;
 
+/** @public Query fields for the document PDF endpoint. */
 export const PdfQuery = {
   template: Schema.optional(PdfTemplate),
   language: Schema.optional(Locale),
@@ -60,6 +63,7 @@ export const CancelInput = Schema.Struct({
   reason: Schema.NonEmptyString,
   on: Schema.optionalKey(IsoDate),
 });
+/** @public Response schema for document cancellation. */
 export const CancelResult = Schema.Struct({
   document: DocumentView,
   creditNote: Schema.NullOr(DocumentView),
@@ -256,8 +260,7 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
   .middleware(Authentication)
   .annotate(OpenApi.Description, "Invoices, Proformas, Payment Tax Documents and Credit Notes") {}
 
-export const ShareLinkCreated = Schema.Struct({ url: Schema.String });
-export type ShareLinkCreated = typeof ShareLinkCreated.Type;
+const ShareLinkCreated = Schema.Struct({ url: Schema.String });
 
 export class ShareLinksGroup extends HttpApiGroup.make("shareLinks")
   .add(

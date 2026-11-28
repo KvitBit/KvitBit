@@ -1,12 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { BlobStorage } from "@kvitbit/domain/ports";
-import { Effect, Layer, Ref, Stream } from "effect";
 import {
-  HttpClient,
-  HttpClientError,
-  type HttpClientRequest,
-  HttpClientResponse,
-} from "effect/http";
+  type BlobMissing,
+  BlobStorage,
+  BlobTooLarge,
+  type BlobUnavailable,
+} from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientError from "effect/http/HttpClientError";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import {
   GcsAccessToken,
   GcsAccessTokenError,
@@ -43,7 +52,10 @@ type Override = (seen: Seen) => Response | "transport-error" | undefined;
  * before the bucket does; an override returning `undefined` passes the request through.
  */
 /** Makes the next resumable chunk persist only `persist` bytes and answer `status`. */
-type ChunkFault = { readonly persist: number; readonly status: number };
+interface ChunkFault {
+  readonly persist: number;
+  readonly status: number;
+}
 
 interface Session {
   readonly name: string;
@@ -52,6 +64,9 @@ interface Session {
   done: boolean;
 }
 
+const progressRange = /^bytes \*\/(\*|\d+)$/;
+const uploadRange = /^bytes (\d+)-(\d+)\/(\*|\d+)$/;
+const objectPath = /^\/storage\/v1\/b\/b\/o\/([^/]+)$/;
 const quarterMiB = 256 * 1024;
 
 const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault> = []) => {
@@ -87,15 +102,15 @@ const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault>
       return new Response(null, { status: 499 });
     }
     const range = seenRequest.contentRange ?? "";
-    const query = /^bytes \*\/(\*|\d+)$/.exec(range);
-    if (query) {
+    const query = progressRange.exec(range);
+    if (query !== null) {
       return session.done
         ? Response.json({ name: session.name })
         : new Response(null, { status: 308, headers: persistedHeader(session) });
     }
-    const match = /^bytes (\d+)-(\d+)\/(\*|\d+)$/.exec(range);
+    const match = uploadRange.exec(range);
     const body = seenRequest.body ?? new Uint8Array();
-    if (!match || Number(match[1]) !== session.persisted) {
+    if (match === null || Number(match[1]) !== session.persisted) {
       return new Response(`bad range ${range} at ${session.persisted}`, { status: 400 });
     }
     if (match[3] === "*" && body.byteLength % quarterMiB !== 0) {
@@ -122,7 +137,7 @@ const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault>
       objects.set(name, (seenRequest.body ?? new Uint8Array()).slice());
       return Response.json({ name, bucket: "b" });
     }
-    const match = /^\/storage\/v1\/b\/b\/o\/([^/]+)$/.exec(url.pathname);
+    const match = objectPath.exec(url.pathname);
     const name = match?.[1] === undefined ? undefined : decodeURIComponent(match[1]);
     if (name === undefined) return new Response("no route", { status: 400 });
     const object = objects.get(name);
@@ -142,7 +157,7 @@ const fakeGcs = (overrides: Array<Override> = [], chunkFaults: Array<ChunkFault>
     const record: Seen = {
       method: request.method,
       url,
-      authorization: request.headers.authorization,
+      authorization: request.headers["authorization"],
       contentRange: request.headers["content-range"],
       contentType: request.body._tag === "Uint8Array" ? request.body.contentType : undefined,
       body: request.body._tag === "Uint8Array" ? request.body.body : undefined,
@@ -170,7 +185,10 @@ const tokensFrom = (values: ReadonlyArray<string>, invalidated: Array<string>) =
         get: Ref.getAndUpdate(index, (n) => Math.min(n + 1, values.length - 1)).pipe(
           Effect.map((n) => values[n] ?? "none"),
         ),
-        invalidate: (token) => Effect.sync(() => void invalidated.push(token)),
+        invalidate: (token) =>
+          Effect.sync(() => {
+            invalidated.push(token);
+          }),
       });
     }),
   );
@@ -187,7 +205,10 @@ const layerFor = (
 const run = <A, E>(layer: Layer.Layer<BlobStorage>, effect: Effect.Effect<A, E, BlobStorage>) =>
   Effect.runPromise(Effect.provide(effect, layer));
 
-describeBlobStorageContract("GcsBlobStorage (fake JSON API)", () => layerFor(fakeGcs()));
+describeBlobStorageContract({
+  name: "GcsBlobStorage (fake JSON API)",
+  layer: () => layerFor(fakeGcs()),
+});
 
 describe("GcsBlobStorage requests", () => {
   test("put sends one media upload with the token, content type and exact bytes", async () => {
@@ -221,13 +242,14 @@ describe("GcsBlobStorage requests", () => {
       layerFor(fake, { endpoint: "http://emulator:4443/" }),
       Effect.gen(function* () {
         const store = yield* BlobStorage;
-        const data = yield* readAll(yield* store.get(key("ws/x.pdf")));
+        const value = yield* store.get(key("ws/x.pdf"));
+        const data = yield* readAll(value);
         yield* store.delete(key("ws/x.pdf"));
         return data.toString();
       }),
     );
     expect(text).toBe("data");
-    expect(fake.seen.map((s) => `${s.method} ${s.url.href}`)).toEqual([
+    expect(Arr.map(fake.seen, (s) => `${s.method} ${s.url.href}`)).toEqual([
       "GET http://emulator:4443/storage/v1/b/b/o/ws%2Fx.pdf?alt=media",
       "DELETE http://emulator:4443/storage/v1/b/b/o/ws%2Fx.pdf",
     ]);
@@ -238,9 +260,9 @@ describe("GcsBlobStorage requests", () => {
     const fake = fakeGcs();
     const error = await run(
       layerFor(fake),
-      withStore((store) => Effect.flip(store.put(key("ws/big"), endless(), meta(1000)))),
+      withStore((store) => Effect.flip(store.put(key("ws/big"), endless, meta(1000)))),
     );
-    expect(error._tag).toBe("BlobTooLarge");
+    expect(error).toBeInstanceOf(BlobTooLarge);
     expect(fake.seen).toHaveLength(0);
   });
 
@@ -262,18 +284,28 @@ describe("GcsBlobStorage requests", () => {
     () =>
       new Response(`upstream ${status}`, { status });
 
-  for (const [label, op] of [
-    ["put", (store: BlobStorage["Service"]) => store.put(key("ws/a"), chunked("x"), meta())],
-    ["get", (store: BlobStorage["Service"]) => store.get(key("ws/a"))],
+  const operations: ReadonlyArray<
+    readonly [
+      string,
+      (
+        store: BlobStorage["Service"],
+      ) => Effect.Effect<void, BlobMissing | BlobUnavailable | BlobTooLarge>,
+    ]
+  > = [
+    [
+      "put",
+      (store: BlobStorage["Service"]) =>
+        store.put(key("ws/a"), chunked("x"), meta()).pipe(Effect.asVoid),
+    ],
+    ["get", (store: BlobStorage["Service"]) => store.get(key("ws/a")).pipe(Effect.asVoid)],
     ["delete", (store: BlobStorage["Service"]) => store.delete(key("ws/a"))],
-  ] as const) {
+  ];
+  for (const [label, op] of operations) {
     test(`${label}: 5xx after retries is BlobUnavailable carrying the status`, async () => {
       const fake = fakeGcs([failing(503), failing(503), failing(500)]);
       const error = await run(
         layerFor(fake, { retries: 2 }),
-        withStore((store) =>
-          Effect.flip(op(store) as Effect.Effect<unknown, { readonly _tag: string }>),
-        ),
+        withStore((store) => Effect.flip(op(store))),
       );
       expect(error._tag).toBe("BlobUnavailable");
       expect(error).toMatchObject({ cause: { status: 500, body: "upstream 500" } });
@@ -284,9 +316,7 @@ describe("GcsBlobStorage requests", () => {
       const fake = fakeGcs([failing(403)]);
       const error = await run(
         layerFor(fake, { retries: 2 }),
-        withStore((store) =>
-          Effect.flip(op(store) as Effect.Effect<unknown, { readonly _tag: string }>),
-        ),
+        withStore((store) => Effect.flip(op(store))),
       );
       expect(error).toMatchObject({ _tag: "BlobUnavailable", cause: { status: 403 } });
       expect(fake.seen).toHaveLength(1);
@@ -301,7 +331,7 @@ describe("GcsBlobStorage requests", () => {
     );
     expect(result.bytes).toBe(3);
     expect(fake.seen).toHaveLength(3);
-    expect(fake.seen.every((s) => s.body !== undefined && s.body.byteLength === 3)).toBe(true);
+    expect(Arr.every(fake.seen, (s) => s.body !== undefined && s.body.byteLength === 3)).toBe(true);
     expect(fake.objects.get("ws/r")).toEqual(bytesOf("abc"));
   });
 
@@ -313,7 +343,7 @@ describe("GcsBlobStorage requests", () => {
       withStore((store) => store.delete(key("ws/a"))),
     );
     expect(invalidated).toEqual(["stale"]);
-    expect(fake.seen.map((s) => s.authorization)).toEqual(["Bearer stale", "Bearer fresh"]);
+    expect(Arr.map(fake.seen, (s) => s.authorization)).toEqual(["Bearer stale", "Bearer fresh"]);
   });
 
   test("a token failure is BlobUnavailable and sends nothing", async () => {
@@ -323,7 +353,7 @@ describe("GcsBlobStorage requests", () => {
         fake,
         {},
         GcsAccessTokens.fromEffect(
-          Effect.fail(new GcsAccessTokenError({ reason: "status" })),
+          Effect.fail(GcsAccessTokenError.make({ reason: "status" })),
           (e) => e,
         ),
       ),
@@ -360,7 +390,9 @@ describe("GcsBlobStorage resumable uploads", () => {
       sha256: sha256(data),
     });
     expect(fake.objects.get("exports/ws/e.zip")).toEqual(data);
-    expect(fake.seen.map((s) => s.contentRange ?? s.url.searchParams.get("uploadType"))).toEqual([
+    expect(
+      Arr.map(fake.seen, (s) => s.contentRange ?? s.url.searchParams.get("uploadType")),
+    ).toEqual([
       "resumable",
       `bytes 0-${quarterMiB - 1}/*`,
       `bytes ${quarterMiB}-${2 * quarterMiB - 1}/*`,
@@ -376,7 +408,7 @@ describe("GcsBlobStorage resumable uploads", () => {
         store.put(key("ws/one"), pieces(pattern(quarterMiB), 1000), meta(10 ** 7)),
       ),
     );
-    expect(fake.seen.map((s) => s.url.searchParams.get("uploadType"))).toEqual(["media"]);
+    expect(Arr.map(fake.seen, (s) => s.url.searchParams.get("uploadType"))).toEqual(["media"]);
   });
 
   test("after a chunk fails part-persisted, it resumes from the offset GCS reports", async () => {
@@ -387,7 +419,9 @@ describe("GcsBlobStorage resumable uploads", () => {
       withStore((store) => store.put(key("ws/flaky"), pieces(data, 65_536), meta(10 ** 7))),
     );
     expect(fake.objects.get("ws/flaky")).toEqual(data);
-    expect(fake.seen.map((s) => s.contentRange ?? s.url.searchParams.get("uploadType"))).toEqual([
+    expect(
+      Arr.map(fake.seen, (s) => s.contentRange ?? s.url.searchParams.get("uploadType")),
+    ).toEqual([
       "resumable",
       `bytes 0-${2 * quarterMiB - 1}/*`,
       "bytes */*",
@@ -400,9 +434,9 @@ describe("GcsBlobStorage resumable uploads", () => {
     const fake = fakeGcs();
     const error = await run(
       layerFor(fake, opts),
-      withStore((store) => Effect.flip(store.put(key("ws/huge"), endless(), meta(3 * quarterMiB)))),
+      withStore((store) => Effect.flip(store.put(key("ws/huge"), endless, meta(3 * quarterMiB)))),
     );
-    expect(error._tag).toBe("BlobTooLarge");
+    expect(error).toBeInstanceOf(BlobTooLarge);
     expect(fake.objects.has("ws/huge")).toBe(false);
     expect(fake.sessions.size).toBe(0);
     expect(fake.seen.at(-1)?.method).toBe("DELETE");
@@ -430,10 +464,12 @@ describe("GcsBlobStorage resumable uploads", () => {
   });
 
   test("rejects a chunk size GCS would refuse", async () => {
-    const defect = await Effect.runPromise(
-      defectOf(
-        Effect.asVoid(Layer.build(layerFor(fakeGcs(), { chunkSize: 1000 })).pipe(Effect.scoped)),
-      ),
+    const defect = await layerFor(fakeGcs(), { chunkSize: 1000 }).pipe(
+      Layer.build,
+      Effect.scoped,
+      Effect.asVoid,
+      defectOf,
+      Effect.runPromise,
     );
     expect(defect).toBeInstanceOf(RangeError);
   });
@@ -493,27 +529,31 @@ describe("GcsBlobStorage review fixes", () => {
       ),
     );
     expect(error._tag).toBe("BlobUnavailable");
-    const rendered = `${String(error)} ${String((error as { cause?: unknown }).cause)}`;
+    const rendered = `${String(error)} ${String(error._tag === "BlobUnavailable" ? error.cause : undefined)}`;
     expect(rendered).toContain("upload_id");
     expect(rendered).not.toContain("secret-session");
   });
 
   test("a download that stalls mid-body dies after the idle timeout", async () => {
     let pulls = 0;
+    const finishPull = Deferred.makeUnsafe<void>();
     const stalled = new ReadableStream<Uint8Array>({
       pull: (controller) => {
         pulls += 1;
         if (pulls === 1) controller.enqueue(new Uint8Array([1, 2, 3]));
-        return pulls === 1 ? undefined : new Promise<void>(() => {});
+        return pulls === 1 ? undefined : finishPull.pipe(Deferred.await, Effect.runPromise);
+      },
+      cancel: () => {
+        Effect.runSync(Deferred.succeed(finishPull, undefined));
       },
     });
     const fake = fakeGcs([() => new Response(stalled, { status: 200 })]);
-    const defect = await Effect.runPromise(
-      defectOf(
-        withStore((store) => Effect.flatMap(store.get(key("ws/slow")), readAll)).pipe(
-          Effect.provide(layerFor(fake, { idleTimeout: "30 millis" })),
-        ),
-      ),
+    const defect = await withStore((store) =>
+      Effect.flatMap(store.get(key("ws/slow")), readAll),
+    ).pipe(
+      Effect.provide(layerFor(fake, { idleTimeout: "30 millis" })),
+      defectOf,
+      Effect.runPromise,
     );
     expect(defect).toMatchObject({ _tag: "BlobUnavailable", cause: { reason: "idle timeout" } });
   });
@@ -542,7 +582,8 @@ describe("GcsBlobStorage error bodies", () => {
       ),
     );
     expect(error._tag).toBe("BlobUnavailable");
-    const serialized = JSON.stringify(error);
+    const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+    const serialized = encodeJson(error).pipe(Effect.runSync);
     expect(error).toMatchObject({ cause: { operation: "session", status: 400 } });
     expect(serialized).not.toContain("secret-session");
   });

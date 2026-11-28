@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { M3_COLOR_ROLES } from "@kvitbit/api-contract";
-import { TestClock } from "effect/testing";
+import { AccountPreferences, M3_COLOR_ROLES, ResolvedTheme } from "@kvitbit/api-contract";
+import { Invalid } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 import { createSeededWorkspace, seedUser } from "./seed";
 
@@ -9,28 +16,48 @@ let alice: TestUser;
 let bob: TestUser;
 
 const PATH = "/api/v1/me/preferences";
+const decodePreferences = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.toEncoded(
+      Schema.Struct({
+        ...AccountPreferences.fields,
+        theme: Schema.JsonObject,
+        resolvedTheme: Schema.NullOr(
+          Schema.Struct({
+            ...ResolvedTheme.fields,
+            source: Schema.JsonObject,
+            schemes: Schema.Record(Schema.String, Schema.Struct({ roles: Schema.JsonObject })),
+          }),
+        ),
+      }),
+    ),
+  ),
+  Effect.runSync,
+);
+const decodeInvalid = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.toEncoded(Invalid)),
+  Effect.runSync,
+);
 
 beforeEach(async () => {
   h = makeHarness();
   await h.run(TestClock.setTime(TEST_NOW));
   alice = h.addUser("Alice");
   bob = h.addUser("Bob");
-  await seedUser(h, alice);
-  await seedUser(h, bob);
+  await h.run(seedUser(alice));
+  await h.run(seedUser(bob));
 }, 20_000);
 
 afterEach(async () => {
   await h.dispose();
 });
 
-const patchPrefs = (user: TestUser, body: unknown, headers: Record<string, string> = {}) => {
-  const init = json(body);
-  return h.fetch(PATH, {
-    ...init,
+const patchPrefs = (user: TestUser, body: Schema.Json, headers: Record<string, string> = {}) =>
+  h.fetch(PATH, {
+    ...json(body),
     method: "PATCH",
-    headers: { ...(init.headers as Record<string, string>), ...as.mobile(user), ...headers },
+    headers: { "content-type": "application/json", ...as.mobile(user), ...headers },
   });
-};
 
 describe("me preferences group", () => {
   test('GET returns default preferences with ETag "1" when no row exists yet', async () => {
@@ -98,11 +125,7 @@ describe("me preferences group", () => {
     const first = await patchPrefs(alice, { locale: "en" }, { "if-match": '"1"' });
     expect(first.status).toBe(200);
     expect(first.headers.get("etag")).toBe('"2"');
-    const firstBody = (await first.json()) as {
-      locale: string | null;
-      revision: number;
-      resolvedTheme: unknown;
-    };
+    const firstBody = decodePreferences(await first.json());
     expect(firstBody.locale).toBe("en");
     expect(firstBody.revision).toBe(2);
     expect(firstBody.resolvedTheme).toBeNull();
@@ -134,24 +157,8 @@ describe("me preferences group", () => {
     );
     expect(presetRes.status).toBe(200);
     expect(presetRes.headers.get("etag")).toBe('"2"');
-    const presetBody = (await presetRes.json()) as {
-      locale: string | null;
-      theme: {
-        mode: string;
-        style: string;
-        contrast: string;
-        dynamicColor: boolean;
-        source: unknown;
-      };
-      resolvedTheme: {
-        source: unknown;
-        schemes: Record<
-          string,
-          { roles: Record<string, string>; extended: Record<string, unknown> }
-        >;
-      } | null;
-      revision: number;
-    };
+    const presetWire = await presetRes.json();
+    const presetBody = decodePreferences(presetWire);
     expect(presetBody.locale).toBe("cs");
     expect(presetBody.theme).toEqual({
       mode: "dark",
@@ -172,26 +179,24 @@ describe("me preferences group", () => {
     ]) {
       const scheme = presetBody.resolvedTheme?.schemes[schemeKey];
       expect(scheme).toBeDefined();
-      expect(Object.keys(scheme?.roles ?? {}).sort()).toEqual([...M3_COLOR_ROLES].sort());
+      expect(Arr.sort(Rec.keys(scheme?.roles ?? {}), Order.String)).toEqual(
+        Arr.sort(M3_COLOR_ROLES, Order.String),
+      );
     }
 
     // GET reflects the persisted preferences and ETag
     const got = await h.fetch(PATH, { headers: as.mobile(alice) });
     expect(got.status).toBe(200);
     expect(got.headers.get("etag")).toBe('"2"');
-    expect(await got.json()).toEqual(presetBody);
+    expect(await got.json()).toEqual(presetWire);
 
     // Partial update: clearing locale to null preserves theme
     const clearLocale = await patchPrefs(alice, { locale: null }, { "if-match": '"2"' });
     expect(clearLocale.status).toBe(200);
     expect(clearLocale.headers.get("etag")).toBe('"3"');
-    const clearLocaleBody = (await clearLocale.json()) as {
-      locale: string | null;
-      theme: { source: unknown };
-      resolvedTheme: unknown;
-    };
+    const clearLocaleBody = decodePreferences(await clearLocale.json());
     expect(clearLocaleBody.locale).toBeNull();
-    expect(clearLocaleBody.theme.source).toEqual({ _tag: "Preset", id: "forest" });
+    expect(clearLocaleBody.theme["source"]).toEqual({ _tag: "Preset", id: "forest" });
     expect(clearLocaleBody.resolvedTheme).not.toBeNull();
 
     // Setting theme.source to null clears resolvedTheme to null
@@ -210,7 +215,7 @@ describe("me preferences group", () => {
     );
     expect(resetSource.status).toBe(200);
     expect(resetSource.headers.get("etag")).toBe('"4"');
-    const resetBody = (await resetSource.json()) as { resolvedTheme: unknown };
+    const resetBody = decodePreferences(await resetSource.json());
     expect(resetBody.resolvedTheme).toBeNull();
 
     // Bob's preferences remain untouched at revision 1
@@ -234,11 +239,9 @@ describe("me preferences group", () => {
       { "if-match": '"1"' },
     );
     expect(invalidMtb.status).toBe(422);
-    expect(((await invalidMtb.json()) as { issues: Array<{ code: string }> }).issues[0]?.code).toBe(
-      "theme.json_invalid",
-    );
+    expect(decodeInvalid(await invalidMtb.json()).issues[0].code).toBe("theme.json_invalid");
 
-    const roles = Object.fromEntries(M3_COLOR_ROLES.map((role) => [role, "#EEEEEE"]));
+    const roles = Rec.fromIterableWith(M3_COLOR_ROLES, (role) => [role, "#EEEEEE"]);
     const lowContrastMtb = await patchPrefs(
       alice,
       {
@@ -263,9 +266,7 @@ describe("me preferences group", () => {
       { "if-match": '"1"' },
     );
     expect(lowContrastMtb.status).toBe(200);
-    const body = (await lowContrastMtb.json()) as {
-      resolvedTheme: { warnings?: string[] } | null;
-    };
+    const body = decodePreferences(await lowContrastMtb.json());
     expect(body.resolvedTheme?.warnings).toEqual(["theme.low_contrast"]);
   });
 

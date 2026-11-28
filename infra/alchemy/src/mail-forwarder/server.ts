@@ -1,3 +1,6 @@
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
+import * as Str from "effect/String";
 /**
  * Effect-based runtime entrypoint for the Kvitbit Always-Free GCP inbound mail forwarder.
  *
@@ -7,34 +10,41 @@
  */
 
 import { BunFileSystem, BunHttpServer, BunRuntime } from "@effect/platform-bun";
-import { Effect, FileSystem, Layer, Logger, Option } from "effect";
-import { FetchHttpClient, HttpRouter, HttpServerResponse } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as HttpServerResponse from "effect/http/HttpServerResponse";
+import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
 import { loadMailForwarderConfig, type MailForwarderConfigShape } from "./config";
 import { layerMailRelay, MailRelay } from "./relay";
 import { startSmtpServer } from "./smtp";
 
-const readOptionalTlsMaterial = (config: MailForwarderConfigShape) =>
-  Effect.gen(function* () {
-    if (Option.isNone(config.tlsCertPath) || Option.isNone(config.tlsKeyPath)) {
-      return undefined;
-    }
-    const fs = yield* FileSystem.FileSystem;
-    const certExists = yield* fs
-      .exists(config.tlsCertPath.value)
-      .pipe(Effect.orElseSucceed(() => false));
-    const keyExists = yield* fs
-      .exists(config.tlsKeyPath.value)
-      .pipe(Effect.orElseSucceed(() => false));
-    if (!certExists || !keyExists) {
-      return undefined;
-    }
-    const cert = yield* fs.readFile(config.tlsCertPath.value);
-    const key = yield* fs.readFile(config.tlsKeyPath.value);
-    return {
-      tlsCert: Buffer.from(cert),
-      tlsKey: Buffer.from(key),
-    };
-  });
+const readOptionalTlsMaterial = Effect.fn("readOptionalTlsMaterial")(function* (
+  config: MailForwarderConfigShape,
+) {
+  if (Option.isNone(config.tlsCertPath) || Option.isNone(config.tlsKeyPath)) {
+    return;
+  }
+  const fs = yield* FileSystem.FileSystem;
+  const certExists = yield* fs
+    .exists(config.tlsCertPath.value)
+    .pipe(Effect.orElseSucceed(() => false));
+  const keyExists = yield* fs
+    .exists(config.tlsKeyPath.value)
+    .pipe(Effect.orElseSucceed(() => false));
+  if (!(certExists && keyExists)) {
+    return;
+  }
+  const cert = yield* fs.readFile(config.tlsCertPath.value);
+  const key = yield* fs.readFile(config.tlsKeyPath.value);
+  return {
+    tlsCert: Buffer.from(cert),
+    tlsKey: Buffer.from(key),
+  };
+});
 
 const makeHealthRoutes = (config: MailForwarderConfigShape, tlsEnabled: boolean) =>
   HttpRouter.add(
@@ -84,7 +94,7 @@ export const MailForwarderLive = Layer.unwrap(
           smtpPort: bound.port,
           relayMode: config.relayMode,
           tlsEnabled,
-          aliases: [...config.allowedRecipients].sort(),
+          aliases: [...config.allowedRecipients].sort(Order.String),
         });
       }),
     ).pipe(Layer.provide(relayLayer));
@@ -103,13 +113,13 @@ export const MailForwarderLive = Layer.unwrap(
 ).pipe(Layer.provide(BunFileSystem.layer));
 
 export const mailForwarderProgram = Layer.launch(MailForwarderLive).pipe(
-  Effect.provide(Logger.layer([Logger.consoleJson])),
+  Effect.provideService(Logger.CurrentLoggers, new Set([Logger.consoleJson])),
 );
 
-const isMain =
-  typeof import.meta.main === "boolean"
-    ? import.meta.main
-    : process.argv[1]?.endsWith("server.ts") || process.argv[1]?.endsWith("mail-forwarder.mjs");
+const isMain = Predicate.isBoolean(import.meta.main)
+  ? import.meta.main
+  : Str.endsWith("server.ts")(process.argv[1] ?? "") ||
+    Str.endsWith("mail-forwarder.mjs")(process.argv[1] ?? "");
 
 if (isMain) {
   BunRuntime.runMain(mailForwarderProgram);

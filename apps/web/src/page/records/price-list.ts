@@ -5,22 +5,32 @@ import type { Html } from "@effect/ui/html";
  * Saved catalog items with search, archived toggle, inline/sheet create & edit,
  * currency/unit/VAT defaults, archive confirmation, and zero-CLS shimmer skeleton.
  */
-import type {
+import {
   CurrencyCode,
   PriceListItemId,
   PriceListItemInput,
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Format, ViewModels } from "@kvitbit/ui-port";
-import { Option, Schema } from "effect";
+import { Format } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { Failure, request } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { BrowserRoutes } from "../../app/routing";
+import type { Markup } from "../../ui/html";
 import { icon } from "../../ui/icons";
 import {
   badge,
@@ -55,7 +65,8 @@ import {
   vatRatePercent,
 } from "./shared";
 
-export type Route = RouteOf<"PriceList">;
+export const Route = RouteCases.PriceList;
+export type Route = typeof Route.Type;
 
 const tLocal = copy({
   cs: {
@@ -106,10 +117,10 @@ const EditorDraft = Schema.Struct({
 type EditorDraft = typeof EditorDraft.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   search: Schema.String,
   includeArchived: Schema.Boolean,
-  items: Remote.remoteSchema(Schema.Array(PriceListItemRecord)),
+  items: PriceListItemRecord.pipe(Schema.Array, Remote.remoteSchema),
   editor: Schema.NullOr(EditorDraft),
   confirmArchive: Schema.NullOr(PriceListItemRecord),
   archiving: Schema.Boolean,
@@ -148,46 +159,48 @@ const loadItemsCommand = (
   includeArchived: boolean,
 ): PageCommand<Message> =>
   apiCommand(
-    "PriceListLoadItems",
+    Message,
+    "PriceList.LoadItems",
     request(
       (client) =>
         client.priceList.list({
-          params: { workspaceId: workspaceId as WorkspaceId },
+          params: { workspaceId: WorkspaceId.make(workspaceId) },
           query: {
-            ...(text.trim() === "" ? {} : { text: text.trim() }),
-            ...(includeArchived ? { includeArchived: true } : {}),
+            text: Str.trim(text) === "" ? undefined : Str.trim(text),
+            includeArchived: includeArchived || undefined,
           },
         }),
-      (raw): Message => Message.LoadedItems({ seq, items: raw.map(normalizePriceListItem) }),
+      (raw): Message => Message.LoadedItems({ seq, items: Arr.map(raw, normalizePriceListItem) }),
       (failure): Message => Message.FailedItems({ seq, failure }),
     ),
   );
 
 const saveItemCommand = (workspaceId: string, draft: EditorDraft): PageCommand<Message> => {
   const parsedPrice = parseUserDecimal(draft.unitPrice) ?? 0;
-  const payload = {
-    name: draft.name.trim(),
-    description: draft.description.trim() === "" ? null : draft.description.trim(),
-    unit: draft.unit.trim() === "" ? null : draft.unit.trim(),
+  const payload = PriceListItemInput.make({
+    name: Str.trim(draft.name),
+    description: Str.trim(draft.description) === "" ? null : Str.trim(draft.description),
+    unit: Str.trim(draft.unit) === "" ? null : Str.trim(draft.unit),
     unitPrice: String(parsedPrice),
-    currency: draft.currency as CurrencyCode,
-    vat: draft.vat === "" ? null : (draft.vat as VatTreatment),
-  } as unknown as PriceListItemInput;
+    currency: CurrencyCode.make(draft.currency),
+    vat: draft.vat === "" ? null : draft.vat,
+  });
 
   return apiCommand(
-    "PriceListSaveItem",
+    Message,
+    "PriceList.SaveItem",
     request(
       (client) =>
         draft.id === null
           ? client.priceList.create({
-              params: { workspaceId: workspaceId as WorkspaceId },
+              params: { workspaceId: WorkspaceId.make(workspaceId) },
               headers: { "idempotency-key": draft.idempotencyKey },
               payload,
             })
           : client.priceList.update({
               params: {
-                workspaceId: workspaceId as WorkspaceId,
-                itemId: draft.id as PriceListItemId,
+                workspaceId: WorkspaceId.make(workspaceId),
+                itemId: PriceListItemId.make(draft.id),
               },
               headers: { "if-match": `"${draft.revision ?? 1}"` },
               payload,
@@ -200,13 +213,14 @@ const saveItemCommand = (workspaceId: string, draft: EditorDraft): PageCommand<M
 
 const archiveItemCommand = (workspaceId: string, itemId: string): PageCommand<Message> =>
   apiCommand(
+    Message,
     "PriceListArchiveItem",
     request(
       (client) =>
         client.priceList.archive({
           params: {
-            workspaceId: workspaceId as WorkspaceId,
-            itemId: itemId as PriceListItemId,
+            workspaceId: WorkspaceId.make(workspaceId),
+            itemId: PriceListItemId.make(itemId),
           },
         }),
       (): Message => Message.ArchivedItem({ id: itemId }),
@@ -242,7 +256,10 @@ const draftFromItem = (item: PriceListItemRecord): EditorDraft => ({
   error: null,
 });
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const search = route.text ?? "";
   const location = Option.getOrUndefined(BrowserRoutes.parse(ctx.path));
   const includeArchived = location?._tag === "PriceList" && location.search.archived === "1";
@@ -263,16 +280,15 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
         ? []
         : [loadItemsCommand(wsId, Remote.seqOf(items), search, includeArchived)],
   };
-};
+});
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> => {
   const tr = translator(ctx.locale);
   const wsId = ctx.workspace?.id;
-  const route = model.route as Route;
+  const route = model.route;
   const committedSearch = route.text ?? "";
 
   return Message.match(message, {
@@ -287,20 +303,14 @@ export const update = (
     ChangedSearch: ({ value }) => ({ model: { ...model, search: value } }),
 
     SubmittedSearch: () => {
-      const trimmed = model.search.trim();
+      const trimmed = Str.trim(model.search);
+      const text = trimmed === "" ? undefined : { text: trimmed };
+      const archived = model.includeArchived ? { archived: "1" as const } : undefined;
       const path = BrowserRoutes.print(
-        BrowserRoutes.PriceList({
-          params: { ws: route.ws },
-          search: {
-            ...(trimmed === "" ? {} : { text: trimmed }),
-            ...(model.includeArchived ? { archived: "1" } : {}),
-          },
-        }),
+        BrowserRoutes.PriceList({ params: { ws: route.ws }, search: { ...text, ...archived } }),
       );
-      return {
-        model: { ...model, search: trimmed },
-        ...(path === ctx.path ? {} : { outMessage: Intent_.navigate(path) }),
-      };
+      const next = { model: { ...model, search: trimmed } };
+      return path === ctx.path ? next : { ...next, outMessage: Intent_.navigate(path) };
     },
 
     ToggledIncludeArchived: ({ checked }) => {
@@ -356,7 +366,7 @@ export const update = (
 
     SubmittedEditor: () => {
       if (model.editor === null || model.editor.saving || wsId === undefined) return { model };
-      if (model.editor.name.trim() === "") {
+      if (Str.trim(model.editor.name) === "") {
         return {
           model: {
             ...model,
@@ -381,9 +391,12 @@ export const update = (
 
     SavedItem: ({ item }) => {
       const existing = Remote.dataOf(model.items) ?? [];
-      const idx = existing.findIndex((i) => i.id === item.id);
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(existing, (i) => i.id === item.id),
+        () => -1,
+      );
       const updated =
-        idx >= 0 ? existing.map((i) => (i.id === item.id ? item : i)) : [item, ...existing];
+        idx >= 0 ? Arr.map(existing, (i) => (i.id === item.id ? item : i)) : [item, ...existing];
       const nextSeq = Remote.seqOf(model.items);
       return {
         model: {
@@ -425,8 +438,8 @@ export const update = (
       const targetName = model.confirmArchive?.name ?? "";
       const existing = Remote.dataOf(model.items) ?? [];
       const updated = model.includeArchived
-        ? existing.map((i) => (i.id === id ? { ...i, archived: true } : i))
-        : existing.filter((i) => i.id !== id);
+        ? Arr.map(existing, (i) => (i.id === id ? { ...i, archived: true } : i))
+        : Arr.filter(existing, (i) => i.id !== id);
       return {
         model: {
           ...model,
@@ -444,15 +457,19 @@ export const update = (
       outMessage: Intent_.toast(textOf(tr, failure.text), "error"),
     }),
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
-};
+});
 
-export const title = (_model: Model, ctx: PageContext): string =>
-  translator(ctx.locale).t("priceList.title");
+export const title: {
+  (ctx: PageContext): (_model: Model) => string;
+  (_model: Model, ctx: PageContext): string;
+} = Fn.dual(2, (_model: Model, ctx: PageContext): string =>
+  translator(ctx.locale).t("priceList.title"),
+);
 
 const formatVatLabel = (locale: PageContext["locale"], treatment: string | null): string => {
   const tr = translator(locale);
-  if (treatment === null || treatment === "") return "—";
-  const label = enumLabel(tr, "vatTreatment", treatment as VatTreatment);
+  if (!Schema.is(VatTreatment)(treatment)) return "—";
+  const label = enumLabel(tr, "vatTreatment", treatment);
   const rate = vatRatePercent(treatment);
   if (rate === 0) return label;
   return tr.t("priceList.vatToday", {
@@ -461,7 +478,10 @@ const formatVatLabel = (locale: PageContext["locale"], treatment: string | null)
   });
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message>;
+} = Fn.dual(3, (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const tr = translator(ctx.locale);
   const writable = canWrite(ctx);
   const items = Remote.dataOf(model.items);
@@ -481,7 +501,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       h.search.children([
         h.form
           .class(ui.row)
-          .attr("action", ctx.path.split("?", 1)[0] ?? ctx.path)
+          .attr("action", Str.split(ctx.path, "?")[0] ?? ctx.path)
           .on("submit", Message.SubmittedSearch(), { preventDefault: true })
           .children([
             h.div.class("relative max-w-[380px] flex-[1_1_240px]").children([
@@ -535,26 +555,30 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       });
     }
     if (items === undefined || items.length === 0) {
+      const action = writable
+        ? {
+            action: button(h, {
+              label: tr.t("priceList.empty.cta"),
+              variant: "primary",
+              icon: icon(h, "plus", 16),
+              onClick: Message.ClickedNew(),
+            }),
+          }
+        : undefined;
       return emptyState(h, {
         title: tr.t("priceList.empty.title"),
         body: tLocal(ctx.locale, "subtitle"),
-        ...(writable
-          ? {
-              action: button(h, {
-                label: tr.t("priceList.empty.cta"),
-                variant: "primary",
-                icon: icon(h, "plus", 16),
-                onClick: Message.ClickedNew(),
-              }),
-            }
-          : {}),
+        ...action,
       });
     }
+    const rowAction = writable
+      ? { onRowClick: (item: PriceListItemRecord) => Message.ClickedEdit({ item }) }
+      : undefined;
     return table<PriceListItemRecord, Message>(h, {
       caption: tr.t("priceList.title"),
       rows: items,
       rowKey: (item) => item.id,
-      ...(writable ? { onRowClick: (item) => Message.ClickedEdit({ item }) } : {}),
+      ...rowAction,
       columns: [
         {
           header: tr.t("priceList.column.name"),
@@ -661,7 +685,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     id: "pli-currency",
                     label: tr.t("common.field.currency"),
                     value: model.editor.currency,
-                    options: CURRENCIES.map((c) => ({ value: c, label: c })),
+                    options: Arr.map(CURRENCIES, (c) => ({ value: c, label: c })),
                     onChange: (value) => Message.ChangedField({ field: "currency", value }),
                   }),
                   textField(h, {
@@ -677,7 +701,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     value: model.editor.vat,
                     options: [
                       { value: "", label: tLocal(ctx.locale, "vatDefault") },
-                      ...VAT_TREATMENTS.map((v) => ({
+                      ...Arr.map(VAT_TREATMENTS, (v) => ({
                         value: v,
                         label: formatVatLabel(ctx.locale, v),
                       })),
@@ -775,4 +799,4 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       .children([listBody, editorPanel]),
     archiveModal,
   ]);
-};
+});

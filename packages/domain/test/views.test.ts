@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal, Exit, Schema } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   AuditEntry,
   ContactView,
@@ -10,6 +14,7 @@ import {
   type ExpenseInput,
   ExpenseQuery,
   ExpenseView,
+  IsoDate,
   Page,
   PriceListItemView,
   SharedDocumentView,
@@ -18,7 +23,7 @@ import {
   type WorkspaceView,
 } from "../src/index";
 
-const id = (n: number) => `0192f0c4-1b2c-7d3e-8f40-${String(n).padStart(12, "0")}`;
+const id = (n: number) => `0192f0c4-1b2c-7d3e-8f40-${Str.padStart(12, "0")(String(n))}`;
 const czk = (amount: string) => ({ amount, currency: "CZK" });
 
 const documentJson = {
@@ -72,16 +77,16 @@ const documentJson = {
 describe("DocumentView runtime schema", () => {
   const json = Schema.toCodecJson(DocumentView);
   test("decodes and re-encodes a full view", () => {
-    const view = Schema.decodeUnknownSync(json)(documentJson);
-    expect(BigDecimal.format(view.totals.gross.amount)).toBe("1210");
+    const view = Schema.decodeEffect(json)(documentJson).pipe(Effect.runSync);
+    expect(view.totals.gross.amount.pipe(BigDecimal.format)).toBe("1210");
     expect(String(view.dates.dueOn)).toBe(documentJson.dates.dueOn);
-    expect(Schema.encodeSync(json)(view)).toEqual(documentJson);
+    expect(Schema.encodeEffect(json)(view).pipe(Effect.runSync)).toEqual(documentJson);
   });
   test("rejects an unknown status and a malformed id", () => {
-    expect(
-      Exit.isFailure(Schema.decodeUnknownExit(json)({ ...documentJson, status: "paid" })),
-    ).toBe(true);
-    expect(Exit.isFailure(Schema.decodeUnknownExit(json)({ ...documentJson, id: "x" }))).toBe(true);
+    expect(Schema.decodeExit(json)({ ...documentJson, status: "paid" }).pipe(Exit.isFailure)).toBe(
+      true,
+    );
+    expect(Schema.decodeExit(json)({ ...documentJson, id: "x" }).pipe(Exit.isFailure)).toBe(true);
   });
   test("list query fields spread into a query struct; summaries page", () => {
     const query = Schema.Struct({
@@ -89,61 +94,70 @@ describe("DocumentView runtime schema", () => {
       cursor: Schema.optional(Schema.String),
     });
     expect(
-      Schema.decodeUnknownSync(query)({ kind: "proforma", overdue: true, from: "2026-01-01" }),
+      Schema.decodeEffect(query)({ kind: "proforma", overdue: true, from: "2026-01-01" }).pipe(
+        Effect.runSync,
+      ),
     ).toEqual({
       kind: "proforma",
       overdue: true,
-      from: "2026-01-01",
-    } as never);
-    const page = Schema.decodeUnknownSync(Page(DocumentSummary))({
+      from: IsoDate.make("2026-01-01"),
+    });
+    const page = Schema.decodeEffect(Page(DocumentSummary))({
       items: [{ any: "row" }],
       nextCursor: null,
-    });
+    }).pipe(Effect.runSync);
     expect(page.items).toHaveLength(1);
   });
 });
 
 describe("partly specified types expose their specified fields", () => {
   test("ContactView.defaults is readable and other fields survive decoding", () => {
-    const view = Schema.decodeUnknownSync(ContactView)({
+    const view = Schema.decodeEffect(ContactView)({
       name: "Buyer",
       defaults: { dueDays: 30 },
       revision: 2,
-    });
+    }).pipe(Effect.runSync);
     expect(view.defaults.dueDays).toBe(30);
-    expect(view.name).toBe("Buyer");
+    expect(view["name"]).toBe("Buyer");
     const etag: number = view.revision;
     expect(etag).toBe(2);
-    expect(Exit.isFailure(Schema.decodeUnknownExit(ContactView)({ defaults: {} }))).toBe(true);
+    expect(Schema.decodeUnknownExit(ContactView)({ defaults: {} }).pipe(Exit.isFailure)).toBe(true);
   });
   test("an incomplete Expense can be recorded and listed", () => {
     const input: ExpenseInput = { status: "incomplete" };
     expect(input.status).toBe("incomplete");
-    expect(Schema.decodeUnknownSync(ExpenseQuery)({ incomplete: true, limit: 20 }).incomplete).toBe(
-      true,
-    );
-    expect(Exit.isFailure(Schema.decodeUnknownExit(ExpenseQuery)({ limit: 0 }))).toBe(true);
+    expect(
+      Schema.decodeEffect(ExpenseQuery)({ incomplete: true, limit: 20 }).pipe(Effect.runSync)
+        .incomplete,
+    ).toBe(true);
+    expect(Schema.decodeExit(ExpenseQuery)({ limit: 0 }).pipe(Exit.isFailure)).toBe(true);
   });
   test("revisioned views type their revision as a number", () => {
-    const expense = Schema.decodeUnknownSync(ExpenseView)({ status: "complete", revision: 5 });
-    const item = Schema.decodeUnknownSync(PriceListItemView)({ name: "Hosting", revision: 1 });
+    const expense = Schema.decodeEffect(ExpenseView)({ status: "complete", revision: 5 }).pipe(
+      Effect.runSync,
+    );
+    const item = Schema.decodeEffect(PriceListItemView)({ name: "Hosting", revision: 1 }).pipe(
+      Effect.runSync,
+    );
     const revisions: ReadonlyArray<number> = [expense.revision, item.revision];
     expect(revisions).toEqual([5, 1]);
   });
   test("TemplateView exposes the schedule pause reason", () => {
-    const view = Schema.decodeUnknownSync(TemplateView)({
+    const view = Schema.decodeEffect(TemplateView)({
       name: "Monthly",
       revision: 3,
       schedule: { startOn: "2026-01-31", pausedReason: "schedule.missed_occurrences" },
-    });
+    }).pipe(Effect.runSync);
     expect(view.schedule?.pausedReason).toBe("schedule.missed_occurrences");
     expect(
-      Schema.decodeUnknownSync(TemplateView)({ revision: 1, schedule: null }).schedule,
+      Schema.decodeEffect(TemplateView)({ revision: 1, schedule: null }).pipe(Effect.runSync)
+        .schedule,
     ).toBeNull();
     expect(
-      Exit.isFailure(
-        Schema.decodeUnknownExit(TemplateView)({ revision: 1, schedule: { pausedReason: "oops" } }),
-      ),
+      Schema.decodeUnknownExit(TemplateView)({
+        revision: 1,
+        schedule: { pausedReason: "oops" },
+      }).pipe(Exit.isFailure),
     ).toBe(true);
   });
   test("WorkspaceView requires slug, branding and revision", () => {
@@ -152,16 +166,18 @@ describe("partly specified types expose their specified fields", () => {
     expect(partial).toBeDefined();
   });
   test("TemplateInput is DocumentInput without dates plus name and relative due", () => {
-    const ok = Schema.decodeUnknownSync(TemplateInput)({
+    const ok = Schema.decodeEffect(TemplateInput)({
       kind: "invoice",
       contact: id(3),
       lines: [{ description: "Hosting" }],
       name: "Monthly hosting",
       due: { inDays: 14 },
-    });
+    }).pipe(Effect.runSync);
     expect(ok.name).toBe("Monthly hosting");
     expect(
-      Exit.isFailure(Schema.decodeUnknownExit(TemplateInput)({ ...ok, due: { on: "2026-12-01" } })),
+      Schema.decodeUnknownExit(TemplateInput)({ ...ok, due: { on: "2026-12-01" } }).pipe(
+        Exit.isFailure,
+      ),
     ).toBe(true);
     expect("issuedOn" in TemplateInput.fields).toBe(false);
   });
@@ -199,8 +215,11 @@ describe("SharedDocumentView is a closed recipient projection", () => {
     pdfUrl: "https://kvitbit.example/s/v1.abc/pdf",
     viewerIsIssuer: false,
   };
-  const roundTrip = (input: unknown) =>
-    Schema.encodeSync(json)(Schema.decodeUnknownSync(json)(input));
+  const roundTrip = (input: Schema.Json) =>
+    Schema.decodeEffect(json)(input).pipe(
+      Effect.flatMap(Schema.encodeEffect(json)),
+      Effect.runSync,
+    );
   test("a Credit Note carries the original number and its language", () => {
     const creditNote = {
       ...shared,
@@ -227,22 +246,23 @@ describe("SharedDocumentView is a closed recipient projection", () => {
       note: "Thank you",
       updatedAt: "2026-11-24T08:00:00Z",
     };
-    const view = Schema.decodeUnknownSync(json)(partial);
-    expect(BigDecimal.format(view.amountDue.amount)).toBe("210");
+    const view = Schema.decodeEffect(json)(partial).pipe(Effect.runSync);
+    expect(view.amountDue.amount.pipe(BigDecimal.format)).toBe("210");
     expect(roundTrip(partial)).toEqual(partial);
   });
   test("encoding drops private fields", () => {
-    const view = Schema.decodeUnknownSync(json)({
+    const view = Schema.decodeEffect(json)({
       ...shared,
       deliveries: documentJson.deliveries,
       internalNote: "chase hard",
-    });
+    }).pipe(Effect.runSync);
     expect(view.paymentQr?.payload).toBe(documentJson.paymentQr.payload);
-    const encoded = Schema.encodeSync(json)({
+    const withPrivateFields = {
       ...view,
       deliveries: [{ to: ["buyer@example.cz"] }],
       internalNote: "chase hard",
-    } as typeof view);
+    };
+    const encoded = Schema.encodeEffect(json)(withPrivateFields).pipe(Effect.runSync);
     expect(encoded).toEqual(shared);
     expect(encoded).not.toHaveProperty("deliveries");
     expect(encoded).not.toHaveProperty("internalNote");
@@ -251,7 +271,7 @@ describe("SharedDocumentView is a closed recipient projection", () => {
 
 describe("Documents.list takes filter and paging", () => {
   test("cursor and limit are part of the port input", () => {
-    type ListInput = Parameters<Documents["Service"]["list"]>[0];
+    type ListInput = Parameters<Documents["Service"]["list"]>[1];
     const next: ListInput = { kind: "invoice", cursor: "c2", limit: 20 };
     expect(next.cursor).toBe("c2");
     expect(next.limit).toBe(20);
@@ -271,6 +291,11 @@ describe("AuditEntry runtime schema", () => {
       reason: null,
     };
     const json = Schema.toCodecJson(AuditEntry);
-    expect(Schema.encodeSync(json)(Schema.decodeUnknownSync(json)(entry))).toEqual(entry);
+    expect(
+      Schema.decodeEffect(json)(entry).pipe(
+        Effect.flatMap(Schema.encodeEffect(json)),
+        Effect.runSync,
+      ),
+    ).toEqual(entry);
   });
 });

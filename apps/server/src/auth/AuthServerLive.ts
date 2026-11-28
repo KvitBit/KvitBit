@@ -3,22 +3,25 @@
  * with transactional email rendering (E01-E03, E07), ALTCHA bot protection, per-email rate
  * limiting, invitation signup, and the Workspace-ownership account deletion guard.
  */
+
 import { BotProtection } from "@kvitbit/adapters/altcha";
 import { type AuthConfig, generateId, makeEmailRateLimiter } from "@kvitbit/adapters/auth";
 import { type EmailTemplate, renderEmail } from "@kvitbit/adapters/templates/email";
-import { Caller, CurrentCaller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
+import { Caller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
 import type { BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
-import { Clock, Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 import { HttpConfig } from "../http/config";
 import { acceptLanguageLocale } from "../http/edge/request";
 import { Analytics } from "../runtime/analytics";
 import { AuthServer } from "./AuthServer";
-import { makeDrizzleOverSqlClient } from "./drizzleBridge";
+import { makeAuthEffectRunner, makeDrizzleOverSqlClient } from "./drizzleBridge";
 import { makeAuthWithInvitationSignUp, SIGN_UP_PATH } from "./invitationSignUp";
-import { makeAuthEffectRunner } from "./logging";
 import { makeWorkspaceAuth } from "./oauthWorkspace";
 
 const DEFAULT_LINK_VALID_MINUTES = 60;
@@ -44,34 +47,52 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
       const emailSender = yield* EmailSender;
       const workspaces = yield* Workspaces;
       const clock = yield* Clock.Clock;
-      const emailRateLimiter = yield* makeEmailRateLimiter();
       const runAuthEffect = yield* makeAuthEffectRunner;
+      const emailRateLimiter = yield* makeEmailRateLimiter();
 
       const db = makeDrizzleOverSqlClient(sql);
       const rpID = new URL(config.appOrigin).hostname;
 
-      const sendTemplate = async (
+      const sendTemplate = Effect.fn("sendAuthTemplate")(function* (
         to: string,
         template: EmailTemplate,
         request?: Request,
-      ): Promise<void> => {
-        const locale = requestLocale(request);
-        const rendered = renderEmail(template, locale);
-        await runAuthEffect(
-          emailSender.send(
-            {
-              to: [to],
-              replyTo: `noreply@${rpID}`,
-              subject: rendered.subject,
-              html: rendered.html,
-              text: rendered.text,
-              attachments: [],
-              tags: { template: template.id },
-            },
-            { idempotencyKey: `auth:${template.id}:${generateId()}` },
-          ),
+      ) {
+        const rendered = renderEmail(template, requestLocale(request));
+        yield* emailSender.send(
+          {
+            to: [to],
+            replyTo: `noreply@${rpID}`,
+            subject: rendered.subject,
+            html: rendered.html,
+            text: rendered.text,
+            attachments: [],
+            tags: { template: template.id },
+          },
+          { idempotencyKey: `auth:${template.id}:${generateId()}` },
         );
-      };
+      });
+
+      const checkAccountDeletion = Effect.fn("checkAccountDeletion")(function* (
+        deleted: Parameters<NonNullable<AuthConfig["beforeDeleteUser"]>>[0],
+        request?: Request,
+      ) {
+        const accountCaller = Caller.account({
+          userId: UserId.make(deleted.id),
+          email: deleted.email,
+          locale: requestLocale(request),
+          channel: "web",
+        });
+        const list = yield* workspaces.listMine(accountCaller);
+        if (Arr.some(list, (workspace) => workspace.role === "owner")) {
+          return yield* Effect.fail(
+            new APIError("CONFLICT", {
+              code: "WORKSPACE_OWNER",
+              message: "Transfer or close owned workspaces before deleting your account.",
+            }),
+          );
+        }
+      });
 
       const authConfig: AuthConfig = {
         baseURL: config.appOrigin,
@@ -86,101 +107,102 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
         botProtection,
         emailRateLimiter,
         ...(overrides.fetchClientMetadata === undefined
-          ? {}
+          ? undefined
           : { fetchClientMetadata: overrides.fetchClientMetadata }),
-        ...(overrides.beforeHooks === undefined ? {} : { beforeHooks: overrides.beforeHooks }),
+        ...(overrides.beforeHooks === undefined
+          ? undefined
+          : { beforeHooks: overrides.beforeHooks }),
         sendVerificationEmail: ({ user, url }, request) =>
-          sendTemplate(
-            user.email,
-            {
-              id: "E01",
-              variant: "verify",
-              url,
-              validForMinutes: DEFAULT_LINK_VALID_MINUTES,
-            },
-            request,
+          runAuthEffect(
+            sendTemplate(
+              user.email,
+              {
+                id: "E01",
+                variant: "verify",
+                url,
+                validForMinutes: DEFAULT_LINK_VALID_MINUTES,
+              },
+              request,
+            ),
           ),
         sendResetPassword: ({ user, url }, request) =>
-          sendTemplate(
-            user.email,
-            {
-              id: "E03",
-              email: user.email,
-              url,
-              validForMinutes: DEFAULT_LINK_VALID_MINUTES,
-            },
-            request,
+          runAuthEffect(
+            sendTemplate(
+              user.email,
+              {
+                id: "E03",
+                email: user.email,
+                url,
+                validForMinutes: DEFAULT_LINK_VALID_MINUTES,
+              },
+              request,
+            ),
           ),
         sendMagicLink: ({ email, url }, request) =>
-          sendTemplate(
-            email,
-            {
-              id: "E02",
+          runAuthEffect(
+            sendTemplate(
               email,
-              url,
-              validForMinutes: 15,
-            },
-            request,
+              {
+                id: "E02",
+                email,
+                url,
+                validForMinutes: 15,
+              },
+              request,
+            ),
           ),
         sendChangeEmailConfirmation: ({ user, newEmail, url }, request) =>
-          sendTemplate(
-            newEmail,
-            {
-              id: "E07",
-              variant: "confirm_new",
-              oldEmail: user.email,
+          runAuthEffect(
+            sendTemplate(
               newEmail,
-              url,
-              validForMinutes: DEFAULT_LINK_VALID_MINUTES,
-            },
-            request,
+              {
+                id: "E07",
+                variant: "confirm_new",
+                oldEmail: user.email,
+                newEmail,
+                url,
+                validForMinutes: DEFAULT_LINK_VALID_MINUTES,
+              },
+              request,
+            ),
           ),
-        beforeDeleteUser: async (deleted, request) => {
-          const accountCaller = Caller.account({
-            userId: UserId.make(deleted.id),
-            email: deleted.email,
-            locale: requestLocale(request),
-            channel: "web",
-          });
-          const list = await runAuthEffect(
-            workspaces.listMine.pipe(Effect.provideService(CurrentCaller, accountCaller)),
-          );
-          if (list.some((ws) => ws.role === "owner")) {
-            throw new APIError("CONFLICT", {
-              code: "WORKSPACE_OWNER",
-              message: "Transfer or close owned workspaces before deleting your account.",
-            });
-          }
-        },
+        beforeDeleteUser: (deleted, request) =>
+          runAuthEffect(checkAccountDeletion(deleted, request)),
       };
 
-      // A duplicate email signup can return 200 with a synthetic user. The database
-      // hook marks real creations, and the handler confirms the request succeeded.
-      const signUps = new WeakMap<Request, string>();
-      const signupHooks = {
+      const createdSignups = new WeakMap<Request, string>();
+      const databaseHooks = {
         user: {
           create: {
-            after: async (user, ctx) => {
-              if (ctx?.path === SIGN_UP_PATH && ctx.request !== undefined) {
-                signUps.set(ctx.request, user.id);
-              }
-            },
+            after: (user, ctx) =>
+              runAuthEffect(
+                Effect.sync(() => {
+                  if (ctx?.path === SIGN_UP_PATH && ctx.request !== undefined) {
+                    createdSignups.set(ctx.request, user.id);
+                  }
+                }),
+              ),
           },
         },
       } satisfies NonNullable<BetterAuthOptions["databaseHooks"]>;
-
-      const auth = makeWorkspaceAuth(sql, authConfig, runAuthEffect, signupHooks);
-      const withInvitations = yield* Effect.promise(() =>
-        makeAuthWithInvitationSignUp(auth, authConfig, workspaces, clock, runAuthEffect, {
-          databaseHooks: signupHooks,
-          capture: async (request, method) => {
-            const userId = signUps.get(request);
-            if (userId !== undefined) {
-              await runAuthEffect(analytics.capture({ event: "user_signed_up", userId, method }));
-            }
-          },
-        }),
-      );
+      const auth = yield* makeWorkspaceAuth(sql)(authConfig, databaseHooks).pipe(Effect.orDie);
+      const withInvitations = yield* makeAuthWithInvitationSignUp(
+        auth,
+        authConfig,
+        workspaces,
+        clock,
+        {
+          databaseHooks,
+          capture: (request, method) =>
+            Effect.suspend(() => {
+              const userId = createdSignups.get(request);
+              createdSignups.delete(request);
+              return userId === undefined
+                ? Effect.void
+                : analytics.capture({ event: "user_signed_up", userId, method });
+            }),
+        },
+      ).pipe(Effect.orDie);
       return AuthServer.of(withInvitations);
     }),
   );

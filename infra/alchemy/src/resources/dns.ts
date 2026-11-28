@@ -1,14 +1,21 @@
+// Alchemy resource names and instance props need a synchronous SHA-256. Effect Digest is asynchronous.
+
 import { createHash } from "node:crypto";
 import * as DNS from "@alchemy.run/gcp/DNS";
 import type { ProjectService } from "@alchemy.run/gcp/ServiceUsage";
 import * as Output from "alchemy/Output";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { type KvitbitStackConfig, resourceNames, stackLabels } from "../config";
 
+const matchPattern = /^(\d+)\s+(\S+)$/;
+
 const zoneNameFor = (prefix: string, domain: string) => {
-  const slug = domain.replaceAll(".", "-");
-  const hash = createHash("sha256").update(domain).digest("hex").slice(0, 12);
-  return `${prefix}-${slug.slice(0, 63 - prefix.length - hash.length - 2)}-${hash}`;
+  const slug = Str.replaceAll(".", "-")(domain);
+  const hash = Str.slice(0, 12)(createHash("sha256").update(domain).digest("hex"));
+  return `${prefix}-${Str.slice(0, 63 - prefix.length - hash.length - 2)(slug)}-${hash}`;
 };
 
 /**
@@ -36,16 +43,16 @@ export const formatCloudDnsTxt = (raw: string): string => {
     }
   }
   chunks.push(`"${current}"`);
-  return chunks.join(" ");
+  return Arr.join(chunks, " ");
 };
 
 export const normalizeMxRrdata = (raw: string): string => {
-  const trimmed = raw.trim();
-  const match = trimmed.match(/^(\d+)\s+(\S+)$/);
-  if (!match) return trimmed;
+  const trimmed = Str.trim(raw);
+  const match = Option.getOrNull(Str.match(matchPattern)(trimmed));
+  if (!(match !== null)) return trimmed;
   const priority = match[1];
-  const host = (match[2] ?? "").toLowerCase();
-  const fqdn = host.endsWith(".") ? host : `${host}.`;
+  const host = Str.toLowerCase(match[2] ?? "");
+  const fqdn = Str.endsWith(".")(host) ? host : `${host}.`;
   return `${priority} ${fqdn}`;
 };
 
@@ -56,20 +63,22 @@ export const declareKvitbitDns = Effect.fn("KvitbitStack.declareDns")(function* 
   mailIpAddress?: Output.Output<string | undefined> | undefined,
 ) {
   const { prefix } = resourceNames(config);
-  const nameServers: Record<string, Output.Output<ReadonlyArray<string>>> = {};
+  const nameServers: Record<string, Output.Output<ReadonlyArray<string>, never>> = {};
   const edgeAddressData = edgeIpAddress?.pipe(
-    Output.map((address) => {
-      if (!address) throw new Error("EdgeAddress has no IPv4 address for the Cloud DNS A records");
-      return [address];
-    }),
+    Output.mapEffect((address) =>
+      address === undefined || address === ""
+        ? Effect.die(new Error("EdgeAddress has no IPv4 address for the Cloud DNS A records"))
+        : Effect.succeed([address]),
+    ),
   );
   const mailAddressData = mailIpAddress?.pipe(
-    Output.map((address) => {
-      if (!address) {
-        throw new Error("KvitbitMailAddress has no IPv4 address for the Cloud DNS MX A record");
-      }
-      return [address];
-    }),
+    Output.mapEffect((address) =>
+      address === undefined || address === ""
+        ? Effect.die(
+            new Error("KvitbitMailAddress has no IPv4 address for the Cloud DNS MX A record"),
+          )
+        : Effect.succeed([address]),
+    ),
   );
 
   for (const domain of config.dnsZones) {

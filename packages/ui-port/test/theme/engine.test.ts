@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { Effect, Exit, Layer, Option, Result } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Str from "effect/String";
 import { UiError } from "../../src/api/errors";
 import {
   auditScheme,
@@ -30,6 +38,7 @@ const account = resolvePreset("plum");
 const workspace = resolvePreset("forest");
 /** Bun's default is 5 s; the exhaustive searches below get margin for a loaded CI machine. */
 const HEAVY_TIMEOUT = 20_000;
+const UPPERCASE_HEX = /^#[0-9A-F]{6}$/;
 const dynamic = Result.getOrThrow(dynamicRoles({ _tag: "Seed", seed: "#B3261E" }));
 
 const state = (patch: {
@@ -148,10 +157,10 @@ describe("dynamic colour input", () => {
     );
     expect(roles.light.primary).toBe("#4A6B2F");
     expect(roles.light.onPrimary).toBe("#FFFFFF");
-    expect(roles.light.surface).toMatch(/^#[0-9A-F]{6}$/);
+    expect(roles.light.surface).toMatch(UPPERCASE_HEX);
     expect(roles.dark.primary).toBe("#AFD38D");
-    expect(Object.keys(roles.dark)).toHaveLength(
-      Object.keys(KvitbitDefaultTheme.schemes.dark.roles).length,
+    expect(Rec.keys(roles.dark)).toHaveLength(
+      Rec.keys(KvitbitDefaultTheme.schemes.dark.roles).length,
     );
   });
 });
@@ -176,12 +185,10 @@ describe("dynamic colour hardening", () => {
       const e = effectiveTheme(
         state({ preference: { contrast }, system: { dynamic: Option.some(roles) } }),
       );
-      const failing = auditScheme(
-        { roles: e.roles, extended: e.extended },
-        variantOf("light", contrast),
-      )
-        // primary/surface are both system colours: the platform owns that pair.
-        .filter((i) => !(i.foreground === "primary" && i.background === "surface"));
+      const failing = Arr.filter(
+        auditScheme({ roles: e.roles, extended: e.extended }, variantOf("light", contrast)),
+        (i) => !(i.foreground === "primary" && i.background === "surface"),
+      );
       expect({ contrast, failing }).toEqual({ contrast, failing: [] });
       expect(e.roles.surface === "#1A1C18" || contrast !== "standard").toBe(true);
     }
@@ -199,7 +206,7 @@ describe("dynamic colour hardening", () => {
           system: { scheme: "dark", dynamic: Option.some(roles) },
         }),
       );
-      const variant = variantOf("dark", contrast);
+      const variant: ReturnType<typeof variantOf> = variantOf("dark", contrast);
       expect({
         contrast,
         failing: auditScheme({ roles: e.roles, extended: e.extended }, variant),
@@ -213,18 +220,17 @@ describe("dynamic colour hardening", () => {
   test(
     "fuzz: realistic partial system maps resolve AA-clean in all six variants",
     () => {
-      let state = 11;
+      let randomState = 11;
       const rnd = () => {
-        state = (state * 1103515245 + 12345) & 0x7fffffff;
-        return state / 0x7fffffff;
+        randomState = (randomState * 1103515245 + 12345) & 0x7fffffff;
+        return randomState / 0x7fffffff;
       };
       const hex = () =>
-        `#${Math.floor(rnd() * 0xffffff)
-          .toString(16)
-          .padStart(6, "0")
-          .toUpperCase()}`;
+        `#${Str.toUpperCase(
+          Fn.pipe(Math.floor(rnd() * 0xffffff).toString(16), Str.padStart(6, "0")),
+        )}`;
       const drop = (m: Record<string, string>) =>
-        Object.fromEntries(Object.entries(m).filter(() => rnd() > 0.3));
+        Rec.fromEntries(Arr.filter(Rec.toEntries(m), () => rnd() > 0.3));
       for (let i = 0; i < 20; i++) {
         const sys = resolveSeed(hex()).schemes;
         const d = Result.getOrThrow(
@@ -239,18 +245,21 @@ describe("dynamic colour hardening", () => {
   // The same 20 seeded cases as one loop took seconds under load, so they run in chunks: each test
   // stays well under bun's 5 s default even on a contended CI machine, with an explicit margin.
   const conflictingCases = (() => {
-    let state = 7;
+    let randomState = 7;
     const rnd = () => {
-      state = (state * 1103515245 + 12345) & 0x7fffffff;
-      return state / 0x7fffffff;
+      randomState = (randomState * 1103515245 + 12345) & 0x7fffffff;
+      return randomState / 0x7fffffff;
     };
     const hex = () =>
-      `#${Math.floor(rnd() * 0xffffff)
-        .toString(16)
-        .padStart(6, "0")
-        .toUpperCase()}`;
-    const roles = Object.keys(KvitbitDefaultTheme.schemes.light.roles);
-    const pick = () => Object.fromEntries(roles.filter(() => rnd() < 0.08).map((r) => [r, hex()]));
+      `#${Str.toUpperCase(Fn.pipe(Math.floor(rnd() * 0xffffff).toString(16), Str.padStart(6, "0")))}`;
+    const roles = Rec.keys(KvitbitDefaultTheme.schemes.light.roles);
+    const pick = () =>
+      Rec.fromEntries(
+        Arr.map(
+          Arr.filter(roles, () => rnd() < 0.08),
+          (r) => [r, hex()] as const,
+        ),
+      );
     return Array.from({ length: 20 }, () => ({ light: pick(), dark: pick() }));
   })();
   const CONFLICTING_CHUNK = 2;
@@ -343,10 +352,14 @@ describe("dynamic colour hardening", () => {
         if (bgA === undefined || bgB === undefined) continue;
         for (const a of colours)
           for (const b of colours) {
-            const supplied: Record<string, string> = { [bgA]: a, [bgB]: b };
-            const required = CHECKED_ROLE_PAIRS.filter(
-              (p) => p.foreground === fg && (p.background === bgA || p.background === bgB),
-            ).map((p) => ({ color: supplied[p.background] ?? "", required: p.required }));
+            const supplied = { [bgA]: a, [bgB]: b };
+            const required = Arr.map(
+              Arr.filter(
+                CHECKED_ROLE_PAIRS,
+                (p) => p.foreground === fg && (p.background === bgA || p.background === bgB),
+              ),
+              (p) => ({ color: supplied[p.background] ?? "", required: p.required }),
+            );
             if (feasibleLuminance(required).length === 0) continue;
             for (const side of ["light", "dark"] as const) {
               const d = Result.getOrThrow(
@@ -356,8 +369,9 @@ describe("dynamic colour hardening", () => {
                   dark: side === "dark" ? supplied : {},
                 }),
               );
-              const failing = failingPairs(d[side]).filter(
-                (p) => !(supplied[p.foreground] && supplied[p.background]),
+              const failing = Arr.filter(
+                failingPairs(d[side]),
+                (p) => !(p.foreground in supplied && p.background in supplied),
               );
               expect({ side, bgA, a, bgB, b, failing }).toEqual({
                 side,
@@ -380,7 +394,7 @@ describe("dynamic colour hardening", () => {
       test(
         `any single supplied role leaves a passing standard scheme (${colour}, ${side})`,
         () => {
-          for (const role of Object.keys(KvitbitDefaultTheme.schemes.light.roles)) {
+          for (const role of Rec.keys(KvitbitDefaultTheme.schemes.light.roles)) {
             const input =
               side === "light"
                 ? { light: { [role]: colour }, dark: {} }
@@ -392,7 +406,7 @@ describe("dynamic colour hardening", () => {
               side,
               failing: [],
             });
-            expect(d[side][role as "primary"]).toBe(colour);
+            expect(d[side][role]).toBe(colour);
           }
         },
         HEAVY_TIMEOUT,
@@ -426,12 +440,15 @@ describe("dynamic colour hardening", () => {
 describe("ThemeEngine seam", () => {
   const run = <A, E>(eff: Effect.Effect<A, E, ThemeEngine>) =>
     Effect.runSyncExit(Effect.provide(eff, LocalThemeEngine));
-  const withEngine = <A, E>(f: (engine: ThemeEngine["Service"]) => Effect.Effect<A, E>) =>
-    Effect.gen(function* () {
-      return yield* f(yield* ThemeEngine);
-    });
+  const withEngine = Effect.fn("withEngine")(function* <A, E>(
+    f: (engine: ThemeEngine["Service"]) => Effect.Effect<A, E>,
+  ) {
+    const engine = yield* ThemeEngine;
+    return yield* f(engine);
+  });
 
   test("LocalThemeEngine resolves presets and seeds", () => {
+    expect(ThemeEngine.key).toBe("@kvitbit/ui-port/theme/engine/ThemeEngine");
     const exit = run(withEngine((e) => e.resolve({ _tag: "Preset", id: "sand" }, "standard")));
     expect(Exit.isSuccess(exit) && exit.value).toEqual(resolvePreset("sand"));
   });
@@ -460,15 +477,17 @@ describe("ThemeEngine seam", () => {
 
   test("a remote layer can fail with UiError, and callers handle Offline directly", () => {
     const Remote = Layer.succeed(ThemeEngine, {
-      resolve: () => Effect.fail(UiError.offline),
-      harmonizeExtended: () => Effect.fail(UiError.timeout),
+      resolve: Effect.fn("ThemeEngine.resolve")(() => Effect.fail(UiError.offline)),
+      harmonizeExtended: Effect.fn("ThemeEngine.harmonizeExtended")(() =>
+        Effect.fail(UiError.timeout),
+      ),
     });
     const handled = Effect.runSync(
       Effect.provide(
         withEngine((e) => e.resolve({ _tag: "Preset", id: "plum" }, "standard")).pipe(
-          Effect.map(() => "resolved"),
+          Effect.as("resolved"),
           Effect.catchTag("Offline", () => Effect.succeed("offline")),
-          Effect.catch(() => Effect.succeed("other")),
+          Effect.orElseSucceed(() => "other"),
         ),
         Remote,
       ),

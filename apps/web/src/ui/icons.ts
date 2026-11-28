@@ -1,4 +1,6 @@
 import type { Html } from "@effect/ui/html";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import { type Markup, svgImage } from "./html";
 
 /** Minimal 24px stroke icon set (inline SVG, currentColor). */
@@ -34,7 +36,7 @@ const PATHS = {
 
 export type IconName = keyof typeof PATHS;
 
-export const icon = <M>(h: Html.H<M>, name: IconName, size = 18): Markup<M> => {
+const iconImpl = <M>(h: Html.H<M>, name: IconName, size = 18): Markup<M> => {
   const image = svgImage(
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${PATHS[name]}</svg>`,
   );
@@ -49,3 +51,8 @@ export const icon = <M>(h: Html.H<M>, name: IconName, size = 18): Markup<M> => {
       maskSize: "contain",
     });
 };
+
+export const icon: {
+  <M>(name: IconName, size?: number): (h: Html.H<M>) => Markup<M>;
+  <M>(h: Html.H<M>, name: IconName, size?: number): Markup<M>;
+} = Fn.dual((args) => Predicate.isObject(args[0]), iconImpl);

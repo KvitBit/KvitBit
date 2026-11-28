@@ -6,10 +6,20 @@
  * DeskoHub's generated `EkonomickySubjekt` / `Adresa` schemas (packages/ares/src/generated),
  * keeping only the fields RegistryRecord needs; unknown keys are ignored on decode.
  */
+
 import { IsoDate } from "@kvitbit/domain";
 import { CompanyRegistry, type RegistryRecord, RegistryUnavailable } from "@kvitbit/domain/ports";
-import { type Duration, Effect, Layer, Schema } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as Arr from "effect/Array";
+import type * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
 /** Official ARES REST root. Pinned: callers cannot redirect lookups to another host. */
 export const aresBaseUrl = "https://ares.gov.cz/ekonomicke-subjekty-v-be/rest";
@@ -51,19 +61,21 @@ const AresExtra = Schema.Struct({
 export const AresSubject = Schema.Struct({
   ico: Schema.String,
   obchodniJmeno: Schema.String.check(
-    Schema.makeFilter((name: string) => name.trim().length > 0, { expected: "a non-blank name" }),
+    Schema.makeFilter((name: string) => Str.trim(name).length > 0, {
+      expected: "a non-blank name",
+    }),
   ),
   sidlo: Schema.optionalKey(AresAddress),
   pravniForma: Schema.optionalKey(Schema.String.check(Schema.isPattern(/^\d{3}$/u))),
   dic: OptionalString,
   datumZaniku: Schema.optionalKey(IsoDate),
-  dalsiUdaje: Schema.optionalKey(Schema.Array(AresExtra)),
+  dalsiUdaje: AresExtra.pipe(Schema.Array, Schema.optionalKey),
 });
 export type AresSubject = typeof AresSubject.Type;
 
 const nonBlank = (value: string | undefined): string | undefined => {
-  const trimmed = value?.trim();
-  return trimmed === undefined || trimmed.length === 0 ? undefined : trimmed;
+  const trimmed = Str.trim(value ?? "");
+  return trimmed.length === 0 ? undefined : trimmed;
 };
 
 /**
@@ -85,14 +97,16 @@ const houseNumber = (address: AresAddress): string | undefined => {
  * Splits ARES `textovaAdresa` ("Na Florenci 2116/15, Nové Město, 11000 Praha 1") into street,
  * postal code and city. Fills only components the structured fields lack.
  */
+const postalAddress = /^(\d{3}) ?(\d{2})\s+(.+)$/u;
 const parseTextAddress = (text: string): { street: string; city: string; postalCode: string } => {
-  const parts = text
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+  const parts = Arr.filter(
+    Arr.map(Str.split(text, ","), (part) => Str.trim(part)),
+    (part) => part.length > 0,
+  );
   const last = parts.at(-1) ?? "";
-  const match = /^(\d{3}) ?(\d{2})\s+(.+)$/u.exec(last);
-  if (match === null || parts.length < 2) return { street: text.trim(), city: "", postalCode: "" };
+  const match = postalAddress.exec(last);
+  if (match === null || parts.length < 2)
+    return { street: Str.trim(text), city: "", postalCode: "" };
   return { street: parts[0] ?? "", city: match[3] ?? "", postalCode: `${match[1]}${match[2]}` };
 };
 
@@ -119,7 +133,9 @@ const toAddress = (address: AresAddress | undefined): RegistryRecord["address"] 
       ? `${streetName} ${number}`
       : (nonBlank(parsed?.street) ?? streetName ?? number ?? "");
   const psc =
-    address.psc !== undefined ? String(address.psc).padStart(5, "0") : nonBlank(address.pscTxt);
+    address.psc !== undefined
+      ? Str.padStart(5, "0")(String(address.psc))
+      : nonBlank(address.pscTxt);
   return {
     street,
     city: city ?? nonBlank(parsed?.city) ?? "",
@@ -131,16 +147,19 @@ const toAddress = (address: AresAddress | undefined): RegistryRecord["address"] 
 /** Commercial register file mark (e.g. "C 12345/MSPH"), preferring the public-register source. */
 const registerEntry = (subject: AresSubject): string | null => {
   const extras = subject.dalsiUdaje ?? [];
-  const fromPublicRegister = extras.find(
+  const fromPublicRegister = Arr.findFirst(
+    extras,
     (extra) => extra.datovyZdroj === "vr" && nonBlank(extra.spisovaZnacka) !== undefined,
   );
-  const any = fromPublicRegister ?? extras.find((e) => nonBlank(e.spisovaZnacka) !== undefined);
-  return nonBlank(any?.spisovaZnacka) ?? null;
+  const entry = Option.orElse(fromPublicRegister, () =>
+    Arr.findFirst(extras, (extra) => nonBlank(extra.spisovaZnacka) !== undefined),
+  );
+  return nonBlank(Option.getOrUndefined(entry)?.spisovaZnacka) ?? null;
 };
 
 /** Maps a decoded ARES subject to the port record. Pure; exported for tests. */
 export const toRegistryRecord = (subject: AresSubject): RegistryRecord => ({
-  name: subject.obchodniJmeno.trim(),
+  name: Str.trim(subject.obchodniJmeno),
   address: toAddress(subject.sidlo),
   dic: nonBlank(subject.dic) ?? null,
   legalForm: nonBlank(subject.pravniForma) ?? "",
@@ -150,79 +169,67 @@ export const toRegistryRecord = (subject: AresSubject): RegistryRecord => ({
 
 const decodeSubject = HttpClientResponse.schemaBodyJson(AresSubject);
 
-class UnexpectedStatus {
-  readonly _tag = "UnexpectedStatus";
-  constructor(readonly status: number) {}
-}
+class UnexpectedStatus extends Schema.TaggedError<
+  UnexpectedStatus,
+  { readonly brand: unique symbol }
+>()("UnexpectedStatus", { status: Schema.Int }) {}
 
-class ForeignSubject {
-  readonly _tag = "ForeignSubject";
-  constructor(readonly ico: string) {}
-}
+class ForeignSubject extends Schema.TaggedError<
+  ForeignSubject,
+  { readonly brand: unique symbol }
+>()("ForeignSubject", { ico: Schema.String }) {}
 
-const readResponse = (
+const readResponse = Effect.fn("AresV3.readResponse")(function* (
   ico: string,
   response: HttpClientResponse.HttpClientResponse,
-): Effect.Effect<RegistryRecord | null, unknown> => {
-  if (response.status === 404) return Effect.succeed(null);
-  if (response.status !== 200) return Effect.fail(new UnexpectedStatus(response.status));
-  return decodeSubject(response).pipe(
-    Effect.flatMap((subject) =>
-      subject.ico === ico
-        ? Effect.succeed(toRegistryRecord(subject))
-        : Effect.fail(new ForeignSubject(subject.ico)),
-    ),
-  );
-};
+) {
+  if (response.status === 404) return null;
+  if (response.status !== 200) return yield* UnexpectedStatus.make({ status: response.status });
+  const subject = yield* decodeSubject(response);
+  if (subject.ico !== ico) return yield* ForeignSubject.make({ ico: subject.ico });
+  return toRegistryRecord(subject);
+});
 
-/** Low-cardinality log label; never the payload or the provider message. */
-const failureReason = (cause: unknown): string =>
-  cause instanceof UnexpectedStatus
-    ? `status ${cause.status}`
-    : typeof cause === "object" &&
-        cause !== null &&
-        "_tag" in cause &&
-        typeof cause._tag === "string"
-      ? cause._tag
-      : "unknown";
+const icoPathSegment = /^\d{8}$/u;
 
 /**
  * Builds the service over the ambient HttpClient. Outcomes: 200 with a matching subject ->
  * record; 404 -> null; IČO not eight digits -> null without a request; anything else
  * (other status, transport error, timeout, malformed body, foreign IČO) -> RegistryUnavailable.
  */
-export const make = (config: AresV3Config = {}) =>
-  Effect.gen(function* () {
-    const client = yield* HttpClient.HttpClient;
-    const scopedClient = HttpClient.withScope(client);
-    const timeout = config.timeout ?? defaultTimeout;
+export const make = Effect.fn("make")(function* (config: AresV3Config = {}) {
+  const client = yield* HttpClient.HttpClient;
+  const scopedClient = HttpClient.withScope(client);
+  const timeout = config.timeout ?? defaultTimeout;
 
-    const unavailable = (cause: unknown) =>
-      Effect.logWarning("ARES company lookup failed").pipe(
-        Effect.annotateLogs({ registry: "ares.gov.cz", reason: failureReason(cause) }),
-        Effect.andThen(Effect.fail(new RegistryUnavailable({ cause }))),
-      );
+  const lookup = Effect.fn("AresV3.lookup")(function* (
+    ico: string,
+  ): Effect.fn.Return<RegistryRecord | null, RegistryUnavailable> {
+    // Core validates the checksum; this guard only keeps the path segment safe.
+    if (!icoPathSegment.test(ico)) return null;
 
-    const lookup = Effect.fn("AresV3.lookup")(function* (
-      ico: string,
-    ): Effect.fn.Return<RegistryRecord | null, RegistryUnavailable> {
-      // Core validates the checksum; this guard only keeps the path segment safe.
-      if (!/^\d{8}$/u.test(ico)) return null;
-
-      const request = HttpClientRequest.get(`${aresBaseUrl}/ekonomicke-subjekty/${ico}`).pipe(
-        HttpClientRequest.acceptJson,
-      );
-      // withScope ties the response body to Effect.scoped, so every exit path releases it.
-      return yield* scopedClient.execute(request).pipe(
-        Effect.flatMap((response) => readResponse(ico, response)),
-        Effect.scoped,
-        Effect.timeout(timeout),
-        Effect.catch(unavailable),
-      );
-    });
-
-    return CompanyRegistry.of({ lookup });
+    const request = HttpClientRequest.get(`${aresBaseUrl}/ekonomicke-subjekty/${ico}`).pipe(
+      HttpClientRequest.acceptJson,
+    );
+    // withScope ties the response body to Effect.scoped, so every exit path releases it.
+    return yield* scopedClient.execute(request).pipe(
+      Effect.flatMap((response) => readResponse(ico, response)),
+      Effect.scoped,
+      Effect.timeout(timeout),
+      Effect.catch((cause) =>
+        Effect.logWarning("ARES company lookup failed").pipe(
+          Effect.annotateLogs({
+            registry: "ares.gov.cz",
+            reason: cause._tag === "UnexpectedStatus" ? `status ${cause.status}` : cause._tag,
+          }),
+          Effect.andThen(Effect.fail(RegistryUnavailable.make({ cause }))),
+        ),
+      ),
+    );
   });
+
+  return CompanyRegistry.of({ lookup });
+});
 
 /** CompanyRegistry over the ambient HttpClient; for tests and custom transports. */
 export const layerHttp = (config: AresV3Config = {}) => Layer.effect(CompanyRegistry, make(config));

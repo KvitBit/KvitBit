@@ -1,13 +1,18 @@
-import { existsSync, readFileSync } from "node:fs";
 import { isIPv4 } from "node:net";
-import { resolve as resolvePath } from "node:path";
+import * as Arr from "effect/Array";
 import * as Config from "effect/Config";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Context from "effect/Context";
-import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   type BlobDriver,
   type BotProtectionMode,
@@ -27,7 +32,11 @@ import {
   validateOriginUrl,
 } from "./deploy-preflight";
 
-export type { BlobDriver, BotProtectionMode, EmailMode };
+const trailingDotPattern = /\.$/;
+const posthogHostPattern = /\/+$/;
+const digitsOnlyPattern = /^\d+$/;
+const validateStackConfigSyncPattern = /\s/;
+const optionalIntPattern = /^-?\d+$/;
 
 export type KvitbitStage = "prod" | "staging";
 
@@ -118,10 +127,13 @@ export interface KvitbitStackConfig {
   readonly turboCache?: KvitbitTurboCacheConfig | undefined;
 }
 
-export class InvalidStackConfig extends Data.TaggedError("InvalidStackConfig")<{
-  readonly field: string;
-  readonly reason: string;
-}> {
+export class InvalidStackConfig extends Schema.TaggedError<
+  InvalidStackConfig,
+  { readonly brand: unique symbol }
+>()("InvalidStackConfig", {
+  field: Schema.String,
+  reason: Schema.String,
+}) {
   override get message() {
     return `Invalid stack config (${this.field}): ${this.reason}`;
   }
@@ -145,7 +157,7 @@ export const KVITBIT_PROD_DEFAULTS = {
   shareKeyVersion: 1,
 } as const;
 
-export const KVITBIT_MAIL_DEFAULTS = {
+const KVITBIT_MAIL_DEFAULTS = {
   region: "us-east1",
   zone: "us-east1-b",
   cidr: "10.42.16.0/28",
@@ -175,18 +187,19 @@ const ALIAS_LOCAL_PATTERN = /^[a-z0-9][a-z0-9._+-]{0,62}$/;
 const CIDR_PATTERN = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
 const MX_RRDATA_PATTERN =
   /^(\d{1,5})\s+([a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+)\.?$/i;
-const parseCsvList = parseCsvDomainList;
 
-export const defaultSecretBindings = (
+interface SecretBindingOptions {
+  readonly enableResend?: boolean;
+  readonly enableSmtp?: boolean;
+  readonly enableMobileSigningKey?: boolean;
+  readonly enableFeedbackGitHubToken?: boolean;
+  readonly enableAltchaHmacKey?: boolean;
+  readonly enableTurboCache?: boolean;
+}
+
+const defaultSecretBindingsImpl = (
   stage: KvitbitStage,
-  options?: {
-    readonly enableResend?: boolean;
-    readonly enableSmtp?: boolean;
-    readonly enableMobileSigningKey?: boolean;
-    readonly enableFeedbackGitHubToken?: boolean;
-    readonly enableAltchaHmacKey?: boolean;
-    readonly enableTurboCache?: boolean;
-  },
+  options?: SecretBindingOptions,
 ): ReadonlyArray<KvitbitSecretBinding> => {
   const prefix = `kvitbit-${stage}`;
   const bindings: Array<KvitbitSecretBinding> = [
@@ -301,11 +314,21 @@ export const resourceNames = (config: KvitbitStackConfig) => {
   };
 };
 
-export const serviceAccountEmail = (projectId: string, accountId: string) =>
-  `${accountId}@${projectId}.iam.gserviceaccount.com`;
+export const serviceAccountEmail = ({
+  projectId,
+  accountId,
+}: {
+  readonly projectId: string;
+  readonly accountId: string;
+}) => `${accountId}@${projectId}.iam.gserviceaccount.com`;
 
-export const secretResourceName = (projectId: string, secretId: string) =>
-  `projects/${projectId}/secrets/${secretId}`;
+export const secretResourceName = ({
+  projectId,
+  secretId,
+}: {
+  readonly projectId: string;
+  readonly secretId: string;
+}) => `projects/${projectId}/secrets/${secretId}`;
 
 export const imageReference = (config: KvitbitStackConfig) =>
   `${config.region}-docker.pkg.dev/${config.projectId}/${config.artifactRepositoryId}/${config.imageName}@${config.imageDigest}`;
@@ -317,21 +340,26 @@ export const stackLabels = (config: KvitbitStackConfig): Record<string, string> 
 });
 
 const isValidPosthogHost = (value: string): boolean => {
-  const hostname = POSTHOG_URL_PATTERN.exec(value)?.groups?.hostname;
+  const hostname = POSTHOG_URL_PATTERN.exec(value)?.groups?.["hostname"];
   if (hostname === undefined || INVALID_URL_CODE_POINT.test(value)) return false;
 
   const url = URL.parse(value);
   if (url === null) return false;
-  if (hostname.startsWith("[")) return true;
+  if (Str.startsWith("[")(hostname)) return true;
   if (isIPv4(url.hostname)) return hostname === url.hostname;
 
-  const domain = url.hostname.replace(/\.$/, "");
-  return domain.length <= 253 && domain.split(".").every((label) => DNS_LABEL_PATTERN.test(label));
+  const domain = Str.replace(trailingDotPattern, "")(url.hostname);
+  return (
+    domain.length <= 253 &&
+    Arr.every(Str.split(domain, "."), (label) => DNS_LABEL_PATTERN.test(label))
+  );
 };
 
 const normalizeValidatedConfig = (config: KvitbitStackConfig): KvitbitStackConfig => {
   const posthogHost =
-    config.posthogHost?.replace(/\/+$/, "") ??
+    (config.posthogHost === undefined
+      ? undefined
+      : Str.replace(posthogHostPattern, "")(config.posthogHost)) ??
     (config.posthogKey === undefined ? undefined : DEFAULT_POSTHOG_HOST);
   return posthogHost === config.posthogHost ? config : { ...config, posthogHost };
 };
@@ -345,16 +373,17 @@ const hasSecret = (
   environmentVariable: string,
   requiredConsumers?: ReadonlyArray<KvitbitWorkload>,
 ): boolean =>
-  config.secrets.some(
+  Arr.some(
+    config.secrets,
     (secret) =>
       secret.environmentVariable === environmentVariable &&
       (requiredConsumers === undefined ||
-        requiredConsumers.every((workload) => secret.consumers.includes(workload))),
+        Arr.every(requiredConsumers, (workload) => secret.consumers.includes(workload))),
   );
 
 const failStack = (field: string, reason: string): StackConfigValidationResult => ({
   ok: false,
-  error: new InvalidStackConfig({ field, reason }),
+  error: InvalidStackConfig.make({ field, reason }),
 });
 
 /** Pure synchronous stack validator backing `validateStackConfig` and Tier 1 exhaustive checks. */
@@ -367,22 +396,25 @@ export const validateStackConfigSync = (
   const bootstrapTurboCacheSecret = config.bootstrapTurboCacheSecret ?? false;
   const blobDriver: BlobDriver = config.blobDriver ?? "gcs";
 
-  if (config.projectId.trim().length === 0) {
+  if (Str.trim(config.projectId).length === 0) {
     return failStack("projectId", "must be non-empty");
   }
-  if (!/^\d+$/.test(config.projectNumber)) {
+  if (!digitsOnlyPattern.test(config.projectNumber)) {
     return failStack("projectNumber", "must be a numeric GCP project number");
   }
-  if (!config.zone.startsWith(`${config.region}-`)) {
+  if (!Str.startsWith(`${config.region}-`)(config.zone)) {
     return failStack("zone", `zone '${config.zone}' must be inside region '${config.region}'`);
   }
-  const activeBootstraps = [
-    config.bootstrapFoundation,
-    bootstrapFeedbackSecret,
-    bootstrapAltchaSecret,
-    bootstrapResendSecret,
-    bootstrapTurboCacheSecret,
-  ].filter(Boolean).length;
+  const activeBootstraps = Arr.filter(
+    [
+      config.bootstrapFoundation,
+      bootstrapFeedbackSecret,
+      bootstrapAltchaSecret,
+      bootstrapResendSecret,
+      bootstrapTurboCacheSecret,
+    ],
+    Boolean,
+  ).length;
   if (activeBootstraps > 1) {
     return failStack(
       bootstrapTurboCacheSecret
@@ -395,7 +427,7 @@ export const validateStackConfigSync = (
       "cannot combine bootstrapFoundation, bootstrapFeedbackSecret, bootstrapAltchaSecret, bootstrapResendSecret, and bootstrapTurboCacheSecret",
     );
   }
-  if (!config.bootstrapFoundation && !DIGEST_PATTERN.test(config.imageDigest)) {
+  if (!(config.bootstrapFoundation || DIGEST_PATTERN.test(config.imageDigest))) {
     return failStack(
       "imageDigest",
       `must be an immutable sha256 digest (got '${config.imageDigest}')`,
@@ -420,7 +452,8 @@ export const validateStackConfigSync = (
   }
   if (
     config.posthogKey !== undefined &&
-    (!config.posthogKey.startsWith("phc_") || /\s/.test(config.posthogKey))
+    (!Str.startsWith("phc_")(config.posthogKey) ||
+      validateStackConfigSyncPattern.test(config.posthogKey))
   ) {
     return failStack("KVITBIT_POSTHOG_KEY", "must start with phc_ and contain no whitespace");
   }
@@ -462,7 +495,7 @@ export const validateStackConfigSync = (
         `domain '${mail.domain}' must be included in KVITBIT_DNS_ZONES`,
       );
     }
-    if (!DOMAIN_PATTERN.test(mail.mxHost) || !mail.mxHost.endsWith(`.${mail.domain}`)) {
+    if (!(DOMAIN_PATTERN.test(mail.mxHost) && Str.endsWith(`.${mail.domain}`)(mail.mxHost))) {
       return failStack(
         "KVITBIT_MAIL_MX_HOST",
         `MX host '${mail.mxHost}' must be a subdomain of '${mail.domain}'`,
@@ -471,13 +504,15 @@ export const validateStackConfigSync = (
     if (!EMAIL_PATTERN.test(mail.forwardTo)) {
       return failStack("KVITBIT_MAIL_FORWARD_TO", `invalid forwarding email '${mail.forwardTo}'`);
     }
-    if (mail.forwardTo.endsWith(`@${mail.domain}`)) {
+    if (Str.endsWith(`@${mail.domain}`)(mail.forwardTo)) {
       return failStack(
         "KVITBIT_MAIL_FORWARD_TO",
         `forwarding target '${mail.forwardTo}' must not be on '${mail.domain}' (prevents forwarding loop)`,
       );
     }
-    if (!EMAIL_PATTERN.test(mail.forwardFrom) || !mail.forwardFrom.endsWith(`@${mail.domain}`)) {
+    if (
+      !(EMAIL_PATTERN.test(mail.forwardFrom) && Str.endsWith(`@${mail.domain}`)(mail.forwardFrom))
+    ) {
       return failStack(
         "KVITBIT_MAIL_FORWARD_FROM",
         `forwardFrom '${mail.forwardFrom}' must be an address on '${mail.domain}'`,
@@ -489,7 +524,10 @@ export const validateStackConfigSync = (
         "must list at least one explicit local-part alias (catch-all is not allowed)",
       );
     }
-    const forwardFromLocal = mail.forwardFrom.slice(0, mail.forwardFrom.indexOf("@"));
+    const forwardFromLocal = Str.slice(
+      0,
+      Option.getOrElse(Str.indexOf("@")(mail.forwardFrom), () => -1),
+    )(mail.forwardFrom);
     for (const alias of mail.aliases) {
       if (!ALIAS_LOCAL_PATTERN.test(alias)) {
         return failStack("KVITBIT_MAIL_ALIASES", `invalid alias local-part '${alias}'`);
@@ -501,7 +539,7 @@ export const validateStackConfigSync = (
         );
       }
     }
-    if (!mail.zone.startsWith(`${mail.region}-`)) {
+    if (!Str.startsWith(`${mail.region}-`)(mail.zone)) {
       return failStack(
         "KVITBIT_MAIL_ZONE",
         `zone '${mail.zone}' must be inside region '${mail.region}'`,
@@ -518,7 +556,7 @@ export const validateStackConfigSync = (
     }
     if (
       mail.relayMode === "resend" &&
-      !config.secrets.some((secret) => secret.environmentVariable === "RESEND_API_KEY")
+      !Arr.some(config.secrets, (secret) => secret.environmentVariable === "RESEND_API_KEY")
     ) {
       return failStack(
         "mail.relayMode",
@@ -529,10 +567,10 @@ export const validateStackConfigSync = (
 
   if (config.turboCache !== undefined) {
     const { turboCache } = config;
-    if (turboCache.bucket.trim().length === 0) {
+    if (Str.trim(turboCache.bucket).length === 0) {
       return failStack("KVITBIT_TURBO_CACHE_BUCKET", "must be non-empty");
     }
-    if (turboCache.image.trim().length === 0) {
+    if (Str.trim(turboCache.image).length === 0) {
       return failStack("KVITBIT_TURBO_CACHE_IMAGE", "must be non-empty");
     }
     if (
@@ -549,7 +587,7 @@ export const validateStackConfigSync = (
     ) {
       return failStack("KVITBIT_TURBO_CACHE_MAX_INSTANCES", "must be an integer between 1 and 20");
     }
-    if (!config.secrets.some((secret) => secret.environmentVariable === "TURBO_TOKEN")) {
+    if (!Arr.some(config.secrets, (secret) => secret.environmentVariable === "TURBO_TOKEN")) {
       return failStack("turboCache", "requires the TURBO_TOKEN secret binding");
     }
   }
@@ -651,8 +689,10 @@ export const validateStackConfigSync = (
     return failStack("secrets", "server workload requires DATABASE_URL secret binding");
   }
   if (
-    !hasSecret(config, "DATABASE_URL", ["runner"]) &&
-    !hasSecret(config, "DATABASE_URL_UNPOOLED", ["runner"])
+    !(
+      hasSecret(config, "DATABASE_URL", ["runner"]) ||
+      hasSecret(config, "DATABASE_URL_UNPOOLED", ["runner"])
+    )
   ) {
     return failStack(
       "secrets",
@@ -665,10 +705,10 @@ export const validateStackConfigSync = (
       "server and runner workloads both require BETTER_AUTH_SECRET secret binding",
     );
   }
-  if (blobDriver === "gcs" && config.blobsBucket.trim().length === 0) {
+  if (blobDriver === "gcs" && Str.trim(config.blobsBucket).length === 0) {
     return failStack("blobsBucket", "must be non-empty when blobDriver='gcs'");
   }
-  if (config.stage === "prod" && config.mobileAssetsBucket.trim().length === 0) {
+  if (config.stage === "prod" && Str.trim(config.mobileAssetsBucket).length === 0) {
     return failStack("mobileAssetsBucket", "must be non-empty when stage='prod'");
   }
 
@@ -696,7 +736,7 @@ export const validateStackConfigSync = (
         "stage='prod' requires an explicit valid emailFrom address (KVITBIT_EMAIL_FROM)",
       );
     }
-    if (!hasResend && !hasSmtp) {
+    if (!(hasResend || hasSmtp)) {
       return failStack(
         "secrets",
         "stage='prod' requires at least one email secret enabled (RESEND_API_KEY and/or KVITBIT_SMTP_URL)",
@@ -779,7 +819,7 @@ const optionalNonEmptyString = (name: string) =>
   Config.option(Config.String(name)).pipe(
     Config.map(
       Option.flatMap((value) => {
-        const trimmed = value.trim();
+        const trimmed = Str.trim(value);
         return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
       }),
     ),
@@ -794,7 +834,7 @@ const optionalBoolean = (
     const raw = yield* optionalNonEmptyString(name);
     const parsed = parseOptionalBoolean(raw, defaultValue);
     if (!parsed.ok) {
-      return yield* new InvalidStackConfig({
+      return yield* InvalidStackConfig.make({
         field: name,
         reason: parsed.reason,
       });
@@ -811,8 +851,8 @@ const optionalInt = (
     if (raw === undefined) {
       return defaultValue;
     }
-    if (!/^-?\d+$/.test(raw)) {
-      return yield* new InvalidStackConfig({
+    if (!optionalIntPattern.test(raw)) {
+      return yield* InvalidStackConfig.make({
         field: name,
         reason: `expected integer, got '${raw}'`,
       });
@@ -828,14 +868,14 @@ const optionalInt = (
 export class StackEnv extends Context.Service<
   StackEnv,
   Readonly<Record<string, string | undefined>>
->()("kvitbit/alchemy/StackEnv") {}
+>()("@kvitbit/alchemy/config/StackEnv") {}
 
-export const mergeStackEnvSources = (
+const mergeStackEnvSourcesImpl = (
   primary: Readonly<Record<string, string | undefined>>,
   fallback: Readonly<Record<string, string | undefined>>,
 ): Record<string, string | undefined> => {
   const merged: Record<string, string | undefined> = {};
-  const keys = new Set([...Object.keys(primary), ...Object.keys(fallback)]);
+  const keys = new Set([...EffectRecord.keys(primary), ...EffectRecord.keys(fallback)]);
   for (const key of keys) {
     const primaryValue = primary[key];
     const fallbackValue = fallback[key];
@@ -852,11 +892,21 @@ export const mergeStackEnvSources = (
   return merged;
 };
 
+const mergeStackEnvSources: {
+  (
+    fallback: Readonly<Record<string, string | undefined>>,
+  ): (primary: Readonly<Record<string, string | undefined>>) => Record<string, string | undefined>;
+  (
+    primary: Readonly<Record<string, string | undefined>>,
+    fallback: Readonly<Record<string, string | undefined>>,
+  ): Record<string, string | undefined>;
+} = Fn.dual(2, mergeStackEnvSourcesImpl);
+
 const definedEnvRecord = (
   env: Readonly<Record<string, string | undefined>>,
 ): Record<string, string> => {
   const out: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
+  for (const [key, value] of EffectRecord.toEntries(env)) {
     if (value !== undefined) {
       out[key] = value;
     }
@@ -869,20 +919,25 @@ const DOT_ENV_LINE =
 
 const parseDotEnvRaw = (contents: string): Record<string, string> => {
   const out: Record<string, string> = {};
-  const normalized = contents.replace(/\r\n?/gm, "\n");
-  for (const match of normalized.matchAll(DOT_ENV_LINE)) {
+  const normalized = Str.replace(/\r\n?/gm, "\n")(contents);
+  for (const match of Str.matchAll(DOT_ENV_LINE)(normalized)) {
     const key = match[1];
     if (key === undefined) continue;
-    let value = (match[2] ?? "").trim();
+    let value = Str.trim(match[2] ?? "");
     const quote = value[0];
-    value = value.replace(/^(['"`])([\s\S]*)\1$/gm, "$2");
+    value = Str.replace(/^(['"`])([\s\S]*)\1$/gm, "$2")(value);
     if (quote === '"') {
-      value = value.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
+      value = Str.replace(/\\r/g, "\r")(Str.replace(/\\n/g, "\n")(value));
     }
     out[key] = value;
   }
   return out;
 };
+
+export const defaultSecretBindings: {
+  (options?: SecretBindingOptions): (stage: KvitbitStage) => ReadonlyArray<KvitbitSecretBinding>;
+  (stage: KvitbitStage, options?: SecretBindingOptions): ReadonlyArray<KvitbitSecretBinding>;
+} = Fn.dual((args) => Predicate.isString(args[0]), defaultSecretBindingsImpl);
 
 const parseEnvFileFlag = (argv: ReadonlyArray<string>): string | undefined => {
   for (let i = 0; i < argv.length; i++) {
@@ -890,8 +945,8 @@ const parseEnvFileFlag = (argv: ReadonlyArray<string>): string | undefined => {
     if (arg === "--env-file") {
       const next = argv[i + 1];
       if (next !== undefined && next.length > 0) return next;
-    } else if (arg?.startsWith("--env-file=")) {
-      const value = arg.slice("--env-file=".length);
+    } else if (arg !== undefined && Str.startsWith("--env-file=")(arg)) {
+      const value = Str.slice("--env-file=".length)(arg);
       if (value.length > 0) return value;
     }
   }
@@ -902,25 +957,28 @@ const parseEnvFileFlag = (argv: ReadonlyArray<string>): string | undefined => {
  * Reads the raw environment keys matching Alchemy CLI's precedence (`--env-file` > shell, or
  * shell > `.env`) without modifying Effect's `ConfigProvider`.
  */
-export const readAlchemyRawEnv = (
-  argv: ReadonlyArray<string> = process.argv,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-  cwd: string = process.cwd(),
-): Record<string, string | undefined> => {
+export const readAlchemyRawEnv = Effect.fn("Alchemy.readRawEnv")(function* ({
+  argv,
+  env,
+  cwd,
+}: {
+  readonly argv: ReadonlyArray<string>;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly cwd: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
   const envFile = parseEnvFileFlag(argv);
-  if (envFile !== undefined) {
-    const fullPath = resolvePath(cwd, envFile);
-    if (existsSync(fullPath)) {
-      return mergeStackEnvSources(parseDotEnvRaw(readFileSync(fullPath, "utf8")), env);
-    }
-    return { ...env };
-  }
-  const defaultDotEnv = resolvePath(cwd, ".env");
-  if (existsSync(defaultDotEnv)) {
-    return mergeStackEnvSources(env, parseDotEnvRaw(readFileSync(defaultDotEnv, "utf8")));
-  }
-  return { ...env };
-};
+  const absolute = path.resolve(cwd, envFile ?? ".env");
+  const exists = yield* fs.exists(absolute).pipe(Effect.orElseSucceed(() => false));
+  if (!exists) return { ...env };
+
+  const contents = yield* fs.readFileString(absolute);
+  const fileValues = parseDotEnvRaw(contents);
+  return envFile === undefined
+    ? mergeStackEnvSources(env, fileValues)
+    : mergeStackEnvSources(fileValues, env);
+});
 
 export const makeStackEnvLayer = (
   env: Readonly<Record<string, string | undefined>>,
@@ -930,7 +988,7 @@ export const makeStackEnvLayer = (
     Layer.succeed(StackEnv, env),
   );
 
-export const composeStackEnvLayers = (
+const composeStackEnvLayersImpl = (
   primary: Readonly<Record<string, string | undefined>>,
   fallback: Readonly<Record<string, string | undefined>>,
 ): Layer.Layer<StackEnv> => {
@@ -940,6 +998,16 @@ export const composeStackEnvLayers = (
     Layer.succeed(StackEnv, merged),
   );
 };
+
+export const composeStackEnvLayers: {
+  (
+    fallback: Readonly<Record<string, string | undefined>>,
+  ): (primary: Readonly<Record<string, string | undefined>>) => Layer.Layer<StackEnv>;
+  (
+    primary: Readonly<Record<string, string | undefined>>,
+    fallback: Readonly<Record<string, string | undefined>>,
+  ): Layer.Layer<StackEnv>;
+} = Fn.dual(2, composeStackEnvLayersImpl);
 
 const MAX_ARRAY_DIRECT_SCAN = 4096;
 
@@ -958,7 +1026,7 @@ const collectKvitbitProviderSubtree = (
   visited: Set<string>,
 ): Effect.Effect<Array<readonly [string, string]>, Config.ConfigError> =>
   Effect.gen(function* () {
-    const pathKey = path.map(String).join("\0");
+    const pathKey = Arr.join(Arr.map(path, String), "\0");
     if (visited.has(pathKey)) return [];
     visited.add(pathKey);
 
@@ -969,22 +1037,22 @@ const collectKvitbitProviderSubtree = (
     const entries: Array<readonly [string, string]> = [];
     if (node._tag === "Value") {
       if (path.length > 0) {
-        entries.push([path.map(String).join("_"), node.value]);
+        entries.push([Arr.join(Arr.map(path, String), "_"), node.value]);
       }
       return entries;
     }
     if (node._tag === "Record") {
       if (node.value !== undefined && path.length > 0) {
-        entries.push([path.map(String).join("_"), node.value]);
+        entries.push([Arr.join(Arr.map(path, String), "_"), node.value]);
       }
       for (const key of node.keys) {
-        if (path.length === 0 && key !== "KVITBIT" && !key.startsWith("KVITBIT_")) {
+        if (path.length === 0 && key !== "KVITBIT" && !Str.startsWith("KVITBIT_")(key)) {
           continue;
         }
         const childPath = [...path, key];
         const nested = yield* collectKvitbitProviderSubtree(provider, childPath, visited);
         entries.push(...nested);
-        const childName = childPath.map(String).join("_");
+        const childName = Arr.join(Arr.map(childPath, String), "_");
         if (nested.length === 0 && isForbiddenOptOutPrefixKey(childName)) {
           entries.push([childName, ""]);
         } else if (childName === "KVITBIT_ALLOW_LOCAL_BLOBS" && nested.length === 0) {
@@ -1000,7 +1068,7 @@ const collectKvitbitProviderSubtree = (
     }
     if (node._tag === "Array") {
       if (node.value !== undefined && path.length > 0) {
-        entries.push([path.map(String).join("_"), node.value]);
+        entries.push([Arr.join(Arr.map(path, String), "_"), node.value]);
       }
       const arrayEntries: Array<readonly [string, string]> = [];
       const limit = Math.min(node.length, MAX_ARRAY_DIRECT_SCAN);
@@ -1010,7 +1078,7 @@ const collectKvitbitProviderSubtree = (
       }
       entries.push(...arrayEntries);
       if (node.length > 0 && arrayEntries.length === 0) {
-        const lastName = [...path, node.length - 1].map(String).join("_");
+        const lastName = Arr.join(Arr.map([...path, node.length - 1], String), "_");
         if (isForbiddenOptOutPrefixKey(lastName)) {
           entries.push([lastName, ""]);
         }
@@ -1040,7 +1108,7 @@ export const loadStackConfig: Effect.Effect<
     Config.withDefault(KVITBIT_PROD_DEFAULTS.stage),
   );
   if (stageRaw !== "prod" && stageRaw !== "staging") {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: "KVITBIT_STAGE",
       reason: `expected 'prod' or 'staging', got '${stageRaw}'`,
     });
@@ -1050,7 +1118,7 @@ export const loadStackConfig: Effect.Effect<
   const rawEnv = yield* Effect.serviceOption(StackEnv);
   const provider = yield* ConfigProvider.ConfigProvider;
   const kvitbitEntries = yield* collectKvitbitProviderEnv(provider);
-  const providerMap: Record<string, string | undefined> = Object.fromEntries(kvitbitEntries);
+  const providerMap: Record<string, string | undefined> = EffectRecord.fromEntries(kvitbitEntries);
   for (const forbidden of FORBIDDEN_OPT_OUT_ENV_VARS) {
     const direct = yield* optionalNonEmptyString(forbidden);
     if (direct !== undefined) {
@@ -1062,7 +1130,7 @@ export const loadStackConfig: Effect.Effect<
     : providerMap;
   const forbiddenFlag = findForbiddenOptOutFlag(combinedForbiddenEnv);
   if (forbiddenFlag !== undefined) {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: forbiddenFlag,
       reason: `boolean opt-out flag ${forbiddenFlag} is forbidden; use typed mode variables in staging only`,
     });
@@ -1071,7 +1139,7 @@ export const loadStackConfig: Effect.Effect<
   const kvitbitEnvRaw = yield* optionalNonEmptyString("KVITBIT_ENV");
   const expectedKvitbitEnv = stage === "prod" ? "production" : "staging";
   if (kvitbitEnvRaw !== undefined && kvitbitEnvRaw !== expectedKvitbitEnv) {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: "KVITBIT_ENV",
       reason: `KVITBIT_ENV='${kvitbitEnvRaw}' conflicts with KVITBIT_STAGE='${stage}' (expected '${expectedKvitbitEnv}')`,
     });
@@ -1124,7 +1192,7 @@ export const loadStackConfig: Effect.Effect<
 
   const emailModeRaw = yield* optionalNonEmptyString("KVITBIT_EMAIL_MODE");
   if (emailModeRaw !== undefined && !isEmailMode(emailModeRaw)) {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: "KVITBIT_EMAIL_MODE",
       reason: `unsupported KVITBIT_EMAIL_MODE '${emailModeRaw}'`,
     });
@@ -1133,7 +1201,7 @@ export const loadStackConfig: Effect.Effect<
 
   const blobDriverRaw = yield* optionalNonEmptyString("KVITBIT_BLOB_DRIVER");
   if (blobDriverRaw !== undefined && !isBlobDriver(blobDriverRaw)) {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: "KVITBIT_BLOB_DRIVER",
       reason: `unsupported KVITBIT_BLOB_DRIVER '${blobDriverRaw}'`,
     });
@@ -1142,7 +1210,7 @@ export const loadStackConfig: Effect.Effect<
 
   const botProtectionModeRaw = yield* optionalNonEmptyString("KVITBIT_BOT_PROTECTION_MODE");
   if (botProtectionModeRaw !== undefined && !isBotProtectionMode(botProtectionModeRaw)) {
-    return yield* new InvalidStackConfig({
+    return yield* InvalidStackConfig.make({
       field: "KVITBIT_BOT_PROTECTION_MODE",
       reason: `unsupported KVITBIT_BOT_PROTECTION_MODE '${botProtectionModeRaw}'`,
     });
@@ -1165,7 +1233,11 @@ export const loadStackConfig: Effect.Effect<
   const edgeDomains = parseCsvDomainList(edgeDomainsRaw);
   const dnsZonesRaw = yield* optionalNonEmptyString("KVITBIT_DNS_ZONES");
   const dnsZones = [
-    ...new Set(parseCsvDomainList(dnsZonesRaw).map((domain) => domain.replace(/\.$/, ""))),
+    ...new Set(
+      Arr.map(parseCsvDomainList(dnsZonesRaw), (domain) =>
+        Str.replace(trailingDotPattern, "")(domain),
+      ),
+    ),
   ];
   const edgeWafPreview = yield* optionalBoolean("KVITBIT_EDGE_WAF_PREVIEW", false);
   const edgeStaticCdnEnabled = yield* optionalBoolean("KVITBIT_EDGE_STATIC_CDN", true);
@@ -1234,30 +1306,38 @@ export const loadStackConfig: Effect.Effect<
     : undefined;
 
   const mailDomainRaw = yield* optionalNonEmptyString("KVITBIT_MAIL_DOMAIN");
-  const mailDomain = mailDomainRaw?.toLowerCase().replace(/\.$/, "");
+  const mailDomain =
+    mailDomainRaw === undefined
+      ? undefined
+      : Str.replace(trailingDotPattern, "")(Str.toLowerCase(mailDomainRaw));
+  const mailAliases =
+    mailDomain === undefined ? undefined : yield* optionalNonEmptyString("KVITBIT_MAIL_ALIASES");
   const mail: KvitbitMailConfig | undefined =
     mailDomain !== undefined
       ? {
           domain: mailDomain,
-          mxHost: ((yield* optionalNonEmptyString("KVITBIT_MAIL_MX_HOST")) ?? `mx.${mailDomain}`)
-            .toLowerCase()
-            .replace(/\.$/, ""),
-          forwardTo: (
-            (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_TO")) ?? ""
-          ).toLowerCase(),
-          forwardFrom: (
+          mxHost: Str.replace(
+            trailingDotPattern,
+            "",
+          )(
+            Str.toLowerCase(
+              (yield* optionalNonEmptyString("KVITBIT_MAIL_MX_HOST")) ?? `mx.${mailDomain}`,
+            ),
+          ),
+          forwardTo: Str.toLowerCase(
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_TO")) ?? "",
+          ),
+          forwardFrom: Str.toLowerCase(
             (yield* optionalNonEmptyString("KVITBIT_MAIL_FORWARD_FROM")) ??
-            `forwarder@${mailDomain}`
-          ).toLowerCase(),
-          aliases: [
-            ...new Set(parseCsvList(yield* optionalNonEmptyString("KVITBIT_MAIL_ALIASES"))),
-          ],
-          region: (
-            (yield* optionalNonEmptyString("KVITBIT_MAIL_REGION")) ?? KVITBIT_MAIL_DEFAULTS.region
-          ).toLowerCase(),
-          zone: (
-            (yield* optionalNonEmptyString("KVITBIT_MAIL_ZONE")) ?? KVITBIT_MAIL_DEFAULTS.zone
-          ).toLowerCase(),
+              `forwarder@${mailDomain}`,
+          ),
+          aliases: [...new Set(parseCsvDomainList(mailAliases))],
+          region: Str.toLowerCase(
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_REGION")) ?? KVITBIT_MAIL_DEFAULTS.region,
+          ),
+          zone: Str.toLowerCase(
+            (yield* optionalNonEmptyString("KVITBIT_MAIL_ZONE")) ?? KVITBIT_MAIL_DEFAULTS.zone,
+          ),
           cidr: (yield* optionalNonEmptyString("KVITBIT_MAIL_CIDR")) ?? KVITBIT_MAIL_DEFAULTS.cidr,
           archiveBucket:
             (yield* optionalNonEmptyString("KVITBIT_MAIL_ARCHIVE_BUCKET")) ??
@@ -1271,6 +1351,8 @@ export const loadStackConfig: Effect.Effect<
         }
       : undefined;
 
+  const mailFields = mail === undefined ? {} : { mail };
+  const turboCacheFields = turboCache === undefined ? {} : { turboCache };
   return yield* validateStackConfig({
     stage,
     bootstrapFoundation,
@@ -1317,7 +1399,7 @@ export const loadStackConfig: Effect.Effect<
     }),
     dnsZones,
     edge,
-    ...(mail === undefined ? {} : { mail }),
-    ...(turboCache === undefined ? {} : { turboCache }),
+    ...mailFields,
+    ...turboCacheFields,
   });
 });

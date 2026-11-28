@@ -14,13 +14,15 @@
  * Requires DocumentsRepo | RecurringRepo | WorkspacesRepo.
  */
 import type { BankAccountId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Clock, Effect, Layer } from "effect";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { DocumentRecord } from "../modules/documents";
 import { DocumentsRepo } from "../modules/documents";
 import { RecurringRepo } from "../modules/recurring";
 import { BankAccountReferences, czechAccountNumber, WorkspacesRepo } from "../modules/workspaces";
 
-const nowIso = Effect.map(Clock.currentTimeMillis, (ms) => new Date(ms).toISOString());
+const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 /**
  * The candidates are read unlocked, so a row can be deleted (`discardDraft`) or changed between
@@ -78,48 +80,48 @@ export const BankAccountReferencesLive: Layer.Layer<
     });
 
     return BankAccountReferences.of({
-      count: (workspaceId, id) =>
+      count: Effect.fn("BankAccountReferences.count")((workspaceId, id) =>
         Effect.map(
           uses(workspaceId, id),
           ([drafts, templates]) => drafts.length + templates.length,
         ),
+      ),
 
-      reassign: (workspaceId, from, to) =>
-        Effect.gen(function* () {
-          if (from === to) return;
-          const [drafts, templates] = yield* uses(workspaceId, from);
-          if (drafts.length === 0 && templates.length === 0) return;
-          const at = yield* nowIso;
-          // Workspaces validated the replacement (active, same currency, same Workspace).
-          const account = yield* locked(workspaces.getBankAccount(workspaceId, to));
-          const snapshot = {
-            id: account.id,
-            name: account.name,
-            currency: account.currency,
-            accountNumber: czechAccountNumber(account.iban),
-            iban: account.iban,
-            bic: account.bic,
-          };
-          for (const draft of drafts) {
-            const row = yield* relock(documents.lock(workspaceId, draft.id));
-            // Discarded, issued or moved off the account between the read and the lock: an
-            // issued document keeps its snapshot (D10), the others have nothing to move.
-            if (row === null || row.status !== "draft") continue;
-            if (row.given.bankAccount !== from && row.issuer.bankAccount?.id !== from) continue;
-            yield* locked(documents.update(moved(row, from, snapshot, at), row.revision));
-          }
-          for (const template of templates) {
-            const row = yield* relock(recurring.lockTemplateState(workspaceId, template.id));
-            // Gone, archived or moved off the account between the read and the lock.
-            if (row === null || row.archivedAt !== null || row.input.bankAccount !== from) continue;
-            yield* locked(
-              recurring.updateTemplate(
-                { ...row, input: { ...row.input, bankAccount: to }, updatedAt: at },
-                row.revision,
-              ),
-            );
-          }
-        }),
+      reassign: Effect.fn("BankAccountReferences.reassign")(function* (workspaceId, from, to) {
+        if (from === to) return;
+        const [drafts, templates] = yield* uses(workspaceId, from);
+        if (drafts.length === 0 && templates.length === 0) return;
+        const at = yield* nowIso;
+        // Workspaces validated the replacement (active, same currency, same Workspace).
+        const account = yield* locked(workspaces.getBankAccount(workspaceId, to));
+        const snapshot = {
+          id: account.id,
+          name: account.name,
+          currency: account.currency,
+          accountNumber: czechAccountNumber(account.iban),
+          iban: account.iban,
+          bic: account.bic,
+        };
+        for (const draft of drafts) {
+          const row = yield* relock(documents.lock(workspaceId, draft.id));
+          // Discarded, issued or moved off the account between the read and the lock: an
+          // issued document keeps its snapshot (D10), the others have nothing to move.
+          if (row === null || row.status !== "draft") continue;
+          if (row.given.bankAccount !== from && row.issuer.bankAccount?.id !== from) continue;
+          yield* locked(documents.update(moved(row, from, snapshot, at), row.revision));
+        }
+        for (const template of templates) {
+          const row = yield* relock(recurring.lockTemplateState(workspaceId, template.id));
+          // Gone, archived or moved off the account between the read and the lock.
+          if (row === null || row.archivedAt !== null || row.input.bankAccount !== from) continue;
+          yield* locked(
+            recurring.updateTemplate(
+              { ...row, input: { ...row.input, bankAccount: to }, updatedAt: at },
+              row.revision,
+            ),
+          );
+        }
+      }),
     });
   }),
 );

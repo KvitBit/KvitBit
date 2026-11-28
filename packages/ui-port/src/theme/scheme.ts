@@ -8,7 +8,12 @@
  * themselves), and the neutral ramps take a per-recipe chroma so each preset has its own
  * undertone (DESIGN.md "Tonal surface harmonization").
  */
+
 import { type Hex, M3_COLOR_ROLES, type M3ColorRole } from "@kvitbit/api-contract";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import * as Str from "effect/String";
 import { Hct } from "./color/hct";
 import { TonalPalette } from "./color/palette";
 import { clamp, hexFromRgb, rgbFromHex } from "./color/utils";
@@ -26,19 +31,20 @@ export const SCHEME_VARIANTS = [
 ] as const;
 export type SchemeVariant = (typeof SCHEME_VARIANTS)[number];
 
-export const variantOf = (
-  scheme: "light" | "dark",
-  contrast: "standard" | "medium" | "high",
-): SchemeVariant =>
-  contrast === "standard"
-    ? scheme
-    : (`${scheme}${contrast === "medium" ? "Medium" : "High"}` as SchemeVariant);
+export const variantOf: {
+  (contrast: "standard" | "medium" | "high"): (scheme: "light" | "dark") => SchemeVariant;
+  (scheme: "light" | "dark", contrast: "standard" | "medium" | "high"): SchemeVariant;
+} = Fn.dual(
+  2,
+  (scheme: "light" | "dark", contrast: "standard" | "medium" | "high"): SchemeVariant =>
+    contrast === "standard" ? scheme : `${scheme}${contrast === "medium" ? "Medium" : "High"}`,
+);
 
-export const isDarkVariant = (v: SchemeVariant): boolean => v.startsWith("dark");
+export const isDarkVariant = (v: SchemeVariant): boolean => Str.startsWith("dark")(v);
 
 /** 0 standard, 1 medium, 2 high. */
 export const contrastLevelOf = (v: SchemeVariant): 0 | 1 | 2 =>
-  v.endsWith("High") ? 2 : v.endsWith("Medium") ? 1 : 0;
+  Str.endsWith("High")(v) ? 2 : Str.endsWith("Medium")(v) ? 1 : 0;
 
 export interface PaletteTuning {
   /** Hue offset from the seed hue, degrees. */
@@ -125,10 +131,10 @@ const accent = (
 });
 
 const fixed = (palette: RoleTone["palette"]) => ({
-  fixed: { palette, light: [90, 90, 90], dark: [90, 90, 90] } as RoleTone,
-  fixedDim: { palette, light: [80, 80, 80], dark: [80, 80, 80] } as RoleTone,
-  onFixed: { palette, light: [10, 5, 0], dark: [10, 5, 0] } as RoleTone,
-  onFixedVariant: { palette, light: [30, 25, 20], dark: [30, 25, 20] } as RoleTone,
+  fixed: { palette, light: [90, 90, 90], dark: [90, 90, 90] } satisfies RoleTone,
+  fixedDim: { palette, light: [80, 80, 80], dark: [80, 80, 80] } satisfies RoleTone,
+  onFixed: { palette, light: [10, 5, 0], dark: [10, 5, 0] } satisfies RoleTone,
+  onFixedVariant: { palette, light: [30, 25, 20], dark: [30, 25, 20] } satisfies RoleTone,
 });
 
 const n = (light: Tones, dark: Tones): RoleTone => ({ palette: "neutral", light, dark });
@@ -146,7 +152,7 @@ const SURFACE = n([98, 98, 99], [6, 5, 4]);
 const ON_SURFACE = n([10, 6, 0], [90, 96, 100]);
 
 /** Tone of every role per variant. `primary` in light is replaced by the fidelity tone below. */
-const ROLE_TONES: Record<M3ColorRole, RoleTone> = {
+const ROLE_TONES = {
   primary: P.color,
   onPrimary: P.onColor,
   primaryContainer: P.container,
@@ -196,10 +202,10 @@ const ROLE_TONES: Record<M3ColorRole, RoleTone> = {
   outlineVariant: nv([80, 70, 55], [30, 40, 55]),
   shadow: n([0, 0, 0], [0, 0, 0]),
   scrim: n([0, 0, 0], [0, 0, 0]),
-};
+} satisfies Record<M3ColorRole, RoleTone>;
 
 /** The tone a role takes in a variant, honouring light `primary` fidelity. */
-export const toneOf = (role: M3ColorRole, variant: SchemeVariant, p: SchemePalettes): number => {
+const toneOf = (role: M3ColorRole, variant: SchemeVariant, p: SchemePalettes): number => {
   const spec = ROLE_TONES[role];
   const level = contrastLevelOf(variant);
   const tones = isDarkVariant(variant) ? spec.dark : spec.light;
@@ -210,13 +216,8 @@ export const toneOf = (role: M3ColorRole, variant: SchemeVariant, p: SchemePalet
 };
 
 /** Every role for one variant, before overrides. */
-export const generateRoles = (p: SchemePalettes, variant: SchemeVariant): RoleMap => {
-  const out = {} as Record<M3ColorRole, Hex>;
-  for (const role of M3_COLOR_ROLES) {
-    out[role] = hexFromRgb(p[ROLE_TONES[role].palette].tone(toneOf(role, variant, p)));
-  }
-  return out;
-};
+const generateRoles = (p: SchemePalettes, variant: SchemeVariant): RoleMap =>
+  Rec.map(ROLE_TONES, (spec, role) => hexFromRgb(p[spec.palette].tone(toneOf(role, variant, p))));
 
 /**
  * Overrides for a medium / high variant derived from the standard variant's overrides: each
@@ -234,7 +235,7 @@ const derivedOverrides = (
   const base: SchemeVariant = isDarkVariant(variant) ? "dark" : "light";
   const std = recipe.overrides?.[base] ?? {};
   const out: Partial<Record<M3ColorRole, Hex>> = {};
-  for (const role of Object.keys(std) as M3ColorRole[]) {
+  for (const role of M3_COLOR_ROLES) {
     const hex = std[role];
     if (hex === undefined) continue;
     const step = toneOf(role, variant, p) - toneOf(role, base, p);
@@ -248,12 +249,18 @@ const derivedOverrides = (
 };
 
 /** Generated roles with the recipe's exact overrides applied (derived ones for contrast variants). */
-export const schemeRoles = (
-  recipe: ThemeRecipe,
-  variant: SchemeVariant,
-  palettes: SchemePalettes = palettesOf(recipe),
-): RoleMap => ({
-  ...generateRoles(palettes, variant),
-  ...derivedOverrides(recipe, variant, palettes),
-  ...recipe.overrides?.[variant],
-});
+export const schemeRoles: {
+  (variant: SchemeVariant, palettes?: SchemePalettes): (recipe: ThemeRecipe) => RoleMap;
+  (recipe: ThemeRecipe, variant: SchemeVariant, palettes?: SchemePalettes): RoleMap;
+} = Fn.dual(
+  (args) => Predicate.isObjectOrArray(args[0]),
+  (
+    recipe: ThemeRecipe,
+    variant: SchemeVariant,
+    palettes: SchemePalettes = palettesOf(recipe),
+  ): RoleMap => ({
+    ...generateRoles(palettes, variant),
+    ...derivedOverrides(recipe, variant, palettes),
+    ...recipe.overrides?.[variant],
+  }),
+);

@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import {
   AccessRequest,
   ALL_SCOPES,
@@ -19,8 +22,8 @@ import {
 } from "../src/index";
 
 describe("scope wire codec (kvitbit:<area>:<level> <-> <area>:<level>)", () => {
-  const decode = Schema.decodeUnknownSync(ScopeFromOAuth);
-  const encode = Schema.encodeSync(ScopeFromOAuth);
+  const decode = Fn.flow(Schema.decodeUnknownEffect(ScopeFromOAuth), Effect.runSync);
+  const encode = Fn.flow(Schema.encodeEffect(ScopeFromOAuth), Effect.runSync);
 
   test("decodes the OAuth form to the core scope and encodes it back", () => {
     expect(decode("kvitbit:documents:write")).toBe("documents:write");
@@ -73,7 +76,7 @@ describe("scope wire codec (kvitbit:<area>:<level> <-> <area>:<level>)", () => {
 });
 
 describe("access requests", () => {
-  const decode = Schema.decodeUnknownSync(AccessRequest);
+  const decode = Fn.flow(Schema.decodeUnknownEffect(AccessRequest), Effect.runSync);
 
   test("decodes presets and non-empty custom requests", () => {
     expect(decode({ access: "read" })).toEqual({ access: "read" });
@@ -129,9 +132,9 @@ describe("OAuth scope parameter", () => {
   });
 
   test("per-area scopes stay custom even when they equal a preset's expansion", () => {
-    const reads = READ_SCOPES.map((s) => `kvitbit:${s}` as const);
+    const reads = Arr.map(READ_SCOPES, (s) => `kvitbit:${s}` as const);
     expect(accessFromOAuthScopes(reads)?.access).toEqual({ access: "custom", scopes: READ_SCOPES });
-    const all = ALL_SCOPES.map((s) => `kvitbit:${s}` as const);
+    const all = Arr.map(ALL_SCOPES, (s) => `kvitbit:${s}` as const);
     expect(accessFromOAuthScopes(all)?.access).toEqual({ access: "custom", scopes: ALL_SCOPES });
   });
 

@@ -1,5 +1,13 @@
-import { Result } from "effect";
+import * as Fn from "effect/Function";
+import * as Result from "effect/Result";
+import * as Str from "effect/String";
+
 import { compact, type FormatIssue, issue } from "./shared";
+
+const CZECH_DIC = /^\d{1,7}$/;
+const SHORT_ICO = /^\d{8}$/;
+const FULL_ICO = /^CZ\d{8,10}$/;
+const VAT_COUNTRY = /^[A-Z]{2}$/;
 
 /** IČO check digit: weights 8..2 on the first seven digits, `(11 - sum mod 11) mod 10`. */
 const icoCheckDigit = (digits: string): number => {
@@ -11,7 +19,7 @@ const icoCheckDigit = (digits: string): number => {
 /** Strips separators and left-pads short numeric IČO to 8 digits (ARES drops leading zeros). */
 export const normalizeIco = (input: string): string => {
   const c = compact(input);
-  return /^\d{1,7}$/.test(c) ? c.padStart(8, "0") : c;
+  return CZECH_DIC.test(c) ? Fn.pipe(c, Str.padStart(8, "0")) : c;
 };
 
 export const isValidIco = (input: string): boolean => Result.isSuccess(validateIco(input));
@@ -19,7 +27,7 @@ export const isValidIco = (input: string): boolean => Result.isSuccess(validateI
 /** `form.ico_format` for anything but up to 8 digits, `ico.checksum` for a wrong check digit. */
 export const validateIco = (input: string): Result.Result<string, FormatIssue> => {
   const ico = normalizeIco(input);
-  if (!/^\d{8}$/.test(ico)) return Result.fail(issue("form.ico_format"));
+  if (!SHORT_ICO.test(ico)) return Result.fail(issue("form.ico_format"));
   return icoCheckDigit(ico) === Number(ico[7])
     ? Result.succeed(ico)
     : Result.fail(issue("ico.checksum"));
@@ -27,8 +35,8 @@ export const validateIco = (input: string): Result.Result<string, FormatIssue> =
 
 /** Uppercases and strips separators: `cz 123 456 78` → `CZ12345678`. Greek `GR` becomes `EL`. */
 export const normalizeVatId = (input: string): string => {
-  const c = compact(input).toUpperCase();
-  return c.startsWith("GR") ? `EL${c.slice(2)}` : c;
+  const c = Str.toUpperCase(compact(input));
+  return Fn.pipe(c, Str.startsWith("GR")) ? `EL${Fn.pipe(c, Str.slice(2))}` : c;
 };
 
 /**
@@ -38,7 +46,7 @@ export const normalizeVatId = (input: string): string => {
  */
 export const validateCzechDic = (input: string): Result.Result<string, FormatIssue> => {
   const dic = normalizeVatId(input);
-  return /^CZ\d{8,10}$/.test(dic) ? Result.succeed(dic) : Result.fail(issue("form.dic_invalid"));
+  return FULL_ICO.test(dic) ? Result.succeed(dic) : Result.fail(issue("form.dic_invalid"));
 };
 
 /** VIES number formats after the two-letter prefix (EU member states plus XI). */
@@ -79,13 +87,13 @@ export const EU_VAT_FORMATS: Readonly<Record<string, RegExp>> = {
  */
 export const validateEuVatId = (input: string): Result.Result<string, FormatIssue> => {
   const id = normalizeVatId(input);
-  const country = id.slice(0, 2);
+  const country = Fn.pipe(id, Str.slice(0, 2));
   const format = EU_VAT_FORMATS[country];
-  if (!/^[A-Z]{2}$/.test(country) || format === undefined) {
+  if (!VAT_COUNTRY.test(country) || format === undefined) {
     return Result.fail(issue("form.vat_id_country_unknown"));
   }
   if (country === "CZ") return validateCzechDic(id);
-  return format.test(id.slice(2))
+  return format.test(Fn.pipe(id, Str.slice(2)))
     ? Result.succeed(id)
     : Result.fail(issue("form.vat_id_invalid", { country }));
 };

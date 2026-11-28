@@ -1,26 +1,41 @@
-import type {
+import {
   ContactDefaults,
   ContactId,
-  ContactInput,
-  ContactRole,
-  ContactView,
+  type ContactInput,
+  type ContactRole,
+  type ContactView,
   CurrencyCode,
-  Locale,
-  Page,
-  PaymentMethod,
-  RegistryResult,
-  ReminderPolicy,
-  WorkspaceId,
-  WorkspaceSummary,
+  type Locale,
+  type Page,
+  type PaymentMethod,
+  type RegistryResult,
+  type ReminderPolicy,
+  type WorkspaceId,
+  type WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import { ifMatchHeaders, inWorkspace, type KvitbitApiClient } from "@kvitbit/ui-port/api";
+import {
+  ifMatchHeaders,
+  inWorkspace,
+  type KvitbitApiClient,
+  Paged,
+  type Paged as PagedState,
+} from "@kvitbit/ui-port/api";
 import { normalizeIco, normalizeVatId, validateIco } from "@kvitbit/ui-port/format";
 import { OverrideForm } from "@kvitbit/ui-port/view-models";
-import { BigDecimal, Effect, Result } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { canWriteWorkspace } from "../dashboard/model";
 import type { ReceivablesReportData } from "../reports/model";
 
-export interface ContactAddressRecord {
+interface ContactAddressRecord {
   readonly street: string | null;
   readonly city: string | null;
   readonly postalCode: string | null;
@@ -86,10 +101,10 @@ export type ContactFormErrorCode =
   | "reminder_offsets_invalid";
 
 export const CONTACT_CURRENCIES: ReadonlyArray<CurrencyCode> = [
-  "CZK" as CurrencyCode,
-  "EUR" as CurrencyCode,
-  "USD" as CurrencyCode,
-  "GBP" as CurrencyCode,
+  CurrencyCode.make("CZK"),
+  CurrencyCode.make("EUR"),
+  CurrencyCode.make("USD"),
+  CurrencyCode.make("GBP"),
 ];
 
 export const CONTACT_LANGUAGES: ReadonlyArray<Locale> = ["cs", "en"];
@@ -105,65 +120,97 @@ export const COMMON_COUNTRIES = ["CZ", "SK", "DE", "AT", "PL"] as const;
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const COUNTRY_RE = /^[A-Z]{2}$/;
+const WHOLE_NUMBER_RE = /^\d+$/;
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+const decodeContact = Schema.decodeUnknownOption(
+  Schema.Struct({
+    id: ContactId,
+    name: Schema.String,
+    revision: Schema.Finite,
+    address: Schema.optional(Schema.Unknown),
+    roles: Schema.optional(Schema.Unknown),
+    ico: Schema.optional(Schema.Unknown),
+    dic: Schema.optional(Schema.Unknown),
+    legalForm: Schema.optional(Schema.Unknown),
+    billingEmails: Schema.optional(Schema.Unknown),
+    phone: Schema.optional(Schema.Unknown),
+    note: Schema.optional(Schema.Unknown),
+    defaults: Schema.optional(Schema.Unknown),
+    registryFetchedAt: Schema.optional(Schema.Unknown),
+    archived: Schema.optional(Schema.Unknown),
+  }),
+);
+const decodeAddress = Schema.decodeUnknownOption(
+  Schema.Struct({
+    street: Schema.optional(Schema.Unknown),
+    city: Schema.optional(Schema.Unknown),
+    postalCode: Schema.optional(Schema.Unknown),
+    country: Schema.optional(Schema.Unknown),
+  }),
+);
+const decodeString = Schema.decodeUnknownOption(Schema.String);
+const asNullableString = Fn.flow(
+  decodeString,
+  Option.filter((value) => Str.trim(value) !== ""),
+  Option.getOrNull,
+);
+const decodeRole = Schema.decodeUnknownOption(Schema.Literals(["customer", "supplier"]));
+const decodeDefaults = Schema.decodeUnknownOption(ContactDefaults);
 
-const asNullableString = (value: unknown): string | null =>
-  typeof value === "string" && value.trim() !== "" ? value : null;
-
-const asRoles = (value: unknown): readonly [ContactRole, ...Array<ContactRole>] => {
-  if (!Array.isArray(value)) return ["customer"];
-  const valid = value.filter((v): v is ContactRole => v === "customer" || v === "supplier");
-  const [first, ...rest] = [...new Set(valid)];
+const nonEmptyRoles = (
+  roles: ReadonlyArray<ContactRole>,
+): readonly [ContactRole, ...ContactRole[]] => {
+  const [first, ...rest] = [...new Set(roles)];
   return first === undefined ? ["customer"] : [first, ...rest];
 };
 
-/** Parses the open `ContactView` wire object into a concrete `ContactRecord`. */
-export const parseContactView = (raw: ContactView | unknown): ContactRecord | null => {
-  if (!isRecord(raw)) return null;
-  const id = typeof raw.id === "string" ? (raw.id as ContactId) : null;
-  const name = typeof raw.name === "string" ? raw.name : null;
-  const revision = typeof raw.revision === "number" ? raw.revision : null;
-  if (id === null || name === null || revision === null) return null;
-
-  const addr = isRecord(raw.address) ? raw.address : {};
-  const country =
-    typeof addr.country === "string" && COUNTRY_RE.test(addr.country.toUpperCase())
-      ? addr.country.toUpperCase()
-      : "CZ";
-  const billingEmails = Array.isArray(raw.billingEmails)
-    ? raw.billingEmails.filter((e): e is string => typeof e === "string")
-    : [];
-  const defaults = isRecord(raw.defaults) ? (raw.defaults as ContactDefaults) : {};
-
-  return {
-    id,
-    roles: asRoles(raw.roles),
-    name,
-    ico: asNullableString(raw.ico),
-    dic: asNullableString(raw.dic),
-    legalForm: asNullableString(raw.legalForm),
-    address: {
-      street: asNullableString(addr.street),
-      city: asNullableString(addr.city),
-      postalCode: asNullableString(addr.postalCode),
-      country,
-    },
-    billingEmails,
-    phone: asNullableString(raw.phone),
-    note: asNullableString(raw.note),
-    defaults,
-    registryFetchedAt: asNullableString(raw.registryFetchedAt),
-    archived: raw.archived === true,
-    revision,
-  };
-};
+/** Parses the open Contact View payload into the fields the screens use. */
+export const parseContactView = Fn.flow(
+  decodeContact,
+  Option.map((row): ContactRecord => {
+    const address = Option.getOrUndefined(decodeAddress(row.address));
+    const countryCode = Str.toUpperCase(asNullableString(address?.country) ?? "");
+    const roles = Arr.isArray(row.roles)
+      ? Arr.flatMap(row.roles, (value) => {
+          const role = decodeRole(value);
+          return role._tag === "Some" ? [role.value] : [];
+        })
+      : [];
+    const billingEmails = Arr.isArray(row.billingEmails)
+      ? Arr.flatMap(row.billingEmails, (value) => {
+          const email = decodeString(value);
+          return email._tag === "Some" ? [email.value] : [];
+        })
+      : [];
+    return {
+      id: row.id,
+      name: row.name,
+      revision: row.revision,
+      roles: nonEmptyRoles(roles),
+      ico: asNullableString(row.ico),
+      dic: asNullableString(row.dic),
+      legalForm: asNullableString(row.legalForm),
+      address: {
+        street: asNullableString(address?.street),
+        city: asNullableString(address?.city),
+        postalCode: asNullableString(address?.postalCode),
+        country: COUNTRY_RE.test(countryCode) ? countryCode : "CZ",
+      },
+      billingEmails,
+      phone: asNullableString(row.phone),
+      note: asNullableString(row.note),
+      defaults: Option.getOrElse(decodeDefaults(row.defaults), (): ContactDefaults => ({})),
+      registryFetchedAt: asNullableString(row.registryFetchedAt),
+      archived: row.archived === true,
+    };
+  }),
+  Option.getOrNull,
+);
 
 export const parseContactViews = (
-  items: ReadonlyArray<ContactView | unknown>,
+  items: ReadonlyArray<ContactView>,
 ): ReadonlyArray<ContactRecord> =>
-  items.flatMap((item) => {
+  Arr.flatMap(items, (item) => {
     const parsed = parseContactView(item);
     return parsed === null ? [] : [parsed];
   });
@@ -206,48 +253,53 @@ export const contactFormFromRecord = (record: ContactRecord): ContactFormState =
     note: record.note ?? "",
     overrides,
     dueDaysText: overrides.current.dueDays !== undefined ? String(overrides.current.dueDays) : "",
-    reminderOffsetsText: policy?.mode === "custom" ? policy.offsetsDays.join(", ") : "",
+    reminderOffsetsText:
+      policy?.mode === "custom" ? Arr.join(Arr.map(policy.offsetsDays, String), ", ") : "",
   };
 };
 
-export const canEditContact = (
-  workspace: WorkspaceSummary,
-  contact: ContactRecord | "new" | null,
-): boolean => canWriteWorkspace(workspace) && (contact === "new" || contact?.archived === false);
+export const canEditContact: {
+  (contact: ContactRecord | "new" | null): (workspace: WorkspaceSummary) => boolean;
+  (workspace: WorkspaceSummary, contact: ContactRecord | "new" | null): boolean;
+} = Fn.dual(
+  2,
+  (workspace: WorkspaceSummary, contact: ContactRecord | "new" | null): boolean =>
+    canWriteWorkspace(workspace) && (contact === "new" || contact?.archived === false),
+);
 
 const emptyToNull = (value: string): string | null => {
-  const trimmed = value.trim();
+  const trimmed = Str.trim(value);
   return trimmed === "" ? null : trimmed;
 };
 
 /** Applies an ARES `RegistryResult` onto a form while keeping emails, roles, phone, note, and defaults. */
-export const applyRegistryToForm = (
-  form: ContactFormState,
-  result: RegistryResult,
-): ContactFormState => {
-  const country = COUNTRY_RE.test(result.address.country.trim().toUpperCase())
-    ? result.address.country.trim().toUpperCase()
+export const applyRegistryToForm: {
+  (result: RegistryResult): (form: ContactFormState) => ContactFormState;
+  (form: ContactFormState, result: RegistryResult): ContactFormState;
+} = Fn.dual(2, (form: ContactFormState, result: RegistryResult): ContactFormState => {
+  const country = COUNTRY_RE.test(Str.toUpperCase(Str.trim(result.address.country)))
+    ? Str.toUpperCase(Str.trim(result.address.country))
     : "CZ";
   return {
     ...form,
-    name: result.name.trim(),
+    name: Str.trim(result.name),
     ico: normalizeIco(result.ico),
-    dic: result.dic?.trim() ?? "",
-    legalForm: result.legalForm.trim(),
-    street: result.address.street.trim(),
-    city: result.address.city.trim(),
-    postalCode: result.address.postalCode.trim(),
+    dic: Str.trim(result.dic ?? ""),
+    legalForm: Str.trim(result.legalForm),
+    street: Str.trim(result.address.street),
+    city: Str.trim(result.address.city),
+    postalCode: Str.trim(result.address.postalCode),
     country,
   };
-};
+});
 
 /** Computes changed fields between a stored contact and a fresh ARES lookup for diff preview. */
-export const diffContactWithRegistry = (
-  record: ContactRecord,
-  result: RegistryResult,
-): ReadonlyArray<RegistryDiffItem> => {
-  const nextCountry = COUNTRY_RE.test(result.address.country.trim().toUpperCase())
-    ? result.address.country.trim().toUpperCase()
+export const diffContactWithRegistry: {
+  (result: RegistryResult): (record: ContactRecord) => ReadonlyArray<RegistryDiffItem>;
+  (record: ContactRecord, result: RegistryResult): ReadonlyArray<RegistryDiffItem>;
+} = Fn.dual(2, (record: ContactRecord, result: RegistryResult): ReadonlyArray<RegistryDiffItem> => {
+  const nextCountry = COUNTRY_RE.test(Str.toUpperCase(Str.trim(result.address.country)))
+    ? Str.toUpperCase(Str.trim(result.address.country))
     : "CZ";
   const pairs: ReadonlyArray<RegistryDiffItem> = [
     { field: "name", before: record.name, after: emptyToNull(result.name) ?? record.name },
@@ -266,19 +318,19 @@ export const diffContactWithRegistry = (
     },
     { field: "country", before: record.address.country, after: nextCountry },
   ];
-  return pairs.filter((item) => item.before !== item.after);
-};
+  return Arr.filter(pairs, (item) => item.before !== item.after);
+});
 
-export const isValidEmail = (email: string): boolean => EMAIL_RE.test(email.trim());
+export const isValidEmail = (email: string): boolean => EMAIL_RE.test(Str.trim(email));
 
 /** Parses comma-separated non-negative integers (e.g. `"3, 7, 14"`). Empty returns `[]`; bad input returns `null`. */
 export const parseReminderOffsets = (text: string): ReadonlyArray<number> | null => {
-  const trimmed = text.trim();
+  const trimmed = Str.trim(text);
   if (trimmed === "") return [];
-  const parts = trimmed.split(",").map((p) => p.trim());
+  const parts = Arr.map(Str.split(",")(trimmed), (p) => Str.trim(p));
   const out: number[] = [];
   for (const part of parts) {
-    if (!/^\d+$/.test(part)) return null;
+    if (!WHOLE_NUMBER_RE.test(part)) return null;
     const n = Number(part);
     if (!Number.isSafeInteger(n) || n < 0) return null;
     out.push(n);
@@ -291,25 +343,23 @@ export const validateContactForm = (
   form: ContactFormState,
 ): Readonly<Partial<Record<string, ContactFormErrorCode>>> => {
   const errors: Partial<Record<string, ContactFormErrorCode>> = {};
-  if (form.name.trim() === "") errors.name = "name_required";
-  if (form.roles.length === 0) errors.roles = "roles_required";
+  if (Str.trim(form.name) === "") errors["name"] = "name_required";
+  if (form.roles.length === 0) errors["roles"] = "roles_required";
 
-  const country = form.country.trim().toUpperCase();
+  const country = Str.toUpperCase(Str.trim(form.country));
   if (!COUNTRY_RE.test(country)) errors["address.country"] = "country_invalid";
 
-  const icoTrimmed = form.ico.trim();
+  const icoTrimmed = Str.trim(form.ico);
   if (icoTrimmed !== "") {
     const check = validateIco(icoTrimmed);
     if (Result.isFailure(check)) {
-      errors.ico = check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format";
+      errors["ico"] = check.failure.code === "ico.checksum" ? "ico_checksum" : "ico_format";
     }
   }
 
-  const dueTrimmed = form.dueDaysText.trim();
-  if (dueTrimmed !== "") {
-    if (!/^\d+$/.test(dueTrimmed)) {
-      errors["defaults.dueDays"] = "due_days_invalid";
-    }
+  const dueTrimmed = Str.trim(form.dueDaysText);
+  if (dueTrimmed !== "" && !WHOLE_NUMBER_RE.test(dueTrimmed)) {
+    errors["defaults.dueDays"] = "due_days_invalid";
   }
 
   if (form.overrides.current.reminderPolicy?.mode === "custom") {
@@ -324,17 +374,17 @@ export const validateContactForm = (
 
 /** Builds the `ContactInput` wire payload matching core's `ContactSaveFields`. */
 export const buildContactInput = (form: ContactFormState): ContactInput => {
-  const country = form.country.trim().toUpperCase() || "CZ";
-  const icoRaw = form.ico.trim();
+  const country = Str.toUpperCase(Str.trim(form.country)) || "CZ";
+  const icoRaw = Str.trim(form.ico);
   const ico = icoRaw === "" ? null : normalizeIco(icoRaw);
-  const dicRaw = form.dic.trim();
+  const dicRaw = Str.trim(form.dic);
   const dic = dicRaw === "" ? null : normalizeVatId(dicRaw);
 
   let overrides = form.overrides;
-  const dueTrimmed = form.dueDaysText.trim();
+  const dueTrimmed = Str.trim(form.dueDaysText);
   if (dueTrimmed === "") {
     overrides = OverrideForm.clear(overrides, "dueDays");
-  } else if (/^\d+$/.test(dueTrimmed)) {
+  } else if (WHOLE_NUMBER_RE.test(dueTrimmed)) {
     overrides = OverrideForm.set(overrides, "dueDays", Number(dueTrimmed));
   }
 
@@ -344,11 +394,11 @@ export const buildContactInput = (form: ContactFormState): ContactInput => {
     overrides = OverrideForm.setReminderPolicy(overrides, policy);
   }
 
-  const roles = asRoles([...form.roles].sort());
+  const roles = nonEmptyRoles(Arr.sort(form.roles, Order.String));
 
   return {
     roles: [...roles],
-    name: form.name.trim(),
+    name: Str.trim(form.name),
     ico,
     dic,
     legalForm: emptyToNull(form.legalForm),
@@ -358,17 +408,24 @@ export const buildContactInput = (form: ContactFormState): ContactInput => {
       postalCode: emptyToNull(form.postalCode),
       country,
     },
-    billingEmails: form.billingEmails.map((e) => e.trim()).filter((e) => e !== ""),
+    billingEmails: Arr.filter(
+      Arr.map(form.billingEmails, (e) => Str.trim(e)),
+      (e) => e !== "",
+    ),
     phone: emptyToNull(form.phone),
     note: emptyToNull(form.note),
     defaults: OverrideForm.toInput(overrides),
   };
 };
 
-export const filterVisibleContacts = (
-  items: ReadonlyArray<ContactRecord>,
-  showArchived: boolean,
-): ReadonlyArray<ContactRecord> => (showArchived ? items : items.filter((c) => !c.archived));
+export const filterVisibleContacts: {
+  (showArchived: boolean): (items: ReadonlyArray<ContactRecord>) => ReadonlyArray<ContactRecord>;
+  (items: ReadonlyArray<ContactRecord>, showArchived: boolean): ReadonlyArray<ContactRecord>;
+} = Fn.dual(
+  2,
+  (items: ReadonlyArray<ContactRecord>, showArchived: boolean): ReadonlyArray<ContactRecord> =>
+    showArchived ? items : Arr.filter(items, (c) => !c.archived),
+);
 
 export const contactSubtitle = (contact: ContactRecord): string => {
   const parts: string[] = [];
@@ -376,7 +433,7 @@ export const contactSubtitle = (contact: ContactRecord): string => {
   if (contact.address.city !== null) parts.push(contact.address.city);
   const firstEmail = contact.billingEmails[0];
   if (firstEmail !== undefined) parts.push(firstEmail);
-  return parts.join(" · ");
+  return Arr.join(parts, " · ");
 };
 
 const registryContactPatch = (items: ReadonlyArray<RegistryDiffItem>): ContactInput => {
@@ -386,42 +443,55 @@ const registryContactPatch = (items: ReadonlyArray<RegistryDiffItem>): ContactIn
     const target = field === "name" || field === "dic" || field === "legalForm" ? patch : address;
     target[field] = after;
   }
-  return Object.keys(address).length === 0 ? patch : { ...patch, address };
+  return Rec.keys(address).length === 0 ? patch : { ...patch, address };
 };
 
-export const applyRegistryPreview = (
-  contacts: Pick<KvitbitApiClient["contacts"], "update">,
-  workspaceId: WorkspaceId,
-  preview: RegistryPreview,
-) =>
+export const applyRegistryPreview = ({
+  contacts,
+  workspaceId,
+  preview,
+}: {
+  readonly contacts: Pick<KvitbitApiClient["contacts"], "update">;
+  readonly workspaceId: WorkspaceId;
+  readonly preview: RegistryPreview;
+}) =>
   contacts.update({
     params: inWorkspace(workspaceId, { contactId: preview.contactId }),
     headers: ifMatchHeaders(preview.revision),
     payload: registryContactPatch(preview.items),
   });
 
-export const findActiveContactByIco = <E>(
-  ico: string,
-  excludedId: ContactId | null,
-  loadPage: (cursor: string | null) => Effect.Effect<Page<ContactView>, E>,
-) =>
-  Effect.gen(function* () {
-    let cursor: string | null = null;
-    do {
-      const page: Page<ContactView> = yield* loadPage(cursor);
-      const match = parseContactViews(page.items).find(
+export const findActiveContactByIco = Effect.fn("findActiveContactByIco")(function* <E>({
+  ico,
+  excludedId,
+  loadPage,
+}: {
+  readonly ico: string;
+  readonly excludedId: ContactId | null;
+  readonly loadPage: (cursor: string | null) => Effect.Effect<Page<ContactView>, E>;
+}) {
+  let cursor: string | null = null;
+  do {
+    const page: Page<ContactView> = yield* loadPage(cursor);
+    const match = Option.getOrUndefined(
+      Arr.findFirst(
+        parseContactViews(page.items),
         (contact) => !contact.archived && contact.ico === ico && contact.id !== excludedId,
-      );
-      if (match !== undefined) return match;
-      cursor = page.nextCursor;
-    } while (cursor !== null);
-    return null;
-  });
+      ),
+    );
+    if (match !== undefined) return match;
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return null;
+});
 
-export const summarizeContactReceivables = (
-  report: ReceivablesReportData,
-  contactId: ContactId,
-) => {
+export const summarizeContactReceivables = ({
+  report,
+  contactId,
+}: {
+  readonly report: ReceivablesReportData;
+  readonly contactId: ContactId;
+}) => {
   let outstanding = BigDecimal.fromBigInt(0n);
   let overdueCount = 0;
   for (const bucket of report.buckets) {
@@ -435,4 +505,20 @@ export const summarizeContactReceivables = (
     }
   }
   return { outstanding: { amount: outstanding, currency: report.total.currency }, overdueCount };
+};
+
+export interface ContactQuery {
+  readonly text?: string;
+  readonly role?: ContactRole;
+}
+
+export const loadContactsQuery = ({
+  current,
+  query,
+}: {
+  readonly current: PagedState<ContactRecord, ContactQuery>;
+  readonly query: ContactQuery;
+}) => {
+  const step = Paged.setQuery(current, query);
+  return step.fetch === null && current.seq === 1 ? Paged.refresh(current) : step;
 };

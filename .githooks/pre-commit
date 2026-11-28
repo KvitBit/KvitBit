@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+index=$(git rev-parse --path-format=absolute --git-path index)
+[[ -f "$index" ]] || exit 0
+
+scratch=$(mktemp -d)
+lock=
+trap '[[ -z "$lock" ]] || rm -f "$lock"; rm -rf "$scratch"' EXIT
+cp -p "$index" "$scratch/original-index"
+GIT_INDEX_FILE="$scratch/original-index" git diff --cached --raw --no-renames --no-abbrev -z -- > "$scratch/changed"
+
+run_knip=false
+files=()
+modes=()
+originals=()
+while IFS= read -r -d '' change && IFS= read -r -d '' path; do
+  case "$path" in
+    *.ts|*.tsx|*.mts|*.cts|*.js|*.jsx|*.mjs|*.cjs|*.sh|*.json|*.jsonc|bun.lock|bunfig.toml|*/bunfig.toml|.gitignore|*/.gitignore|.github/workflows/*.yml|.github/workflows/*.yaml|.github/actions/*)
+      run_knip=true
+      ;;
+  esac
+
+  read -r _ mode _ original _ <<< "$change"
+  [[ "$mode" == 100* ]] || continue
+  case "$path" in
+    *.ts|*.tsx|*.mts|*.cts|*.js|*.jsx|*.mjs|*.cjs|*.json|*.jsonc|*.css|*.scss|*.html|*.graphql|*.gql|*.yml|*.yaml)
+      files+=("./$path")
+      modes+=("$mode")
+      originals+=("$original")
+      ;;
+  esac
+done < "$scratch/changed"
+
+if (( ${#files[@]} == 0 )) && ! "$run_knip"; then
+  exit 0
+fi
+if ! command -v bun >/dev/null; then
+  printf '%s\n' 'Bun is required on PATH for the pre-commit checks.' >&2
+  exit 1
+fi
+
+# Run both checks with the staged sources, configs, and dependency graph.
+snapshot="$scratch/tree"
+mkdir "$snapshot"
+GIT_INDEX_FILE="$scratch/original-index" git checkout-index --all --prefix="$snapshot/"
+(
+  while IFS= read -r name; do unset "$name"; done < <(git rev-parse --local-env-vars)
+  cd -P "$snapshot"
+  bun install --frozen-lockfile --ignore-scripts --prefer-offline
+  if (( ${#files[@]} > 0 )); then
+    bun --bun biome format --write --no-errors-on-unmatched "${files[@]}"
+    bun --bun biome check --error-on-warnings --no-errors-on-unmatched "${files[@]}"
+  fi
+  if "$run_knip"; then
+    bun run knip:check
+  fi
+)
+
+: > "$scratch/index-info"
+for i in "${!files[@]}"; do
+  path=${files[i]#./}
+  formatted=$(git --work-tree="$snapshot" hash-object -w --path="$path" -- "$snapshot/$path")
+  if [[ "$formatted" != "${originals[i]}" ]]; then
+    printf '%s %s\t%s\0' "${modes[i]}" "$formatted" "$path" >> "$scratch/index-info"
+  fi
+done
+
+if [[ -s "$scratch/index-info" ]]; then
+  # Hold Git's lock across the comparison and replacement.
+  if ! (set -o noclobber; : > "$index.lock") 2>/dev/null; then
+    printf '%s\n' 'Could not lock the Git index. Retry after the other Git command finishes.' >&2
+    exit 1
+  fi
+  lock="$index.lock"
+fi
+if ! cmp -s "$scratch/original-index" "$index"; then
+  printf '%s\n' 'The Git index changed during pre-commit checks. Retry the commit.' >&2
+  exit 1
+fi
+if [[ -n "$lock" ]]; then
+  # Apply formatting to the index. Leave working-tree edits and modes alone.
+  cp -p "$scratch/original-index" "$scratch/formatted-index"
+  GIT_INDEX_FILE="$scratch/formatted-index" git update-index -z --index-info < "$scratch/index-info"
+  cp -p "$scratch/formatted-index" "$lock"
+  mv -f "$lock" "$index"
+  lock=
+fi

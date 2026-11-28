@@ -8,7 +8,7 @@
  *   for the workflow and cron defined later; they run only as the System caller of the job.
  * - `decideDue` and friends (./sweep): the pure sweep decisions.
  */
-import { Layer } from "effect";
+import * as Layer from "effect/Layer";
 import { FakeDeliveryStatuses } from "./deliveries";
 import { RecurringIssuanceLive } from "./issuance";
 import { FakeDocumentLinks } from "./links";

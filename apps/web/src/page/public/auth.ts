@@ -12,13 +12,20 @@ import type { Html } from "@effect/ui/html";
  */
 import { BotScope } from "@kvitbit/api-contract";
 import { InvitationPeek, InvitationToken, WorkspaceSummary } from "@kvitbit/domain";
-import { ViewModels } from "@kvitbit/ui-port";
-import { Effect, Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { authFetch, Failure, failureFromUnknown } from "../../app/api";
-import { browserCommand, defineApiCommand, type PageCommand, RunApi } from "../../app/commands";
+import { apiCommand, defineApiCommand, type PageCommand, RunApi } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href, magicSignInCallback, safeReturnTo } from "../../app/routing";
 import { performPasskeyAuthentication } from "../../app/webauthn";
@@ -28,7 +35,6 @@ import { icon } from "../../ui/icons";
 import { banner, button, card, checkbox, segmented, textField } from "../../ui/kit";
 import { botProofVariants, buttonVariants, cn, ui } from "../../ui/styles";
 import {
-  authPostWithProof,
   BotProofState,
   botProofHeader,
   type FetchAndSolveResult,
@@ -37,7 +43,14 @@ import {
 } from "./_altcha";
 import { callApi, failureMessage, fieldIssue } from "./_shared";
 
-export type Route = RouteOf<"SignUp" | "SignIn" | "CheckEmail" | "AuthLink" | "ResetPassword">;
+export const Route = Schema.Union([
+  RouteCases.SignUp,
+  RouteCases.SignIn,
+  RouteCases.CheckEmail,
+  RouteCases.AuthLink,
+  RouteCases.ResetPassword,
+]);
+export type Route = typeof Route.Type;
 
 const SignInMethod = Schema.Literals(["password", "magic_link", "passkey"]);
 const SignUpMethod = Schema.Literals(["password", "passkey"]);
@@ -45,7 +58,7 @@ const SignUpMethod = Schema.Literals(["password", "passkey"]);
 const InvitationRemote = Remote.remoteSchema(InvitationPeek);
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   email: Schema.String,
   name: Schema.String,
   password: Schema.String,
@@ -190,22 +203,28 @@ const mapBotResult = (seq: Remote.Seq, res: FetchAndSolveResult) => {
 };
 
 const botProofCommandName = "AuthBotProof";
-const BotProofCmd = defineApiCommand(botProofCommandName, {
+const BotProofCmd = defineApiCommand({
+  message: Message,
+  name: botProofCommandName,
   args: { scope: BotScope, seq: Remote.Seq },
   execute: ({ scope, seq }) => fetchAndSolveBotProof(scope, (res) => mapBotResult(seq, res)),
 });
 
-const PeekInviteCmd = defineApiCommand("AuthPeekInvite", {
+const PeekInviteCmd = defineApiCommand({
+  message: Message,
+  name: "AuthPeekInvite",
   args: { token: Schema.String, seq: Remote.Seq },
   execute: ({ token, seq }) =>
     callApi(
-      (client) => client.invitations.peek({ params: { token: token as never } }),
+      (client) => client.invitations.peek({ params: { token: InvitationToken.make(token) } }),
       (peek) => Message.GotInvitation({ seq, peek }),
       (failure) => Message.FailedInvitation({ seq, failure }),
     ),
 });
 
-const AcceptSignedUpInviteCmd = defineApiCommand("AuthAcceptSignedUpInvite", {
+const AcceptSignedUpInviteCmd = defineApiCommand({
+  message: Message,
+  name: "AuthAcceptSignedUpInvite",
   args: { token: Schema.String, seq: Remote.Seq },
   execute: ({ token, seq }) =>
     callApi(
@@ -227,35 +246,39 @@ const AuthAction = Schema.Literals([
   "reset_confirm",
 ]);
 
-const AuthPostCmd = defineApiCommand("AuthPost", {
+const isAuthenticatedResponse = Schema.is(
+  Schema.Struct({
+    token: Schema.NonEmptyString,
+  }),
+);
+
+const AuthPostCmd = defineApiCommand({
+  message: Message,
+  name: "AuthPost",
   args: {
     seq: Remote.Seq,
     action: AuthAction,
     path: Schema.String,
-    body: Schema.Record(Schema.String, Schema.Unknown),
+    body: Schema.JsonObject,
     altchaHeader: Schema.NullOr(Schema.String),
   },
   execute: ({ seq, action, path, body, altchaHeader }) =>
-    authPostWithProof(
+    authFetch(
       path,
-      body,
-      altchaHeader ?? undefined,
+      { method: "POST", body, altchaHeader: altchaHeader ?? undefined },
       (json) =>
         Message.CompletedSubmit({
           seq,
           action,
-          sessionEstablished:
-            typeof json === "object" &&
-            json !== null &&
-            "token" in json &&
-            typeof json.token === "string" &&
-            json.token.length > 0,
+          sessionEstablished: isAuthenticatedResponse(json),
         }),
       (failure) => Message.FailedSubmit({ seq, failure }),
     ),
 });
 
-const AuthGetCmd = defineApiCommand("AuthGet", {
+const AuthGetCmd = defineApiCommand({
+  message: Message,
+  name: "AuthGet",
   args: { seq: Remote.Seq, action: AuthAction, path: Schema.String },
   execute: ({ seq, action, path }) =>
     authFetch<ReturnType<typeof Message.CompletedSubmit> | ReturnType<typeof Message.FailedSubmit>>(
@@ -273,18 +296,11 @@ const restartBotProof = (scope: BotScope, seq: Remote.Seq) => [
   startBotProof(scope, seq),
 ];
 
-const origin = (): string =>
-  typeof location === "undefined" || location.origin === "null"
-    ? "http://localhost"
-    : location.origin;
-
 const runPasskeyAuth = (seq: Remote.Seq) =>
-  browserCommand(
+  apiCommand(
+    Message,
     "AuthPasskey",
-    Effect.tryPromise({
-      try: (signal) => performPasskeyAuthentication(origin(), signal),
-      catch: (e) => e,
-    }).pipe(
+    performPasskeyAuthentication.pipe(
       Effect.map((out) =>
         !out.supported
           ? Message.FailedPasskeyUnsupported({ seq })
@@ -304,7 +320,7 @@ const invitationPath = (model: Model) =>
 const signInPath = (returnTo: string | undefined) =>
   href(returnTo === undefined ? { _tag: "SignIn" } : { _tag: "SignIn", returnTo });
 
-export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, _ctx: PageContext): PageReturn<Model, Message> => {
   const scope = scopeForRoute(route, "password");
   const botSeq = scope !== null ? 1 : 0;
   const botProof: BotProofState =
@@ -387,11 +403,12 @@ export const init = (route: Route, _ctx: PageContext): PageReturn<Model, Message
   };
 };
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> =>
+export const init: {
+  (_ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, _ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
+const updateImpl = (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> =>
   Message.match(message, {
     ChangedEmail: ({ value }) =>
       invitationPath(model) !== undefined || model.submitting
@@ -412,7 +429,7 @@ export const update = (
     SelectedSignUpMethod: ({ method }) => {
       if (model.submitting || model.signUpMethod === method || invitationPath(model) !== undefined)
         return { model };
-      const route = model.route as Route;
+      const route = model.route;
       const scope = scopeForRoute(route, model.signInMethod, method);
       if (scope === null) {
         return {
@@ -434,7 +451,7 @@ export const update = (
     },
     SelectedSignInMethod: ({ method }) => {
       if (model.submitting || model.signInMethod === method) return { model };
-      const route = model.route as Route;
+      const route = model.route;
       const scope = scopeForRoute(route, method);
       if (scope === null) {
         return {
@@ -473,7 +490,7 @@ export const update = (
       return { model: { ...model, botProof } };
     },
     ClickedRetryBotProof: () => {
-      const scope = scopeForRoute(model.route as Route, model.signInMethod, model.signUpMethod);
+      const scope = scopeForRoute(model.route, model.signInMethod, model.signUpMethod);
       if (scope === null) return { model };
       const botSeq = model.botSeq + 1;
       return {
@@ -514,7 +531,7 @@ export const update = (
       ) {
         return { model: { ...model, localError: local(ctx.locale, "invitationUnavailable") } };
       }
-      const email = (peek?.email ?? model.email).trim();
+      const email = Str.trim(peek?.email ?? model.email);
       if (email === "") {
         return { model: { ...model, localError: local(ctx.locale, "emailRequired") } };
       }
@@ -528,8 +545,18 @@ export const update = (
         return { model: { ...model, localError: local(ctx.locale, "botWait") } };
       }
       const seq = model.submitSeq + 1;
-      const displayName = model.name.trim() || email.split("@")[0] || email;
+      const displayName = Str.trim(model.name) || Str.split(email, "@")[0] || email;
       const isPasskeySignUp = model.signUpMethod === "passkey";
+      const credentials = {
+        email,
+        name: displayName,
+        password: model.password,
+        callbackURL: signInPath(invite),
+      };
+      const signUpBody =
+        route.invitation === undefined
+          ? credentials
+          : { ...credentials, invitationToken: route.invitation };
       return {
         model: {
           ...model,
@@ -549,13 +576,7 @@ export const update = (
                   name: displayName,
                   callbackURL: href({ _tag: "Account", tab: "security" }),
                 }
-              : {
-                  email,
-                  name: displayName,
-                  password: model.password,
-                  callbackURL: signInPath(invite),
-                  ...(route.invitation !== undefined ? { invitationToken: route.invitation } : {}),
-                },
+              : signUpBody,
             altchaHeader: botProofHeader(model.botProof) ?? null,
           }),
         ],
@@ -565,7 +586,7 @@ export const update = (
       if (model.submitting || model.route._tag !== "SignIn" || model.signInMethod === "passkey") {
         return { model };
       }
-      const email = model.email.trim();
+      const email = Str.trim(model.email);
       if (email === "") {
         return { model: { ...model, localError: local(ctx.locale, "emailRequired") } };
       }
@@ -632,7 +653,7 @@ export const update = (
       };
     },
     ClickedChangeEmail: () => {
-      const scope = scopeForRoute(model.route as Route, model.signInMethod, model.signUpMethod);
+      const scope = scopeForRoute(model.route, model.signInMethod, model.signUpMethod);
       if (scope === null) return { model };
       const botSeq = model.botSeq + 1;
       return {
@@ -656,7 +677,7 @@ export const update = (
       };
     },
     SubmittedResetRequest: () => {
-      const email = model.email.trim();
+      const email = Str.trim(model.email);
       if (email === "") {
         return { model: { ...model, localError: local(ctx.locale, "emailRequired") } };
       }
@@ -691,7 +712,8 @@ export const update = (
         return { model: { ...model, localError: local(ctx.locale, "passwordsMismatch") } };
       }
       const seq = model.submitSeq + 1;
-      const route = model.route as RouteOf<"ResetPassword">;
+      const route = model.route;
+      if (route._tag !== "ResetPassword") return { model };
       return {
         model: {
           ...model,
@@ -716,7 +738,7 @@ export const update = (
       const t = translator(ctx.locale);
       switch (action) {
         case "sign_up": {
-          if (sessionEstablished) {
+          if (sessionEstablished === true) {
             if (model.route._tag === "SignUp" && model.route.invitation !== undefined) {
               return {
                 model: { ...model, password: "" },
@@ -730,7 +752,9 @@ export const update = (
           }
           return {
             model: { ...model, submitting: false, password: "" },
-            outMessage: Intent_.navigate(href({ _tag: "CheckEmail", email: model.email.trim() })),
+            outMessage: Intent_.navigate(
+              href({ _tag: "CheckEmail", email: Str.trim(model.email) }),
+            ),
           };
         }
         case "sign_up_passkey":
@@ -740,7 +764,7 @@ export const update = (
           return {
             model: { ...model, submitting: false },
             outMessage: Intent_.navigate(
-              href({ _tag: "CheckEmail", email: model.email.trim() }),
+              href({ _tag: "CheckEmail", email: Str.trim(model.email) }),
               false,
             ),
           };
@@ -768,9 +792,10 @@ export const update = (
         case "verify_link":
           return {
             model: { ...model, submitting: false, linkState: "verified" },
-            ...(model.route._tag === "AuthLink" && model.route.kind === "magic"
-              ? { outMessage: Intent_.reloadSession({ _tag: "DefaultSignedIn" }) }
-              : {}),
+            outMessage:
+              model.route._tag === "AuthLink" && model.route.kind === "magic"
+                ? Intent_.reloadSession({ _tag: "DefaultSignedIn" })
+                : undefined,
           };
         case "reset_confirm":
           return {
@@ -806,7 +831,7 @@ export const update = (
         };
       }
       // If the server rejected the bot proof, automatically fetch a fresh challenge.
-      const scope = scopeForRoute(model.route as Route, model.signInMethod, model.signUpMethod);
+      const scope = scopeForRoute(model.route, model.signInMethod, model.signUpMethod);
       if (failure.freshBotProof && scope !== null) {
         const botSeq = model.botSeq + 1;
         return {
@@ -836,7 +861,12 @@ export const update = (
           },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   switch (model.route._tag) {
     case "SignUp":
@@ -855,6 +885,11 @@ export const title = (model: Model, ctx: PageContext): string => {
       return t.t("auth.signIn.title");
   }
 };
+
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
 
 const botProofBar = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
@@ -893,7 +928,7 @@ const botProofBar = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
     ]);
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const errorText =
     model.localError ??
@@ -1286,3 +1321,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ),
     ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

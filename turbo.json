@@ -3,7 +3,7 @@
   "remoteCache": {
     "enabled": true
   },
-  "globalDependencies": ["tsconfig.base.json"],
+  "globalDependencies": ["tsconfig.base.json", "tsconfig.effect.json"],
   "globalEnv": ["NODE_ENV"],
   "tasks": {
     "transit": {
@@ -41,7 +41,7 @@
     },
     "lint": {
       "dependsOn": [],
-      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/biome.json", "!**/*.md"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/biome.jsonc", "!**/*.md", "$TURBO_ROOT$/lint/**"],
       "outputs": []
     },
     "test": {
@@ -61,7 +61,7 @@
     },
     "//#lint:root": {
       "inputs": [
-        "biome.json",
+        "biome.jsonc",
         "package.json",
         "tsconfig.base.json",
         "turbo.json",
@@ -70,7 +70,9 @@
         "!formal/*.tsbuildinfo",
         "scripts/**",
         "!scripts/**/*.tsbuildinfo",
-        "!**/*.md"
+        "!**/*.md",
+        "lint/**",
+        "knip.jsonc"
       ],
       "outputs": []
     },
@@ -87,34 +89,9 @@
       ],
       "outputs": ["formal/*.tsbuildinfo"]
     },
-    "//#typecheck:issue-pool": {
-      "inputs": [
-        "scripts/issue-pool/**/*.ts",
-        "scripts/issue-pool/tsconfig.json",
-        "tsconfig.base.json"
-      ],
-      "outputs": ["scripts/issue-pool/*.tsbuildinfo"]
-    },
-    "//#typecheck:alert-inbox": {
-      "inputs": [
-        "scripts/alert-inbox/**/*.ts",
-        "scripts/alert-inbox/tsconfig.json",
-        "infra/alchemy/src/mail-forwarder/mime.ts",
-        "tsconfig.base.json"
-      ],
-      "outputs": []
-    },
     "//#test:issue-pool": {
       "inputs": ["scripts/issue-pool/**", "!scripts/issue-pool/*.tsbuildinfo"],
       "outputs": []
-    },
-    "//#typecheck:cache-graph": {
-      "inputs": [
-        "scripts/turbo-cache-guard/**/*.ts",
-        "scripts/turbo-cache-guard/tsconfig.json",
-        "tsconfig.base.json"
-      ],
-      "outputs": ["scripts/turbo-cache-guard/*.tsbuildinfo"]
     },
     "//#test:cache-graph": {
       "inputs": [
@@ -150,7 +127,12 @@
       "outputs": []
     },
     "//#check:bun-nix": {
-      "inputs": ["bun.lock", "bun.nix", "scripts/generate-bun-nix.ts"],
+      "inputs": [
+        "bun.lock",
+        "bun.nix",
+        "scripts/bun-lock-boundary.ts",
+        "scripts/generate-bun-nix.ts"
+      ],
       "outputs": []
     },
     "//#formal:selftest": {
@@ -364,6 +346,30 @@
         "//#formal:replay:idempotency"
       ],
       "cache": false
+    },
+    "//#typecheck:scripts": {
+      "inputs": [
+        "package.json",
+        "scripts/**",
+        "lint/**",
+        "formal/**",
+        "infra/alchemy/src/mail-forwarder/mime.ts",
+        "!**/*.tsbuildinfo",
+        "!formal/.cache/**"
+      ],
+      "outputs": ["scripts/*.tsbuildinfo"]
+    },
+    "//#test:static-checks": {
+      "inputs": [
+        "scripts/check-changed*.ts",
+        "package.json",
+        "bun.lock",
+        "biome.jsonc",
+        "knip.jsonc",
+        "lint/**",
+        ".githooks/**"
+      ],
+      "outputs": []
     }
   }
 }

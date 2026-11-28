@@ -5,6 +5,8 @@
  */
 import { describe, expect, test } from "bun:test";
 import { I18n } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Str from "effect/String";
 import type { Locale } from "../src/app/prefs";
 import { DEMO_USER, DEMO_WORKSPACE, demoId } from "../src/demo/shell";
 import { anonymous, renderPath, signedIn, WS } from "./support";
@@ -46,29 +48,31 @@ const ROUTE_GROUPS: ReadonlyArray<RouteCase> = [
   { name: "404", path: "/no/such/page", expectedChrome: "public" },
 ];
 
-const assertCleanSsr = (
+const requiredMarkup = (locale: Locale, chrome: RouteCase["expectedChrome"]) => [
+  'class="kb-root"',
+  `lang="${locale}"`,
+  'id="kb-theme-vars"',
+  "--md-sys-color-surface",
+  "--md-sys-color-primary",
+  'id="main"',
+  ...(chrome === "workspace" ? ['data-slot="app"', 'data-slot="sidebar"'] : ['data-slot="public"']),
+];
+
+const inspectSsr = (
   html: string,
   title: string,
   locale: Locale,
   chrome: RouteCase["expectedChrome"],
-) => {
-  expect(html).toContain('class="kb-root"');
-  expect(html).toContain(`lang="${locale}"`);
-  expect(html).toContain('id="kb-theme-vars"');
-  expect(html).toContain("--md-sys-color-surface");
-  expect(html).toContain("--md-sys-color-primary");
-  expect(html).toContain('id="main"');
-  expect(html).not.toContain("[object Object]");
-  expect(html).not.toContain(">undefined<");
-  expect(title.trim().length).toBeGreaterThan(0);
-  expect(title).toContain("Kvitbit");
-  if (chrome === "workspace") {
-    expect(html).toContain('data-slot="app"');
-    expect(html).toContain('data-slot="sidebar"');
-  } else {
-    expect(html).toContain('data-slot="public"');
-  }
-};
+) => ({
+  missingMarkup: Arr.filter(
+    requiredMarkup(locale, chrome),
+    (markup) => !Str.includes(markup)(html),
+  ),
+  unexpectedMarkup: Arr.filter(["[object Object]", ">undefined<"], (markup) =>
+    Str.includes(markup)(html),
+  ),
+  title: Str.trim(title),
+});
 
 describe("server render smoke (all route groups × cs/en)", () => {
   test("discloses cookieless product analytics in Czech and English", async () => {
@@ -96,21 +100,25 @@ describe("server render smoke (all route groups × cs/en)", () => {
       for (const entry of ROUTE_GROUPS) {
         test(`renders ${entry.name} (${entry.path})`, async () => {
           const { html, title } = await renderPath(entry.path, { locale, session: signedIn });
-          assertCleanSsr(html, title, locale, entry.expectedChrome);
+          const inspected = inspectSsr(html, title, locale, entry.expectedChrome);
+          expect(inspected.missingMarkup).toEqual([]);
+          expect(inspected.unexpectedMarkup).toEqual([]);
+          expect(inspected.title).toContain("Kvitbit");
         });
       }
     });
   }
 
-  test("anonymous viewer of a workspace route redirects to public chrome (sign-in)", async () => {
-    for (const locale of LOCALES) {
-      const { html, title } = await renderPath(`/w/${WS}/documents`, {
-        locale,
-        session: anonymous,
-      });
-      assertCleanSsr(html, title, locale, "public");
-      expect(html).not.toContain('data-slot="sidebar"');
-    }
+  test.each(LOCALES)("anonymous viewer of a workspace route sees sign-in in %s", async (locale) => {
+    const { html, title } = await renderPath(`/w/${WS}/documents`, {
+      locale,
+      session: anonymous,
+    });
+    const inspected = inspectSsr(html, title, locale, "public");
+    expect(inspected.missingMarkup).toEqual([]);
+    expect(inspected.unexpectedMarkup).toEqual([]);
+    expect(inspected.title).toContain("Kvitbit");
+    expect(html).not.toContain('data-slot="sidebar"');
   });
 
   test("anonymous viewer of an account route redirects to public chrome (sign-in)", async () => {
@@ -118,7 +126,10 @@ describe("server render smoke (all route groups × cs/en)", () => {
       locale: "en",
       session: anonymous,
     });
-    assertCleanSsr(html, title, "en", "public");
+    const inspected = inspectSsr(html, title, "en", "public");
+    expect(inspected.missingMarkup).toEqual([]);
+    expect(inspected.unexpectedMarkup).toEqual([]);
+    expect(inspected.title).toContain("Kvitbit");
   });
 
   test("signed-in non-member of a workspace renders public error chrome (no_access)", async () => {
@@ -130,7 +141,10 @@ describe("server render smoke (all route groups × cs/en)", () => {
         workspaces: [DEMO_WORKSPACE],
       },
     });
-    assertCleanSsr(html, title, "cs", "public");
+    const inspected = inspectSsr(html, title, "cs", "public");
+    expect(inspected.missingMarkup).toEqual([]);
+    expect(inspected.unexpectedMarkup).toEqual([]);
+    expect(inspected.title).toContain("Kvitbit");
     expect(html).not.toContain('data-slot="sidebar"');
   });
 });

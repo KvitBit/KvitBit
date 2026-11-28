@@ -3,10 +3,14 @@
  * repositories, fakes and their test controls, through the public entry point, identical to the
  * module's own export (one tag per control, so a test's control reaches the layer it drives).
  */
+
 import { describe, expect, test } from "bun:test";
 import * as Testing from "@kvitbit/core/testing";
+import * as EffectArray from "effect/Array";
+import * as EffectRecord from "effect/Record";
 import * as Contacts from "../src/modules/contacts";
 import * as Documents from "../src/modules/documents";
+import { StartedDeliveries } from "../src/modules/documents/deliveries/jobs";
 import * as Expenses from "../src/modules/expenses";
 import * as Numbering from "../src/modules/numbering";
 import * as Payments from "../src/modules/payments";
@@ -33,34 +37,36 @@ const MODULES = {
 const TEST_NAME =
   /TestLayer$|Memory$|^Fake|Fake$|FakesLive$|Fixtures$|^Capture|^StartedDeliveries$|KeysTest$|None$|^fakePdfBytes$/;
 
-const testNames = (mod: object) => Object.keys(mod).filter((name) => TEST_NAME.test(name));
+type TestModule = (typeof MODULES)[keyof typeof MODULES];
+const testNames = (mod: TestModule) =>
+  EffectArray.filter(Object.getOwnPropertyNames(mod), (name) => TEST_NAME.test(name));
 
 describe("the testing entry", () => {
-  test.each(Object.entries(MODULES))(
+  test.each(EffectRecord.toEntries(MODULES))(
     "re-exports every %s test layer, fake and control",
     (_, mod) => {
       const names = testNames(mod);
-      const missing = names.filter(
+      const missing = EffectArray.filter(
+        names,
         (name) =>
-          (Testing as Record<string, unknown>)[name] !== (mod as Record<string, unknown>)[name],
+          Object.getOwnPropertyDescriptor(Testing, name)?.value !==
+          Object.getOwnPropertyDescriptor(mod, name)?.value,
       );
       expect(missing).toEqual([]);
     },
   );
 
   test("carries the controls and layers the e2e tests drive", () => {
-    for (const name of [
-      "DocumentsTestLayer",
-      "PaymentsTestLayer",
-      "WorkspacesTestLayer",
-      "ShareLinksTestLayer",
-      "StartedDeliveries",
-      "FakeExportWorkflow",
-      "DocumentFixtures",
-      "PaymentFixtures",
-      "ShareLinkKeysTest",
-    ]) {
-      expect({ name, exported: name in Testing }).toEqual({ name, exported: true });
-    }
+    expect(Testing).toMatchObject({
+      DocumentsTestLayer: Documents.DocumentsTestLayer,
+      PaymentsTestLayer: Payments.PaymentsTestLayer,
+      WorkspacesTestLayer: Workspaces.WorkspacesTestLayer,
+      ShareLinksTestLayer: ShareLinks.ShareLinksTestLayer,
+      StartedDeliveries,
+      FakeExportWorkflow: Reports.FakeExportWorkflow,
+      DocumentFixtures: Documents.DocumentFixtures,
+      PaymentFixtures: Payments.PaymentFixtures,
+      ShareLinkKeysTest: ShareLinks.ShareLinkKeysTest,
+    });
   });
 });

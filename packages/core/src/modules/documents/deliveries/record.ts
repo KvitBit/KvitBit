@@ -8,12 +8,13 @@ import {
   DeliveryId,
   DeliveryPurpose,
   DocumentId,
+  type DocumentView,
   IsoDate,
   Locale,
   PdfTemplate,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { defineCollection } from "../../../store/tables";
 import { DocumentViewCodec } from "../view";
 
@@ -29,15 +30,17 @@ export const ReminderStepRecord = Schema.Struct({
 });
 export type ReminderStepRecord = typeof ReminderStepRecord.Type;
 
+const DeliveryViewCodec: Schema.Codec<DocumentView, unknown> = DocumentViewCodec;
+
 export const DeliveryRecord = Schema.Struct({
   id: DeliveryId,
   workspaceId: WorkspaceId,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   documentId: DocumentId,
   /** 1, 2, ... per document in queueing order (unique `deliveries_document_sequence`). */
   sequence: Schema.Int,
   /** The document revision the snapshot was taken at (J3). */
-  documentRevision: Schema.Number,
+  documentRevision: Schema.Finite,
   purpose: DeliveryPurpose,
   status: DeliveryStatus,
   to: Schema.Array(Schema.String),
@@ -45,7 +48,7 @@ export const DeliveryRecord = Schema.Struct({
   language: Locale,
   subject: Schema.String,
   /** The document as queued (J3); the PDF attachment is rendered from it. */
-  view: DocumentViewCodec,
+  view: DeliveryViewCodec,
   attachment: Schema.Struct({
     filename: Schema.String,
     contentType: Schema.String,
@@ -80,7 +83,7 @@ export const DeliveriesTable = defineCollection<DeliveryRecord>({
   name: "deliveries",
   // EntityKind has no Delivery; a delivery is part of its Document.
   entity: "Document",
-  schema: DeliveryRecord as unknown as Schema.Codec<DeliveryRecord, unknown>,
+  schema: DeliveryRecord,
   unique: [
     {
       name: DOCUMENT_SEQUENCE,

@@ -1,13 +1,13 @@
 import type { Locale } from "@kvitbit/domain/contract";
 import type { SettingsSection } from "@kvitbit/ui-port/view-models";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
 import {
   AlertTriangle,
   BarChart3,
   Bell,
   Building2,
   Check,
-  ChevronDown,
-  ChevronUp,
   FileSpreadsheet,
   FileText,
   Hash,
@@ -44,6 +44,7 @@ import {
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { canEditWorkspaceSettings } from "../settings/permissions";
+import { forkFeatureEffect } from "../ui-effect";
 import { filterWorkspaces, hiddenTabItems, roleLabelKey, SETTINGS_NAV_ITEMS } from "./more-model";
 
 const HIDDEN_TAB_ICON: Readonly<Record<string, IconComponent>> = {
@@ -81,7 +82,7 @@ export function MoreScreen() {
     () => filterWorkspaces(workspaces, search),
     [workspaces, search],
   );
-  const hiddenTabs = useMemo(() => hiddenTabItems(workspace.slug), [workspace.slug]);
+  const hiddenTabs = useMemo(() => hiddenTabItems({ ws: workspace.slug }), [workspace.slug]);
   const isAdminOrOwner = canEditWorkspaceSettings(workspace.role, workspace.closed);
 
   const handleSwitchWorkspace = (targetSlug: typeof workspace.slug) => {
@@ -91,27 +92,32 @@ export function MoreScreen() {
     navigate({ _tag: "Dashboard", ws: targetSlug }, { replace: true });
   };
 
-  const handleSignOut = async () => {
-    const confirmed = await overlay.confirm({
-      title: t("common.action.signOut"),
-      body: local({
-        cs: "Opravdu se chcete odhlásit z tohoto zařízení?",
-        en: "Are you sure you want to sign out on this device?",
+  const handleSignOut = () =>
+    forkFeatureEffect(
+      Effect.gen(function* () {
+        const confirmed = yield* Effect.promise(() =>
+          overlay.confirm({
+            title: t("common.action.signOut"),
+            body: local({
+              cs: "Opravdu se chcete odhlásit z tohoto zařízení?",
+              en: "Are you sure you want to sign out on this device?",
+            }),
+            confirmLabel: t("common.action.signOut"),
+            cancelLabel: t("common.action.cancel"),
+            destructive: true,
+          }),
+        );
+        if (confirmed === false) return;
+        setSigningOut(true);
+        yield* Effect.promise(() =>
+          session.auth("/sign-out", { method: "POST" }).catch(() => undefined),
+        ).pipe(
+          Effect.andThen(Effect.promise(session.clear)),
+          Effect.tap(() => Effect.sync(() => navigate({ _tag: "SignIn" }, { replace: true }))),
+          Effect.ensuring(Effect.sync(() => setSigningOut(false))),
+        );
       }),
-      confirmLabel: t("common.action.signOut"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
-    if (!confirmed) return;
-    setSigningOut(true);
-    try {
-      await session.auth("/sign-out", { method: "POST" }).catch(() => undefined);
-      await session.clear();
-      navigate({ _tag: "SignIn" }, { replace: true });
-    } finally {
-      setSigningOut(false);
-    }
-  };
+    );
 
   return (
     <Screen title={t("shell.nav.more")} onRefresh={reload}>
@@ -133,9 +139,9 @@ export function MoreScreen() {
             }
             onPress={() => setSwitcherOpen((open) => !open)}
             chevron={false}
-            trailing={switcherOpen ? "▲" : "▼"}
+            trailing={switcherOpen === true ? "▲" : "▼"}
           />
-          {switcherOpen ? (
+          {switcherOpen === true ? (
             <View className="gap-2 pt-2">
               {workspaces.length > 3 ? (
                 <TextField
@@ -149,7 +155,7 @@ export function MoreScreen() {
                   {t("shell.workspaceSwitcher.empty")}
                 </Text>
               ) : (
-                visibleWorkspaces.map((item) => {
+                Arr.map(visibleWorkspaces, (item) => {
                   const isCurrent = item.id === workspace.id;
                   return (
                     <ListRow
@@ -184,7 +190,7 @@ export function MoreScreen() {
 
       <Section title={local({ cs: "Agenda", en: "Workspace" })}>
         <Card className="gap-0 px-3 py-1">
-          {hiddenTabs.map((item) => (
+          {Arr.map(hiddenTabs, (item) => (
             <ListRow
               key={item.id}
               testID={`more-nav-${item.id}`}
@@ -203,7 +209,7 @@ export function MoreScreen() {
         }
       >
         <Card className="gap-0 px-3 py-1">
-          {SETTINGS_NAV_ITEMS.map((item) => (
+          {Arr.map(SETTINGS_NAV_ITEMS, (item) => (
             <ListRow
               key={item.section}
               testID={`more-settings-${item.section}`}
@@ -263,13 +269,11 @@ export function MoreScreen() {
           icon={LogOut}
           label={t("common.action.signOut")}
           busy={signingOut}
-          onPress={() => void handleSignOut()}
+          onPress={() => {
+            handleSignOut();
+          }}
         />
       </View>
     </Screen>
   );
 }
-
-// Keep unused icon imports referenced cleanly if needed later
-void ChevronDown;
-void ChevronUp;

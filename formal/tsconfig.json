@@ -1,5 +1,5 @@
 {
-  "extends": "../tsconfig.base.json",
+  "extends": "../tsconfig.effect.json",
   "compilerOptions": {
     "paths": {
       "@kvitbit/core": ["../packages/core/src/index.ts"],

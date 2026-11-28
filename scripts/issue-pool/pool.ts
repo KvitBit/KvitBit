@@ -1,23 +1,27 @@
 import { Database } from "bun:sqlite";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Order from "effect/Order";
+import * as Schema from "effect/Schema";
 
 export const feedbackLabel = "visual-feedback";
 export const claimedLabel = "visual-feedback:claimed";
 
-export interface Issue {
+interface Issue {
   number: number;
   claimed: boolean;
 }
 
 export interface IssueTracker {
-  list(): Promise<readonly Issue[]>;
-  isAvailable(number: number): Promise<boolean>;
-  ensureClaimLabel(): Promise<void>;
-  claim(number: number): Promise<void>;
+  readonly list: Effect.Effect<ReadonlyArray<Issue>, PoolError>;
+  isAvailable(number: number): Effect.Effect<boolean, PoolError>;
+  readonly ensureClaimLabel: Effect.Effect<void, PoolError>;
+  claim(number: number): Effect.Effect<void, PoolError>;
 }
 
 export interface WorkerRunner {
-  find(number: number): Promise<string | null>;
-  start(number: number): Promise<string>;
+  find(number: number): Effect.Effect<string | null, PoolError>;
+  start(number: number): Effect.Effect<string, PoolError>;
 }
 
 interface Assignment {
@@ -28,12 +32,10 @@ interface Assignment {
 
 export class IssuePool {
   private readonly db: Database;
+  private readonly repoId: number;
 
-  constructor(
-    path: string,
-    private readonly repoId: number,
-    readonly = false,
-  ) {
+  constructor(path: string, repoId: number, readonly = false) {
+    this.repoId = repoId;
     this.db = new Database(path, { readonly, create: !readonly, strict: true });
     this.db.exec("PRAGMA busy_timeout = 5000");
     if (!readonly) {
@@ -99,9 +101,11 @@ export class IssuePool {
       )
       .all(threadId);
     const [binding] = bindings;
-    if (!binding) return false;
+    if (!(binding !== undefined)) return false;
     if (bindings.length !== 1 || binding.repoId !== this.repoId || binding.issue !== issue) {
-      throw new PoolError(`T3 worker for issue ${issue} has a conflicting saved assignment`);
+      throw PoolError.make({
+        message: `T3 worker for issue ${issue} has a conflicting saved assignment`,
+      });
     }
     return true;
   }
@@ -118,7 +122,7 @@ export class IssuePool {
         `)
           .run(this.repoId, issue, threadId);
         if (this.assignment(issue)?.threadId !== threadId) {
-          throw new PoolError(`Issue ${issue} has a different saved T3 worker`);
+          throw PoolError.make({ message: `Issue ${issue} has a different saved T3 worker` });
         }
       })
       .immediate();
@@ -132,11 +136,14 @@ interface PassResult {
   failures: { issue: number; operation: "assignment"; reason: string }[];
 }
 
-function failureReason(error: unknown): string {
-  return error instanceof PoolError ? error.message : "Unexpected response or local state error";
+function failureReason(cause: unknown): string {
+  return Schema.is(PoolError)(cause) ? cause.message : "Unexpected response or local state error";
 }
 
-export class PoolError extends Error {}
+export class PoolError extends Schema.TaggedError<PoolError, { readonly brand: unique symbol }>()(
+  "PoolError",
+  { message: Schema.String },
+) {}
 
 interface PassOptions {
   apply: boolean;
@@ -144,89 +151,111 @@ interface PassOptions {
   pool: IssuePool;
   runner: WorkerRunner;
   tracker: IssueTracker;
-  fetchMain(): Promise<void>;
+  fetchMain(): Effect.Effect<void, PoolError>;
 }
 
-export async function runIssuePool({
+export const runIssuePool = Effect.fn("IssuePool.runPass")(function* ({
   apply,
   maxWorkers,
   pool,
   runner,
   tracker,
   fetchMain,
-}: PassOptions): Promise<PassResult> {
+}: PassOptions) {
   const result: PassResult = {
     plannedAssignments: [],
     started: [],
     adopted: [],
     failures: [],
   };
-  let fetched: Promise<void> | undefined;
+  const fetched = yield* Effect.cached(fetchMain());
   let attempts = 0;
-  const issues = new Map((await tracker.list()).map((issue) => [issue.number, issue]));
+  const listed = yield* tracker.list;
+  const issues = new Map(Arr.map(listed, (issue) => [issue.number, issue] as const));
   const numbers = new Set([
-    ...pool.pendingAssignments().map(({ number }) => number),
-    ...[...issues.keys()].sort((left, right) => left - right),
+    ...Arr.map(pool.pendingAssignments(), ({ number }) => number),
+    ...Arr.sort(issues.keys(), Order.Number),
   ]);
-  for (const number of numbers) {
-    try {
-      const issue = issues.get(number);
-      const assignment = pool.assignment(number);
-      if (assignment?.threadId) {
-        pool.hasWorkerBinding(number, assignment.threadId);
-        continue;
-      }
-      const threadId = await runner.find(number);
-      if (threadId) {
-        if (apply) {
-          pool.recordThread(number, threadId);
-          result.adopted.push(number);
-        }
-        continue;
-      }
-      if (assignment?.phase === "starting") {
-        // A failed acknowledgment can follow an accepted start. Only adopt an
-        // existing worker in this case, even if nobody can find it yet.
-        throw new PoolError("T3 has not confirmed the reserved worker");
-      }
-      if (!issue || issue.claimed) {
-        if (assignment) throw new PoolError("GitHub has not confirmed the reserved claim");
-        continue;
-      }
-      if (attempts >= maxWorkers) continue;
-      if (!(await tracker.isAvailable(number))) {
-        if (assignment) throw new PoolError("GitHub has not confirmed the reserved claim");
-        continue;
-      }
-
-      result.plannedAssignments.push(number);
-      if (!apply) {
-        attempts += 1;
-        continue;
-      }
-
-      fetched ??= fetchMain();
-      await fetched;
-      await tracker.ensureClaimLabel();
-      if (!(await tracker.isAvailable(number))) {
-        if (assignment) throw new PoolError("GitHub has not confirmed the reserved claim");
-        continue;
-      }
-      if (!assignment && !pool.reserveAssignment(number)) continue;
-      // Retrying an unconfirmed, still-unlabeled claim can add the same label
-      // again. Only the claimant that wins the next transition can start T3.
-      await tracker.claim(number);
-      if (!pool.reserveStart(number)) continue;
-      attempts += 1;
-      pool.recordThread(number, await runner.start(number));
-      result.started.push(number);
-    } catch (error) {
-      result.failures.push({
-        issue: number,
-        operation: "assignment",
-        reason: failureReason(error),
-      });
+  const processIssue = Effect.fn("IssuePool.processIssue")(function* (number: number) {
+    const issue = issues.get(number);
+    const assignment = pool.assignment(number);
+    if (
+      assignment?.threadId !== undefined &&
+      assignment?.threadId !== null &&
+      assignment?.threadId !== ""
+    ) {
+      pool.hasWorkerBinding(number, assignment.threadId);
+      return;
     }
+    const threadId = yield* runner.find(number);
+    if (threadId !== null && threadId !== "") {
+      if (apply) {
+        pool.recordThread(number, threadId);
+        result.adopted.push(number);
+      }
+      return;
+    }
+    if (assignment?.phase === "starting") {
+      // A failed acknowledgment can follow an accepted start. Only adopt an
+      // existing worker in this case, even if nobody can find it yet.
+      return yield* PoolError.make({ message: "T3 has not confirmed the reserved worker" });
+    }
+    if (!(issue !== undefined) || issue.claimed) {
+      if (assignment !== null)
+        return yield* PoolError.make({ message: "GitHub has not confirmed the reserved claim" });
+      return;
+    }
+    if (attempts >= maxWorkers) return;
+    if (!(yield* tracker.isAvailable(number))) {
+      if (assignment !== null)
+        return yield* PoolError.make({ message: "GitHub has not confirmed the reserved claim" });
+      return;
+    }
+
+    result.plannedAssignments.push(number);
+    if (!apply) {
+      attempts += 1;
+      return;
+    }
+
+    yield* fetched;
+    yield* tracker.ensureClaimLabel;
+    if (!(yield* tracker.isAvailable(number))) {
+      if (assignment !== null)
+        return yield* PoolError.make({ message: "GitHub has not confirmed the reserved claim" });
+      return;
+    }
+    if (!(assignment !== null || pool.reserveAssignment(number))) return;
+    // Retrying an unconfirmed, still-unlabeled claim can add the same label
+    // again. Only the claimant that wins the next transition can start T3.
+    yield* tracker.claim(number);
+    if (!pool.reserveStart(number)) return;
+    attempts += 1;
+    const started = yield* runner.start(number);
+    pool.recordThread(number, started);
+    result.started.push(number);
+  });
+  for (const number of numbers) {
+    yield* processIssue(number).pipe(
+      Effect.catch((error) =>
+        Effect.sync(() => {
+          result.failures.push({
+            issue: number,
+            operation: "assignment",
+            reason: failureReason(error),
+          });
+        }),
+      ),
+      Effect.catchDefect((defect) =>
+        Effect.sync(() => {
+          result.failures.push({
+            issue: number,
+            operation: "assignment",
+            reason: failureReason(defect),
+          });
+        }),
+      ),
+    );
   }
   return result;
-}
+});

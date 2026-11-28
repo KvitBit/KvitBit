@@ -2,12 +2,30 @@
  * WebAuthn Level 3 JSON normalization & base64url helpers shared by native and web passkey bridges.
  * Adapted from DeskoHub's passkey-credential.ts & native-passkey-error.ts.
  */
-import type { JsonObject } from "./passkey-bridge";
 
-const TRANSPORTS = new Set(["ble", "cable", "hybrid", "internal", "nfc", "smart-card", "usb"]);
+import * as EffectArray from "effect/Array";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+
+const Transport = Schema.Literals([
+  "ble",
+  "cable",
+  "hybrid",
+  "internal",
+  "nfc",
+  "smart-card",
+  "usb",
+]);
+const isTransport = Schema.is(Transport);
+const padding = /[=]+$/;
+export const JsonObject = Schema.Record(Schema.String, Schema.Unknown);
 
 export const toBase64Url = (value: string): string =>
-  value.replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  EffectString.replace(
+    padding,
+    "",
+  )(EffectString.replaceAll("/", "_")(EffectString.replaceAll("+", "-")(value)));
 
 const B64_ALPHA = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -24,22 +42,22 @@ export const bytesToBase64Url = (input: ArrayBuffer | Uint8Array): string => {
     out += i + 1 < bytes.length ? B64_ALPHA[(n >>> 6) & 63] : "";
     out += i + 2 < bytes.length ? B64_ALPHA[n & 63] : "";
   }
-  return out.replaceAll("+", "-").replaceAll("/", "_");
+  return EffectString.replaceAll("/", "_")(EffectString.replaceAll("+", "-")(out));
 };
 
-export const base64UrlToBytes = (value: string): Uint8Array => {
-  const std = value.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = std + "=".repeat((4 - (std.length % 4)) % 4);
+export const base64UrlToBytes = (value: string): Uint8Array<ArrayBuffer> => {
+  const std = EffectString.replaceAll("_", "/")(EffectString.replaceAll("-", "+")(value));
+  const padded = std + EffectString.repeat((4 - (std.length % 4)) % 4)("=");
   const out: number[] = [];
   for (let i = 0; i < padded.length; i += 4) {
     const c0 = padded[i] ?? "";
     const c1 = padded[i + 1] ?? "";
     const c2 = padded[i + 2] ?? "=";
     const c3 = padded[i + 3] ?? "=";
-    const a = B64_ALPHA.indexOf(c0);
-    const b = B64_ALPHA.indexOf(c1);
-    const c = c2 === "=" ? -1 : B64_ALPHA.indexOf(c2);
-    const d = c3 === "=" ? -1 : B64_ALPHA.indexOf(c3);
+    const a = Option.getOrElse(EffectString.indexOf(c0)(B64_ALPHA), () => -1);
+    const b = Option.getOrElse(EffectString.indexOf(c1)(B64_ALPHA), () => -1);
+    const c = c2 === "=" ? -1 : Option.getOrElse(EffectString.indexOf(c2)(B64_ALPHA), () => -1);
+    const d = c3 === "=" ? -1 : Option.getOrElse(EffectString.indexOf(c3)(B64_ALPHA), () => -1);
     if (a < 0 || b < 0) break;
     out.push((a << 2) | (b >>> 4));
     if (c >= 0) out.push(((b & 0x0f) << 4) | (c >>> 2));
@@ -48,84 +66,105 @@ export const base64UrlToBytes = (value: string): Uint8Array => {
   return new Uint8Array(out);
 };
 
-const isRecord = (u: unknown): u is Record<string, unknown> =>
-  typeof u === "object" && u !== null && !Array.isArray(u);
+const isNonEmptyText = Schema.is(Schema.NonEmptyString);
+const isAttachment = Schema.is(Schema.Literals(["platform", "cross-platform"]));
+const isFiniteNumber = Schema.is(Schema.Finite);
+const isJsonArray = Schema.is(Schema.Array(Schema.Unknown));
+const isJsonObject = Schema.is(JsonObject);
+export const NativeFields = Schema.Struct({
+  id: Schema.String,
+  rawId: Schema.optionalKey(Schema.Unknown),
+  authenticatorAttachment: Schema.optionalKey(Schema.Unknown),
+  clientExtensionResults: Schema.optionalKey(Schema.Unknown),
+  response: JsonObject,
+});
+const Registration = Schema.Struct({
+  clientDataJSON: Schema.String,
+  attestationObject: Schema.String,
+});
+const AuthenticationFields = Schema.Struct({
+  clientDataJSON: Schema.String,
+  authenticatorData: Schema.String,
+  signature: Schema.String,
+});
+const isRegistration = Schema.is(Registration);
+const isAuthentication = Schema.is(AuthenticationFields);
 
-const optionalBytes = (value: unknown): string | undefined =>
-  typeof value === "string" && value.length > 0 ? toBase64Url(value) : undefined;
-
-const filterTransports = (value: unknown): string[] | undefined =>
-  Array.isArray(value)
-    ? value.filter((t): t is string => typeof t === "string" && TRANSPORTS.has(t))
-    : undefined;
-
-const toAttachment = (value: unknown): "platform" | "cross-platform" | undefined =>
-  value === "platform" || value === "cross-platform" ? value : undefined;
-
-/** Normalizes a native `react-native-passkeys` registration result into WebAuthn Level 3 JSON. */
-export const normalizeRegistrationResponse = (raw: unknown): JsonObject | null => {
-  if (!isRecord(raw) || typeof raw.id !== "string" || !isRecord(raw.response)) return null;
-  const resp = raw.response;
-  if (typeof resp.clientDataJSON !== "string" || typeof resp.attestationObject !== "string") {
-    return null;
-  }
-  const attachment = toAttachment(raw.authenticatorAttachment);
-  const authenticatorData = optionalBytes(resp.authenticatorData);
-  const transports = filterTransports(resp.transports);
-  const publicKeyAlgorithm =
-    typeof resp.publicKeyAlgorithm === "number" && Number.isFinite(resp.publicKeyAlgorithm)
-      ? resp.publicKeyAlgorithm
-      : undefined;
-  const publicKey = optionalBytes(resp.publicKey);
-  return {
-    id: toBase64Url(raw.id),
-    rawId: toBase64Url(typeof raw.rawId === "string" ? raw.rawId : raw.id),
+const normalize = (
+  fields: typeof NativeFields.Type,
+  response: typeof JsonObject.Type,
+): typeof JsonObject.Type => {
+  const output = {
+    id: toBase64Url(fields.id),
+    rawId: toBase64Url(isText(fields.rawId) ? fields.rawId : fields.id),
     type: "public-key",
-    ...(attachment !== undefined ? { authenticatorAttachment: attachment } : {}),
-    clientExtensionResults: isRecord(raw.clientExtensionResults) ? raw.clientExtensionResults : {},
-    response: {
-      clientDataJSON: toBase64Url(resp.clientDataJSON),
-      attestationObject: toBase64Url(resp.attestationObject),
-      ...(authenticatorData !== undefined ? { authenticatorData } : {}),
-      ...(transports !== undefined ? { transports } : {}),
-      ...(publicKeyAlgorithm !== undefined ? { publicKeyAlgorithm } : {}),
-      ...(publicKey !== undefined ? { publicKey } : {}),
-    },
+    clientExtensionResults: isJsonObject(fields.clientExtensionResults)
+      ? fields.clientExtensionResults
+      : {},
+    response,
   };
+  if (isAttachment(fields.authenticatorAttachment)) {
+    return { ...output, authenticatorAttachment: fields.authenticatorAttachment };
+  }
+  return output;
 };
 
-/** Normalizes a native `react-native-passkeys` authentication result into WebAuthn Level 3 JSON. */
-export const normalizeAuthenticationResponse = (raw: unknown): JsonObject | null => {
-  if (!isRecord(raw) || typeof raw.id !== "string" || !isRecord(raw.response)) return null;
-  const resp = raw.response;
-  if (
-    typeof resp.clientDataJSON !== "string" ||
-    typeof resp.authenticatorData !== "string" ||
-    typeof resp.signature !== "string"
-  ) {
-    return null;
-  }
-  const attachment = toAttachment(raw.authenticatorAttachment);
-  const userHandle = optionalBytes(resp.userHandle);
-  return {
-    id: toBase64Url(raw.id),
-    rawId: toBase64Url(typeof raw.rawId === "string" ? raw.rawId : raw.id),
-    type: "public-key",
-    ...(attachment !== undefined ? { authenticatorAttachment: attachment } : {}),
-    clientExtensionResults: isRecord(raw.clientExtensionResults) ? raw.clientExtensionResults : {},
-    response: {
-      clientDataJSON: toBase64Url(resp.clientDataJSON),
-      authenticatorData: toBase64Url(resp.authenticatorData),
-      signature: toBase64Url(resp.signature),
-      ...(userHandle !== undefined ? { userHandle } : {}),
-    },
+/** Normalizes a native registration result into WebAuthn Level 3 JSON. */
+export const normalizeRegistrationResponse = (
+  fields: typeof NativeFields.Type,
+): typeof JsonObject.Type | null => {
+  const { response } = fields;
+  if (!isRegistration(response)) return null;
+  const output = {
+    clientDataJSON: toBase64Url(response.clientDataJSON),
+    attestationObject: toBase64Url(response.attestationObject),
   };
+  if (isNonEmptyText(response["authenticatorData"]))
+    Object.assign(output, {
+      authenticatorData: toBase64Url(response["authenticatorData"]),
+    });
+  if (isJsonArray(response["transports"]))
+    Object.assign(output, {
+      transports: EffectArray.filter(response["transports"], isTransport),
+    });
+  if (isFiniteNumber(response["publicKeyAlgorithm"]))
+    Object.assign(output, { publicKeyAlgorithm: response["publicKeyAlgorithm"] });
+  if (isNonEmptyText(response["publicKey"]))
+    Object.assign(output, { publicKey: toBase64Url(response["publicKey"]) });
+  return normalize(fields, output);
 };
+
+/** Normalizes a native authentication result into WebAuthn Level 3 JSON. */
+export const normalizeAuthenticationResponse = (
+  fields: typeof NativeFields.Type,
+): typeof JsonObject.Type | null => {
+  const { response } = fields;
+  if (!isAuthentication(response)) return null;
+  const output = {
+    clientDataJSON: toBase64Url(response.clientDataJSON),
+    authenticatorData: toBase64Url(response.authenticatorData),
+    signature: toBase64Url(response.signature),
+  };
+  return normalize(
+    fields,
+    isNonEmptyText(response["userHandle"])
+      ? { ...output, userHandle: toBase64Url(response["userHandle"]) }
+      : output,
+  );
+};
+
+const ErrorFields = Schema.Struct({
+  code: Schema.optionalKey(Schema.Unknown),
+  name: Schema.optionalKey(Schema.Unknown),
+  message: Schema.optionalKey(Schema.Unknown),
+});
+const isErrorFields = Schema.is(ErrorFields);
+const isText = Schema.is(Schema.String);
 
 const textOf = (cause: unknown, key: "code" | "message" | "name"): string => {
-  if (typeof cause !== "object" || cause === null || !(key in cause)) return "";
-  const val = (cause as Record<string, unknown>)[key];
-  return typeof val === "string" ? val : "";
+  if (!isErrorFields(cause)) return "";
+  const value = cause[key];
+  return isText(value) ? value : "";
 };
 
 const CANCELLED_CODES = new Set(["ERR_USER_CANCELLED"]);
@@ -137,7 +176,10 @@ export const classifyNativePasskeyError = (
 ): { readonly kind: "cancelled" } | { readonly kind: "failed"; readonly message: string } => {
   const code = textOf(cause, "code");
   const message = textOf(cause, "message");
-  if (CANCELLED_CODES.has(code) || CANCELLED_SUBSTRINGS.some((s) => message.includes(s))) {
+  if (
+    CANCELLED_CODES.has(code) ||
+    EffectArray.some(CANCELLED_SUBSTRINGS, (s) => EffectString.includes(s)(message))
+  ) {
     return { kind: "cancelled" };
   }
   return { kind: "failed", message: message || code || "passkey ceremony failed" };

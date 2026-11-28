@@ -18,29 +18,40 @@
  * by probing `reservations.tryReserve` for a probe draft in a transaction that always rolls
  * back.
  */
+
 import { describe, expect, test } from "bun:test";
-import { NumberingModule } from "@kvitbit/core";
-import { CoreStore } from "@kvitbit/core/ports";
-import { DocumentFixtures, DocumentsTestLayer, InMemoryPortsLive } from "@kvitbit/core/testing";
-import type {
-  Caller,
+import { deepStrictEqual, notDeepStrictEqual } from "node:assert/strict";
+import { inspect } from "node:util";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as EffectRecord from "effect/Record";
+import * as EffectString from "effect/String";
+import { NumberingModule } from "../../packages/core/src/index";
+import { CoreStore } from "../../packages/core/src/ports";
+import {
+  DocumentFixtures,
+  DocumentsTestLayer,
+  InMemoryPortsLive,
+} from "../../packages/core/src/testing/index";
+import type { Caller, DocumentId, DocumentInput } from "../../packages/domain/src/contract";
+import {
+  BankAccountId,
   ContactId,
   CurrencyCode,
-  DocumentId,
-  DocumentInput,
+  Documents,
   IsoDate,
   UserId,
   WorkspaceId,
-} from "@kvitbit/domain/contract";
-import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
-import { BigDecimal, Effect, Layer } from "effect";
+} from "../../packages/domain/src/contract";
 
-const WS = "01900000-0000-7000-8000-00000000a001" as WorkspaceId;
-const BUYER = "01900000-0000-7000-8000-0000c0000001" as ContactId;
-const CZK = "CZK" as CurrencyCode;
+const WS = WorkspaceId.make("01900000-0000-7000-8000-00000000a001");
+const BUYER = ContactId.make("01900000-0000-7000-8000-0000c0000001");
+const CZK = CurrencyCode.make("CZK");
 const OWNER: Caller = {
   _tag: "Member",
-  userId: "01900000-0000-7000-8000-00000000c001" as UserId,
+  userId: UserId.make("01900000-0000-7000-8000-00000000c001"),
   workspaceId: WS,
   role: "owner",
   scopes: "all",
@@ -52,9 +63,9 @@ const OWNER: Caller = {
 /** Model periods p1, p2: the default invoice series YYYY-NNNN keeps one counter per year. */
 const PERIODS = ["2026", "2027"] as const;
 type Period = (typeof PERIODS)[number];
-const dayIn = (p: Period) => `${p}-06-01` as IsoDate;
-const fmt = (p: Period, seq: number) => `${p}-${String(seq).padStart(4, "0")}`;
-const seqOf = (n: string) => Number(n.slice(5));
+const dayIn = (p: Period) => IsoDate.make(`${p}-06-01`);
+const fmt = (p: Period, seq: number) => `${p}-${EffectString.padStart(4, "0")(String(seq))}`;
+const seqOf = (n: string) => Number(EffectString.slice(5)(n));
 
 type FixturesShape = DocumentFixtures["Service"];
 const issuer: Parameters<FixturesShape["putIssuer"]>[0] = {
@@ -72,7 +83,7 @@ const issuer: Parameters<FixturesShape["putIssuer"]>[0] = {
   regime: "vat_payer",
   bankAccounts: [
     {
-      id: "01900000-0000-7000-8000-0000ba000001" as never,
+      id: BankAccountId.make("01900000-0000-7000-8000-0000ba000001"),
       name: null,
       currency: CZK,
       accountNumber: "123456789/0100",
@@ -154,7 +165,7 @@ interface ModelState {
 const expectedRevision = (m: ModelState, step: Step) => {
   const history = m.rev.get(step.doc) ?? [];
   const current = history.at(-1) ?? 1;
-  return step.op === "override" && step.stale ? (history.at(-2) ?? current) : current;
+  return step.op === "override" && step.stale === true ? (history.at(-2) ?? current) : current;
 };
 const bump = (m: ModelState, doc: string) => {
   const history = m.rev.get(doc) ?? [];
@@ -168,7 +179,7 @@ const modelStep = (m: ModelState, step: Step): Outcome => {
     while (m.resv.has(fmt(step.period, seq))) seq++; // ITry: skip a committed reservation
     const n = fmt(step.period, seq);
     if ([...m.docNum.values()].includes(n)) return { kind: "conflict" }; // IWrite index
-    if (step.crash) return { kind: "aborted" };
+    if (step.crash === true) return { kind: "aborted" };
     m.resv.add(n);
     m.counter[step.period] = seq + 1;
     m.docNum.set(step.doc, n);
@@ -184,17 +195,19 @@ const modelStep = (m: ModelState, step: Step): Outcome => {
   if (current === null) return { kind: "illegal" }; // OLock: a draft
   // editIssued: the same number reserves nothing, but the edit still commits (revision + 1).
   if (current === step.number) {
-    if (step.crash) return { kind: "aborted" };
+    if (step.crash === true) return { kind: "aborted" };
     bump(m, step.doc);
     return { kind: "unchanged" };
   }
   if (m.resv.has(step.number)) return { kind: "conflict" }; // OReserve: taken
-  if (step.crash) return { kind: "aborted" };
+  if (step.crash === true) return { kind: "aborted" };
   m.resv.add(step.number);
   m.docNum.set(step.doc, step.number);
   bump(m, step.doc);
   return { kind: "committed", number: step.number };
 };
+
+const traceDescription = (trace: Step | ReadonlyArray<Step>) => inspect(trace, { compact: true });
 
 const World = DocumentsTestLayer.pipe(Layer.provideMerge(InMemoryPortsLive()));
 
@@ -210,7 +223,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
     yield* numbering.ensureDefaults(WS, ["invoice"]);
     const series = yield* numbering.resolve(WS, "invoice");
     // A draft row for the reservation probe (number_reservations_document_fk); never numbered.
-    const probe = (yield* documents.createDraft(input("2026"))).id;
+    const probe = (yield* documents.createDraft(OWNER, input("2026"))).id;
 
     const model: ModelState = {
       counter: { "2026": 1, "2027": 1 },
@@ -222,22 +235,22 @@ const replay = (steps: ReadonlyArray<Step>) =>
     const ids = new Map<string, DocumentId>();
     for (const s of steps) {
       if (s.op === "issue" && s.from === "draft" && !ids.has(s.doc)) {
-        ids.set(s.doc, (yield* documents.createDraft(input(s.period))).id);
+        ids.set(s.doc, (yield* documents.createDraft(OWNER, input(s.period))).id);
         model.docNum.set(s.doc, null);
         model.rev.set(s.doc, [1]);
       }
     }
 
     const counters = Effect.gen(function* () {
-      const out = {} as Record<Period, number>;
-      for (const p of PERIODS) out[p] = (yield* numbering.view(series, dayIn(p))).nextCounter;
-      return out;
+      const first = yield* numbering.view(series, dayIn("2026"));
+      const second = yield* numbering.view(series, dayIn("2027"));
+      return { "2026": first.nextCounter, "2027": second.nextCounter };
     });
     /** Stored number and revision of every trace document, read back after commit. */
     const stored = Effect.gen(function* () {
       const out = new Map<string, { number: string | null; revision: number }>();
       for (const [doc, id] of ids) {
-        const view = yield* documents.get(id);
+        const view = yield* documents.get(OWNER, id);
         out.set(doc, { number: view.number, revision: view.revision });
       }
       return out;
@@ -264,117 +277,146 @@ const replay = (steps: ReadonlyArray<Step>) =>
       const body =
         step.op === "issue"
           ? documents.issue(
+              OWNER,
               step.from === "draft" && id !== undefined
                 ? { draft: id, expectedRevision: expected }
                 : { input: input(step.period) },
             )
           : Effect.suspend(() => {
               if (id === undefined) return Effect.die(`no document ${step.doc}`);
-              return documents.edit(id, { number: step.number }, expected);
+              return documents.edit(OWNER, id, { number: step.number }, expected);
             });
       const crash = Effect.fail({ _tag: "Crash" as const });
-      return store.transaction(step.crash ? Effect.tap(body, () => crash) : body).pipe(
+      return store.transaction(step.crash === true ? Effect.tap(body, () => crash) : body).pipe(
         Effect.map((view): Outcome => {
           if (!ids.has(step.doc)) ids.set(step.doc, view.id);
           if (step.op === "override" && unchangedBefore) return { kind: "unchanged" };
           return { kind: "committed", number: view.number ?? "" };
         }),
-        Effect.catchTag("Crash", () => Effect.succeed<Outcome>({ kind: "aborted" })),
-        Effect.catchTag("Conflict", (e) =>
-          e.reason === "duplicate"
-            ? Effect.succeed<Outcome>({ kind: "conflict" })
-            : e.reason === "revision_changed"
-              ? Effect.succeed<Outcome>({ kind: "revision_changed" })
-              : e.reason === "illegal_transition"
-                ? Effect.succeed<Outcome>({ kind: "illegal" })
-                : Effect.fail(e),
-        ),
+        Effect.catchTags({
+          Crash: () => Effect.succeed<Outcome>({ kind: "aborted" }),
+          Conflict: (e) =>
+            e.reason === "duplicate"
+              ? Effect.succeed<Outcome>({ kind: "conflict" })
+              : e.reason === "revision_changed"
+                ? Effect.succeed<Outcome>({ kind: "revision_changed" })
+                : e.reason === "illegal_transition"
+                  ? Effect.succeed<Outcome>({ kind: "illegal" })
+                  : Effect.fail(e),
+        }),
       );
     };
 
     const held = new Map<string, Set<string>>();
-    const allocated = new Map<Period, Set<number>>(PERIODS.map((p) => [p, new Set<number>()]));
+    const allocated = new Map<Period, Set<number>>(
+      EffectArray.map(PERIODS, (p) => [p, new Set<number>()]),
+    );
     const record = (rows: Map<string, { number: string | null; revision: number }>) => {
       for (const [doc, row] of rows) {
         if (row.number !== null)
           held.set(row.number, new Set([...(held.get(row.number) ?? []), doc]));
       }
     };
-    record(yield* stored);
+    const initial = yield* stored;
+    record(initial);
 
     for (const [i, step] of steps.entries()) {
-      const at = `step ${i} ${JSON.stringify(step)}`;
+      const at = `step ${i} ${traceDescription(step)}`;
       const before = yield* counters;
       const sent = expectedRevision(model, step);
       const expected = modelStep(model, step);
       const previous = step.op === "override" ? (yield* stored).get(step.doc)?.number : undefined;
       const actual = yield* run(step, step.op === "override" && previous === step.number, sent);
-      expect({ at, outcome: actual }).toEqual({ at, outcome: expected });
+      deepStrictEqual({ at, outcome: actual }, { at, outcome: expected });
       const rows = yield* stored;
       record(rows);
       if (step.op === "issue" && actual.kind === "committed") {
         allocated.get(step.period)?.add(seqOf(actual.number));
       }
       // Stored revisions follow the model's docRev (an accepted edit bumps it once).
-      const storedRevisions = Object.fromEntries([...rows].map(([d, r]) => [d, r.revision]));
-      expect({ at, revisions: storedRevisions }).toEqual({
-        at,
-        revisions: Object.fromEntries(
-          [...model.rev].filter(([d]) => ids.has(d)).map(([d, h]) => [d, h.at(-1) ?? 0]),
-        ),
-      });
+      const storedRevisions = EffectRecord.fromEntries(
+        EffectArray.map([...rows], ([d, r]) => [d, r.revision]),
+      );
+      deepStrictEqual(
+        { at, revisions: storedRevisions },
+        {
+          at,
+          revisions: EffectRecord.fromEntries(
+            EffectArray.map(
+              EffectArray.filter([...model.rev], ([d]) => ids.has(d)),
+              ([d, h]) => [d, h.at(-1) ?? 0],
+            ),
+          ),
+        },
+      );
       // The stored rows, not the service's return values, carry the numbers.
-      const storedNumbers = Object.fromEntries([...rows].map(([d, r]) => [d, r.number]));
-      expect({ at, stored: storedNumbers }).toEqual({
-        at,
-        stored: Object.fromEntries([...model.docNum].filter(([d]) => ids.has(d))),
-      });
+      const storedNumbers = EffectRecord.fromEntries(
+        EffectArray.map([...rows], ([d, r]) => [d, r.number]),
+      );
+      deepStrictEqual(
+        { at, stored: storedNumbers },
+        {
+          at,
+          stored: EffectRecord.fromEntries(
+            EffectArray.filter([...model.docNum], ([d]) => ids.has(d)),
+          ),
+        },
+      );
       const after = yield* counters;
-      expect({ at, counters: after }).toEqual({ at, counters: model.counter });
+      deepStrictEqual({ at, counters: after }, { at, counters: model.counter });
 
       // IssueNeverHitsIndex
       if (step.op === "issue")
-        expect({ at, outcome: actual.kind }).not.toEqual({ at, outcome: "conflict" });
+        notDeepStrictEqual({ at, outcome: actual.kind }, { at, outcome: "conflict" });
       // NoDuplicateNumber
-      const numbers = [...rows.values()].flatMap((r) => (r.number === null ? [] : [r.number]));
-      expect({ at, duplicates: numbers.length - new Set(numbers).size }).toEqual({
-        at,
-        duplicates: 0,
-      });
+      const numbers = EffectArray.flatMap([...rows.values()], (r) =>
+        r.number === null ? [] : [r.number],
+      );
+      deepStrictEqual(
+        { at, duplicates: numbers.length - new Set(numbers).size },
+        {
+          at,
+          duplicates: 0,
+        },
+      );
       for (const [n, docs] of held) {
         // NoReuse
-        expect({ at, n, holders: docs.size }).toEqual({ at, n, holders: 1 });
+        deepStrictEqual({ at, n, holders: docs.size }, { at, n, holders: 1 });
         // ReservedForever
-        expect({ at, n, reserved: yield* reserved(n) }).toEqual({ at, n, reserved: true });
+        deepStrictEqual({ at, n, reserved: yield* reserved(n) }, { at, n, reserved: true });
       }
       for (const p of PERIODS) {
         // Gapless
         for (let s = 1; s < after[p]; s++) {
           const n = fmt(p, s);
-          expect({ at, n, reserved: yield* reserved(n) }).toEqual({ at, n, reserved: true });
+          deepStrictEqual({ at, n, reserved: yield* reserved(n) }, { at, n, reserved: true });
         }
         // NoOrphanReservation: every reserved number some document carried
         for (let s = 1; s <= 6; s++) {
           const n = fmt(p, s);
           if (yield* reserved(n))
-            expect({ at, n, held: held.has(n) }).toEqual({ at, n, held: true });
+            deepStrictEqual({ at, n, held: held.has(n) }, { at, n, held: true });
         }
         // CounterTracksIssue
-        expect({ at, p, counter: after[p] }).toEqual({
-          at,
-          p,
-          counter: 1 + Math.max(0, ...(allocated.get(p) ?? [])),
-        });
+        deepStrictEqual(
+          { at, p, counter: after[p] },
+          {
+            at,
+            p,
+            counter: 1 + Math.max(0, ...(allocated.get(p) ?? [])),
+          },
+        );
       }
       // OverrideKeepsCounter
-      if (step.op === "override") expect({ at, counters: after }).toEqual({ at, counters: before });
+      if (step.op === "override")
+        deepStrictEqual({ at, counters: after }, { at, counters: before });
     }
     const final = yield* stored;
     return {
-      numbers: Object.fromEntries([...final].map(([d, r]) => [d, r.number])),
+      numbers: EffectRecord.fromEntries(EffectArray.map([...final], ([d, r]) => [d, r.number])),
       counters: yield* counters,
     };
-  }).pipe(Effect.provideService(CurrentCaller, OWNER), Effect.provide(World));
+  }).pipe(Effect.provide(World));
 
 const runReplay = (steps: ReadonlyArray<Step>) => Effect.runPromise(replay(steps));
 
@@ -403,7 +445,7 @@ describe("Numbering.tla traces on Documents.issue / Documents.edit (serial proje
     expect(r.counters["2026"]).toBe(4);
   });
 
-  test("H1, allocation commits first: the override is Conflict{duplicate}", async () => {
+  test("H1, allocation commits first: the override fails with a duplicate conflict", async () => {
     // Model: i1 reserves <<p1,2>>; o1 waits in OReserve; i1 commits; OReserve -> conflict.
     const r = await runReplay([
       D0,
@@ -493,40 +535,56 @@ describe("Numbering.tla traces on Documents.issue / Documents.edit (serial proje
 });
 
 /** mulberry32: a small seeded generator, so a failing trace reruns from its seed. */
-const rng = (seed: number) => () => {
-  seed = (seed + 0x6d2b79f5) | 0;
-  let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-  t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+const rng = (seed: number) => {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 };
 
 // Sampled traces mix issues from drafts and from input and several overrides (beyond the TLC
 // bounds): they check the code against the model's serial transitions, not a TLC bound.
 describe("sampled serial traces (property test, not exhaustive)", () => {
   test("100 seeded traces of 6 steps agree with the model and keep its invariants", async () => {
-    for (let seed = 1; seed <= 100; seed++) {
-      const next = rng(seed);
-      const pick = <T>(xs: ReadonlyArray<T>): T => xs[Math.floor(next() * xs.length)] as T;
-      const steps: Step[] = [D0];
-      const known = ["d0"];
-      for (let k = 0; k < 6; k++) {
-        const crash = next() < 0.25 ? ({ crash: true } as const) : {};
-        if (next() < 0.5) {
-          const doc = `t${k}`;
-          const from = next() < 0.5 ? "draft" : "input";
-          steps.push({ op: "issue", doc, from, period: pick(PERIODS), ...crash });
-          if (from === "draft" || !("crash" in crash)) known.push(doc);
-        } else {
-          const number = fmt(pick(PERIODS), 1 + Math.floor(next() * 4));
-          const stale = next() < 0.2 ? ({ stale: true } as const) : {};
-          steps.push({ op: "override", doc: pick(known), number, ...crash, ...stale });
-        }
-      }
-      try {
-        await runReplay(steps);
-      } catch (e) {
-        throw new Error(`seed ${seed}: ${JSON.stringify(steps)}\n${String(e)}`);
-      }
-    }
+    const seeds = EffectArray.range(1, 100);
+    const results = await Effect.runPromise(
+      Effect.forEach(
+        seeds,
+        (seed) =>
+          Effect.gen(function* () {
+            const next = rng(seed);
+            const pick = <T>(xs: ReadonlyArray<T>): T => {
+              const item = xs[Math.floor(next() * xs.length)];
+              if (item === undefined) throw new Error("cannot sample an empty array");
+              return item;
+            };
+            const steps: Step[] = [D0];
+            const known = ["d0"];
+            for (let k = 0; k < 6; k++) {
+              const crash = next() < 0.25 ? ({ crash: true } as const) : {};
+              if (next() < 0.5) {
+                const doc = `t${k}`;
+                const from = next() < 0.5 ? "draft" : "input";
+                steps.push({ op: "issue", doc, from, period: pick(PERIODS), ...crash });
+                if (from === "draft" || !("crash" in crash)) known.push(doc);
+              } else {
+                const number = fmt(pick(PERIODS), 1 + Math.floor(next() * 4));
+                const stale = next() < 0.2 ? ({ stale: true } as const) : {};
+                steps.push({ op: "override", doc: pick(known), number, ...crash, ...stale });
+              }
+            }
+            return yield* replay(steps).pipe(
+              Effect.catchCause((cause) =>
+                Effect.die(new Error(`seed ${seed}: ${traceDescription(steps)}`, { cause })),
+              ),
+            );
+          }),
+        { concurrency: 1 },
+      ),
+    );
+    expect(results).toHaveLength(seeds.length);
   }, 60_000);
 });

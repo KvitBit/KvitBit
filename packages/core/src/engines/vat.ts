@@ -25,14 +25,24 @@
  * vat 0. Negative lines (discounts, credit notes) follow the same rules; because rounding is
  * symmetric, `calculate` of negated lines equals `negate` of the breakdown.
  */
-import type { CurrencyCode, IsoDate, VatTreatment } from "@kvitbit/domain/contract";
-import { MoneyMath, type VatBreakdown, type VatBucket } from "@kvitbit/domain/contract";
-import { BigDecimal } from "effect";
+
+import type { VatTreatment } from "@kvitbit/domain/contract";
+import {
+  CurrencyCode,
+  IsoDate,
+  MoneyMath,
+  type VatBreakdown,
+  type VatBucket,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
 import { divideRound, HUNDRED, roundAt, sumAll, ZERO } from "./decimal";
 import type { FxRate } from "./fx";
 import { toCzk } from "./fx";
 
-export type { VatBreakdown, VatBucket };
+export type { VatBreakdown, VatBucket } from "@kvitbit/domain/contract";
 
 export interface VatInputLine {
   readonly quantity: BigDecimal.BigDecimal;
@@ -57,7 +67,7 @@ export interface VatInput {
 }
 
 /** Decimals of every rounded VatMath amount (rules 3-6: round2). */
-export const VAT_SCALE = 2;
+const VAT_SCALE = 2;
 
 /** Bucket order: the `VatTreatment` literal order. */
 export const TREATMENTS: ReadonlyArray<VatTreatment> = [
@@ -73,24 +83,28 @@ export const VAT_RATE_TABLE: ReadonlyArray<{
   readonly from: IsoDate;
   readonly standard: number;
   readonly reduced: number;
-}> = [{ from: "2024-01-01" as IsoDate, standard: 21, reduced: 12 }];
+}> = [{ from: IsoDate.make("2024-01-01"), standard: 21, reduced: 12 }];
 
 /** Rate in force on the tax point; a tax point before the table is a defect (throws). */
-export const rateFor = (treatment: VatTreatment, taxPoint: IsoDate): BigDecimal.BigDecimal => {
+const rateFor: {
+  (taxPoint: IsoDate): (treatment: VatTreatment) => BigDecimal.BigDecimal;
+  (treatment: VatTreatment, taxPoint: IsoDate): BigDecimal.BigDecimal;
+} = Fn.dual(2, (treatment: VatTreatment, taxPoint: IsoDate): BigDecimal.BigDecimal => {
   let entry: (typeof VAT_RATE_TABLE)[number] | undefined;
   for (const e of VAT_RATE_TABLE) if (e.from <= taxPoint) entry = e;
-  if (entry === undefined) {
-    throw new Error(`VatMath: no VAT rate table entry for tax point ${taxPoint}`);
-  }
+  const rates = Option.getOrThrowWith(
+    Option.fromNullishOr(entry),
+    () => new Error(`VatMath: no VAT rate table entry for tax point ${taxPoint}`),
+  );
   switch (treatment) {
     case "standard":
-      return BigDecimal.fromBigInt(BigInt(entry.standard));
+      return BigDecimal.fromBigInt(BigInt(rates.standard));
     case "reduced":
-      return BigDecimal.fromBigInt(BigInt(entry.reduced));
+      return BigDecimal.fromBigInt(BigInt(rates.reduced));
     default:
       return ZERO;
   }
-};
+});
 
 /** VAT included in a gross amount at `ratePercent`, rounded (rule 4). */
 const vatOfGross = (gross: BigDecimal.BigDecimal, rate: BigDecimal.BigDecimal, scale: number) =>
@@ -111,8 +125,8 @@ const assemble = (
   paymentRounding: VatInput["paymentRounding"],
   foreign: boolean,
 ): VatBreakdown => {
-  const net = sumAll(buckets.map((b) => b.base));
-  const vat = sumAll(buckets.map((b) => b.vat));
+  const net = sumAll(EffectArray.map(buckets, (b) => b.base));
+  const vat = sumAll(EffectArray.map(buckets, (b) => b.vat));
   const total = BigDecimal.sum(net, vat);
   const toPay = paymentRounding === "whole_unit" ? roundAt(total, 0) : total;
   const money = (amount: BigDecimal.BigDecimal) =>
@@ -124,13 +138,15 @@ const assemble = (
     roundingAdjustment: money(BigDecimal.subtract(toPay, total)),
     gross: money(toPay),
     vatCzk: foreign
-      ? MoneyMath.make(sumAll(buckets.map((b) => b.vatCzk ?? ZERO)), "CZK" as CurrencyCode)
+      ? MoneyMath.make(
+          sumAll(EffectArray.map(buckets, (b) => b.vatCzk ?? ZERO)),
+          CurrencyCode.make("CZK"),
+        )
       : null,
   };
 };
 
-export const calculate = (input: VatInput): VatBreakdown => {
-  const scale = VAT_SCALE;
+const calculate = (input: VatInput): VatBreakdown => {
   const foreign = input.currency !== "CZK" && input.fx !== null;
   const groups = new Map<VatTreatment, BigDecimal.BigDecimal>();
   for (const line of input.lines) {
@@ -147,12 +163,12 @@ export const calculate = (input: VatInput): VatBreakdown => {
     let vat: BigDecimal.BigDecimal;
     let gross: BigDecimal.BigDecimal;
     if (input.pricesIncludeVat) {
-      gross = roundAt(sum, scale);
-      vat = vatOfGross(gross, ratePercent, scale);
+      gross = roundAt(sum, VAT_SCALE);
+      vat = vatOfGross(gross, ratePercent, VAT_SCALE);
       base = BigDecimal.normalize(BigDecimal.subtract(gross, vat));
     } else {
-      base = roundAt(sum, scale);
-      vat = divideRound(BigDecimal.multiply(base, ratePercent), HUNDRED, scale);
+      base = roundAt(sum, VAT_SCALE);
+      vat = divideRound(BigDecimal.multiply(base, ratePercent), HUNDRED, VAT_SCALE);
       gross = BigDecimal.normalize(BigDecimal.sum(base, vat));
     }
     buckets.push({
@@ -167,14 +183,14 @@ export const calculate = (input: VatInput): VatBreakdown => {
   return assemble(buckets, input.currency, input.paymentRounding, foreign);
 };
 
-const neg = (v: BigDecimal.BigDecimal) => BigDecimal.normalize(BigDecimal.negate(v));
+const neg = (v: BigDecimal.BigDecimal) => v.pipe(BigDecimal.negate, BigDecimal.normalize);
 
 /**
  * Credit-note helper: every amount of the breakdown negated (buckets, totals, rounding
  * adjustment, CZK VAT). `negate(calculate(x))` equals `calculate` of x with negated quantities.
  */
-export const negate = (breakdown: VatBreakdown): VatBreakdown => ({
-  buckets: breakdown.buckets.map((b) => ({
+const negate = (breakdown: VatBreakdown): VatBreakdown => ({
+  buckets: EffectArray.map(breakdown.buckets, (b) => ({
     ...b,
     base: neg(b.base),
     vat: neg(b.vat),
@@ -205,7 +221,7 @@ export const negate = (breakdown: VatBreakdown): VatBreakdown => ({
  * Proforma's rates). `fx` is the rate for that tax point; null leaves CZK VAT unknown.
  * A Proforma whose buckets sum to zero gross cannot be split (defect).
  */
-export const splitAdvance = (
+const splitAdvance = (
   proforma: VatBreakdown,
   paid: BigDecimal.BigDecimal,
   options: { readonly fx?: VatInput["fx"]; readonly taxPoint?: IsoDate } = {},
@@ -215,13 +231,14 @@ export const splitAdvance = (
   // currency's minor unit and VAT_SCALE (a JPY proforma's gross can be 1.21).
   const paidScale = Math.max(0, BigDecimal.normalize(paid).scale);
   const shareScale = Math.max(MoneyMath.minorUnitScale(currency), VAT_SCALE, paidScale);
-  const total = sumAll(proforma.buckets.map((b) => b.gross));
-  if (BigDecimal.isZero(total)) {
-    throw new Error("VatMath.splitAdvance: the proforma has no gross amount to split");
-  }
+  const gross = sumAll(EffectArray.map(proforma.buckets, (b) => b.gross));
+  const total = Option.getOrThrowWith(
+    Option.liftPredicate((value: BigDecimal.BigDecimal) => !BigDecimal.isZero(value))(gross),
+    () => new Error("VatMath.splitAdvance: the proforma has no gross amount to split"),
+  );
   const units = BigDecimal.scale(roundAt(paid, shareScale), shareScale).value;
   // Exact share in minor units = units x gross / total, as floor + fractional remainder.
-  const raw = proforma.buckets.map((b) => {
+  const raw = EffectArray.map(proforma.buckets, (b) => {
     const exact = BigDecimal.divideUnsafe(
       BigDecimal.multiply(BigDecimal.fromBigInt(units), b.gross),
       total,
@@ -229,28 +246,28 @@ export const splitAdvance = (
     const floor = BigDecimal.scale(BigDecimal.floor(exact, 0), 0).value;
     return { floor, fraction: BigDecimal.subtract(exact, BigDecimal.fromBigInt(floor)) };
   });
-  let leftover = units - raw.reduce((acc, r) => acc + r.floor, 0n);
-  const order = raw
-    .map((r, i) => ({ i, fraction: r.fraction }))
-    .sort((a, b) => BigDecimal.Order(b.fraction, a.fraction) || a.i - b.i);
-  const shares = raw.map((r) => r.floor);
+  let leftover = units - EffectArray.reduce(raw, 0n, (acc, r) => acc + r.floor);
+  const order = EffectArray.map(raw, (r, i) => ({ i, fraction: r.fraction })).sort(
+    (a, b) => BigDecimal.Order(b.fraction, a.fraction) || a.i - b.i,
+  );
+  const shares = EffectArray.map(raw, (r) => r.floor);
   for (const { i } of order) {
     if (leftover <= 0n) break;
     shares[i] = (shares[i] ?? 0n) + 1n;
     leftover--;
   }
   const fx = options.fx ?? null;
-  return proforma.buckets.map((b, i) => {
-    const gross = BigDecimal.normalize(BigDecimal.make(shares[i] ?? 0n, shareScale));
+  return EffectArray.map(proforma.buckets, (b, i) => {
+    const shareGross = BigDecimal.normalize(BigDecimal.make(shares[i] ?? 0n, shareScale));
     const ratePercent =
       options.taxPoint === undefined ? b.ratePercent : rateFor(b.treatment, options.taxPoint);
-    const vat = vatOfGross(gross, ratePercent, VAT_SCALE);
+    const vat = vatOfGross(shareGross, ratePercent, VAT_SCALE);
     return {
       treatment: b.treatment,
       ratePercent,
-      base: BigDecimal.normalize(BigDecimal.subtract(gross, vat)),
+      base: BigDecimal.normalize(BigDecimal.subtract(shareGross, vat)),
       vat,
-      gross,
+      gross: shareGross,
       vatCzk: czkOrNull(vat, currency, fx),
     };
   });
@@ -262,33 +279,51 @@ export const splitAdvance = (
  * is its own VAT converted at `fx` (null for CZK or without a fixing), never the sum of the
  * inputs' stored CZK VAT.
  */
-export const netDeductions = (
-  supply: ReadonlyArray<VatBucket>,
-  deducted: ReadonlyArray<VatBucket>,
-  currency: CurrencyCode,
-  fx: VatInput["fx"],
-): ReadonlyArray<VatBucket> => {
-  const byKey = new Map<string, VatBucket>();
-  for (const b of [...supply, ...deducted]) {
-    const key = `${b.treatment}|${BigDecimal.format(BigDecimal.normalize(b.ratePercent))}`;
-    const prev = byKey.get(key);
-    byKey.set(
-      key,
-      prev === undefined
-        ? b
-        : {
-            ...prev,
-            base: BigDecimal.normalize(BigDecimal.sum(prev.base, b.base)),
-            vat: BigDecimal.normalize(BigDecimal.sum(prev.vat, b.vat)),
-            gross: BigDecimal.normalize(BigDecimal.sum(prev.gross, b.gross)),
-          },
-    );
-  }
-  return [...byKey.values()].map((b) => ({ ...b, vatCzk: czkOrNull(b.vat, currency, fx) }));
-};
+const netDeductions: {
+  (
+    deducted: ReadonlyArray<VatBucket>,
+    currency: CurrencyCode,
+    fx: VatInput["fx"],
+  ): (supply: ReadonlyArray<VatBucket>) => ReadonlyArray<VatBucket>;
+  (
+    supply: ReadonlyArray<VatBucket>,
+    deducted: ReadonlyArray<VatBucket>,
+    currency: CurrencyCode,
+    fx: VatInput["fx"],
+  ): ReadonlyArray<VatBucket>;
+} = Fn.dual(
+  4,
+  (
+    supply: ReadonlyArray<VatBucket>,
+    deducted: ReadonlyArray<VatBucket>,
+    currency: CurrencyCode,
+    fx: VatInput["fx"],
+  ): ReadonlyArray<VatBucket> => {
+    const byKey = new Map<string, VatBucket>();
+    for (const b of [...supply, ...deducted]) {
+      const key = `${b.treatment}|${b.ratePercent.pipe(BigDecimal.normalize, BigDecimal.format)}`;
+      const prev = byKey.get(key);
+      byKey.set(
+        key,
+        prev === undefined
+          ? b
+          : {
+              ...prev,
+              base: BigDecimal.normalize(BigDecimal.sum(prev.base, b.base)),
+              vat: BigDecimal.normalize(BigDecimal.sum(prev.vat, b.vat)),
+              gross: BigDecimal.normalize(BigDecimal.sum(prev.gross, b.gross)),
+            },
+      );
+    }
+    return EffectArray.map([...byKey.values()], (b) => ({
+      ...b,
+      vatCzk: czkOrNull(b.vat, currency, fx),
+    }));
+  },
+);
 
 /** Sums buckets back into a breakdown (e.g. a Payment Tax Document from `splitAdvance`). */
-export const fromBuckets = (
+const fromBuckets = (
   buckets: ReadonlyArray<VatBucket>,
   currency: CurrencyCode,
   paymentRounding: VatInput["paymentRounding"] = "none",
@@ -297,7 +332,7 @@ export const fromBuckets = (
     buckets,
     currency,
     paymentRounding,
-    currency !== "CZK" && buckets.some((b) => b.vatCzk !== null),
+    currency !== "CZK" && EffectArray.some(buckets, (b) => b.vatCzk !== null),
   );
 
 export const VatMath = {

@@ -26,7 +26,7 @@ COPY infra/alchemy/package.json ./infra/alchemy/package.json
 RUN --mount=type=cache,target=/root/.bun/install/cache \
     bun install --frozen-lockfile
 
-COPY tsconfig.base.json turbo.json ./
+COPY tsconfig.base.json tsconfig.effect.json turbo.json ./
 COPY assets ./assets
 COPY packages ./packages
 COPY apps ./apps

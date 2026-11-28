@@ -1,18 +1,24 @@
 import { expect, test } from "bun:test";
-import { createHash, randomBytes } from "node:crypto";
 import { BunHttpServer } from "@effect/platform-bun";
 import { READ_SCOPES, SESSION_COOKIE } from "@kvitbit/api-contract";
 import { UserId } from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import { HttpRouter } from "effect/http";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as EffectArray from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as HttpRouter from "effect/http/HttpRouter";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
 import { RateLimiterMemory } from "../../src/http";
 import { McpConfigTest, McpRoutesLive } from "../../src/mcp";
 import { createSeededWorkspace, joinMember, seedWorkspaceRow } from "./credentials/seed";
-import { makeHarness, ORIGIN } from "./harness";
+import { json, makeHarness, ORIGIN } from "./harness";
 
+const encodeBase64Url = Schema.encodeEffect(Schema.Uint8ArrayFromBase64Url);
 const redirectUri = "https://oauth-client.example.test/callback";
 const resource = `${ORIGIN}/mcp`;
 const clientMetadataUrl = "https://oauth-client.example/metadata.json";
@@ -25,15 +31,53 @@ const clientMetadata = {
   scope: "kvitbit:read kvitbit:write offline_access",
 };
 
+const signupFields = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    user: Schema.Struct({ id: Schema.String, name: Schema.String, email: Schema.String }),
+  }),
+);
+const registrationFields = Schema.decodeUnknownEffect(Schema.Struct({ client_id: Schema.String }));
+const signInFields = Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String }));
+const workspaceFields = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    workspaces: Schema.Array(Schema.Struct({ id: Schema.String, maxAccess: Schema.String })),
+  }),
+);
+const redirectFields = Schema.decodeUnknownEffect(Schema.Struct({ redirectTo: Schema.String }));
+const tokenFields = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    access_token: Schema.String,
+    refresh_token: Schema.String,
+    scope: Schema.String,
+    expires_at: Schema.Finite,
+    expires_in: Schema.Finite,
+  }),
+);
+const resourceFields = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    result: Schema.Struct({
+      contents: Schema.TupleWithRest(Schema.Tuple([Schema.Struct({ text: Schema.String })]), [
+        Schema.Unknown,
+      ]),
+    }),
+  }),
+);
+const grantFields = Schema.decodeUnknownEffect(
+  Schema.TupleWithRest(Schema.Tuple([Schema.Struct({ grantId: Schema.String })]), [Schema.Unknown]),
+);
+const parseJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
+
 test.each(["DCR", "CIMD"])(
   "%s tokens keep their workspace through refresh and revocation",
   async (registration) => {
     const harness = makeHarness({
       principalResolver: "live",
       authOverrides: {
-        fetchClientMetadata: async (input) => {
+        fetchClientMetadata: (input) => {
           expect(String(input)).toBe(clientMetadataUrl);
-          return Response.json({ client_id: clientMetadataUrl, ...clientMetadata });
+          return Promise.resolve(
+            Response.json({ client_id: clientMetadataUrl, ...clientMetadata }),
+          );
         },
       },
     });
@@ -51,28 +95,22 @@ test.each(["DCR", "CIMD"])(
       { disableLogger: true },
     );
 
-    const postJson = (path: string, body: unknown, cookie?: string) =>
-      harness.fetch(path, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: ORIGIN,
-          ...(cookie === undefined ? {} : { cookie }),
-        },
-        body: JSON.stringify(body),
-      });
+    const postJson = (path: string, body: Schema.Json, cookie?: string) => {
+      const headers = new Headers({ origin: ORIGIN, "content-type": "application/json" });
+      if (cookie !== undefined) headers.set("cookie", cookie);
+      return harness.fetch(path, { ...json(body), method: "POST", headers });
+    };
 
     try {
-      await harness.run(TestClock.setTime(Date.now()));
+      const wallTime = Effect.runSync(Clock.currentTimeMillis);
+      await harness.run(TestClock.setTime(wallTime));
       const identity = { email: "oauth-owner@example.test", password: "OAuth-test-password-123" };
       const signUp = await postJson("/api/auth/sign-up/email", {
         ...identity,
         name: "OAuth owner",
       });
       expect(signUp.status).toBe(200);
-      const { user } = (await signUp.json()) as {
-        user: { id: string; name: string; email: string };
-      };
+      const { user } = signupFields(await signUp.json()).pipe(Effect.runSync);
       await harness.run(
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
@@ -92,16 +130,41 @@ test.each(["DCR", "CIMD"])(
       await joinMember(harness, second, owner, "accountant");
       await seedWorkspaceRow(harness, first.workspaceId, "oauth-alpha", "OAuth Alpha");
 
-      let clientId = clientMetadataUrl;
-      if (registration === "DCR") {
+      const register = async () => {
         const registered = await postJson("/api/auth/oauth2/register", clientMetadata);
         expect(registered.ok).toBe(true);
-        clientId = ((await registered.json()) as { client_id: string }).client_id;
-      }
+        return registrationFields(await registered.json()).pipe(Effect.runSync).client_id;
+      };
+      const clientId = registration === "DCR" ? await register() : clientMetadataUrl;
+
+      const signInAt = async (location: URL) => {
+        expect(location.pathname).toBe("/sign-in");
+        const signIn = await postJson("/api/auth/sign-in/email", {
+          ...identity,
+          oauth_query: EffectString.slice(1)(location.search),
+        });
+        expect(signIn.status).toBe(200);
+        const sessionCookie = EffectArray.findFirst(
+          signIn.headers.getSetCookie(),
+          EffectString.startsWith(`${SESSION_COOKIE}=`),
+        ).pipe(
+          Option.map((value) => EffectString.split(value, ";")[0]),
+          Option.getOrUndefined,
+        );
+        if (sessionCookie === undefined)
+          throw new Error("Better Auth did not return a session cookie");
+        const { url } = signInFields(await signIn.json()).pipe(Effect.runSync);
+        return { cookie: sessionCookie, location: new URL(url, ORIGIN) };
+      };
 
       const startConsent = async (scope = "kvitbit:write offline_access") => {
-        const verifier = randomBytes(32).toString("base64url");
-        const state = randomBytes(12).toString("base64url");
+        const verifier = encodeBase64Url(crypto.getRandomValues(new Uint8Array(32))).pipe(
+          Effect.runSync,
+        );
+        const state = encodeBase64Url(crypto.getRandomValues(new Uint8Array(12))).pipe(
+          Effect.runSync,
+        );
+        const challenge = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
         const query = new URLSearchParams({
           response_type: "code",
           client_id: clientId,
@@ -109,29 +172,19 @@ test.each(["DCR", "CIMD"])(
           scope,
           resource,
           state,
-          code_challenge: createHash("sha256").update(verifier).digest("base64url"),
+          code_challenge: encodeBase64Url(new Uint8Array(challenge)).pipe(Effect.runSync),
           code_challenge_method: "S256",
         });
+        const headers = new Headers();
+        if (cookie !== undefined) headers.set("cookie", cookie);
         const authorize = await harness.fetch(`/api/auth/oauth2/authorize?${query}`, {
-          ...(cookie === undefined ? {} : { headers: { cookie } }),
+          headers,
           redirect: "manual",
         });
         expect([302, 303]).toContain(authorize.status);
         let location = new URL(authorize.headers.get("location") ?? "", ORIGIN);
         if (cookie === undefined) {
-          expect(location.pathname).toBe("/sign-in");
-          const signIn = await postJson("/api/auth/sign-in/email", {
-            ...identity,
-            oauth_query: location.search.slice(1),
-          });
-          expect(signIn.status).toBe(200);
-          cookie = signIn.headers
-            .getSetCookie()
-            .find((value) => value.startsWith(`${SESSION_COOKIE}=`))
-            ?.split(";", 1)[0];
-          if (cookie === undefined) throw new Error("Better Auth did not return a session cookie");
-          const { url } = (await signIn.json()) as { url: string };
-          location = new URL(url, ORIGIN);
+          ({ cookie, location } = await signInAt(location));
         }
         expect(location.pathname).toBe("/oauth/consent");
         const consentId = location.searchParams.get("consent_id");
@@ -140,27 +193,33 @@ test.each(["DCR", "CIMD"])(
         return { path, state, verifier, cookie };
       };
 
+      const checkAccountantConsent = async (
+        view: Response,
+        path: string,
+        workspaceId: string,
+        sessionCookie: string,
+      ) => {
+        const { workspaces } = workspaceFields(await view.json()).pipe(Effect.runSync);
+        const workspace = EffectArray.findFirst(workspaces, (entry) => entry.id === workspaceId);
+        expect(Option.getOrUndefined(workspace)?.maxAccess).toBe("read");
+        const overRole = await postJson(
+          path,
+          {
+            _tag: "Approve",
+            workspace: workspaceId,
+            grant: { access: "read_write" },
+          },
+          sessionCookie,
+        );
+        expect(overRole.status).toBe(403);
+      };
+
       const consent = async (workspaceId: string) => {
         const { path, state, verifier, cookie: sessionCookie } = await startConsent();
         const view = await harness.fetch(path, { headers: { cookie: sessionCookie } });
         expect(view.status).toBe(200);
         if (workspaceId === second.workspaceId) {
-          const { workspaces } = (await view.json()) as {
-            workspaces: Array<{ id: string; maxAccess: string }>;
-          };
-          expect(workspaces.find((workspace) => workspace.id === workspaceId)?.maxAccess).toBe(
-            "read",
-          );
-          const overRole = await postJson(
-            path,
-            {
-              _tag: "Approve",
-              workspace: workspaceId,
-              grant: { access: "read_write" },
-            },
-            sessionCookie,
-          );
-          expect(overRole.status).toBe(403);
+          await checkAccountantConsent(view, path, workspaceId, sessionCookie);
         }
         const approval = {
           _tag: "Approve",
@@ -173,7 +232,7 @@ test.each(["DCR", "CIMD"])(
           404,
         );
         expect((await postJson(path, approval, sessionCookie)).status).toBe(404);
-        const { redirectTo } = (await decide.json()) as { redirectTo: string };
+        const { redirectTo } = redirectFields(await decide.json()).pipe(Effect.runSync);
         const callback = new URL(redirectTo);
         expect(callback.origin + callback.pathname).toBe(redirectUri);
         expect(callback.searchParams.get("state")).toBe(state);
@@ -197,38 +256,35 @@ test.each(["DCR", "CIMD"])(
       const refresh = (refreshToken: string) =>
         tokenRequest({ grant_type: "refresh_token", refresh_token: refreshToken });
       const tokens = async (response: Response) => {
-        const body = (await response.json()) as {
-          access_token: string;
-          refresh_token: string;
-          scope: string;
-          expires_at: number;
-          expires_in: number;
-        };
+        const body = tokenFields(await response.json()).pipe(Effect.runSync);
         expect(response.status).toBe(200);
         expect(body.access_token).toBeTruthy();
         expect(body.refresh_token).toBeTruthy();
-        expect(body.scope.split(" ").sort()).toEqual(["kvitbit:workspace:read", "offline_access"]);
+        expect(EffectString.split(body.scope, " ").sort()).toEqual([
+          "kvitbit:workspace:read",
+          "offline_access",
+        ]);
         return body;
       };
 
       const readWorkspace = (accessToken: string, uri = "kvitbit://workspace") =>
         mcp.handler(
           new Request(resource, {
-            method: "POST",
-            headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
-            body: JSON.stringify({
+            ...json({
               jsonrpc: "2.0",
               id: 1,
               method: "resources/read",
               params: { uri },
             }),
+            method: "POST",
+            headers: { "content-type": "application/json", authorization: `Bearer ${accessToken}` },
           }),
         );
       const expectWorkspace = async (accessToken: string, name: string) => {
         const response = await readWorkspace(accessToken);
         expect(response.status).toBe(200);
-        const { result } = (await response.json()) as { result: { contents: [{ text: string }] } };
-        expect(JSON.parse(result.contents[0].text)).toMatchObject({ name });
+        const { result } = resourceFields(await response.json()).pipe(Effect.runSync);
+        expect(parseJson(result.contents[0].text).pipe(Effect.runSync)).toMatchObject({ name });
       };
 
       const denied = await startConsent("kvitbit:read offline_access");
@@ -263,7 +319,9 @@ test.each(["DCR", "CIMD"])(
       expect(widened.status).toBe(403);
       const denial = await postJson(denied.path, { _tag: "Deny" }, session.cookie);
       expect(denial.status).toBe(200);
-      const deniedCallback = new URL(((await denial.json()) as { redirectTo: string }).redirectTo);
+      const deniedCallback = new URL(
+        redirectFields(await denial.json()).pipe(Effect.runSync).redirectTo,
+      );
       expect(deniedCallback.searchParams.get("error")).toBe("access_denied");
       expect(deniedCallback.searchParams.get("state")).toBe(denied.state);
       expect((await harness.fetch(denied.path, { headers: session })).status).toBe(404);
@@ -346,7 +404,7 @@ test.each(["DCR", "CIMD"])(
       const appsPath = `/api/v1/workspaces/${first.workspaceId}/connected-apps`;
       const listed = await harness.fetch(appsPath, { headers: session });
       expect(listed.status).toBe(200);
-      const [grant] = (await listed.json()) as [{ grantId: string }];
+      const [grant] = grantFields(await listed.json()).pipe(Effect.runSync);
       const revoked = await harness.fetch(`${appsPath}/${grant.grantId}`, {
         method: "DELETE",
         headers: { ...session, origin: ORIGIN },
@@ -375,12 +433,17 @@ test.each(["DCR", "CIMD"])(
       expect(await staleAfterReconnect.json()).toMatchObject({ error: "invalid_grant" });
 
       const secondRotated = await tokens(await refresh(secondTokens.refresh_token));
+      const digest = encodeBase64Url(
+        new Uint8Array(
+          await crypto.subtle.digest(
+            "SHA-256",
+            new TextEncoder().encode(secondTokens.refresh_token),
+          ),
+        ),
+      ).pipe(Effect.runSync);
       await harness.run(
         Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          const digest = createHash("sha256")
-            .update(secondTokens.refresh_token)
-            .digest("base64url");
           yield* sql`update auth.oauth_refresh_token
         set rotation_replay_expires_at = current_timestamp - interval '1 second'
         where token = ${digest}`;

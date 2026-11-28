@@ -2,19 +2,15 @@
 import { Hct } from "./hct";
 import { type Rgb, sanitizeDegrees } from "./utils";
 
-/** The tones Material 3 tooling exports, including the surface steps of the 2023 spec. */
-export const PALETTE_TONES = [
-  0, 4, 5, 6, 10, 12, 15, 17, 20, 22, 24, 25, 30, 35, 40, 50, 60, 70, 80, 87, 90, 92, 94, 95, 96,
-  98, 99, 100,
-] as const;
-
 export class TonalPalette {
+  readonly hue: number;
+  readonly chroma: number;
   private readonly cache = new Map<number, Rgb>();
 
-  private constructor(
-    readonly hue: number,
-    readonly chroma: number,
-  ) {}
+  private constructor(hue: number, chroma: number) {
+    this.hue = hue;
+    this.chroma = chroma;
+  }
 
   static fromHueAndChroma(hue: number, chroma: number): TonalPalette {
     return new TonalPalette(sanitizeDegrees(hue), Math.max(0, chroma));
@@ -34,3 +30,9 @@ export class TonalPalette {
     return rgb;
   }
 }
+
+/** Tones used by the Material palette. */
+export const PALETTE_TONES = [
+  0, 4, 5, 6, 10, 12, 15, 17, 20, 22, 24, 25, 30, 35, 40, 50, 60, 70, 80, 87, 90, 92, 94, 95, 96,
+  98, 99, 100,
+] as const;

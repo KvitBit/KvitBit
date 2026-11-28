@@ -2,9 +2,9 @@ import type {
   BankAccountInput,
   IssuingEntityPatch,
   NewWorkspace,
-  WorkspaceId,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
+import { WorkspaceId } from "@kvitbit/domain/contract";
 import {
   type ApiResult,
   describeError,
@@ -14,9 +14,16 @@ import {
   ok,
   UiError,
 } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Rec from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import type { ApiRunner } from "../../runtime/api-runtime";
 import {
+  fromMobilePromise,
   isRequestIntentExpired,
+  runMobileEffect,
   runRequestIntent,
   settlesRequestIntent,
 } from "../../runtime/request-intent";
@@ -31,28 +38,27 @@ import {
   onboardingStore,
 } from "./onboarding-persistence";
 
-export type {
-  OnboardingFormFields,
-  OnboardingProgress,
-  OnboardingScope,
-  OnboardingStep,
-  OnboardingStore,
-  OnboardingWorkspaceRef,
-  PersistedOnboarding,
-} from "./onboarding-persistence";
+const decodeWorkspaceId = Schema.decodeUnknownEffect(WorkspaceId);
 
-const toWorkspaceRef = (workspace: WorkspaceView): OnboardingWorkspaceRef => ({
-  id: workspace.id as WorkspaceId,
-  slug: workspace.slug,
-  revision: workspace.revision,
+const toWorkspaceRef = Effect.fn("Onboarding.workspaceRef")(function* (workspace: WorkspaceView) {
+  const id = yield* decodeWorkspaceId(workspace["id"]);
+  return { id, slug: workspace.slug, revision: workspace.revision };
 });
 
-const includesPatch = (stored: unknown, patch: unknown): boolean => {
-  if (patch === null || typeof patch !== "object") return stored === patch;
-  if (stored === null || typeof stored !== "object") return false;
-  const fields = stored as Record<string, unknown>;
-  return Object.entries(patch).every(([key, value]) => includesPatch(fields[key], value));
+const decodeJsonObject = Schema.decodeUnknownResult(Schema.JsonObject);
+const includesPatch = (stored: Schema.Json, patch: Schema.Json): boolean => {
+  const expected = decodeJsonObject(patch);
+  if (Result.isFailure(expected)) return stored === patch;
+  const actual = decodeJsonObject(stored);
+  return (
+    Result.isSuccess(actual) &&
+    Arr.every(Rec.toEntries(expected.success), ([key, value]) => {
+      const current = actual.success[key];
+      return current !== undefined && includesPatch(current, value);
+    })
+  );
 };
+const isJson = Schema.is(Schema.Json);
 
 export interface SaveOnboardingOptions {
   readonly scope: OnboardingScope;
@@ -63,7 +69,7 @@ export interface SaveOnboardingOptions {
   readonly store?: OnboardingStore;
 }
 
-export const saveOnboarding = async (
+const save = Effect.fn("Onboarding.save")(function* (
   api: ApiRunner,
   input: {
     readonly workspace: NewWorkspace;
@@ -71,82 +77,87 @@ export const saveOnboarding = async (
     readonly bank: BankAccountInput | null;
   },
   options: SaveOnboardingOptions,
-): Promise<{
-  readonly step: "workspace" | "issuer" | "bank";
-  readonly result: ApiResult<OnboardingWorkspaceRef>;
-}> => {
+) {
   const { scope, fields, onProgress } = options;
   const store = options.store ?? onboardingStore;
-  const owner = onboardingOwner(scope.origin, scope.userId);
-
-  const persistState = async (
+  const owner = onboardingOwner(scope);
+  const persistState = Effect.fn("Onboarding.persistState")(function* (
     nextProgress: OnboardingProgress | null,
     nextStep: OnboardingStep,
-  ): Promise<void> => {
-    await store.write({
-      version: 1,
-      origin: scope.origin,
-      userId: scope.userId,
-      step: nextStep,
-      progress: nextProgress,
-      fields,
-    });
+  ) {
+    yield* fromMobilePromise(() =>
+      store.write({
+        version: 1,
+        origin: scope.origin,
+        userId: scope.userId,
+        step: nextStep,
+        progress: nextProgress,
+        fields,
+      }),
+    );
     onProgress(nextProgress);
-  };
+  });
 
-  const clearState = async (): Promise<void> => {
-    await store.clear(scope.origin, scope.userId);
+  const clearState = Effect.fn("Onboarding.clearState")(function* () {
+    yield* fromMobilePromise(() => store.clear(scope.origin, scope.userId));
     onProgress(null);
-  };
+  });
 
-  let progress =
-    options.progress ?? (await store.read(scope.origin, scope.userId))?.progress ?? null;
+  let progress = options.progress;
+  if (progress === null) {
+    const persisted = yield* fromMobilePromise(() => store.read(scope.origin, scope.userId));
+    progress = persisted?.progress ?? null;
+  }
   if (progress !== null && options.progress === null) {
     onProgress(progress);
   }
 
   if (progress === null) {
-    try {
-      await persistState(null, options.step ?? 3);
-    } catch {
-      return { step: "workspace", result: err(UiError.offline) };
+    const persisted = yield* Effect.result(persistState(null, options.step ?? 3));
+    if (Result.isFailure(persisted)) {
+      return { step: "workspace" as const, result: err(UiError.offline) };
     }
 
     const needsIssuer = input.issuingEntity !== null;
     const needsBank = input.bank !== null;
-    const result = await runRequestIntent(
-      owner,
-      "onboard/workspace",
-      input.workspace,
-      (key) =>
-        api.run((client) =>
-          client.myWorkspaces.create({
-            headers: idempotencyHeaders(key),
-            payload: input.workspace,
-          }),
-        ),
-      async (workspace) => {
-        const next: OnboardingProgress = {
-          workspace: toWorkspaceRef(workspace),
-          issuerSaved: !needsIssuer,
-        };
-        if (!needsIssuer && !needsBank) {
-          await clearState();
-        } else {
-          await persistState(next, 3);
-        }
-        progress = next;
-      },
+    const result = yield* Effect.promise(() =>
+      runRequestIntent(
+        owner,
+        "onboard/workspace",
+        input.workspace,
+        (key) =>
+          api.run((client) =>
+            client.myWorkspaces.create({
+              headers: idempotencyHeaders(key),
+              payload: input.workspace,
+            }),
+          ),
+        (workspace) =>
+          runMobileEffect(
+            toWorkspaceRef(workspace).pipe(
+              Effect.flatMap((ref) => {
+                const next: OnboardingProgress = { workspace: ref, issuerSaved: !needsIssuer };
+                return (needsIssuer || needsBank ? persistState(next, 3) : clearState()).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      progress = next;
+                    }),
+                  ),
+                );
+              }),
+            ),
+          ),
+      ),
     );
     if (result._tag === "Err") {
       if (!isRequestIntentExpired(result.error) && settlesRequestIntent(result)) {
-        await clearState().catch(() => undefined);
+        yield* Effect.ignore(clearState());
       }
-      return { step: "workspace", result };
+      return { step: "workspace" as const, result };
     }
     if (progress === null) {
       progress = {
-        workspace: toWorkspaceRef(result.value),
+        workspace: yield* toWorkspaceRef(result.value),
         issuerSaved: !needsIssuer,
       };
     }
@@ -155,78 +166,92 @@ export const saveOnboarding = async (
   const workspaceId = progress.workspace.id;
   const issuingEntity = input.issuingEntity;
   if (!progress.issuerSaved && issuingEntity !== null) {
-    try {
-      await persistState(progress, 3);
-    } catch {
-      return { step: "issuer", result: err(UiError.offline) };
+    const persisted = yield* Effect.result(persistState(progress, 3));
+    if (Result.isFailure(persisted)) {
+      return { step: "issuer" as const, result: err(UiError.offline) };
     }
 
     const revision = progress.workspace.revision;
-    let result = await api.run((client) =>
-      client.workspace.updateIssuingEntity({
-        params: { workspaceId },
-        headers: ifMatchHeaders(revision),
-        payload: issuingEntity,
-      }),
+    let result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.updateIssuingEntity({
+          params: { workspaceId },
+          headers: ifMatchHeaders(revision),
+          payload: issuingEntity,
+        }),
+      ),
     );
     if (result._tag === "Err" && describeError(result.error).staleRevision) {
       // The PATCH may have committed before its response was lost. Continue only
       // if the current entity already contains every edit from this attempt.
-      const current = await api.run((client) =>
-        client.workspace.current({ params: { workspaceId } }),
+      const current = yield* Effect.promise(() =>
+        api.run((client) => client.workspace.current({ params: { workspaceId } })),
       );
-      if (current._tag === "Ok" && includesPatch(current.value.issuingEntity, issuingEntity)) {
+      if (
+        current._tag === "Ok" &&
+        isJson(current.value["issuingEntity"]) &&
+        isJson(issuingEntity) &&
+        includesPatch(current.value["issuingEntity"], issuingEntity)
+      ) {
         result = current;
       }
     }
     if (result._tag === "Err") {
-      await persistState(progress, 1).catch(() => undefined);
-      return { step: "issuer", result };
+      yield* Effect.ignore(persistState(progress, 1));
+      return { step: "issuer" as const, result };
     }
     const next: OnboardingProgress = {
-      workspace: toWorkspaceRef(result.value),
+      workspace: yield* toWorkspaceRef(result.value),
       issuerSaved: true,
     };
-    try {
-      if (input.bank === null) {
-        await clearState();
-      } else {
-        await persistState(next, 3);
-      }
-    } catch {
-      return { step: "issuer", result: err(UiError.offline) };
+    const updated = yield* Effect.result(
+      input.bank === null ? clearState() : persistState(next, 3),
+    );
+    if (Result.isFailure(updated)) {
+      return { step: "issuer" as const, result: err(UiError.offline) };
     }
     progress = next;
   }
 
   const bank = input.bank;
   if (bank !== null) {
-    try {
-      await persistState(progress, 3);
-    } catch {
-      return { step: "bank", result: err(UiError.offline) };
+    const persisted = yield* Effect.result(persistState(progress, 3));
+    if (Result.isFailure(persisted)) {
+      return { step: "bank" as const, result: err(UiError.offline) };
     }
 
-    const result = await runRequestIntent(
-      owner,
-      `onboard/bank/${workspaceId}`,
-      bank,
-      (key) =>
-        api.run((client) =>
-          client.workspace.createBankAccount({
-            params: { workspaceId },
-            headers: idempotencyHeaders(key),
-            payload: bank,
-          }),
-        ),
-      async () => {
-        await clearState();
-      },
+    const result = yield* Effect.promise(() =>
+      runRequestIntent(
+        owner,
+        `onboard/bank/${workspaceId}`,
+        bank,
+        (key) =>
+          api.run((client) =>
+            client.workspace.createBankAccount({
+              params: { workspaceId },
+              headers: idempotencyHeaders(key),
+              payload: bank,
+            }),
+          ),
+        () => runMobileEffect(clearState()),
+      ),
     );
-    if (result._tag === "Err") return { step: "bank", result };
-    return { step: "workspace", result: ok(progress.workspace) };
+    if (result._tag === "Err") return { step: "bank" as const, result };
+    return { step: "workspace" as const, result: ok({ value: progress.workspace }) };
   }
 
-  await clearState().catch(() => undefined);
-  return { step: "workspace", result: ok(progress.workspace) };
-};
+  yield* Effect.ignore(clearState());
+  return { step: "workspace" as const, result: ok({ value: progress.workspace }) };
+});
+
+export const saveOnboarding = (
+  ...args: Parameters<typeof save>
+): Promise<{
+  readonly step: "workspace" | "issuer" | "bank";
+  readonly result: ApiResult<OnboardingWorkspaceRef>;
+}> =>
+  runMobileEffect(
+    save(...args).pipe(
+      Effect.orElseSucceed(() => ({ step: "workspace" as const, result: err(UiError.offline) })),
+    ),
+  );

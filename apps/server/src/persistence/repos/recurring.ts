@@ -1,52 +1,81 @@
 /** `RecurringRepo` over `templates`, `template_lines`, `schedules`, and `schedule_runs`. */
+
 import { RecurringRepo } from "@kvitbit/core";
-import type {
+import {
   DeliveryId,
   DocumentId,
   IsoDate,
   IssueCode,
   ScheduleId,
   TemplateId,
-  WorkspaceId,
+  TemplateInput as TemplateInputSchema,
 } from "@kvitbit/domain/contract";
-import { TemplateInput as TemplateInputSchema } from "@kvitbit/domain/contract";
-import { Effect, Layer, Option, Schema } from "effect";
-import { SqlClient } from "effect/sql";
-import { formatNullableDecimal, parseJson } from "../codec";
+import * as Arr from "effect/Array";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import {
+  decodeStored,
+  decodeWorkspaceId,
+  encodeJson,
+  encodeStored,
+  formatNullableDecimal,
+  parseJson,
+} from "../codec";
 import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
+
+const readNullableText = decodeStored(Schema.NullOr(Schema.String));
+const readNullableIsoDate = decodeStored(Schema.NullOr(IsoDate));
+const readNullableIssueCode = decodeStored(Schema.NullOr(IssueCode));
+const readNullableDocumentId = decodeStored(Schema.NullOr(DocumentId));
+const readNullableDeliveryId = decodeStored(Schema.NullOr(DeliveryId));
+const readTemplateId = decodeStored(TemplateId);
+const readText = decodeStored(Schema.String);
+const readScheduleId = decodeStored(ScheduleId);
+const readCadenceUnit = decodeStored(Schema.Literals(["weeks", "months", "years"]));
+const readIsoDate = decodeStored(IsoDate);
+const readIssueAs = decodeStored(Schema.Literals(["invoice", "proforma"]));
+const readRunOutcome = decodeStored(Schema.Literals(["issued", "failed", "skipped_missed"]));
+const readRunSend = decodeStored(Schema.Literals(["none", "pending", "queued", "failed"]));
 
 type TemplateRow = Effect.Success<ReturnType<RecurringRepo["Service"]["getTemplate"]>>;
 type ScheduleRow = Effect.Success<ReturnType<RecurringRepo["Service"]["lockSchedule"]>>;
 type RunRow = Effect.Success<ReturnType<RecurringRepo["Service"]["insertRun"]>>;
 
 const templateInputJson = Schema.toCodecJson(TemplateInputSchema);
-const encodeTemplateInput = Schema.encodeSync(templateInputJson);
-const decodeTemplateInput = Schema.decodeUnknownSync(templateInputJson);
+const encodeTemplateInput = encodeStored(templateInputJson);
+const decodeTemplateInput = parseJson(templateInputJson);
 
 const templateSpec: TableSpec<TemplateRow> = {
   table: "templates",
   collection: "templates",
   entity: "Template",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "name",
-    "body",
-    col.instant("archived_at"),
-    col.instant("created_at"),
-    col.instant("updated_at"),
-  ].join(", "),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "name",
+      "body",
+      col.instant("archived_at"),
+      col.instant("created_at"),
+      col.instant("updated_at"),
+    ],
+    ", ",
+  ),
   decode: decodeEach(
     (row): TemplateRow => ({
-      id: row.id as TemplateId,
-      workspaceId: row.workspace_id as WorkspaceId,
-      revision: Number(row.revision),
-      name: row.name as string,
-      input: decodeTemplateInput(parseJson<unknown>(row.body)),
-      archivedAt: (row.archived_at as string | null) ?? null,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
+      id: readTemplateId(row["id"]),
+      workspaceId: decodeWorkspaceId(row["workspace_id"]),
+      revision: Number(row["revision"]),
+      name: readText(row["name"]),
+      input: decodeTemplateInput(row["body"]),
+      archivedAt: readNullableText(row["archived_at"] ?? null),
+      createdAt: readText(row["created_at"]),
+      updatedAt: readText(row["updated_at"]),
     }),
   ),
   encode: (row) => ({
@@ -58,79 +87,81 @@ const templateSpec: TableSpec<TemplateRow> = {
     series_id: row.input.series ?? null,
     bank_account_id: row.input.bankAccount ?? null,
     due_in_days: row.input.due?.inDays ?? null,
-    body: JSON.stringify(encodeTemplateInput(row.input)),
+    body: encodeJson(encodeTemplateInput(row.input)),
     archived_at: row.archivedAt,
     created_at: row.createdAt,
     updated_at: row.updatedAt,
   }),
-  writeChildren: (row, mode) =>
-    Effect.gen(function* () {
-      const sql = yield* SqlClient.SqlClient;
-      if (mode === "update") {
-        yield* sql`
+  writeChildren: Effect.fn("writeChildren")(function* (row, mode) {
+    const sql = yield* SqlClient.SqlClient;
+    if (mode === "update") {
+      yield* sql`
           delete from template_lines
           where workspace_id = ${row.workspaceId} and template_id = ${row.id}
         `;
-      }
-      if (row.input.lines.length === 0) return;
-      const lineRows = row.input.lines.map((line, idx) => ({
-        id: crypto.randomUUID(),
-        workspace_id: row.workspaceId,
-        template_id: row.id,
-        position: idx,
-        price_list_item_id: line.item ?? null,
-        description: line.description ?? null,
-        quantity: formatNullableDecimal(line.quantity ?? null),
-        unit: line.unit ?? null,
-        unit_price: formatNullableDecimal(line.unitPrice ?? null),
-        vat: line.vat ?? null,
-      })) as unknown as [Record<string, unknown>, ...Record<string, unknown>[]];
-      yield* sql`insert into template_lines ${sql.insert(lineRows)}`;
-    }),
+    }
+    if (!Arr.isReadonlyArrayNonEmpty(row.input.lines)) return;
+    const lineRows = Arr.map(row.input.lines, (line, idx) => ({
+      id: SecureRandom.uuidV4Unsafe(),
+      workspace_id: row.workspaceId,
+      template_id: row.id,
+      position: idx,
+      price_list_item_id: line.item ?? null,
+      description: line.description ?? null,
+      quantity: formatNullableDecimal(line.quantity ?? null),
+      unit: line.unit ?? null,
+      unit_price: formatNullableDecimal(line.unitPrice ?? null),
+      vat: line.vat ?? null,
+    }));
+    yield* sql`insert into template_lines ${sql.insert(lineRows)}`;
+  }),
 };
 
 const scheduleSpec: TableSpec<ScheduleRow> = {
   table: "schedules",
   collection: "schedules",
   entity: "Schedule",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "template_id",
-    "cadence_unit",
-    "cadence_interval",
-    col.date("start_on"),
-    col.date("end_on"),
-    "issue_as",
-    "auto_send",
-    col.date("next_occurrence"),
-    col.instant("paused_at"),
-    "paused_reason",
-    "paused_error",
-    col.date("catch_up_through"),
-    col.instant("detached_at"),
-    col.instant("created_at"),
-  ].join(", "),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "template_id",
+      "cadence_unit",
+      "cadence_interval",
+      col.date("start_on"),
+      col.date("end_on"),
+      "issue_as",
+      "auto_send",
+      col.date("next_occurrence"),
+      col.instant("paused_at"),
+      "paused_reason",
+      "paused_error",
+      col.date("catch_up_through"),
+      col.instant("detached_at"),
+      col.instant("created_at"),
+    ],
+    ", ",
+  ),
   decode: decodeEach(
     (row): ScheduleRow => ({
-      id: row.id as ScheduleId,
-      workspaceId: row.workspace_id as WorkspaceId,
-      revision: Number(row.revision),
-      templateId: row.template_id as TemplateId,
-      cadenceUnit: row.cadence_unit as ScheduleRow["cadenceUnit"],
-      cadenceInterval: Number(row.cadence_interval),
-      startOn: row.start_on as IsoDate,
-      endOn: (row.end_on as IsoDate | null) ?? null,
-      issueAs: row.issue_as as ScheduleRow["issueAs"],
-      autoSend: Boolean(row.auto_send),
-      nextOccurrence: (row.next_occurrence as IsoDate | null) ?? null,
-      pausedAt: (row.paused_at as string | null) ?? null,
-      pausedReason: (row.paused_reason as IssueCode | null) ?? null,
-      pausedError: (row.paused_error as string | null) ?? null,
-      catchUpThrough: (row.catch_up_through as IsoDate | null) ?? null,
-      detachedAt: (row.detached_at as string | null) ?? null,
-      createdAt: row.created_at as string,
+      id: readScheduleId(row["id"]),
+      workspaceId: decodeWorkspaceId(row["workspace_id"]),
+      revision: Number(row["revision"]),
+      templateId: readTemplateId(row["template_id"]),
+      cadenceUnit: readCadenceUnit(row["cadence_unit"]),
+      cadenceInterval: Number(row["cadence_interval"]),
+      startOn: readIsoDate(row["start_on"]),
+      endOn: readNullableIsoDate(row["end_on"] ?? null),
+      issueAs: readIssueAs(row["issue_as"]),
+      autoSend: Boolean(row["auto_send"]),
+      nextOccurrence: readNullableIsoDate(row["next_occurrence"] ?? null),
+      pausedAt: readNullableText(row["paused_at"] ?? null),
+      pausedReason: readNullableIssueCode(row["paused_reason"] ?? null),
+      pausedError: readNullableText(row["paused_error"] ?? null),
+      catchUpThrough: readNullableIsoDate(row["catch_up_through"] ?? null),
+      detachedAt: readNullableText(row["detached_at"] ?? null),
+      createdAt: readText(row["created_at"]),
     }),
   ),
   encode: (row) => ({
@@ -157,34 +188,37 @@ const runSpec: TableSpec<RunRow> = {
   table: "schedule_runs",
   collection: "schedule_runs",
   entity: "Schedule",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "schedule_id",
-    col.date("occurrence"),
-    "outcome",
-    col.instant("at"),
-    "document_id",
-    "(select d.number from documents d where d.workspace_id = schedule_runs.workspace_id and d.id = schedule_runs.document_id) as document_number",
-    "delivery_id",
-    "send_state",
-    "failure",
-  ].join(", "),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "schedule_id",
+      col.date("occurrence"),
+      "outcome",
+      col.instant("at"),
+      "document_id",
+      "(select d.number from documents d where d.workspace_id = schedule_runs.workspace_id and d.id = schedule_runs.document_id) as document_number",
+      "delivery_id",
+      "send_state",
+      "failure",
+    ],
+    ", ",
+  ),
   decode: decodeEach(
     (row: DbRow): RunRow => ({
-      id: row.id as string,
-      workspaceId: row.workspace_id as WorkspaceId,
-      revision: Number(row.revision),
-      scheduleId: row.schedule_id as ScheduleId,
-      occurrence: row.occurrence as IsoDate,
-      outcome: row.outcome as RunRow["outcome"],
-      at: row.at as string,
-      documentId: (row.document_id as DocumentId | null) ?? null,
-      documentNumber: (row.document_number as string | null) ?? null,
-      deliveryId: (row.delivery_id as DeliveryId | null) ?? null,
-      send: row.send_state as RunRow["send"],
-      failure: (row.failure as IssueCode | null) ?? null,
+      id: readText(row["id"]),
+      workspaceId: decodeWorkspaceId(row["workspace_id"]),
+      revision: Number(row["revision"]),
+      scheduleId: readScheduleId(row["schedule_id"]),
+      occurrence: readIsoDate(row["occurrence"]),
+      outcome: readRunOutcome(row["outcome"]),
+      at: readText(row["at"]),
+      documentId: readNullableDocumentId(row["document_id"] ?? null),
+      documentNumber: readNullableText(row["document_number"] ?? null),
+      deliveryId: readNullableDeliveryId(row["delivery_id"] ?? null),
+      send: readRunSend(row["send_state"]),
+      failure: readNullableIssueCode(row["failure"] ?? null),
     }),
   ),
   encode: (row) => ({
@@ -211,31 +245,39 @@ export const RecurringRepoSql: Layer.Layer<RecurringRepo, never, SqlClient.SqlCl
       const runs = makeTable(sql, runSpec);
 
       return RecurringRepo.of({
-        getTemplate: (ws, id) => templates.get(ws, id),
-        lockTemplate: (ws, id, expectedRevision) =>
+        getTemplate: Effect.fn("RecurringRepo.getTemplate")((ws, id) => templates.get(ws, id)),
+        lockTemplate: Effect.fn("RecurringRepo.lockTemplate")((ws, id, expectedRevision) =>
           templates.getForUpdate(ws, id, expectedRevision),
-        lockTemplateState: (ws, id) => templates.lock(ws, id),
-        listTemplates: (ws) =>
+        ),
+        lockTemplateState: Effect.fn("RecurringRepo.lockTemplateState")((ws, id) =>
+          templates.lock(ws, id),
+        ),
+        listTemplates: Effect.fn("RecurringRepo.listTemplates")((ws) =>
           templates.select(ws, sql`archived_at is null`, sql`order by name asc, id asc`),
+        ),
         insertTemplate: templates.insert,
         updateTemplate: templates.update,
 
-        attachedSchedule: (ws, templateId) =>
+        attachedSchedule: Effect.fn("RecurringRepo.attachedSchedule")((ws, templateId) =>
           schedules.first(ws, sql`template_id = ${templateId} and detached_at is null`),
-        schedulesOfTemplate: (ws, templateId) =>
+        ),
+        schedulesOfTemplate: Effect.fn("RecurringRepo.schedulesOfTemplate")((ws, templateId) =>
           schedules.select(ws, sql`template_id = ${templateId}`, sql`order by created_at asc`),
-        lockSchedule: (ws, id) => schedules.lock(ws, id),
+        ),
+        lockSchedule: Effect.fn("RecurringRepo.lockSchedule")((ws, id) => schedules.lock(ws, id)),
         insertSchedule: schedules.insert,
         updateSchedule: schedules.update,
-        dueSchedules: (today) =>
+        dueSchedules: Effect.fn("RecurringRepo.dueSchedules")((today) =>
           schedules.selectGlobal(
             sql`detached_at is null and paused_at is null and next_occurrence is not null and next_occurrence <= ${today}::date`,
             sql`order by next_occurrence asc`,
           ),
+        ),
 
-        findRun: (ws, scheduleId, occurrence) =>
+        findRun: Effect.fn("RecurringRepo.findRun")((ws, scheduleId, occurrence) =>
           runs.first(ws, sql`schedule_id = ${scheduleId} and occurrence = ${occurrence}::date`),
-        lastIssuedRun: (ws, scheduleId) =>
+        ),
+        lastIssuedRun: Effect.fn("RecurringRepo.lastIssuedRun")((ws, scheduleId) =>
           Effect.map(
             runs.select(
               ws,
@@ -244,14 +286,16 @@ export const RecurringRepoSql: Layer.Layer<RecurringRepo, never, SqlClient.SqlCl
             ),
             (rows) => Option.fromNullishOr(rows[0]),
           ),
-        pendingSendRuns: (before) =>
+        ),
+        pendingSendRuns: Effect.fn("RecurringRepo.pendingSendRuns")((before) =>
           runs.selectGlobal(
             sql`outcome = 'issued' and send_state = 'pending' and at < ${before}::timestamptz`,
             sql`order by at asc`,
           ),
+        ),
         insertRun: runs.insert,
         updateRun: runs.update,
-        listRuns: (ws, query) => {
+        listRuns: Effect.fn("RecurringRepo.listRuns")((ws, query) => {
           if (query.scheduleIds.length === 0) return Effect.succeed([]);
           const after = query.after;
           const where =
@@ -264,14 +308,16 @@ export const RecurringRepoSql: Layer.Layer<RecurringRepo, never, SqlClient.SqlCl
             where,
             sql`order by occurrence desc, id desc limit ${query.limit}`,
           );
-        },
+        }),
 
-        templatesUsingBankAccount: (ws, bankAccountId) =>
-          templates.select(
-            ws,
-            sql`archived_at is null and bank_account_id = ${bankAccountId}`,
-            sql`order by name asc, id asc`,
-          ),
+        templatesUsingBankAccount: Effect.fn("RecurringRepo.templatesUsingBankAccount")(
+          (ws, bankAccountId) =>
+            templates.select(
+              ws,
+              sql`archived_at is null and bank_account_id = ${bankAccountId}`,
+              sql`order by name asc, id asc`,
+            ),
+        ),
       });
     }),
   );

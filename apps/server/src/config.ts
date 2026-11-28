@@ -1,9 +1,16 @@
+import * as Fn from "effect/Function";
 /**
  * Process configuration shared by every entrypoint. Names follow the Phase 3 runtime contract
  * agreed with phase3d-infra on board thread #871. Stream-specific settings live next to their
  * stream (`./<area>/config.ts`) and read their own variables.
  */
-import { Config, Effect, Option, Redacted, Schema } from "effect";
+
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   InvalidRuntimeConfig,
   type KvitbitEnv,
@@ -12,7 +19,9 @@ import {
   toConfigError,
 } from "./config-contract";
 
-export type RunnerMode = "single" | "cluster";
+const httpsPattern = /^https:\/\//i;
+
+type RunnerMode = "single" | "cluster";
 
 export interface PostHogSettings {
   readonly apiKey: string;
@@ -29,10 +38,10 @@ const postHogHost = Config.schema(
     Schema.makeFilter((value) => {
       const url = URL.parse(value);
       return (
-        (/^https:\/\//i.test(value) &&
+        (httpsPattern.test(value) &&
           url?.protocol === "https:" &&
-          !url.username &&
-          !url.password) ||
+          !(url.username !== "") &&
+          !(url.password !== "")) ||
         "Expected an HTTPS URL without credentials"
       );
     }),
@@ -70,11 +79,12 @@ const requireNonEmptyRedacted = (
 ): Effect.Effect<Redacted.Redacted<string>, Config.ConfigError> =>
   Effect.gen(function* () {
     const value = yield* Config.Redacted(name);
-    if (Redacted.value(value).trim().length === 0) {
-      return yield* Effect.fail(
+    if (value.pipe(Redacted.value, Str.trim).length === 0) {
+      return yield* Fn.pipe(
         toConfigError(
-          new InvalidRuntimeConfig({ field: name, reason: `${name} must be non-empty` }),
+          InvalidRuntimeConfig.make({ field: name, reason: `${name} must be non-empty` }),
         ),
+        Effect.fail,
       );
     }
     return value;
@@ -111,5 +121,3 @@ export const ServerConfig: Effect.Effect<ServerConfigShape, Config.ConfigError> 
     } satisfies ServerConfigShape;
   },
 );
-
-export const loadServerConfig = ServerConfig;

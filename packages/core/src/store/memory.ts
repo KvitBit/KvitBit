@@ -19,9 +19,19 @@
  * Rows are treated as immutable values; never mutate a row after storing it. Audit entries are
  * stored as JSON, as the SQL table stores them.
  */
-import type { AuditEntry, NotFound as NotFoundError, WorkspaceId } from "@kvitbit/domain/contract";
-import { Conflict, NotFound } from "@kvitbit/domain/contract";
-import { Cause, Context, Effect, Exit, Layer, Option, Semaphore } from "effect";
+
+import type { NotFound as NotFoundError, WorkspaceId } from "@kvitbit/domain/contract";
+import { AuditEntry, Conflict, NotFound } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import type {
   Claim,
   CoreStoreShape,
@@ -32,7 +42,7 @@ import type {
 } from "./CoreStore";
 import { CoreStore, UniqueViolation } from "./CoreStore";
 import { runQuery } from "./query";
-import type { Collection, CollectionDef, Row, Scalar, UniqueConstraint } from "./tables";
+import type { Collection, CollectionDef, Row, UniqueConstraint } from "./tables";
 import { MemoryTables } from "./tables";
 
 interface Frame {
@@ -69,7 +79,7 @@ const emptyState = (): State => ({
 });
 
 const copyState = (s: State): State => ({
-  tables: new Map([...s.tables].map(([name, rows]) => [name, new Map(rows)])),
+  tables: new Map(EffectArray.map([...s.tables], ([name, rows]) => [name, new Map(rows)])),
   counters: new Map(s.counters),
   reservations: new Map(s.reservations),
   requestLog: new Map(s.requestLog),
@@ -79,11 +89,34 @@ const copyState = (s: State): State => ({
 const isPending = (v: RequestLogEntry | PendingClaim | undefined): v is PendingClaim =>
   v !== undefined && "_tag" in v && v._tag === "Pending";
 
+const encodeKey = Schema.encodeOption(Schema.fromJsonString(Schema.Unknown));
+const encodeAudit = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+// JSON omits undefined change values. Restore them when reading an audit entry.
+const AuditChangeValue = Schema.Unknown.pipe(Schema.withDecodingDefaultKey(Effect.undefined));
+const StoredAudit = Schema.Struct({
+  ...AuditEntry.fields,
+  changes: Schema.Array(
+    Schema.Struct({ path: Schema.String, before: AuditChangeValue, after: AuditChangeValue }),
+  ),
+});
+const decodeAudit = Schema.decodeResult(Schema.fromJsonString(StoredAudit));
+const isNotFound = Schema.is(NotFound);
+const isConflict = Schema.is(Conflict);
+
+class CollectionRowMismatch extends Schema.TaggedError<
+  CollectionRowMismatch,
+  { readonly brand: unique symbol }
+>()("CollectionRowMismatch", { collection: Schema.String, id: Schema.String }) {}
+
+const encodeTuple = <A extends ReadonlyArray<string | number | boolean | null | undefined>>(
+  key: A,
+) => Option.getOrThrow(encodeKey(key));
+
 /** The index tuple of `row`, or undefined when the row is outside the index or has a NULL. */
 const uniqueKey = <A extends Row>(row: A, constraint: UniqueConstraint<A>): string | undefined => {
   const key = constraint.key(row);
-  if (key === null || key.some((v) => v === null)) return undefined;
-  return JSON.stringify([constraint.scope === "workspace" ? row.workspaceId : "*", ...key]);
+  if (key === null || EffectArray.some(key, (v) => v === null)) return undefined;
+  return encodeTuple([constraint.scope === "workspace" ? row.workspaceId : "*", ...key]);
 };
 
 const scopeKey = (scope: RequestScope) =>
@@ -187,12 +220,11 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
       Effect.forEach(
         frame.afterCommit,
         (hook) =>
-          Effect.flatMap(Effect.exit(hook), (exit) =>
-            Exit.isFailure(exit)
-              ? Effect.logError("CoreStore.afterCommit failed", Cause.pretty(exit.cause))
-              : Effect.void,
-          ),
-        { discard: true },
+          Effect.flatMap(Effect.exit(hook), (exit) => {
+            if (Exit.isSuccess(exit)) return Effect.void;
+            return Effect.logError("CoreStore.afterCommit failed", Cause.pretty(exit.cause));
+          }),
+        { discard: true, concurrency: 1 },
       ),
     );
 
@@ -246,11 +278,19 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
   };
 
   const collection = <A extends Row>(def: CollectionDef<A>): Collection<A> => {
-    const rows = () => table(def.name) as Map<string, A>;
-    const notFound = (id: string): NotFoundError => new NotFound({ entity: def.entity, id });
+    const rows = () => table(def.name);
+    const isRow = Schema.is(Schema.toType(def.schema));
+    const checkedRow = (row: Row): A => {
+      if (isRow(row)) return row;
+      return Option.getOrThrowWith(Option.none<A>(), () =>
+        CollectionRowMismatch.make({ collection: def.name, id: row.id }),
+      );
+    };
+    const values = () => EffectArray.map([...rows().values()], checkedRow);
+    const notFound = (id: string): NotFoundError => NotFound.make({ entity: def.entity, id });
     const lookup = (workspaceId: WorkspaceId, id: string): A | undefined => {
       const row = rows().get(id);
-      return row !== undefined && row.workspaceId === workspaceId ? row : undefined;
+      return row !== undefined && row.workspaceId === workspaceId ? checkedRow(row) : undefined;
     };
     /** The stored row at `expectedRevision` (when given), or the error to fail with. */
     const locate = (
@@ -261,19 +301,23 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
       const row = lookup(workspaceId, id);
       if (row === undefined) return notFound(id);
       if (expectedRevision !== undefined && row.revision !== expectedRevision) {
-        return new Conflict({ reason: "revision_changed", currentRevision: row.revision });
+        return Conflict.make({ reason: "revision_changed", currentRevision: row.revision });
       }
       return row;
     };
-    const isError = (v: unknown): v is NotFoundError | Conflict =>
-      v instanceof NotFound || v instanceof Conflict;
+    const isError = (value: A | NotFoundError | Conflict): value is NotFoundError | Conflict =>
+      isNotFound(value) || isConflict(value);
     const violation = (row: A): UniqueViolation | undefined => {
       for (const constraint of def.unique ?? []) {
         const key = uniqueKey(row, constraint);
         if (key === undefined) continue;
         for (const other of rows().values()) {
-          if (other.id !== row.id && uniqueKey(other, constraint) === key) {
-            return new UniqueViolation({ collection: def.name, constraint: constraint.name });
+          if (
+            other.id !== row.id &&
+            (constraint.scope !== "workspace" || other.workspaceId === row.workspaceId) &&
+            uniqueKey(checkedRow(other), constraint) === key
+          ) {
+            return UniqueViolation.make({ collection: def.name, constraint: constraint.name });
           }
         }
       }
@@ -298,7 +342,7 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
         write("insert", (): Effect.Effect<A, UniqueViolation> => {
           if (rows().has(row.id)) {
             return Effect.fail(
-              new UniqueViolation({ collection: def.name, constraint: "primary" }),
+              UniqueViolation.make({ collection: def.name, constraint: "primary" }),
             );
           }
           const stored: A = { ...row, revision: 1 };
@@ -324,7 +368,8 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
           // `number_reservations_document_fk` (no ON DELETE): a reserved number keeps its row.
           if (
             def.name === DOCUMENTS_TABLE &&
-            [...state.reservations.values()].some(
+            EffectArray.some(
+              [...state.reservations.values()],
               (r) => r.workspaceId === workspaceId && r.documentId === id,
             )
           ) {
@@ -337,34 +382,42 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
         read(() =>
           Effect.succeed(
             runQuery(
-              [...rows().values()].filter((r) => r.workspaceId === workspaceId),
+              EffectArray.map(
+                EffectArray.filter(rows().values(), (row) => row.workspaceId === workspaceId),
+                checkedRow,
+              ),
               query,
             ),
           ),
         ),
-      listGlobal: (query) => read(() => Effect.succeed(runQuery(rows().values(), query))),
+      listGlobal: (query) => read(() => Effect.succeed(runQuery(values(), query))),
       findUnique: (name, key, workspaceId) =>
         read(() => {
-          const constraint = def.unique?.find((c) => c.name === name);
-          if (constraint === undefined) return defect(`${def.name} has no unique "${name}"`);
+          const foundConstraint = EffectArray.findFirst(
+            def.unique ?? [],
+            (entry) => entry.name === name,
+          );
+          if (Option.isNone(foundConstraint)) return defect(`${def.name} has no unique "${name}"`);
+          const constraint = foundConstraint.value;
           if (constraint.scope === "workspace" && workspaceId === undefined) {
             return defect(`${def.name}.${name} needs a workspaceId`);
           }
-          const wanted = JSON.stringify([
+          const wanted = encodeTuple([
             constraint.scope === "workspace" ? workspaceId : "*",
-            ...(key as ReadonlyArray<Scalar>),
+            ...key,
           ]);
           for (const row of rows().values()) {
-            if (uniqueKey(row, constraint) === wanted) return Effect.succeed(Option.some(row));
+            if (constraint.scope === "workspace" && row.workspaceId !== workspaceId) continue;
+            const candidate = checkedRow(row);
+            if (uniqueKey(candidate, constraint) === wanted) return Effect.succeedSome(candidate);
           }
-          return Effect.succeed(Option.none());
+          return Effect.succeedNone;
         }),
     };
   };
 
-  const counterKey = (key: CounterKey) =>
-    JSON.stringify([key.workspaceId, key.seriesId, key.period]);
-  const logKey = (scope: RequestScope, key: string) => JSON.stringify([scopeKey(scope), key]);
+  const counterKey = (key: CounterKey) => encodeTuple([key.workspaceId, key.seriesId, key.period]);
+  const logKey = (scope: RequestScope, key: string) => encodeTuple([scopeKey(scope), key]);
 
   const store: CoreStoreShape = {
     transaction,
@@ -401,7 +454,7 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
     reservations: {
       tryReserve: (reservation) =>
         write("reservations.tryReserve", () => {
-          const k = JSON.stringify([reservation.workspaceId, reservation.kind, reservation.number]);
+          const k = encodeTuple([reservation.workspaceId, reservation.kind, reservation.number]);
           if (state.reservations.has(k)) return Effect.succeed(false);
           // `number_reservations_document_fk` (not deferrable): a free key for a document whose
           // row does not exist yet fails the statement, and Postgres aborts the transaction. A
@@ -449,19 +502,25 @@ export const makeMemoryStore: Effect.Effect<MemoryStore> = Effect.sync(() => {
     audit: {
       append: (workspaceId, entry) =>
         write("audit.append", () => {
-          state.audit.push({ workspaceId, json: JSON.stringify(entry) });
+          const encoded = encodeAudit(entry);
+          if (Result.isFailure(encoded)) return Effect.die(encoded.failure);
+          state.audit.push({ workspaceId, json: encoded.success });
           return Effect.void;
         }),
       history: (workspaceId, subject) =>
-        read(() =>
-          Effect.succeed(
-            state.audit
-              .filter((a) => a.workspaceId === workspaceId)
-              .map((a) => JSON.parse(a.json) as AuditEntry)
-              .filter((e) => e.subject.entity === subject.entity && e.subject.id === subject.id)
-              .sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)),
-          ),
-        ),
+        read(() => {
+          const entries: AuditEntry[] = [];
+          for (const row of state.audit) {
+            if (row.workspaceId !== workspaceId) continue;
+            const decoded = decodeAudit(row.json);
+            if (Result.isFailure(decoded)) return Effect.die(decoded.failure);
+            const entry = decoded.success;
+            if (entry.subject.entity === subject.entity && entry.subject.id === subject.id) {
+              entries.push(entry);
+            }
+          }
+          return Effect.succeed(entries.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0)));
+        }),
     },
   };
   return { store, tables: { collection } };

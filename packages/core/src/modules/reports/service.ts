@@ -1,14 +1,5 @@
-/**
- * `ReportsLive`: the domain `Reports` service (core-ports 4.9). Reports are read-only and not
- * audited, except `startExport` (one audit entry on subject `Export`). Every method authorizes
- * first (R1a), reads through `ReportsSource` inside one `CoreStore` transaction (a consistent
- * snapshot), and maps port failures to `Unavailable`.
- *
- * The domain tag states the errors these methods raise. One gap remains (board #340/#341):
- * `ReportView` is an opaque placeholder, so `ReportsImpl.run` returns the concrete
- * `ReportViewData` and `ReportsLive` casts that one method's success type at the layer boundary.
- */
 import type {
+  Caller,
   Conflict as ConflictError,
   CurrencyCode,
   DashboardView,
@@ -20,22 +11,39 @@ import type {
   Locale,
   NotFound,
   ReportQuery,
-  ReportView,
   RequestOptions,
   Unavailable,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import {
   Conflict,
-  type CurrentCaller,
+  ExportId as ExportIdSchema,
   ExportJobView as ExportJobViewSchema,
   Forbidden as ForbiddenError,
   Invalid,
   IsoDate,
   Reports,
+  ReportView,
 } from "@kvitbit/domain/contract";
 import { BlobStorage } from "@kvitbit/domain/ports";
-import { Clock, Effect, Layer, Option, Schema, Stream } from "effect";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+/**
+ * `ReportsLive`: the domain `Reports` service (core-ports 4.9). Reports are read-only and not
+ * audited, except `startExport` (one audit entry on subject `Export`). Every method authorizes
+ * first (R1a), reads through `ReportsSource` inside one `CoreStore` transaction (a consistent
+ * snapshot), and maps port failures to `Unavailable`.
+ *
+ * The domain tag states the errors these methods raise. One gap remains (board #340/#341):
+ * `ReportView` is an opaque placeholder, so `ReportsImpl.run` returns the concrete
+ * `ReportViewData` and `ReportsLive` casts that one method's success type at the layer boundary.
+ */
+import * as EffectString from "effect/String";
 import { daysBetween, pragueDate } from "../../engines/calendar";
 import { Fx } from "../../engines/fx";
 import { authorizeInWorkspace } from "../../policy/Policy";
@@ -64,17 +72,17 @@ import type { ReportViewData } from "./views";
 /** Longest accepted period (about ten years), so a request cannot ask for unbounded work. */
 export const MAX_PERIOD_DAYS = 3660;
 
-const GROUPINGS: { readonly [K in ReportQuery["report"]]: ReadonlyArray<string> } = {
+const GROUPINGS = {
   revenue: ["month", "contact", "currency"],
   expenses: ["month", "contact", "currency", "category"],
   profit: ["month"],
   cashflow: ["month"],
   vat_summary: ["month"],
   receivables: [],
-};
+} satisfies { readonly [K in ReportQuery["report"]]: ReadonlyArray<string> };
 
 const malformed = (path: ReadonlyArray<string>, reason: string) =>
-  new Invalid({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
+  Invalid.make({ issues: [{ path: [...path], code: "request.malformed", params: { reason } }] });
 
 const isIsoDate = Schema.is(IsoDate);
 
@@ -91,47 +99,53 @@ export const validatePeriod = (period: {
   return Effect.succeed({ from: period.from, to: period.to });
 };
 
-const validateQuery = (q: ReportQuery) =>
-  Effect.gen(function* () {
-    const period = yield* validatePeriod(q.period);
-    const allowed = GROUPINGS[q.report];
-    if (allowed === undefined) return yield* malformed(["report"], "unknown_report");
-    if (q.groupBy !== undefined && !allowed.includes(q.groupBy)) {
-      return yield* malformed(["groupBy"], "not_supported");
-    }
-    return { report: q.report, period, groupBy: q.groupBy };
-  });
+const validateQuery = Effect.fn("validateQuery")(function* (q: ReportQuery) {
+  const period = yield* validatePeriod(q.period);
+  const allowed: ReadonlyArray<string> | undefined = GROUPINGS[q.report];
+  if (allowed === undefined) return yield* malformed(["report"], "unknown_report");
+  if (q.groupBy !== undefined && !allowed.includes(q.groupBy)) {
+    return yield* malformed(["groupBy"], "not_supported");
+  }
+  return { report: q.report, period, groupBy: q.groupBy };
+});
 
 /** The method surface with honest error types (see the module comment). */
 export interface ReportsImpl {
   readonly run: (
+    caller: Caller,
     q: ReportQuery,
-  ) => Effect.Effect<ReportViewData, Invalid | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<ReportViewData, Invalid | Forbidden | Unavailable>;
   readonly export: (
+    caller: Caller,
     q: ReportQuery,
     format: "csv" | "pdf",
-  ) => Effect.Effect<FileDownload, Invalid | Forbidden | Unavailable, CurrentCaller>;
-  readonly dashboard: (period: {
-    readonly from: IsoDate;
-    readonly to: IsoDate;
-  }) => Effect.Effect<DashboardView, Invalid | Forbidden | Unavailable, CurrentCaller>;
-  readonly fxRate: (q: {
-    readonly currency: CurrencyCode;
-    readonly on: IsoDate;
-  }) => Effect.Effect<FxRateView, Invalid | Unavailable | Forbidden, CurrentCaller>;
+  ) => Effect.Effect<FileDownload, Invalid | Forbidden | Unavailable>;
+  readonly dashboard: (
+    caller: Caller,
+    period: {
+      readonly from: IsoDate;
+      readonly to: IsoDate;
+    },
+  ) => Effect.Effect<DashboardView, Invalid | Forbidden | Unavailable>;
+  readonly fxRate: (
+    caller: Caller,
+    q: {
+      readonly currency: CurrencyCode;
+      readonly on: IsoDate;
+    },
+  ) => Effect.Effect<FxRateView, Invalid | Unavailable | Forbidden>;
   readonly startExport: (
+    caller: Caller,
     opts?: RequestOptions,
-  ) => Effect.Effect<ExportJobView, Forbidden | ConflictError | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<ExportJobView, Forbidden | ConflictError | Unavailable>;
   readonly getExport: (
+    caller: Caller,
     id: ExportId,
-  ) => Effect.Effect<ExportJobView, NotFound | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<ExportJobView, NotFound | Forbidden | Unavailable>;
   readonly exportFile: (
+    caller: Caller,
     id: ExportId,
-  ) => Effect.Effect<
-    FileDownload,
-    NotFound | ConflictError | Unavailable | Forbidden,
-    CurrentCaller
-  >;
+  ) => Effect.Effect<FileDownload, NotFound | ConflictError | Unavailable | Forbidden>;
 }
 
 const localeOf = (caller: { readonly _tag: string; readonly locale?: Locale }): Locale =>
@@ -162,12 +176,16 @@ export const makeReports = Effect.gen(function* () {
           switch (q.report) {
             case "revenue": {
               const docs = yield* source.documents(workspaceId, { ...period, field: "issuedOn" });
-              return Compute.revenue(docs, period, (q.groupBy ?? "month") as "month");
+              return Compute.revenue(
+                docs,
+                period,
+                q.groupBy === "contact" || q.groupBy === "currency" ? q.groupBy : "month",
+              );
             }
             case "expenses": {
               const rows = yield* source.expenses(workspaceId, { ...period, field: "issuedOn" });
               const incomplete = yield* source.incompleteExpenses(workspaceId);
-              return Compute.expenses(rows, period, (q.groupBy ?? "month") as "month", incomplete);
+              return Compute.expenses(rows, period, q.groupBy ?? "month", incomplete);
             }
             case "profit": {
               const docs = yield* source.documents(workspaceId, { ...period, field: "issuedOn" });
@@ -175,14 +193,15 @@ export const makeReports = Effect.gen(function* () {
               const regimes = yield* source.taxRegimes(workspaceId);
               return Compute.profit(docs, rows, regimes, period);
             }
-            case "cashflow":
-              return Compute.cashflow(yield* source.payments(workspaceId, period), period);
-            case "receivables":
-              return Compute.receivables(
-                yield* source.openReceivables(workspaceId),
-                period,
-                yield* today,
-              );
+            case "cashflow": {
+              const value_1 = yield* source.payments(workspaceId, period);
+              return Compute.cashflow(value_1, period);
+            }
+            case "receivables": {
+              const value_1 = yield* source.openReceivables(workspaceId);
+              const today_1 = yield* today;
+              return Compute.receivables(value_1, period, today_1);
+            }
             case "vat_summary": {
               const docs = yield* source.documents(workspaceId, { ...period, field: "taxPoint" });
               const rows = yield* source.expenses(workspaceId, { ...period, field: "taxPoint" });
@@ -195,183 +214,181 @@ export const makeReports = Effect.gen(function* () {
     );
 
   /** A live export row of this Workspace; expired ones are gone (NotFound), as after Housekeeping. */
-  const liveExport = (workspaceId: WorkspaceId, id: ExportId) =>
-    Effect.gen(function* () {
-      const row = yield* store.transaction(repo.get(workspaceId, id));
-      const now = new Date(yield* Clock.currentTimeMillis).toISOString();
-      if (row.expiresAt !== null && row.expiresAt <= now) return yield* notFoundExport(id);
-      return row;
-    });
+  const liveExport = Effect.fn("liveExport")(function* (workspaceId: WorkspaceId, id: ExportId) {
+    const row = yield* store.transaction(repo.get(workspaceId, id));
+    const currentTimeMillis_1 = yield* Clock.currentTimeMillis;
+    const now = DateTime.formatIso(DateTime.makeUnsafe(currentTimeMillis_1));
+    if (row.expiresAt !== null && row.expiresAt <= now) return yield* notFoundExport(id);
+    return row;
+  });
 
   const impl: ReportsImpl = {
-    run: (q) =>
-      Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("report.run");
-        return yield* build(workspaceId, yield* validateQuery(q));
-      }),
+    run: Effect.fn("run")(function* (caller: Caller, q) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "report.run");
+      const value_1 = yield* validateQuery(q);
+      return yield* build(workspaceId, value_1);
+    }),
 
-    export: (q, format) =>
-      Effect.gen(function* () {
-        const { caller, workspaceId } = yield* authorizeInWorkspace("report.export");
-        const query = yield* validateQuery(q);
-        const view = yield* build(workspaceId, query);
-        const base = `${query.report}_${query.period.from}_${query.period.to}`;
-        const locale = localeOf(caller);
-        if (format === "csv") {
-          return {
-            filename: `${base}.csv`,
-            contentType: CSV_CONTENT_TYPE,
-            bytes: csvStream(reportTable(view), locale),
-          };
-        }
-        const bytes = yield* renderer.render({ workspaceId, locale, view });
+    export: Effect.fn("export")(function* (caller: Caller, q, format) {
+      const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+        caller,
+        "report.export",
+      );
+      const query = yield* validateQuery(q);
+      const view = yield* build(workspaceId, query);
+      const base = `${query.report}_${query.period.from}_${query.period.to}`;
+      const locale = localeOf(workspaceCaller);
+      if (format === "csv") {
         return {
-          filename: `${base}.pdf`,
-          contentType: "application/pdf",
-          bytes: Stream.succeed(bytes),
+          filename: `${base}.csv`,
+          contentType: CSV_CONTENT_TYPE,
+          bytes: csvStream(reportTable(view), locale),
         };
-      }),
+      }
+      const bytes = yield* renderer.render({ workspaceId, locale, view });
+      return {
+        filename: `${base}.pdf`,
+        contentType: "application/pdf",
+        bytes: Stream.succeed(bytes),
+      };
+    }),
 
-    dashboard: (period) =>
-      Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("report.run");
-        const valid = yield* validatePeriod(period);
-        const day = yield* today;
-        const window = Compute.twelveMonthsEnding(valid.to);
-        if (window === null) return yield* malformed(["period", "to"], "too_early");
-        return yield* orUnavailable(
-          store.transaction(
-            Effect.gen(function* () {
-              return Compute.dashboard({
-                period: valid,
-                today: day,
-                issued: yield* source.documents(workspaceId, { ...valid, field: "issuedOn" }),
-                open: yield* source.openReceivables(workspaceId),
-                expenses: yield* source.expenses(workspaceId, { ...valid, field: "issuedOn" }),
-                regimes: yield* source.taxRegimes(workspaceId),
-                incompleteExpenses: yield* source.incompleteExpenses(workspaceId),
-                payments: yield* source.payments(workspaceId, { from: window.from, to: valid.to }),
-                months: window.months,
-              });
-            }),
-          ),
-        );
-      }),
-
-    fxRate: (q) =>
-      Effect.gen(function* () {
-        yield* authorizeInWorkspace("report.run");
-        if (!isIsoDate(q.on)) return yield* malformed(["on"], "date_invalid");
-        const fixing = yield* orUnavailable(fx.fixing(q.on));
-        const rate = yield* Effect.fromResult(Fx.fromFixing(fixing, q.currency));
-        return {
-          currency: q.currency,
-          rate: rate.rate,
-          quantity: rate.quantity,
-          fixingDate: fixing.fixingDate,
-          source: "cnb" as const,
-        };
-      }),
-
-    startExport: (opts) =>
-      Effect.gen(function* () {
-        const { caller, workspaceId } = yield* authorizeInWorkspace("report.export");
-        // R5: report.export is a read action, but starting a job writes; the DataExport job
-        // itself only reads, so it can never start (or restart) an export.
-        if (caller._tag === "System" && caller.job._tag === "DataExport") {
-          return yield* new ForbiddenError({ action: "report.export" });
-        }
-        const attempt = (
-          round: number,
-        ): Effect.Effect<
-          ExportJobView,
-          StoreUnavailable,
-          CoreStore | IdGenerator | CurrentCaller
-        > =>
+    dashboard: Effect.fn("dashboard")(function* (caller: Caller, period) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "report.run");
+      const valid = yield* validatePeriod(period);
+      const day = yield* today;
+      const window = Compute.twelveMonthsEnding(valid.to);
+      if (window === null) return yield* malformed(["period", "to"], "too_early");
+      return yield* orUnavailable(
+        store.transaction(
           Effect.gen(function* () {
-            const running = yield* repo.findRunning(workspaceId);
-            if (Option.isSome(running)) return toExportJobView(running.value);
-            const id = yield* newId<ExportId>();
-            const row: ExportRow = {
-              id,
-              workspaceId,
-              revision: 1,
-              status: "running",
-              createdAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
-              readyAt: null,
-              expiresAt: null,
-              sizeBytes: null,
-            };
-            // A savepoint, so a concurrent start's clash on the one-running index leaves the
-            // outer transaction usable and the caller gets the job that won. Any other unique
-            // violation is a bug.
-            const inserted = yield* store.transaction(repo.insert(row)).pipe(
-              Effect.map(Option.some),
-              Effect.catchTag("UniqueViolation", (e) =>
-                e.constraint === ONE_RUNNING_EXPORT
-                  ? Effect.succeed(Option.none<ExportRow>())
-                  : Effect.die(e),
-              ),
-            );
-            if (Option.isNone(inserted)) {
-              const winner = yield* repo.findRunning(workspaceId);
-              if (Option.isSome(winner)) return toExportJobView(winner.value);
-              // The winner already finished: start afresh (bounded; each round needs a new race).
-              if (round >= 3) {
-                // Contention that outlives every retry: a retryable database failure
-                // (Unavailable{database}), never a defect.
-                return yield* new StoreUnavailable({ cause: "export start contention" });
-              }
-              return yield* attempt(round + 1);
-            }
-            yield* appendAudit({
-              workspaceId,
-              subject: { entity: "Export", id },
-              action: "report.export",
-              revision: inserted.value.revision,
+            return Compute.dashboard({
+              period: valid,
+              today: day,
+              issued: yield* source.documents(workspaceId, { ...valid, field: "issuedOn" }),
+              open: yield* source.openReceivables(workspaceId),
+              expenses: yield* source.expenses(workspaceId, { ...valid, field: "issuedOn" }),
+              regimes: yield* source.taxRegimes(workspaceId),
+              incompleteExpenses: yield* source.incompleteExpenses(workspaceId),
+              payments: yield* source.payments(workspaceId, { from: window.from, to: valid.to }),
+              months: window.months,
             });
-            yield* store.afterCommit(workflow.start({ workspaceId, exportId: id }));
-            return toExportJobView(inserted.value);
+          }),
+        ),
+      );
+    }),
+
+    fxRate: Effect.fn("fxRate")(function* (caller: Caller, q) {
+      yield* authorizeInWorkspace(caller, "report.run");
+      if (!isIsoDate(q.on)) return yield* malformed(["on"], "date_invalid");
+      const fixing = yield* orUnavailable(fx.fixing(q.on));
+      const rate = yield* Effect.fromResult(Fx.fromFixing(fixing, q.currency));
+      return {
+        currency: q.currency,
+        rate: rate.rate,
+        quantity: rate.quantity,
+        fixingDate: fixing.fixingDate,
+        source: "cnb" as const,
+      };
+    }),
+
+    startExport: Effect.fn("startExport")(function* (caller: Caller, opts) {
+      const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+        caller,
+        "report.export",
+      );
+      // R5: report.export is a read action, but starting a job writes; the DataExport job
+      // itself only reads, so it can never start (or restart) an export.
+      if (workspaceCaller._tag === "System" && workspaceCaller.job._tag === "DataExport") {
+        return yield* ForbiddenError.make({ action: "report.export" });
+      }
+      const attempt = (
+        round: number,
+      ): Effect.Effect<ExportJobView, StoreUnavailable, CoreStore | IdGenerator> =>
+        Effect.gen(function* () {
+          const running = yield* repo.findRunning(workspaceId);
+          if (Option.isSome(running)) return toExportJobView(running.value);
+          const id = yield* newId(ExportIdSchema.make);
+          const createdAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
+          const row: ExportRow = {
+            id,
+            workspaceId,
+            revision: 1,
+            status: "running",
+            createdAt,
+            readyAt: null,
+            expiresAt: null,
+            sizeBytes: null,
+          };
+          // A savepoint, so a concurrent start's clash on the one-running index leaves the
+          // outer transaction usable and the caller gets the job that won. Any other unique
+          // violation is a bug.
+          const inserted = yield* store.transaction(repo.insert(row)).pipe(
+            Effect.asSome,
+            Effect.catchTag("UniqueViolation", (e) =>
+              e.constraint === ONE_RUNNING_EXPORT
+                ? Effect.succeed(Option.none<ExportRow>())
+                : Effect.die(e),
+            ),
+          );
+          if (Option.isNone(inserted)) {
+            const winner = yield* repo.findRunning(workspaceId);
+            if (Option.isSome(winner)) return toExportJobView(winner.value);
+            // The winner already finished: start afresh (bounded; each round needs a new race).
+            if (round >= 3) {
+              // Contention that outlives every retry: a retryable database failure
+              // (Unavailable{database}), never a defect.
+              return yield* StoreUnavailable.make({ cause: "export start contention" });
+            }
+            return yield* attempt(round + 1);
+          }
+          yield* appendAudit(workspaceCaller, {
+            workspaceId,
+            subject: { entity: "Export", id },
+            action: "report.export",
+            revision: inserted.value.revision,
           });
-        const body = attempt(1);
-        return yield* orUnavailable(
-          withIdempotency(
-            {
-              scope: { _tag: "Workspace", workspaceId },
-              key: opts?.requestKey,
-              method: "Reports.startExport",
-              payload: { schema: StartExportPayload, value: {} },
-              result: ExportJobViewSchema as unknown as Schema.Codec<ExportJobView, unknown>,
-            },
-            body,
-          ),
-        ).pipe(Effect.provideService(CoreStore, store), Effect.provideService(IdGenerator, ids));
-      }),
+          yield* store.afterCommit(workflow.start({ workspaceId, exportId: id }));
+          return toExportJobView(inserted.value);
+        });
+      const body = attempt(1);
+      return yield* orUnavailable(
+        withIdempotency(
+          {
+            scope: { _tag: "Workspace", workspaceId },
+            key: opts?.requestKey,
+            method: "Reports.startExport",
+            payload: { schema: StartExportPayload, value: {} },
+            result: ExportJobViewSchema,
+          },
+          body,
+        ),
+      ).pipe(Effect.provideService(CoreStore, store), Effect.provideService(IdGenerator, ids));
+    }),
 
-    getExport: (id) =>
-      Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("report.export");
-        return toExportJobView(yield* orUnavailable(liveExport(workspaceId, id)));
-      }),
+    getExport: Effect.fn("getExport")(function* (caller: Caller, id) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "report.export");
+      const value_1 = yield* orUnavailable(liveExport(workspaceId, id));
+      return toExportJobView(value_1);
+    }),
 
-    exportFile: (id) =>
-      Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("report.export");
-        const row = yield* orUnavailable(liveExport(workspaceId, id));
-        if (row.status !== "ready") {
-          return yield* new Conflict({ reason: "illegal_transition", detail: "export.not_ready" });
-        }
-        const bytes = yield* orUnavailable(
-          blobs
-            .get(exportBlobKey(workspaceId, id))
-            .pipe(Effect.catchTag("BlobMissing", () => Effect.fail(notFoundExport(id)))),
-        );
-        return {
-          filename: `kvitbit-export-${row.createdAt.slice(0, 10)}.zip`,
-          contentType: "application/zip",
-          bytes,
-        };
-      }),
+    exportFile: Effect.fn("exportFile")(function* (caller: Caller, id) {
+      const { workspaceId } = yield* authorizeInWorkspace(caller, "report.export");
+      const row = yield* orUnavailable(liveExport(workspaceId, id));
+      if (row.status !== "ready") {
+        return yield* Conflict.make({ reason: "illegal_transition", detail: "export.not_ready" });
+      }
+      const bytes = yield* orUnavailable(
+        blobs
+          .get(exportBlobKey(workspaceId, id))
+          .pipe(Effect.catchTag("BlobMissing", () => Effect.fail(notFoundExport(id)))),
+      );
+      return {
+        filename: `kvitbit-export-${EffectString.slice(0, 10)(row.createdAt)}.zip`,
+        contentType: "application/zip",
+        bytes,
+      };
+    }),
   };
   return impl;
 });
@@ -397,7 +414,9 @@ export const ReportsLive: Layer.Layer<
   Effect.map(makeReports, (impl) =>
     Reports.of({
       ...impl,
-      run: (q) => Effect.map(impl.run(q), (view) => view as unknown as ReportView),
+      run: Effect.fn("Reports.run")((caller, q) =>
+        Effect.map(impl.run(caller, q), (view) => ReportView.make(view)),
+      ),
     }),
   ),
 );

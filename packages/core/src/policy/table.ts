@@ -43,7 +43,7 @@ const held = (
   level: ScopeLevel,
 ): ActionRule => ({ area, level, roles: NONE, holder });
 
-export const POLICY: { readonly [A in Action]: ActionRule } = {
+export const POLICY = {
   // `*.read` and the other read-only actions: every Member role and System.
   "workspace.read": read("workspace"),
   "member.read": read("members"),
@@ -107,4 +107,4 @@ export const POLICY: { readonly [A in Action]: ActionRule } = {
   "share.logo": held("ShareLinkVisitor", "share", "read"),
   // InvitationHolder caller (own token only).
   "invitation.peek": held("InvitationHolder", "members", "read"),
-};
+} satisfies { readonly [A in Action]: ActionRule };

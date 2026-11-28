@@ -1,11 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import type { Action, Caller, Role, Scope, ScopeArea } from "@kvitbit/domain/contract";
-import { Action as ActionSchema, Forbidden, SCOPE_AREAS } from "@kvitbit/domain/contract";
-import { Effect, Exit } from "effect";
+import {
+  Action as ActionSchema,
+  DocumentId,
+  ExportId,
+  Forbidden,
+  SCOPE_AREAS,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Order from "effect/Order";
 import { actionScope, can } from "../src/contract";
 import { authorize, authorizeInWorkspace } from "../src/policy";
 import { account, invitationHolder, member, shareVisitor, system } from "./helpers/callers";
-import { runWithCaller } from "./helpers/run";
 
 const ACTIONS: ReadonlyArray<Action> = ActionSchema.literals;
 const ROLES: ReadonlyArray<Role> = ["owner", "admin", "member", "accountant"];
@@ -85,18 +93,24 @@ const GROUPS: ReadonlyArray<{
 ];
 
 const COLUMNS: ReadonlyArray<readonly [Column, Caller]> = [
-  ...ROLES.map((role) => [role, member(role)] as const),
+  ...EffectArray.map(ROLES, (role) => [role, member(role)] as const),
   ["Account", account()],
   ["ShareLinkVisitor", shareVisitor()],
   ["InvitationHolder", invitationHolder()],
-  ["System", system({ _tag: "PaymentReminders", documentId: "d" as never })],
+  [
+    "System",
+    system({
+      _tag: "PaymentReminders",
+      documentId: DocumentId.make("01900000-0000-7000-8000-00000000000d"),
+    }),
+  ],
 ];
 
 describe("can: table 2.3", () => {
   test("the groups cover every Action exactly once", () => {
-    const listed = GROUPS.flatMap((g) => g.actions);
+    const listed = EffectArray.flatMap(GROUPS, (g) => g.actions);
     expect(new Set(listed).size).toBe(listed.length);
-    expect([...listed].sort()).toEqual([...ACTIONS].sort());
+    expect(EffectArray.sort(listed, Order.String)).toEqual(EffectArray.sort(ACTIONS, Order.String));
   });
 
   for (const group of GROUPS) {
@@ -155,7 +169,7 @@ describe("can: scopes (R1)", () => {
   });
 
   test("scoped callers never exceed the role table, for every role and scope set", () => {
-    const allScopes: ReadonlyArray<Scope> = SCOPE_AREAS.flatMap((a: ScopeArea) => [
+    const allScopes: ReadonlyArray<Scope> = EffectArray.flatMap(SCOPE_AREAS, (a: ScopeArea) => [
       `${a}:read` as const,
       `${a}:write` as const,
     ]);
@@ -166,25 +180,24 @@ describe("can: scopes (R1)", () => {
       return seed;
     };
     const subsets: Array<ReadonlyArray<Scope>> = [[], allScopes];
-    for (let i = 0; i < 200; i++) subsets.push(allScopes.filter(() => next() % 2 === 0));
+    for (let i = 0; i < 200; i++)
+      subsets.push(EffectArray.filter(allScopes, () => next() % 2 === 0));
     for (const role of ROLES) {
       for (const scopes of subsets) {
         const scoped = member(role, { scopes });
         for (const action of ACTIONS) {
-          if (can(scoped, action)) {
-            expect({ role, action, roleAllows: can(member(role), action) }).toEqual({
-              role,
-              action,
-              roleAllows: true,
-            });
-          }
+          const roleAllows = !can(scoped, action) || can(member(role), action);
+          expect({ role, action, roleAllows }).toEqual({ role, action, roleAllows: true });
         }
       }
     }
   });
 
   test("a token with every scope still cannot touch credentials (R1d)", () => {
-    const allScopes = SCOPE_AREAS.flatMap((a) => [`${a}:read` as const, `${a}:write` as const]);
+    const allScopes = EffectArray.flatMap(SCOPE_AREAS, (a) => [
+      `${a}:read` as const,
+      `${a}:write` as const,
+    ]);
     for (const action of SESSION_ONLY) {
       expect(can(member("owner", { scopes: allScopes }), action)).toBe(false);
       expect(can(member("owner"), action)).toBe(true);
@@ -267,55 +280,75 @@ describe("can: special rules", () => {
 
   test("the accountant holds no write outside leave and own grants", () => {
     const accountant = member("accountant");
-    const writes = ACTIONS.filter((a) => can(accountant, a) && actionScope(a).level === "write");
-    expect(writes.sort()).toEqual(["grant.create", "grant.revoke.own", "member.leave"]);
+    const writes = EffectArray.filter(
+      ACTIONS,
+      (a) => can(accountant, a) && actionScope(a).level === "write",
+    );
+    expect(EffectArray.sort(writes, Order.String)).toEqual([
+      "grant.create",
+      "grant.revoke.own",
+      "member.leave",
+    ]);
   });
 
   test("System writes only issue and send; DataExport only reads (R4, R5)", () => {
     const delivery = system();
-    const writes = ACTIONS.filter((a) => can(delivery, a) && actionScope(a).level === "write");
-    expect(writes.sort()).toEqual(["document.issue", "document.send"]);
-    const exporter = system({ _tag: "DataExport", exportId: "e" as never });
+    const writes = EffectArray.filter(
+      ACTIONS,
+      (a) => can(delivery, a) && actionScope(a).level === "write",
+    );
+    expect(EffectArray.sort(writes, Order.String)).toEqual(["document.issue", "document.send"]);
+    const exporter = system({
+      _tag: "DataExport",
+      exportId: ExportId.make("01900000-0000-7000-8000-00000000000e"),
+    });
     expect(can(exporter, "document.read")).toBe(true);
     expect(can(exporter, "document.issue")).toBe(false);
     expect(can(exporter, "document.send")).toBe(false);
   });
 
   test("a sealed System caller's job cannot be changed afterwards", () => {
-    const job = { _tag: "DataExport" as const, exportId: "e" as never };
+    const job = {
+      _tag: "DataExport" as const,
+      exportId: ExportId.make("01900000-0000-7000-8000-00000000000e"),
+    };
     const exporter = system(job);
-    (job as { _tag: string })._tag = "RecurringIssuance";
+    Object.assign(job, { _tag: "RecurringIssuance" });
     expect(() => {
-      (exporter.job as { _tag: string })._tag = "RecurringIssuance";
+      Object.assign(exporter.job, { _tag: "RecurringIssuance" });
     }).toThrow();
     expect(can(exporter, "document.issue")).toBe(false);
   });
 
   test("an unsealed System caller is denied everything", () => {
-    const forged = { ...system() } as Caller;
+    const caller = system();
+    const forged = { ...caller };
     for (const action of ACTIONS) expect(can(forged, action)).toBe(false);
   });
 });
 
 describe("Policy enforcement", () => {
   test("authorize fails with Forbidden{action}", async () => {
-    const exit = await runWithCaller(member("accountant"), authorize("contact.write"));
-    expect(exit).toEqual(Exit.fail(new Forbidden({ action: "contact.write" })));
+    const exit = await Effect.runPromiseExit(authorize(member("accountant"), "contact.write"));
+    expect(exit).toEqual(Exit.fail(Forbidden.make({ action: "contact.write" })));
   });
 
   test("authorizeInWorkspace returns the caller's Workspace", async () => {
     const caller = member("member");
-    const exit = await runWithCaller(caller, authorizeInWorkspace("contact.write"));
+    const exit = await Effect.runPromiseExit(authorizeInWorkspace(caller, "contact.write"));
     expect(exit).toEqual(Exit.succeed({ caller, workspaceId: caller.workspaceId }));
   });
 
   test("authorizeInWorkspace rejects non-Workspace callers", async () => {
-    const exit = await runWithCaller(account(), authorizeInWorkspace("workspace.create"));
+    const exit = await Effect.runPromiseExit(authorizeInWorkspace(account(), "workspace.create"));
     expect(Exit.isFailure(exit)).toBe(true);
   });
 
   test("authorize passes an allowed caller through", async () => {
-    const exit = await runWithCaller(account(), Effect.asVoid(authorize("workspace.create")));
+    const exit = await authorize(account(), "workspace.create").pipe(
+      Effect.asVoid,
+      Effect.runPromiseExit,
+    );
     expect(Exit.isSuccess(exit)).toBe(true);
   });
 });

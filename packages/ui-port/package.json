@@ -14,7 +14,7 @@
   },
   "scripts": {
     "lint": "biome check --error-on-warnings .",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "effect-tsgo tsc -p tsconfig.json",
     "test": "bun test --pass-with-no-tests",
     "test:suite": ":",
     "test:api": "bun test test/api",
@@ -25,7 +25,6 @@
   },
   "dependencies": {
     "@kvitbit/api-contract": "workspace:*",
-    "@kvitbit/brand": "workspace:*",
     "@kvitbit/domain": "workspace:*",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",

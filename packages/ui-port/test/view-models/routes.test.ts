@@ -1,17 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as SchemaAST from "effect/SchemaAST";
+import * as Str from "effect/String";
+
 import {
   activeSection,
   matchShortcut,
   Route,
   type RouteBase,
   Routes,
-  type RouteTag,
   sectionRoute,
   switchWorkspace,
 } from "../../src/view-models";
 
-const decode = Schema.decodeUnknownSync(Route);
+const decode = Fn.flow(Schema.decodeUnknownEffect(Route), Effect.runSync);
 const ID = "0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a6b";
 const ID2 = "0193a1b2-c3d4-7e5f-8a6b-1c2d3e4f5a6c";
 
@@ -39,62 +46,76 @@ const SAMPLES: ReadonlyArray<Route> = [
   { _tag: "Onboarding" },
   { _tag: "Onboarding", step: 2 },
   { _tag: "Account", tab: "appearance" },
-  ...[
-    { _tag: "Share", token: "v1.aGVsbG8" },
-    { _tag: "Dashboard", ws: "acme" },
-    { _tag: "Documents", ws: "acme", query: {} },
-    {
-      _tag: "Documents",
-      ws: "acme",
-      query: { settlement: "partially_paid", overdue: true, from: "2026-01-01", to: "2026-03-31" },
-    },
-    {
-      _tag: "Documents",
-      ws: "acme",
-      query: { text: "Nová faktura & co", status: "issued", kind: "proforma", contact: ID },
-    },
-    { _tag: "DocumentNew", ws: "acme", kind: "invoice" },
-    { _tag: "DocumentNew", ws: "acme", kind: "proforma", from: { _tag: "Contact", id: ID } },
-    { _tag: "DocumentNew", ws: "acme", kind: "invoice", from: { _tag: "Template", id: ID } },
-    { _tag: "DocumentNew", ws: "acme", kind: "invoice", from: { _tag: "Duplicate", id: ID } },
-    { _tag: "DocumentEdit", ws: "acme", id: ID },
-    { _tag: "Document", ws: "acme", id: ID, tab: "preview" },
-    { _tag: "Document", ws: "acme", id: ID, tab: "payments", dialog: "payment" },
-    { _tag: "Templates", ws: "acme" },
-    { _tag: "Template", ws: "acme", id: "new", tab: "template" },
-    { _tag: "Template", ws: "acme", id: ID, tab: "runs" },
-    { _tag: "Expenses", ws: "acme", query: {} },
-    { _tag: "Expenses", ws: "acme", query: { text: "fuel", incomplete: true } },
-    { _tag: "ExpenseCapture", ws: "acme" },
-    { _tag: "Expense", ws: "acme", id: "new", mode: "edit", attachment: ID, job: "job-1" },
-    { _tag: "Expense", ws: "acme", id: ID, mode: "view" },
-    { _tag: "Contacts", ws: "acme", query: { role: "supplier", archived: false } },
-    { _tag: "Contact", ws: "acme", id: "new", mode: "edit" },
-    { _tag: "Contact", ws: "acme", id: ID, mode: "view" },
-    { _tag: "PriceList", ws: "acme" },
-    { _tag: "PriceList", ws: "acme", text: "hodina" },
-    { _tag: "Reports", ws: "acme", report: "vat_summary", period: "2026-Q4" },
-    { _tag: "Reports", ws: "acme", report: "revenue", period: "2026-11" },
-    { _tag: "Settings", ws: "acme", section: "apiKeys" },
-    { _tag: "Settings", ws: "acme", section: "dangerZone" },
-    { _tag: "More", ws: "my-firm-2" },
-  ].map((r) => decode(r)),
+  ...Arr.map(
+    [
+      { _tag: "Share", token: "v1.aGVsbG8" },
+      { _tag: "Dashboard", ws: "acme" },
+      { _tag: "Documents", ws: "acme", query: {} },
+      {
+        _tag: "Documents",
+        ws: "acme",
+        query: {
+          settlement: "partially_paid",
+          overdue: true,
+          from: "2026-01-01",
+          to: "2026-03-31",
+        },
+      },
+      {
+        _tag: "Documents",
+        ws: "acme",
+        query: { text: "Nová faktura & co", status: "issued", kind: "proforma", contact: ID },
+      },
+      { _tag: "DocumentNew", ws: "acme", kind: "invoice" },
+      { _tag: "DocumentNew", ws: "acme", kind: "proforma", from: { _tag: "Contact", id: ID } },
+      { _tag: "DocumentNew", ws: "acme", kind: "invoice", from: { _tag: "Template", id: ID } },
+      { _tag: "DocumentNew", ws: "acme", kind: "invoice", from: { _tag: "Duplicate", id: ID } },
+      { _tag: "DocumentEdit", ws: "acme", id: ID },
+      { _tag: "Document", ws: "acme", id: ID, tab: "preview" },
+      { _tag: "Document", ws: "acme", id: ID, tab: "payments", dialog: "payment" },
+      { _tag: "Templates", ws: "acme" },
+      { _tag: "Template", ws: "acme", id: "new", tab: "template" },
+      { _tag: "Template", ws: "acme", id: ID, tab: "runs" },
+      { _tag: "Expenses", ws: "acme", query: {} },
+      { _tag: "Expenses", ws: "acme", query: { text: "fuel", incomplete: true } },
+      { _tag: "ExpenseCapture", ws: "acme" },
+      { _tag: "Expense", ws: "acme", id: "new", mode: "edit", attachment: ID, job: "job-1" },
+      { _tag: "Expense", ws: "acme", id: ID, mode: "view" },
+      { _tag: "Contacts", ws: "acme", query: { role: "supplier", archived: false } },
+      { _tag: "Contact", ws: "acme", id: "new", mode: "edit" },
+      { _tag: "Contact", ws: "acme", id: ID, mode: "view" },
+      { _tag: "PriceList", ws: "acme" },
+      { _tag: "PriceList", ws: "acme", text: "hodina" },
+      { _tag: "Reports", ws: "acme", report: "vat_summary", period: "2026-Q4" },
+      { _tag: "Reports", ws: "acme", report: "revenue", period: "2026-11" },
+      { _tag: "Settings", ws: "acme", section: "apiKeys" },
+      { _tag: "Settings", ws: "acme", section: "dangerZone" },
+      { _tag: "More", ws: "my-firm-2" },
+    ],
+    (r) => decode(r),
+  ),
 ];
 
-const ALL_TAGS: ReadonlyArray<RouteTag> = Route.members.map(
-  (m) => (m.fields._tag.ast as unknown as { literal: RouteTag }).literal,
-);
+const ALL_TAGS = Arr.map(Route.members, (member) => {
+  const ast = member.fields._tag.ast;
+  if (!(SchemaAST.isLiteral(ast) && Predicate.isString(ast.literal))) {
+    throw new Error("expected literal route tag");
+  }
+  return ast.literal;
+});
 
 describe("Routes.toPath / fromPath", () => {
   test("samples cover every route", () => {
-    expect(new Set(SAMPLES.map((r) => r._tag))).toEqual(new Set(ALL_TAGS));
+    const used: ReadonlyArray<string> = Arr.map(SAMPLES, (route) => route._tag);
+    expect(new Set(used)).toEqual(new Set(ALL_TAGS));
   });
 
-  for (const base of ["/", "/app/"] as ReadonlyArray<RouteBase>) {
+  const bases: ReadonlyArray<RouteBase> = ["/", "/app/"];
+  for (const base of bases) {
     test(`round-trips every route and its canonical path (base ${base})`, () => {
       for (const route of SAMPLES) {
         const path = Routes.toPath(route, base);
-        expect(path.startsWith(base)).toBe(true);
+        expect(Fn.pipe(path, Str.startsWith(base))).toBe(true);
         const back = Routes.fromPath(path, base);
         expect(back).toEqual(Option.some(route));
         expect(Routes.toPath(Option.getOrThrow(back), base)).toBe(path);
@@ -103,7 +124,7 @@ describe("Routes.toPath / fromPath", () => {
   }
 
   test("canonical spellings", () => {
-    const p = (r: unknown) => Routes.toPath(decode(r), "/");
+    const p = (r: typeof Route.Encoded) => Routes.toPath(decode(r), "/");
     expect(p({ _tag: "Document", ws: "acme", id: ID, tab: "payments" })).toBe(
       `/w/acme/documents/${ID}?tab=payments`,
     );
@@ -134,11 +155,11 @@ describe("Routes.toPath / fromPath", () => {
       "/w",
       "/w/acme/nope",
       "/w/Acme_Corp", // invalid slug
-      `/w/acme/documents/not-a-uuid`,
+      "/w/acme/documents/not-a-uuid",
       `/w/acme/documents/${ID}/edit/extra`,
       `/w/acme/documents/${ID}?tab=bogus`,
       "/w/acme/documents/new/credit_note",
-      `/w/acme/documents?contact=${ID2.slice(0, 10)}`,
+      `/w/acme/documents?contact=${Fn.pipe(ID2, Str.slice(0, 10))}`,
       "/w/acme/reports/revenue", // period required
       "/w/acme/reports/revenue?period=2026-13",
       "/w/acme/settings/apiKeys", // not the kebab spelling

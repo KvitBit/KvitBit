@@ -10,10 +10,17 @@ import {
   EmailSender,
   type OutboundEmail,
 } from "@kvitbit/domain/ports";
-import { Effect, Layer } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import nodemailer from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
-import { bareAddress, boundedToken, type EmailSenderService } from "./shared";
+import { bareAddress, boundedToken, type EmailSenderService, mailboxDomain } from "./shared";
 
 /** The nodemailer mail fields this sender sets. */
 export interface SmtpMail {
@@ -54,42 +61,49 @@ export interface SmtpConfig {
 
 export const SMTP_PROVIDER = "smtp";
 
+const headerNamePattern = /[^A-Za-z0-9-]/g;
+const headerNewlines = /[\r\n]+/g;
 const messageIdTokenPattern = /^[A-Za-z0-9._-]+$/;
 
 /** `<key@domain>`, the key hashed when it has characters a Message-ID cannot carry or is long. */
-export const smtpMessageId = (idempotencyKey: string, domain: string): string =>
-  `<${boundedToken(idempotencyKey, 128, messageIdTokenPattern)}@${domain}>`;
+export const smtpMessageId: {
+  (domain: string): (idempotencyKey: string) => string;
+  (idempotencyKey: string, domain: string): string;
+} = Fn.dual(
+  2,
+  (idempotencyKey: string, domain: string): string =>
+    `<${boundedToken({ maxLength: 128, allowed: messageIdTokenPattern })(idempotencyKey)}@${domain}>`,
+);
 
-const domainOf = (from: string): string => {
-  const address = bareAddress(from);
-  return address.slice(address.lastIndexOf("@") + 1) || "localhost";
-};
+const domainOf = (from: string): string => mailboxDomain(bareAddress(from)) || "localhost";
 
-export const smtpMail = (
-  message: OutboundEmail,
-  config: SmtpConfig,
-  idempotencyKey: string,
-): SmtpMail => ({
-  from: config.from,
-  to: message.to,
-  ...(message.cc !== undefined && message.cc.length > 0 && { cc: message.cc }),
-  replyTo: message.replyTo,
-  subject: message.subject,
-  html: message.html,
-  text: message.text,
-  messageId: smtpMessageId(idempotencyKey, config.messageIdDomain ?? domainOf(config.from)),
-  attachments: message.attachments.map((attachment) => ({
-    filename: attachment.filename,
-    contentType: attachment.contentType,
-    content: Buffer.from(attachment.bytes),
-  })),
-  headers: Object.fromEntries(
-    Object.entries(message.tags).map(([name, value]) => [
-      `X-Kvitbit-Tag-${name.replace(/[^A-Za-z0-9-]/g, "-")}`,
-      value.replace(/[\r\n]+/g, " "),
-    ]),
-  ),
-});
+export const smtpMail: {
+  (config: SmtpConfig, idempotencyKey: string): (message: OutboundEmail) => SmtpMail;
+  (message: OutboundEmail, config: SmtpConfig, idempotencyKey: string): SmtpMail;
+} = Fn.dual(
+  3,
+  (message: OutboundEmail, config: SmtpConfig, idempotencyKey: string): SmtpMail => ({
+    from: config.from,
+    to: message.to,
+    ...(message.cc !== undefined && message.cc.length > 0 && { cc: message.cc }),
+    replyTo: message.replyTo,
+    subject: message.subject,
+    html: message.html,
+    text: message.text,
+    messageId: smtpMessageId(idempotencyKey, config.messageIdDomain ?? domainOf(config.from)),
+    attachments: Arr.map(message.attachments, (attachment) => ({
+      filename: attachment.filename,
+      contentType: attachment.contentType,
+      content: Buffer.from(attachment.bytes),
+    })),
+    headers: Rec.fromEntries(
+      Arr.map(Rec.toEntries(message.tags), ([name, value]) => [
+        `X-Kvitbit-Tag-${Str.replace(headerNamePattern, "-")(name)}`,
+        Str.replace(headerNewlines, " ")(value),
+      ]),
+    ),
+  }),
+);
 
 type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
 
@@ -149,10 +163,18 @@ const unconnectedCodes = new Set([
   "ERR_SSL_WRONG_VERSION_NUMBER",
 ]);
 
-const field = (error: unknown, name: string): unknown =>
-  typeof error === "object" && error !== null && name in error
-    ? (error as Record<string, unknown>)[name]
-    : undefined;
+// Keep the diagnostic values as supplied by nodemailer. The classifier checks each value it uses.
+const smtpErrorFields = Schema.Struct({
+  code: Schema.optional(Schema.Unknown),
+  originalCode: Schema.optional(Schema.Unknown),
+  command: Schema.optional(Schema.Unknown),
+  responseCode: Schema.optional(Schema.Unknown),
+  response: Schema.optional(Schema.Unknown),
+  timeoutType: Schema.optional(Schema.Unknown),
+});
+const decodeSmtpError = Schema.decodeUnknownOption(smtpErrorFields);
+const isString = Schema.is(Schema.String);
+const isNumber = Schema.is(Schema.Finite);
 
 /** Commands whose 5xx reply refuses this message rather than the session. */
 const messageStageCommand = /^(MAIL FROM|RCPT TO|DATA|BDAT)\b/i;
@@ -172,81 +194,78 @@ const messageStageCommand = /^(MAIL FROM|RCPT TO|DATA|BDAT)\b/i;
  *   unrecognised failure. nodemailer reports every timeout with command CONN, so a socket
  *   timeout before DATA cannot be told apart and is treated as unknown too.
  */
-export const classifySmtpError = (error: unknown): SendError => {
-  const cause = smtpCause(error);
-  const code = field(error, "code");
-  const command = field(error, "command");
-  const responseCode = field(error, "responseCode");
-  if (typeof responseCode === "number" && responseCode >= 500 && responseCode < 600) {
+export const classifySmtpError = Fn.flow(decodeSmtpError, (decoded): SendError => {
+  const fields = Option.getOrElse(decoded, () => smtpErrorFields.make({}));
+  const { code, originalCode, command, responseCode, response, timeoutType } = fields;
+  const cause = Rec.filter(
+    { code, originalCode, command, responseCode, response, timeoutType },
+    (value) => value !== undefined && value !== false,
+  );
+  if (isNumber(responseCode) && responseCode >= 500 && responseCode < 600) {
     const messageStage =
       code === "EENVELOPE" ||
       code === "EMESSAGE" ||
-      (typeof command === "string" && messageStageCommand.test(command));
+      (isString(command) && messageStageCommand.test(command));
     return messageStage && responseCode !== 530 && code !== "EAUTH"
-      ? new EmailRejected({ cause })
-      : new EmailNotAccepted({ cause });
+      ? EmailRejected.make({ cause })
+      : EmailNotAccepted.make({ cause });
   }
-  if (typeof responseCode === "number" && responseCode >= 400 && responseCode < 500) {
-    return new EmailNotAccepted({ cause });
+  if (isNumber(responseCode) && responseCode >= 400 && responseCode < 500) {
+    return EmailNotAccepted.make({ cause });
   }
   if (code === "ETIMEDOUT") {
-    const timeoutType = field(error, "timeoutType");
-    return typeof timeoutType === "string" && setupTimeouts.has(timeoutType)
-      ? new EmailNotAccepted({ cause })
-      : new EmailOutcomeUnknown({ cause });
+    return isString(timeoutType) && setupTimeouts.has(timeoutType)
+      ? EmailNotAccepted.make({ cause })
+      : EmailOutcomeUnknown.make({ cause });
   }
-  if (typeof code === "string" && setupCodes.has(code)) return new EmailNotAccepted({ cause });
-  const originalCode = field(error, "originalCode") ?? code;
-  if (typeof originalCode === "string" && unconnectedCodes.has(originalCode)) {
-    return new EmailNotAccepted({ cause });
+  if (isString(code) && setupCodes.has(code)) return EmailNotAccepted.make({ cause });
+  const transportCode = originalCode ?? code;
+  if (isString(transportCode) && unconnectedCodes.has(transportCode)) {
+    return EmailNotAccepted.make({ cause });
   }
   if ((code === "EENVELOPE" || code === "EMESSAGE") && responseCode === undefined) {
-    return new EmailRejected({ cause });
+    return EmailRejected.make({ cause });
   }
-  return new EmailOutcomeUnknown({ cause });
-};
-
-/** The diagnostic fields of a nodemailer error, without the message or credentials. */
-const smtpCause = (error: unknown) =>
-  Object.fromEntries(
-    ["code", "originalCode", "command", "responseCode", "response", "timeoutType"]
-      .map((name) => [name, field(error, name)] as const)
-      .filter(([, value]) => value !== undefined && value !== false),
-  );
+  return EmailOutcomeUnknown.make({ cause });
+});
 
 /**
  * nodemailer resolves when at least one recipient was accepted. Some recipients already have
  * the message, so a partial refusal is never retryable: it succeeds with a warning. A
  * resolution that lists no accepted recipient but some rejected ones is a rejection.
  */
-const checkRecipients = (info: SmtpSendInfo): Effect.Effect<SmtpSendInfo, EmailRejected> => {
+const checkRecipients = Effect.fnUntraced(function* (info: SmtpSendInfo) {
   const accepted = info.accepted?.length ?? 0;
   const rejected = info.rejected?.length ?? 0;
-  if (rejected === 0) return Effect.succeed(info);
+  if (rejected === 0) return info;
   if (accepted === 0) {
-    return Effect.fail(new EmailRejected({ cause: { rejectedRecipients: rejected } }));
+    return yield* EmailRejected.make({ cause: { rejectedRecipients: rejected } });
   }
-  return Effect.logWarning("SMTP server refused some recipients").pipe(
+  yield* Effect.logWarning("SMTP server refused some recipients").pipe(
     Effect.annotateLogs({ accepted, rejected, messageId: info.messageId }),
-    Effect.as(info),
   );
-};
+  return info;
+});
 
-export const makeSmtpEmailSender = (
-  transport: SmtpTransport,
-  config: SmtpConfig,
-): EmailSenderService =>
-  EmailSender.of({
-    send: (message, { idempotencyKey }) =>
-      Effect.tryPromise({
-        try: () => transport.sendMail(smtpMail(message, config, idempotencyKey)),
-        catch: classifySmtpError,
-      }).pipe(
-        Effect.flatMap(checkRecipients),
-        Effect.map((info) => ({ provider: SMTP_PROVIDER, providerMessageId: info.messageId })),
-        Effect.withSpan("SmtpEmailSender.send"),
+export const makeSmtpEmailSender: {
+  (config: SmtpConfig): (transport: SmtpTransport) => EmailSenderService;
+  (transport: SmtpTransport, config: SmtpConfig): EmailSenderService;
+} = Fn.dual(
+  2,
+  (transport: SmtpTransport, config: SmtpConfig): EmailSenderService =>
+    EmailSender.of({
+      send: Effect.fn("SmtpEmailSender.send")(
+        (message: OutboundEmail, { idempotencyKey }: Parameters<EmailSenderService["send"]>[1]) =>
+          Effect.tryPromise({
+            try: () => transport.sendMail(smtpMail(message, config, idempotencyKey)),
+            catch: classifySmtpError,
+          }).pipe(
+            Effect.flatMap(checkRecipients),
+            Effect.map((info) => ({ provider: SMTP_PROVIDER, providerMessageId: info.messageId })),
+          ),
       ),
-  });
+    }),
+);
 
 /** Bounds used when the options leave them unset (nodemailer's socket default is 10 minutes). */
 export const SMTP_DEFAULT_TIMEOUTS = {
@@ -262,30 +281,33 @@ export type SmtpTransportOptions = SMTPTransport.Options;
  * `EmailSender` over a nodemailer SMTP transport; closes the transport on release. Use a plain
  * (non-pooled) transport: one connection per message keeps each failure tied to its message.
  */
-export const layerSmtp = (
-  options: SmtpTransportOptions,
-  config: SmtpConfig,
-): Layer.Layer<EmailSender> =>
-  Layer.effect(
-    EmailSender,
-    Effect.acquireRelease(
-      Effect.sync(() => nodemailer.createTransport({ ...SMTP_DEFAULT_TIMEOUTS, ...options })),
-      (transporter) => Effect.sync(() => transporter.close()),
-    ).pipe(
-      Effect.map((transporter) =>
-        makeSmtpEmailSender(
-          {
-            sendMail: ({ to, cc, attachments, headers, ...rest }) =>
-              transporter.sendMail({
-                ...rest,
-                to: [...to],
-                ...(cc !== undefined && { cc: [...cc] }),
-                attachments: attachments.map((attachment) => ({ ...attachment })),
-                headers: { ...headers },
-              }),
-          },
-          config,
+export const layerSmtp: {
+  (config: SmtpConfig): (options: SmtpTransportOptions) => Layer.Layer<EmailSender>;
+  (options: SmtpTransportOptions, config: SmtpConfig): Layer.Layer<EmailSender>;
+} = Fn.dual(
+  2,
+  (options: SmtpTransportOptions, config: SmtpConfig): Layer.Layer<EmailSender> =>
+    Layer.effect(
+      EmailSender,
+      Effect.acquireRelease(
+        Effect.sync(() => nodemailer.createTransport({ ...SMTP_DEFAULT_TIMEOUTS, ...options })),
+        (transporter) => Effect.sync(() => transporter.close()),
+      ).pipe(
+        Effect.map((transporter) =>
+          makeSmtpEmailSender(
+            {
+              sendMail: ({ to, cc, attachments, headers, ...rest }) =>
+                transporter.sendMail({
+                  ...rest,
+                  to: [...to],
+                  ...(cc !== undefined && { cc: [...cc] }),
+                  attachments: Arr.map(attachments, (attachment) => ({ ...attachment })),
+                  headers: { ...headers },
+                }),
+            },
+            config,
+          ),
         ),
       ),
     ),
-  );
+);

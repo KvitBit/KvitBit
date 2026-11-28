@@ -1,15 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { cpSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import * as BunServices from "@effect/platform-bun/BunServices";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 
 // The core record alignment migration (#451, #479, #557) is applied on top of a database that
 // already holds rows from the init migration, as it would be in a deployed install.
-const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
+const { fs, path } = await Effect.all(
+  { fs: FileSystem.FileSystem, path: Path.Path },
+  { concurrency: 1 },
+).pipe(Effect.provide(BunServices.layer), Effect.runPromise);
+const migrationsFolder = path.resolve(import.meta.dir, "../drizzle");
 const INIT = "20261123175822_init";
 
 const ws = "0190a000-0000-7000-8000-0000000002a0";
@@ -27,14 +32,14 @@ const sendFailedRun = "0190a000-0000-7000-8000-0000000002c2";
 const issueFailedRun = "0190a000-0000-7000-8000-0000000002c3";
 
 let client: PGlite;
-let initOnly: string;
+let initOnly: string | undefined;
 
 const rows = async <T>(sql: string, params: ReadonlyArray<unknown> = []): Promise<Array<T>> =>
   (await client.query<T>(sql, [...params])).rows;
 
 beforeAll(async () => {
-  initOnly = mkdtempSync(join(tmpdir(), "kvitbit-db-init-"));
-  cpSync(join(migrationsFolder, INIT), join(initOnly, INIT), { recursive: true });
+  initOnly = await Effect.runPromise(fs.makeTempDirectory({ prefix: "kvitbit-db-init-" }));
+  await Effect.runPromise(fs.copy(path.join(migrationsFolder, INIT), path.join(initOnly, INIT)));
   client = new PGlite();
   await migrate(drizzle({ client }), { migrationsFolder: initOnly });
   await client.exec(`
@@ -72,7 +77,8 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await client?.close();
-  if (initOnly) rmSync(initOnly, { recursive: true, force: true });
+  if (initOnly !== undefined)
+    await Effect.runPromise(fs.remove(initOnly, { recursive: true, force: true }));
 });
 
 describe("core record alignment migration", () => {
@@ -87,7 +93,7 @@ describe("core record alignment migration", () => {
               is_nullable as nullable, column_default as default
        from information_schema.columns where table_schema = 'public'`,
     );
-    const byName = new Map(cols.map((c) => [c.name, c]));
+    const byName = new Map(Arr.map(cols, (c) => [c.name, c]));
     const expected: ReadonlyArray<readonly [string, string, "YES" | "NO", string | null]> = [
       ["schedules.catch_up_through", "date", "YES", null],
       ["schedules.paused_error", "text", "YES", null],
@@ -115,24 +121,24 @@ describe("core record alignment migration", () => {
       `select e.enumlabel as label from pg_enum e join pg_type t on t.oid = e.enumtypid
        where t.typname = 'recurring_send_state' order by e.enumsortorder`,
     );
-    expect(labels.map((l) => l.label)).toEqual(["none", "pending", "queued", "failed"]);
+    expect(Arr.map(labels, (l) => l.label)).toEqual(["none", "pending", "queued", "failed"]);
   });
 
   test("existing rows get defaults; expense paid totals are backfilled from live Payments", async () => {
-    expect(await rows(`select revision, paused_error, catch_up_through from schedules`)).toEqual([
+    expect(await rows("select revision, paused_error, catch_up_through from schedules")).toEqual([
       { revision: 1, paused_error: null, catch_up_through: null },
     ]);
-    expect(await rows(`select id, revision, send_state from schedule_runs order by id`)).toEqual([
+    expect(await rows("select id, revision, send_state from schedule_runs order by id")).toEqual([
       { id: run, revision: 1, send_state: "none" },
       { id: queuedRun, revision: 1, send_state: "queued" },
       { id: sendFailedRun, revision: 1, send_state: "failed" },
       { id: issueFailedRun, revision: 1, send_state: "none" },
     ]);
-    expect(await rows(`select revision, removed_at from memberships`)).toEqual([
+    expect(await rows("select revision, removed_at from memberships")).toEqual([
       { revision: 1, removed_at: null },
     ]);
     expect(
-      await rows(`select id, deductible_percent, paid, payments from expenses order by id`),
+      await rows("select id, deductible_percent, paid, payments from expenses order by id"),
     ).toEqual([
       { id: paidExpense, deductible_percent: 100, paid: "120.50", payments: 2 },
       { id: unpaidExpense, deductible_percent: 100, paid: "0", payments: 0 },
@@ -142,27 +148,27 @@ describe("core record alignment migration", () => {
 
   test("the new checks reject rows core never writes", async () => {
     await expect(
-      client.query(`update expenses set deductible_percent = 101 where id = $1`, [paidExpense]),
-    ).rejects.toThrow(/expenses_deductible_percent_range/);
+      client.query("update expenses set deductible_percent = 101 where id = $1", [paidExpense]),
+    ).rejects.toThrow("expenses_deductible_percent_range");
     await expect(
-      client.query(`update expenses set payments = -1 where id = $1`, [paidExpense]),
-    ).rejects.toThrow(/expenses_payments_nonnegative/);
+      client.query("update expenses set payments = -1 where id = $1", [paidExpense]),
+    ).rejects.toThrow("expenses_payments_nonnegative");
     await expect(
       client.query(`update schedule_runs set send_state = 'sent' where id = $1`, [run]),
-    ).rejects.toThrow(/invalid input value for enum recurring_send_state/);
+    ).rejects.toThrow("invalid input value for enum recurring_send_state");
     await expect(
       client.query(`update schedule_runs set send_state = 'failed' where id = $1`, [
         issueFailedRun,
       ]),
-    ).rejects.toThrow(/schedule_runs_send_needs_issued/);
+    ).rejects.toThrow("schedule_runs_send_needs_issued");
     await expect(
       client.query(`update schedule_runs set send_state = 'queued' where id = $1`, [sendFailedRun]),
-    ).rejects.toThrow(/schedule_runs_queued_has_delivery/);
+    ).rejects.toThrow("schedule_runs_queued_has_delivery");
     await expect(
       client.query(`update schedules set paused_error = 'NotFound:Contact' where id = $1`, [
         schedule,
       ]),
-    ).rejects.toThrow(/schedules_pause_fields_need_paused_at/);
+    ).rejects.toThrow("schedules_pause_fields_need_paused_at");
     const doc = "0190a000-0000-7000-8000-0000000002b0";
     await client.query(
       `insert into documents (id, workspace_id, kind, contact_id, currency, language, payment_method)
@@ -175,18 +181,18 @@ describe("core record alignment migration", () => {
          values (gen_random_uuid(), $1, $2, 1, 'L', '1', 'standard', '1.00')`,
         [ws, doc],
       ),
-    ).rejects.toThrow(/document_lines_deducted_vat_czk_on_deduction/);
+    ).rejects.toThrow("document_lines_deducted_vat_czk_on_deduction");
   });
 
   test("an FX request date resolves to a stored fixing", async () => {
     await client.query(
-      `insert into fx_fixings (fixing_date, sequence, rates) values ('2026-01-05', 2, '[]')`,
+      "insert into fx_fixings (fixing_date, sequence, rates) values ('2026-01-05', 2, '[]')",
     );
     await expect(
       client.query(
-        `insert into fx_fixing_requests (requested_on, fixing_date) values ('2026-01-04', '2026-01-05')`,
+        "insert into fx_fixing_requests (requested_on, fixing_date) values ('2026-01-04', '2026-01-05')",
       ),
-    ).rejects.toThrow(/fx_fixing_requests_not_after_request/);
+    ).rejects.toThrow("fx_fixing_requests_not_after_request");
     await client.exec(`
       insert into fx_fixings (fixing_date, sequence, rates) values ('2026-01-02', 1, '[]');
       insert into fx_fixing_requests (requested_on, fixing_date)

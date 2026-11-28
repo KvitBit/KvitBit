@@ -1,13 +1,7 @@
 import { router } from "expo-router";
 import { useI18n } from "../../i18n/i18n-provider";
 import { EmptyState, Screen, Text } from "../../ui";
-
-export type ErrorKind = "not_found" | "no_access" | "server" | "offline";
-
-export const parseErrorKind = (raw: string | undefined): ErrorKind =>
-  raw === "not_found" || raw === "no_access" || raw === "server" || raw === "offline"
-    ? raw
-    : "not_found";
+import type { ErrorKind } from "./auth-links";
 
 export function ErrorScreen(props: { readonly kind: ErrorKind; readonly requestId?: string }) {
   const { t } = useI18n();
@@ -18,11 +12,11 @@ export function ErrorScreen(props: { readonly kind: ErrorKind; readonly requestI
     props.kind === "offline" || props.kind === "server"
       ? {
           label: t("common.action.retry"),
-          onPress: () => router.replace("/" as never),
+          onPress: () => router.replace("/"),
         }
       : {
           label: t("common.action.goHome"),
-          onPress: () => router.replace("/" as never),
+          onPress: () => router.replace("/"),
         };
 
   return (

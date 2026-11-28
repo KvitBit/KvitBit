@@ -3,13 +3,33 @@ import { inspect } from "node:util";
 import { BotProtection, BotProtectionUnavailable, InvalidBotProof } from "@kvitbit/adapters/altcha";
 import { InvitationTokens } from "@kvitbit/core";
 import { CaptureEmailSender } from "@kvitbit/core/testing";
-import { CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
-import { Effect, Layer, Ref } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import { Workspaces } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { captureAnalytics } from "../analytics-fixture";
-import { type Harness, makeHarness, ORIGIN } from "./harness";
+import { type Harness, json, makeHarness, ORIGIN } from "./harness";
 
+const decodeAccount = Schema.decodeUnknownResult(
+  Schema.Struct({
+    token: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
+    user: Schema.Struct({
+      id: Schema.String,
+      email: Schema.String,
+      emailVerified: Schema.Boolean,
+    }),
+  }),
+);
+
+const emailLink = /https:\/\/\S+/;
+const sqlLog = /Failed query:|params:/;
 const password = "A test password for Better Auth";
 let harness: Harness | undefined;
 
@@ -21,13 +41,14 @@ afterEach(async () => {
 const setup = () => {
   const used = new Set<string>();
   const botProtection = Layer.succeed(BotProtection, {
-    issue: () => Effect.fail(new BotProtectionUnavailable({})),
+    issue: () => Effect.fail(BotProtectionUnavailable.make({})),
     verify: (scope, payload) => {
-      if (!payload.startsWith(`${scope}:`)) {
-        return Effect.fail(new InvalidBotProof({ reason: "invalid_solution" }));
+      if (!EffectString.startsWith(`${scope}:`)(payload)) {
+        return Effect.fail(InvalidBotProof.make({ reason: "invalid_solution" }));
       }
-      if (payload.endsWith(":unavailable")) return Effect.fail(new BotProtectionUnavailable({}));
-      if (used.has(payload)) return Effect.fail(new InvalidBotProof({ reason: "replayed" }));
+      if (EffectString.endsWith(":unavailable")(payload))
+        return Effect.fail(BotProtectionUnavailable.make({}));
+      if (used.has(payload)) return Effect.fail(InvalidBotProof.make({ reason: "replayed" }));
       used.add(payload);
       return Effect.void;
     },
@@ -44,39 +65,42 @@ const setup = () => {
       Effect.gen(function* () {
         const workspaces = yield* Workspaces;
         const tokens = yield* InvitationTokens;
-        const invitation = yield* workspaces.invite(email, "accountant");
+        const invitation = yield* workspaces.invite(caller, email, "accountant");
         const token = yield* tokens.token(invitation.id, 0);
         return { token, id: invitation.id };
-      }).pipe(Effect.provideService(CurrentCaller, caller)),
+      }),
     );
   };
   const signUp = (email: string, proof: string, fields = {}, origin = ORIGIN) =>
     app.fetch("/api/auth/sign-up/email", {
+      ...json({ name: "Invitee", email, password, ...fields }),
       method: "POST",
       headers: { "content-type": "application/json", origin, "x-altcha": proof },
-      body: JSON.stringify({ name: "Invitee", email, password, ...fields }),
     });
-  const accept = (token: string, cookie?: string) =>
-    app.fetch(`/api/v1/invitations/${token}/accept`, {
-      method: "POST",
-      headers: { origin: ORIGIN, ...(cookie === undefined ? {} : { cookie }) },
-    });
+  const accept = (token: string, cookie?: string) => {
+    const headers = new Headers({ origin: ORIGIN });
+    if (cookie !== undefined) headers.set("cookie", cookie);
+    return app.fetch(`/api/v1/invitations/${token}/accept`, { method: "POST", headers });
+  };
   const verificationEmails = () =>
     app.run(
       Effect.gen(function* () {
         const capture = yield* CaptureEmailSender;
         const sent = yield* Ref.get(capture.sent);
-        return sent.filter(({ message }) => message.tags?.template === "E01");
+        return EffectArray.filter(sent, ({ message }) => message.tags?.["template"] === "E01");
       }),
     );
   return { app, workspace, invite, signUp, accept, verificationEmails, analytics };
 };
 
 const sessionCookie = (response: Response) =>
-  response.headers
-    .getSetCookie()
-    .find((value) => value.startsWith("__Secure-kvitbit.session_token="))
-    ?.split(";")[0];
+  EffectArray.findFirst(
+    response.headers.getSetCookie(),
+    EffectString.startsWith("__Secure-kvitbit.session_token="),
+  ).pipe(
+    Option.map((value) => EffectString.split(value, ";")[0]),
+    Option.getOrUndefined,
+  );
 
 test("invitation signup verifies the invited address and creates a session that can accept through core", async () => {
   const { app, workspace, invite, signUp, accept, verificationEmails, analytics } = setup();
@@ -85,11 +109,11 @@ test("invitation signup verifies the invited address and creates a session that 
   const other = await invite("other-invitee@example.cz");
 
   expect((await accept(token)).status).toBe(401);
-  const signup = await signUp(email.toUpperCase(), "invitation_accept:create", {
+  const signup = await signUp(EffectString.toUpperCase(email), "invitation_accept:create", {
     invitationToken: token,
   });
   expect(signup.status).toBe(200);
-  const account = (await signup.json()) as { user: { id: string } };
+  const account = decodeAccount(await signup.json()).pipe(Result.getOrThrow);
   expect(account).toMatchObject({ user: { email, emailVerified: true } });
   expect(await verificationEmails()).toEqual([]);
   const cookie = sessionCookie(signup);
@@ -133,7 +157,7 @@ test("invitation signup verifies the invited address and creates a session that 
     user: { name: "Phone", displayName: email },
   });
   expect(
-    options.headers.getSetCookie().some((value) => value.includes("better-auth-passkey")),
+    EffectArray.some(options.headers.getSetCookie(), EffectString.includes("better-auth-passkey")),
   ).toBe(true);
   const bearer = signup.headers.get("set-auth-token");
   expect(bearer).toBeTruthy();
@@ -190,8 +214,8 @@ test("invalid invitation signup attempts leave accounts and memberships unchange
   await app.run(
     Effect.gen(function* () {
       const workspaces = yield* Workspaces;
-      yield* workspaces.revokeInvitation(revoked.id);
-    }).pipe(Effect.provideService(CurrentCaller, caller)),
+      yield* workspaces.revokeInvitation(caller, revoked.id);
+    }),
   );
   expect(
     (
@@ -223,7 +247,7 @@ test("ordinary signup still verifies by email and an existing user can sign in t
   const email = "existing@example.cz";
   const ordinary = await signUp(email, "sign_up:ordinary", { emailVerified: true });
   expect(ordinary.status).toBe(200);
-  const signup = (await ordinary.json()) as { user: { id: string } };
+  const signup = decodeAccount(await ordinary.json()).pipe(Result.getOrThrow);
   expect(signup).toMatchObject({ token: null, user: { emailVerified: false } });
   expect(sessionCookie(ordinary)).toBeUndefined();
   // Better Auth returns a generic success response for an existing email.
@@ -232,7 +256,7 @@ test("ordinary signup still verifies by email and an existing user can sign in t
     [{ event: "user_signed_up", distinctId: signup.user.id, properties: { method: "email" } }],
   ]);
   const [verification] = await verificationEmails();
-  const verificationLink = verification?.message.text.match(/https:\/\/\S+/)?.[0];
+  const verificationLink = emailLink.exec(verification?.message.text ?? "")?.[0];
   expect(verificationLink).toBeDefined();
   const url = new URL(verificationLink ?? ORIGIN);
   expect((await app.fetch(`${url.pathname}${url.search}`)).status).toBe(302);
@@ -246,9 +270,9 @@ test("ordinary signup still verifies by email and an existing user can sign in t
   expect(sessionCookie(duplicate)).toBeUndefined();
 
   const signedIn = await app.fetch("/api/auth/sign-in/email", {
+    ...json({ email, password }),
     method: "POST",
     headers: { "content-type": "application/json", origin: ORIGIN, "x-altcha": "sign_in:existing" },
-    body: JSON.stringify({ email, password }),
   });
   expect(signedIn.status).toBe(200);
   const cookie = sessionCookie(signedIn);
@@ -261,10 +285,7 @@ test("invited signup rolls back failed inserts without logging SQL and can retry
   const email = "retry@example.cz";
   const { token } = await invite(email);
 
-  for (const { table, status } of [
-    { table: "user", status: 422 },
-    { table: "session", status: 500 },
-  ]) {
+  const checkRollback = async (table: "user" | "session", status: number) => {
     await app.run(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
@@ -272,12 +293,12 @@ test("invited signup rolls back failed inserts without logging SQL and can retry
       }),
     );
 
-    const log = spyOn(console, "error").mockImplementation(() => {});
+    const log = spyOn(console, "error").mockReturnValue(undefined);
     try {
       const failed = await signUp(email, `invitation_accept:abort-${table}`, { invitation: token });
       expect(failed.status).toBe(status);
       expect(sessionCookie(failed)).toBeUndefined();
-      const leakedSql = log.mock.calls.some((args) => /Failed query:|params:/.test(inspect(args)));
+      const leakedSql = EffectArray.some(log.mock.calls, (args) => sqlLog.test(inspect(args)));
       expect(leakedSql).toBe(false);
     } finally {
       log.mockRestore();
@@ -286,12 +307,16 @@ test("invited signup rolls back failed inserts without logging SQL and can retry
     await app.run(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        expect(yield* sql`select id from auth."user"`).toEqual([]);
-        expect(yield* sql`select id from auth.account`).toEqual([]);
+        const users = yield* sql`select id from auth."user"`;
+        const accounts = yield* sql`select id from auth.account`;
+        expect(users).toEqual([]);
+        expect(accounts).toEqual([]);
         yield* sql`alter table auth.${sql(table)} drop constraint fail_auth_insert`;
       }),
     );
-  }
+  };
+  await checkRollback("user", 422);
+  await checkRollback("session", 500);
 
   const [invited, ordinary] = await Promise.all([
     signUp(email, "invitation_accept:retry", { invitation: token }),
@@ -303,7 +328,7 @@ test("invited signup rolls back failed inserts without logging SQL and can retry
   expect(ordinary.status).toBe(200);
   expect(await ordinary.json()).toMatchObject({ token: null, user: { emailVerified: false } });
   expect(sessionCookie(ordinary)).toBeUndefined();
-  expect((await verificationEmails()).map(({ message }) => message.to)).toEqual([
+  expect(EffectArray.map(await verificationEmails(), ({ message }) => message.to)).toEqual([
     ["ordinary@example.cz"],
   ]);
 });

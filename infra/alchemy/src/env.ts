@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import * as Arr from "effect/Array";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
 import type { KvitbitSecretBinding, KvitbitStackConfig, KvitbitWorkload } from "./config";
 import { DEFAULT_POSTHOG_HOST, secretResourceName } from "./config";
 
@@ -17,9 +20,7 @@ export interface SecretEnvVar {
   };
 }
 
-export type CloudRunEnvVar = PlainEnvVar | SecretEnvVar;
-
-export interface RunnerWorkerSecretSpec {
+interface RunnerWorkerSecretSpec {
   readonly environmentVariable: string;
   readonly secretId: string;
   readonly version: string;
@@ -36,7 +37,7 @@ export interface RunnerWorkerConfig {
   readonly secrets: ReadonlyArray<RunnerWorkerSecretSpec>;
 }
 
-export const KVITBIT_IMAGE_PATHS = {
+const KVITBIT_IMAGE_PATHS = {
   webDir: "/app/public/web",
   pwaDir: "/app/public/app",
   blobDir: "/var/lib/kvitbit/blobs",
@@ -44,11 +45,14 @@ export const KVITBIT_IMAGE_PATHS = {
   chromiumPath: "/usr/bin/chromium",
 } as const;
 
-export const secretBindingsForWorkload = (
-  config: KvitbitStackConfig,
-  workload: KvitbitWorkload,
-): ReadonlyArray<KvitbitSecretBinding> =>
-  config.secrets.filter((secret) => secret.consumers.includes(workload));
+const secretBindingsForWorkload = ({
+  config,
+  workload,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly workload: KvitbitWorkload;
+}): ReadonlyArray<KvitbitSecretBinding> =>
+  Arr.filter(config.secrets, (secret) => secret.consumers.includes(workload));
 
 const kvitbitEnvForStage = (stage: KvitbitStackConfig["stage"]): "production" | "staging" =>
   stage === "prod" ? "production" : "staging";
@@ -61,13 +65,16 @@ const posthogPlainEnv = (config: KvitbitStackConfig): ReadonlyArray<PlainEnvVar>
         { name: "KVITBIT_POSTHOG_HOST", value: config.posthogHost ?? DEFAULT_POSTHOG_HOST },
       ];
 
-export const serverPlainEnv = (
-  config: KvitbitStackConfig,
-  buckets: {
+export const serverPlainEnv = ({
+  config,
+  buckets,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly buckets: {
     readonly blobsBucket: string;
     readonly mobileAssetsBucket: string;
-  },
-): ReadonlyArray<PlainEnvVar> => {
+  };
+}): ReadonlyArray<PlainEnvVar> => {
   const blobDriver = config.blobDriver ?? "gcs";
   const vars: Array<PlainEnvVar> = [
     { name: "NODE_ENV", value: "production" },
@@ -118,20 +125,23 @@ export const serverPlainEnv = (
 };
 
 export const serverSecretEnv = (config: KvitbitStackConfig): ReadonlyArray<SecretEnvVar> =>
-  secretBindingsForWorkload(config, "server").map((secret) => ({
+  Arr.map(secretBindingsForWorkload({ config, workload: "server" }), (secret) => ({
     name: secret.environmentVariable,
     valueSource: {
       secretKeyRef: {
-        secret: secretResourceName(config.projectId, secret.secretId),
+        secret: secretResourceName({ projectId: config.projectId, secretId: secret.secretId }),
         version: secret.version,
       },
     },
   }));
 
-export const runnerPlainEnv = (
-  config: KvitbitStackConfig,
-  blobsBucket: string,
-): ReadonlyArray<PlainEnvVar> => {
+export const runnerPlainEnv = ({
+  config,
+  blobsBucket,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly blobsBucket: string;
+}): ReadonlyArray<PlainEnvVar> => {
   const blobDriver = config.blobDriver ?? "gcs";
   const vars: Array<PlainEnvVar> = [
     { name: "NODE_ENV", value: "production" },
@@ -161,10 +171,13 @@ export const runnerPlainEnv = (
   return vars;
 };
 
-export const buildRunnerWorkerConfig = (
-  config: KvitbitStackConfig,
-  options?: { readonly blobsBucket?: string | undefined },
-): RunnerWorkerConfig => {
+export const buildRunnerWorkerConfig = ({
+  config,
+  options,
+}: {
+  readonly config: KvitbitStackConfig;
+  readonly options?: { readonly blobsBucket?: string | undefined };
+}): RunnerWorkerConfig => {
   const blobsBucket = options?.blobsBucket ?? config.blobsBucket;
   return {
     version: 1,
@@ -172,8 +185,8 @@ export const buildRunnerWorkerConfig = (
     registryHost: `${config.region}-docker.pkg.dev`,
     runnerCidr: config.runnerCidr,
     runnerPort: config.runnerPort,
-    plainEnv: runnerPlainEnv(config, blobsBucket),
-    secrets: secretBindingsForWorkload(config, "runner").map((secret) => ({
+    plainEnv: runnerPlainEnv({ config, blobsBucket }),
+    secrets: Arr.map(secretBindingsForWorkload({ config, workload: "runner" }), (secret) => ({
       environmentVariable: secret.environmentVariable,
       secretId: secret.secretId,
       version: secret.version,
@@ -182,8 +195,10 @@ export const buildRunnerWorkerConfig = (
   };
 };
 
+const encodeWorkerConfig = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown, { space: 2 }));
+
 export const serializeRunnerWorkerConfig = (workerConfig: RunnerWorkerConfig): string =>
-  JSON.stringify(workerConfig, null, 2);
+  Result.getOrThrow(encodeWorkerConfig(workerConfig));
 
 export const runnerWorkerConfigSha = (workerConfig: RunnerWorkerConfig): string => {
   const hash = createHash("sha256").update(serializeRunnerWorkerConfig(workerConfig)).digest("hex");

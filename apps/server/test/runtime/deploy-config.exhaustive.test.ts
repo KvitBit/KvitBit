@@ -1,3 +1,6 @@
+import * as Fn from "effect/Function";
+import * as EffectRecord from "effect/Record";
+import { NoQueriesSqlLive } from "./no-queries-sql";
 /**
  * Tier 1 exhaustive finite-domain verification (`verify-deploy-config`, ADR-0005).
  *
@@ -17,9 +20,19 @@
  *   (d) cross-layer soundness (`deploy.yml` preflight -> `infra/alchemy` -> `apps/server`
  *       server & worker boot validation).
  */
+
 import { describe, expect, test } from "bun:test";
+import { BotProtection } from "@kvitbit/adapters/altcha";
 import { EmailSender } from "@kvitbit/domain/ports";
-import { ConfigProvider, Effect, Layer, Option, Redacted } from "effect";
+import * as Arr from "effect/Array";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   composeStackEnvLayers,
   defaultSecretBindings,
@@ -47,7 +60,6 @@ import {
   serverSecretEnv,
 } from "../../../../infra/alchemy/src/env";
 import { BotProtectionLive } from "../../src/app";
-import { BotProtection } from "../../src/auth";
 import {
   BLOB_DRIVERS,
   BOT_PROTECTION_MODES,
@@ -72,6 +84,9 @@ import { HttpConfig, HttpConfigLive } from "../../src/http/config";
 import { MobileConfig, MobileConfigLive } from "../../src/http/mobile/config";
 import { makeBlobStorageLayer } from "../../src/wiring/blob";
 import { makeEmailSenderLayer } from "../../src/wiring/email";
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
 
 // -----------------------------------------------------------------------------
 // Independent specification oracles (written from Issue #31, never calling impl)
@@ -144,7 +159,7 @@ const EMAIL_FROM_VALUES: Readonly<Record<EmailFromCase, string | undefined>> = {
   valid: "Kvitbit <noreply@kvitbit.cz>",
   invalid: "invalid-from",
   invalid_double_dot: "a..b@example.org",
-  invalid_overlong_label: `a@${"b".repeat(64)}.org`,
+  invalid_overlong_label: `a@${Str.repeat(64)("b")}.org`,
 };
 
 const isInvalidFromCase = (from: EmailFromCase): boolean =>
@@ -179,7 +194,7 @@ const oracleEmail = (
   } else if (env === "test") {
     effectiveMode = "capture";
   } else {
-    effectiveMode = !hasResend && !hasSmtp ? "console" : "capture";
+    effectiveMode = !(hasResend || hasSmtp) ? "console" : "capture";
   }
 
   if (effectiveMode === "capture" || effectiveMode === "console") {
@@ -189,7 +204,7 @@ const oracleEmail = (
   if ((effectiveMode === "resend" || effectiveMode === "resend+smtp") && !hasResend) {
     return { ok: false };
   }
-  if ((effectiveMode === "smtp" || effectiveMode === "resend+smtp") && (!hasSmtp || !smtpValid)) {
+  if ((effectiveMode === "smtp" || effectiveMode === "resend+smtp") && !(hasSmtp && smtpValid)) {
     return { ok: false };
   }
 
@@ -253,7 +268,7 @@ const oracleBotProtection = (
   return hasKey ? { ok: true, expectedMode: "altcha" } : { ok: true, expectedMode: "none" };
 };
 
-const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
+const SAMPLE_DIGEST = `sha256:${Str.repeat(64)("a")}`;
 const VALID_EDGE: KvitbitEdgeConfig = {
   domains: ["kvitbit.cz", "kvitbit.app"],
   enableHttps: true,
@@ -338,23 +353,19 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         const actual = resolveKvitbitEnv({ kvitbitEnv, nodeEnv });
         const expected: KvitbitEnv | undefined =
           kvitbitEnv !== undefined
-            ? (SPEC_ENVS as ReadonlyArray<string>).includes(kvitbitEnv)
-              ? (kvitbitEnv as KvitbitEnv)
+            ? Schema.is(Schema.Literals(SPEC_ENVS))(kvitbitEnv)
+              ? kvitbitEnv
               : undefined
             : nodeEnv !== undefined
-              ? (SPEC_ENVS as ReadonlyArray<string>).includes(nodeEnv)
-                ? (nodeEnv as KvitbitEnv)
+              ? Schema.is(Schema.Literals(SPEC_ENVS))(nodeEnv)
+                ? nodeEnv
                 : undefined
               : "development";
 
-        if (expected === undefined) {
-          expect(actual.ok, `KVITBIT_ENV=${kvitbitEnv} NODE_ENV=${nodeEnv}`).toBe(false);
-        } else {
-          expect(actual.ok, `KVITBIT_ENV=${kvitbitEnv} NODE_ENV=${nodeEnv}`).toBe(true);
-          if (actual.ok) {
-            expect(actual.value).toBe(expected);
-          }
-        }
+        expect(actual.ok, `KVITBIT_ENV=${kvitbitEnv} NODE_ENV=${nodeEnv}`).toBe(
+          expected !== undefined,
+        );
+        expect(actual.ok ? actual.value : undefined).toBe(expected);
       }
     }
 
@@ -446,7 +457,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                 for (const blobDriver of blobDrivers) {
                   for (const blobBucket of blobBuckets) {
                     total++;
-                    const envMap: Record<string, string | undefined> = {
+                    const envMap = {
                       KVITBIT_ENV: envSpec.kvitbitEnv,
                       NODE_ENV: envSpec.nodeEnv,
                       DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
@@ -470,7 +481,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                       KVITBIT_BLOB_DRIVER: blobDriver === "absent" ? undefined : blobDriver,
                       KVITBIT_BLOB_BUCKET:
                         blobBucket === "present" ? "kvitbit-prod-blobs-prod" : undefined,
-                    };
+                    } satisfies Record<string, string | undefined>;
 
                     const actual = validateServerRuntimeEnv(envMap, workload);
 
@@ -490,15 +501,14 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
 
                     if (actual.ok) {
                       if (
-                        actual.value.env !== envSpec.resolved ||
-                        actual.value.email.mode !== expEmail.expectedMode ||
-                        actual.value.blob.driver !== expBlob.expectedDriver
+                        (actual.value.env !== envSpec.resolved ||
+                          actual.value.email.mode !== expEmail.expectedMode ||
+                          actual.value.blob.driver !== expBlob.expectedDriver) &&
+                        failures.length < 10
                       ) {
-                        if (failures.length < 10) {
-                          failures.push(
-                            `resolved mismatch for ${workload} ${envSpec.label}: got (${actual.value.env}, ${actual.value.email.mode}, ${actual.value.blob.driver})`,
-                          );
-                        }
+                        failures.push(
+                          `resolved mismatch for ${workload} ${envSpec.label}: got (${actual.value.env}, ${actual.value.email.mode}, ${actual.value.blob.driver})`,
+                        );
                       }
 
                       // Invariant (a) & (b): production never accepts broken config or non-prod modes.
@@ -508,12 +518,12 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                           !SPEC_PROD_EMAIL_MODES.has(actual.value.email.mode) ||
                           actual.value.blob.driver !== "gcs" ||
                           actual.value.blob.gcsBucket === undefined ||
-                          !actual.value.appOrigin.startsWith("https://") ||
+                          !Str.startsWith("https://")(actual.value.appOrigin) ||
                           (workload === "server" &&
                             actual.value.botProtection?.mode !== "altcha") ||
                           (workload === "worker" && actual.value.botProtection !== undefined)
                         ) {
-                          failures.push(`prod invariant violated: ${JSON.stringify(actual.value)}`);
+                          failures.push(`prod invariant violated: ${encodeJson(actual.value)}`);
                         }
                       }
 
@@ -565,9 +575,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
           expect(actual.ok, `resolveBotProtectionConfig ${env} ${mode} ${keyCase}`).toBe(
             expected.ok,
           );
-          if (actual.ok && expected.expectedMode !== undefined) {
-            expect(actual.value.mode).toBe(expected.expectedMode);
-          }
+          expect(actual.ok ? actual.value.mode : undefined).toBe(expected.expectedMode);
         }
       }
     }
@@ -597,7 +605,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             for (const emailProfile of ["prod_resend", "explicit_capture"] as const) {
               for (const blobProfile of ["gcs", "local"] as const) {
                 runtimeChecked++;
-                const envMap: Record<string, string | undefined> = {
+                const envMap = {
                   KVITBIT_ENV: envSpec.kvitbitEnv,
                   NODE_ENV: envSpec.nodeEnv,
                   DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
@@ -610,7 +618,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                   KVITBIT_BLOB_BUCKET: blobProfile === "gcs" ? "kvitbit-blobs" : undefined,
                   KVITBIT_BOT_PROTECTION_MODE: mode === "absent" ? undefined : mode,
                   ALTCHA_HMAC_KEY: ALTCHA_KEY_VALUES[keyCase],
-                };
+                } satisfies Record<string, string | undefined>;
                 const actual = validateServerRuntimeEnv(envMap, workload);
                 const expEmailOk =
                   emailProfile === "prod_resend" || envSpec.resolved !== "production";
@@ -621,17 +629,18 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                   actual.ok,
                   `bot runtime ${workload} ${envSpec.label} mode=${mode} key=${keyCase} email=${emailProfile} blob=${blobProfile}`,
                 ).toBe(expOk);
-                if (actual.ok) {
-                  if (workload === "worker") {
-                    expect(actual.value.botProtection).toBeUndefined();
-                  } else {
-                    expect(actual.value.botProtection?.mode).toBe(expBot.expectedMode);
-                    if (envSpec.resolved === "production") {
-                      expect(actual.value.botProtection?.mode).toBe("altcha");
-                      expect(actual.value.botProtection?.hmacKey).toBe("synthetic-altcha-hmac-key");
-                    }
-                  }
-                }
+                const actualBot = actual.ok ? actual.value.botProtection : undefined;
+                const expectedMode =
+                  expOk && workload === "server" ? expBot.expectedMode : undefined;
+                expect(actualBot?.mode).toBe(expectedMode);
+                const productionServer =
+                  expOk && workload === "server" && envSpec.resolved === "production";
+                expect(productionServer ? actualBot?.mode : undefined).toBe(
+                  productionServer ? "altcha" : undefined,
+                );
+                expect(productionServer ? actualBot?.hmacKey : undefined).toBe(
+                  productionServer ? "synthetic-altcha-hmac-key" : undefined,
+                );
               }
             }
           }
@@ -647,21 +656,20 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       for (const mode of botModes) {
         for (const keyCase of keyCases) {
           liveChecked++;
-          const rawEnv: Record<string, string | undefined> = {
+          const rawEnv = {
             KVITBIT_ENV: env,
             DATABASE_URL: "postgres://app:pw@db.internal:5432/kvitbit",
             BETTER_AUTH_SECRET: "test-auth-secret",
             APP_ORIGIN: "https://kvitbit.cz",
             KVITBIT_BOT_PROTECTION_MODE: mode === "absent" ? undefined : mode,
             ALTCHA_HMAC_KEY: ALTCHA_KEY_VALUES[keyCase],
-          };
+          } satisfies Record<string, string | undefined>;
           const envLayer = makeRuntimeEnvLayer(rawEnv);
           const expected = oracleBotProtection(env, "server", mode, keyCase);
 
           const httpRes = await Effect.runPromise(
             Effect.map(HttpConfig, (cfg) => cfg.botProtection).pipe(
-              Effect.provide(HttpConfigLive),
-              Effect.provide(envLayer),
+              Effect.provide(HttpConfigLive.pipe(Layer.provideMerge(envLayer))),
               Effect.result,
             ),
           );
@@ -675,37 +683,33 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             cfgRes._tag === "Success",
             `loadBotProtectionConfig ${env} ${mode} ${keyCase}`,
           ).toBe(expected.ok);
-          if (
-            httpRes._tag === "Success" &&
-            cfgRes._tag === "Success" &&
-            expected.expectedMode !== undefined
-          ) {
-            expect(httpRes.success).toBe(expected.expectedMode);
-            expect(cfgRes.success.mode).toBe(expected.expectedMode);
-            if (expected.expectedMode === "none") {
-              const noopRes = await Effect.runPromise(
-                Effect.flatMap(BotProtection, (bp) => bp.issue("sign_up")).pipe(
-                  Effect.provide(BotProtectionLive as Layer.Layer<BotProtection, unknown>),
-                  Effect.provide(envLayer),
+          expect(httpRes._tag === "Success" ? httpRes.success : undefined).toBe(
+            expected.expectedMode,
+          );
+          expect(cfgRes._tag === "Success" ? cfgRes.success.mode : undefined).toBe(
+            expected.expectedMode,
+          );
+          const testChallenge = !expected.ok || expected.expectedMode === "none";
+          const challenge = testChallenge
+            ? await Effect.runPromise(
+                BotProtection.pipe(
+                  Effect.flatMap((bp) => bp.issue("sign_up")),
+                  Effect.provide(
+                    BotProtectionLive.pipe(
+                      Layer.provide(NoQueriesSqlLive),
+                      Layer.provideMerge(envLayer),
+                    ),
+                  ),
                   Effect.result,
                 ),
-              );
-              expect(noopRes._tag).toBe("Success");
-              if (noopRes._tag === "Success") {
-                expect(noopRes.success.parameters.algorithm).toBe("NONE");
-              }
-            }
-          } else {
-            // Failed states must also fail BotProtectionLive layer build.
-            const bpFail = await Effect.runPromise(
-              Effect.flatMap(BotProtection, (bp) => bp.issue("sign_up")).pipe(
-                Effect.provide(BotProtectionLive as Layer.Layer<BotProtection, unknown>),
-                Effect.provide(envLayer),
-                Effect.result,
-              ),
-            );
-            expect(bpFail._tag, `BotProtectionLive fail ${env} ${mode} ${keyCase}`).toBe("Failure");
-          }
+              )
+            : undefined;
+          expect(challenge?._tag, `BotProtectionLive ${env} ${mode} ${keyCase}`).toBe(
+            !testChallenge ? undefined : expected.ok ? "Success" : "Failure",
+          );
+          expect(
+            challenge?._tag === "Success" ? challenge.success.parameters.algorithm : undefined,
+          ).toBe(expected.expectedMode === "none" ? "NONE" : undefined);
         }
       }
     }
@@ -764,7 +768,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       for (const env of KVITBIT_ENVS) {
         for (const key of optOutKeys) {
           optOutChecked++;
-          const baseEnvMap: Record<string, string> = {
+          const baseEnvMap = {
             KVITBIT_ENV: env,
             DATABASE_URL: "postgres://a/b",
             BETTER_AUTH_SECRET: "secret",
@@ -774,8 +778,8 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             RESEND_API_KEY: "re_key",
             KVITBIT_BLOB_DRIVER: "gcs",
             KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
-          };
-          const envMap: Record<string, string> = { ...baseEnvMap, [key]: "true" };
+          } satisfies Record<string, string>;
+          const envMap = { ...baseEnvMap, [key]: "true" } satisfies Record<string, string>;
           const res = validateServerRuntimeEnv(envMap, workload);
           expect(res.ok, `pure ${workload} ${env} ${key}`).toBe(false);
 
@@ -810,7 +814,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     expect(fallbackOptOutChecked).toBe(110);
 
     // Upgrade preservation: NODE_ENV=production with empty KVITBIT_ENV and configured Resend stays in production (never capture).
-    const upgradedEnv: Record<string, string> = {
+    const upgradedEnv = {
       NODE_ENV: "production",
       KVITBIT_ENV: "",
       DATABASE_URL: "postgres://a/b",
@@ -821,7 +825,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       RESEND_API_KEY: "re_key",
       KVITBIT_BLOB_DRIVER: "gcs",
       KVITBIT_BLOB_BUCKET: "kvitbit-blobs",
-    };
+    } satisfies Record<string, string>;
     const upgraded = await Effect.runPromise(
       loadBootRuntimeConfig("server").pipe(
         Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: upgradedEnv }))),
@@ -832,8 +836,10 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
 
     // Boundary checks: RFC 1035 63-octet label & public IPv4-mapped IPv6 accepted; 64-octet TLD & [::ffff:0.0.0.0] rejected.
     expect(
-      validateServerRuntimeEnv({ ...upgradedEnv, EMAIL_FROM: `a@${"b".repeat(63)}.org` }, "server")
-        .ok,
+      validateServerRuntimeEnv(
+        { ...upgradedEnv, EMAIL_FROM: `a@${Str.repeat(63)("b")}.org` },
+        "server",
+      ).ok,
     ).toBe(true);
     expect(
       validateServerRuntimeEnv(
@@ -843,7 +849,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
     ).toBe(true);
     expect(
       validateServerRuntimeEnv(
-        { ...upgradedEnv, EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+        { ...upgradedEnv, EMAIL_FROM: `a@example.${Str.repeat(64)("c")}` },
         "server",
       ).ok,
     ).toBe(false);
@@ -881,11 +887,10 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
         ),
       );
       expect(siblingMasked._tag, `${workload} empty primary sibling + fallback`).toBe("Failure");
-      if (siblingMasked._tag === "Failure") {
-        expect(String(siblingMasked.failure)).toContain(
-          "Invalid runtime config (KVITBIT_DISABLE_CUSTOM):",
-        );
-      }
+      if (siblingMasked._tag !== "Failure") throw new Error("Expected the asserted result");
+      expect(String(siblingMasked.failure)).toContain(
+        "Invalid runtime config (KVITBIT_DISABLE_CUSTOM):",
+      );
 
       const scalarMasked = await Effect.runPromise(
         loadBootRuntimeConfig(workload).pipe(
@@ -901,11 +906,10 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
       expect(scalarMasked._tag, `${workload} scalar primary KVITBIT_DISABLE + fallback`).toBe(
         "Failure",
       );
-      if (scalarMasked._tag === "Failure") {
-        expect(String(scalarMasked.failure)).toContain(
-          "Invalid runtime config (KVITBIT_DISABLE_CUSTOM):",
-        );
-      }
+      if (scalarMasked._tag !== "Failure") throw new Error("Expected the asserted result");
+      expect(String(scalarMasked.failure)).toContain(
+        "Invalid runtime config (KVITBIT_DISABLE_CUSTOM):",
+      );
 
       // Exact-key KVITBIT_ALLOW_LOCAL_BLOBS presence is strictly rejected with and without longer neighbors,
       // while the longer neighbor alone succeeds.
@@ -932,11 +936,10 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
           ),
         );
         expect(liveRes._tag, `live ${workload} ${label}`).toBe(expectedTag);
-        if (liveRes._tag === "Failure") {
-          expect(String(liveRes.failure)).toContain(
-            "Invalid runtime config (KVITBIT_ALLOW_LOCAL_BLOBS):",
-          );
-        }
+        const exactMarker = "Invalid runtime config (KVITBIT_ALLOW_LOCAL_BLOBS):";
+        expect(
+          liveRes._tag === "Failure" && Str.includes(exactMarker)(String(liveRes.failure)),
+        ).toBe(expectedTag === "Failure");
       }
 
       for (const [label, sparseExtra, expectedKey] of [
@@ -958,9 +961,8 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
           ),
         );
         expect(sparseRes._tag, `${workload} ${label}`).toBe("Failure");
-        if (sparseRes._tag === "Failure") {
-          expect(String(sparseRes.failure)).toContain(`Invalid runtime config (${expectedKey}):`);
-        }
+        if (sparseRes._tag !== "Failure") throw new Error("Expected the asserted result");
+        expect(String(sparseRes.failure)).toContain(`Invalid runtime config (${expectedKey}):`);
       }
     }
   }, 30_000);
@@ -1006,37 +1008,40 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
               env,
             );
             const expected = oracleEmail(env, modeCase, secrets, fromCase);
-            const built = await Effect.runPromiseExit(Layer.build(layer).pipe(Effect.scoped));
+            const built = await Layer.build(layer).pipe(Effect.scoped, Effect.runPromiseExit);
             expect(
               built._tag === "Success",
               `makeEmailSenderLayer ${env} ${modeCase} ${secrets} ${fromCase}`,
             ).toBe(expected.ok);
 
-            if (
-              built._tag === "Success" &&
+            const localProvider =
+              expected.ok &&
               (expected.expectedMode === "capture" || expected.expectedMode === "console")
-            ) {
-              const sent = await Effect.runPromise(
-                Effect.flatMap(EmailSender, (sender) =>
-                  sender.send(
-                    {
-                      to: ["u@example.cz"],
-                      replyTo: "noreply@kvitbit.cz",
-                      subject: "Verify",
-                      html: "<p>ok</p>",
-                      text: "ok",
-                      attachments: [],
-                      tags: {},
-                    },
-                    { idempotencyKey: "verify-k1" },
-                  ),
-                ).pipe(Effect.provide(layer), Effect.result),
-              );
-              expect(sent._tag).toBe("Success");
-              if (sent._tag === "Success") {
-                expect(sent.success.provider).toBe(expected.expectedMode);
-              }
-            }
+                ? expected.expectedMode
+                : undefined;
+            const sent =
+              localProvider === undefined
+                ? undefined
+                : await Effect.runPromise(
+                    Effect.flatMap(EmailSender, (sender) =>
+                      sender.send(
+                        {
+                          to: ["u@example.cz"],
+                          replyTo: "noreply@kvitbit.cz",
+                          subject: "Verify",
+                          html: "<p>ok</p>",
+                          text: "ok",
+                          attachments: [],
+                          tags: {},
+                        },
+                        { idempotencyKey: "verify-k1" },
+                      ),
+                    ).pipe(Effect.provide(layer), Effect.result),
+                  );
+            expect(sent?._tag).toBe(localProvider === undefined ? undefined : "Success");
+            expect(sent?._tag === "Success" ? sent.success.provider : undefined).toBe(
+              localProvider,
+            );
           }
         }
       }
@@ -1059,7 +1064,7 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             env,
           );
           const expected = oracleBlob(env, driver, hasBucket ? "present" : "absent");
-          const built = await Effect.runPromiseExit(Layer.build(layer).pipe(Effect.scoped));
+          const built = await Layer.build(layer).pipe(Effect.scoped, Effect.runPromiseExit);
           expect(
             built._tag === "Success",
             `makeBlobStorageLayer ${env} ${driver} bucket=${hasBucket}`,
@@ -1084,20 +1089,23 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
             for (const blobDriver of ["absent", "gcs", "local"] as const) {
               for (const hasBlobBucket of [false, true] as const) {
                 mobileChecked++;
-                const rawEnv: Record<string, string> = { KVITBIT_ENV: env };
+                const rawEnv = EffectRecord.singleton<string, string>("KVITBIT_ENV", env);
                 const originVal = ORIGIN_VALUES[origin];
-                if (originVal !== undefined) rawEnv.APP_ORIGIN = originVal;
-                if (hasMobileBucket) rawEnv.KVITBIT_MOBILE_STORAGE_BUCKET = "mobile-bucket";
-                if (hasMobileDir) rawEnv.KVITBIT_MOBILE_STORAGE_DIR = "/var/lib/kvitbit/mobile";
-                if (blobDriver !== "absent") rawEnv.KVITBIT_BLOB_DRIVER = blobDriver;
-                if (hasBlobBucket) rawEnv.KVITBIT_BLOB_BUCKET = "blob-bucket";
+                if (originVal !== undefined) rawEnv["APP_ORIGIN"] = originVal;
+                if (hasMobileBucket) rawEnv["KVITBIT_MOBILE_STORAGE_BUCKET"] = "mobile-bucket";
+                if (hasMobileDir) rawEnv["KVITBIT_MOBILE_STORAGE_DIR"] = "/var/lib/kvitbit/mobile";
+                if (blobDriver !== "absent") rawEnv["KVITBIT_BLOB_DRIVER"] = blobDriver;
+                if (hasBlobBucket) rawEnv["KVITBIT_BLOB_BUCKET"] = "blob-bucket";
 
                 const res = await Effect.runPromise(
-                  Effect.gen(function* () {
-                    return yield* MobileConfig;
-                  }).pipe(
-                    Effect.provide(MobileConfigLive),
-                    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: rawEnv }))),
+                  MobileConfig.pipe(
+                    Effect.provide(
+                      MobileConfigLive.pipe(
+                        Layer.provideMerge(
+                          ConfigProvider.layer(ConfigProvider.fromEnv({ env: rawEnv })),
+                        ),
+                      ),
+                    ),
                     Effect.result,
                   ),
                 );
@@ -1113,23 +1121,21 @@ describe("verify-deploy-config: apps/server runtime contract", () => {
                   else if (blobDriver === "gcs") expectedTag = hasBlobBucket ? "gcs" : undefined;
                   else if (blobDriver === "local") expectedTag = "local";
                   else expectedTag = undefined;
-                } else {
-                  if (hasMobileBucket) expectedTag = "gcs";
-                  else if (hasMobileDir) expectedTag = "local";
-                  else if (blobDriver === "gcs") expectedTag = hasBlobBucket ? "gcs" : undefined;
-                  else if (blobDriver === "local") expectedTag = "local";
-                  else if (hasBlobBucket) expectedTag = "gcs";
-                  else expectedTag = "local";
-                }
+                } else if (hasMobileBucket) expectedTag = "gcs";
+                else if (hasMobileDir) expectedTag = "local";
+                else if (blobDriver === "gcs") expectedTag = hasBlobBucket ? "gcs" : undefined;
+                else if (blobDriver === "local") expectedTag = "local";
+                else if (hasBlobBucket) expectedTag = "gcs";
+                else expectedTag = "local";
 
                 const expOk = originOk && expectedTag !== undefined;
                 expect(
                   res._tag === "Success",
                   `MobileConfigLive ${env} origin=${origin} mobileBucket=${hasMobileBucket} mobileDir=${hasMobileDir} blob=${blobDriver}/${hasBlobBucket}`,
                 ).toBe(expOk);
-                if (res._tag === "Success" && expectedTag !== undefined) {
-                  expect(res.success.storage._tag).toBe(expectedTag);
-                }
+                expect(res._tag === "Success" ? res.success.storage._tag : undefined).toBe(
+                  expOk ? expectedTag : undefined,
+                );
               }
             }
           }
@@ -1272,7 +1278,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                             if (origin !== "https_public") expOk = false;
                             if (edgeCase.label !== "valid_https") expOk = false;
                             if (from !== "valid") expOk = false;
-                            if (!secrets.enableResend && !secrets.enableSmtp) expOk = false;
+                            if (!(secrets.enableResend || secrets.enableSmtp)) expOk = false;
                             if (
                               (emailMode === "resend" || emailMode === "resend+smtp") &&
                               !secrets.enableResend
@@ -1338,9 +1344,12 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                           crossLayerVerified++;
 
                           const serverEnvMap: Record<string, string> = {};
-                          for (const v of serverPlainEnv(config, {
-                            blobsBucket: config.blobsBucket,
-                            mobileAssetsBucket: config.mobileAssetsBucket,
+                          for (const v of serverPlainEnv({
+                            config,
+                            buckets: {
+                              blobsBucket: config.blobsBucket,
+                              mobileAssetsBucket: config.mobileAssetsBucket,
+                            },
                           })) {
                             serverEnvMap[v.name] = v.value;
                           }
@@ -1355,20 +1364,19 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                                 `cross-layer server failure for ${stage} emailMode=${emailMode} secrets=${secrets.label}: ${serverCheck.error.message}`,
                               );
                             }
-                          } else if (stage === "prod") {
-                            if (
-                              serverCheck.value.env !== "production" ||
+                          } else if (
+                            stage === "prod" &&
+                            (serverCheck.value.env !== "production" ||
                               !SPEC_PROD_EMAIL_MODES.has(serverCheck.value.email.mode) ||
                               serverCheck.value.blob.driver !== "gcs" ||
-                              serverCheck.value.botProtection?.mode !== "altcha"
-                            ) {
-                              failures.push(
-                                `cross-layer prod server weakened: ${JSON.stringify(serverCheck.value)}`,
-                              );
-                            }
+                              serverCheck.value.botProtection?.mode !== "altcha")
+                          ) {
+                            failures.push(
+                              `cross-layer prod server weakened: ${encodeJson(serverCheck.value)}`,
+                            );
                           }
 
-                          const runnerConfig = buildRunnerWorkerConfig(config);
+                          const runnerConfig = buildRunnerWorkerConfig({ config });
                           const runnerEnvMap: Record<string, string> = {};
                           for (const v of runnerConfig.plainEnv) {
                             runnerEnvMap[v.name] = v.value;
@@ -1396,16 +1404,15 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                                 `cross-layer worker failure for ${stage} emailMode=${emailMode} secrets=${secrets.label}: ${workerCheck.error.message}`,
                               );
                             }
-                          } else if (stage === "prod") {
-                            if (
-                              workerCheck.value.env !== "production" ||
+                          } else if (
+                            stage === "prod" &&
+                            (workerCheck.value.env !== "production" ||
                               !SPEC_PROD_EMAIL_MODES.has(workerCheck.value.email.mode) ||
-                              workerCheck.value.blob.driver !== "gcs"
-                            ) {
-                              failures.push(
-                                `cross-layer prod worker weakened: ${JSON.stringify(workerCheck.value)}`,
-                              );
-                            }
+                              workerCheck.value.blob.driver !== "gcs")
+                          ) {
+                            failures.push(
+                              `cross-layer prod worker weakened: ${encodeJson(workerCheck.value)}`,
+                            );
                           }
                         }
                       }
@@ -1534,11 +1541,14 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
 
                     // Independent oracle
                     let expOk = true;
-                    const activeBootstraps = [
-                      deployMode.bootstrapFoundation,
-                      deployMode.bootstrapFeedbackSecret,
-                      deployMode.bootstrapAltchaSecret,
-                    ].filter(Boolean).length;
+                    const activeBootstraps = Arr.filter(
+                      [
+                        deployMode.bootstrapFoundation,
+                        deployMode.bootstrapFeedbackSecret,
+                        deployMode.bootstrapAltchaSecret,
+                      ],
+                      Boolean,
+                    ).length;
                     if (activeBootstraps > 1) {
                       expOk = false;
                     } else if (botMode === "disabled") {
@@ -1559,7 +1569,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                     } else {
                       // Normal deploy
                       if (stage === "prod") {
-                        if (!enableResend || !enableAltcha) expOk = false;
+                        if (!(enableResend && enableAltcha)) expOk = false;
                       } else {
                         if (botMode !== "none" && !enableAltcha) expOk = false;
                         if (emailMode !== "capture" && !enableResend) expOk = false;
@@ -1579,9 +1589,12 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                     if (actual.ok && activeBootstraps === 0) {
                       normalVerified++;
                       const serverEnvMap: Record<string, string> = {};
-                      for (const v of serverPlainEnv(config, {
-                        blobsBucket: config.blobsBucket,
-                        mobileAssetsBucket: config.mobileAssetsBucket,
+                      for (const v of serverPlainEnv({
+                        config,
+                        buckets: {
+                          blobsBucket: config.blobsBucket,
+                          mobileAssetsBucket: config.mobileAssetsBucket,
+                        },
                       })) {
                         serverEnvMap[v.name] = v.value;
                       }
@@ -1597,14 +1610,17 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
                         stage === "prod" &&
                         serverCheck.value.botProtection?.mode !== "altcha"
                       ) {
-                        failures.push(`prod server botProtection not altcha`);
+                        failures.push("prod server botProtection not altcha");
                       }
 
-                      const runnerCfg = buildRunnerWorkerConfig(config);
+                      const runnerCfg = buildRunnerWorkerConfig({ config });
                       if (
-                        runnerCfg.secrets.some((s) => s.environmentVariable === "ALTCHA_HMAC_KEY")
+                        Arr.some(
+                          runnerCfg.secrets,
+                          (s) => s.environmentVariable === "ALTCHA_HMAC_KEY",
+                        )
                       ) {
-                        failures.push(`ALTCHA_HMAC_KEY must not be injected into runner workload`);
+                        failures.push("ALTCHA_HMAC_KEY must not be injected into runner workload");
                       }
                       const runnerEnvMap: Record<string, string> = {};
                       for (const v of runnerCfg.plainEnv) runnerEnvMap[v.name] = v.value;
@@ -1762,23 +1778,23 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     // Dropping DATABASE_URL, BETTER_AUTH_SECRET, ALTCHA_HMAC_KEY, or runner-side RESEND_API_KEY must fail.
     expect(
       validateStackConfigSync(
-        baseProd(full.filter((s) => s.environmentVariable !== "DATABASE_URL")),
+        baseProd(Arr.filter(full, (s) => s.environmentVariable !== "DATABASE_URL")),
       ).ok,
     ).toBe(false);
     expect(
       validateStackConfigSync(
-        baseProd(full.filter((s) => s.environmentVariable !== "BETTER_AUTH_SECRET")),
+        baseProd(Arr.filter(full, (s) => s.environmentVariable !== "BETTER_AUTH_SECRET")),
       ).ok,
     ).toBe(false);
     expect(
       validateStackConfigSync(
-        baseProd(full.filter((s) => s.environmentVariable !== "ALTCHA_HMAC_KEY")),
+        baseProd(Arr.filter(full, (s) => s.environmentVariable !== "ALTCHA_HMAC_KEY")),
       ).ok,
     ).toBe(false);
     expect(
       validateStackConfigSync(
         baseProd(
-          full.map((s) =>
+          Arr.map(full, (s) =>
             s.environmentVariable === "ALTCHA_HMAC_KEY" ? { ...s, consumers: ["runner"] } : s,
           ),
         ),
@@ -1787,7 +1803,7 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     expect(
       validateStackConfigSync(
         baseProd(
-          full.map((s) =>
+          Arr.map(full, (s) =>
             s.environmentVariable === "RESEND_API_KEY" ? { ...s, consumers: ["server"] } : s,
           ),
         ),
@@ -1865,12 +1881,11 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
     expect(stackSiblingMasked._tag, "loadStackConfig empty primary sibling + fallback").toBe(
       "Failure",
     );
-    if (stackSiblingMasked._tag === "Failure") {
-      expect(stackSiblingMasked.failure).toMatchObject({
-        _tag: "InvalidStackConfig",
-        field: "KVITBIT_DISABLE_CUSTOM",
-      });
-    }
+    if (stackSiblingMasked._tag !== "Failure") throw new Error("Expected the asserted result");
+    expect(stackSiblingMasked.failure).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_DISABLE_CUSTOM",
+    });
 
     const stackScalarMasked = await Effect.runPromise(
       loadStackConfig.pipe(
@@ -1887,12 +1902,11 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
       stackScalarMasked._tag,
       "loadStackConfig scalar primary KVITBIT_DISABLE + fallback",
     ).toBe("Failure");
-    if (stackScalarMasked._tag === "Failure") {
-      expect(stackScalarMasked.failure).toMatchObject({
-        _tag: "InvalidStackConfig",
-        field: "KVITBIT_DISABLE_CUSTOM",
-      });
-    }
+    if (stackScalarMasked._tag !== "Failure") throw new Error("Expected the asserted result");
+    expect(stackScalarMasked.failure).toMatchObject({
+      _tag: "InvalidStackConfig",
+      field: "KVITBIT_DISABLE_CUSTOM",
+    });
 
     for (const [label, extraEnv, expectedTag] of [
       ["empty exact alone", { KVITBIT_ALLOW_LOCAL_BLOBS: "" }, "Failure"],
@@ -1915,12 +1929,16 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
         ),
       );
       expect(exactRes._tag, `loadStackConfig ${label}`).toBe(expectedTag);
-      if (exactRes._tag === "Failure") {
-        expect(exactRes.failure).toMatchObject({
-          _tag: "InvalidStackConfig",
-          field: "KVITBIT_ALLOW_LOCAL_BLOBS",
-        });
-      }
+      const error = exactRes._tag === "Failure" ? exactRes.failure : null;
+      expect(
+        error === null
+          ? null
+          : { _tag: error._tag, field: "field" in error ? error.field : undefined },
+      ).toEqual(
+        expectedTag === "Failure"
+          ? { _tag: "InvalidStackConfig", field: "KVITBIT_ALLOW_LOCAL_BLOBS" }
+          : null,
+      );
     }
 
     for (const [label, sparseExtra, expectedField] of [
@@ -1942,12 +1960,11 @@ describe("verify-deploy-config: infra/alchemy stack validation & cross-layer sou
         ),
       );
       expect(sparseRes._tag, `loadStackConfig ${label}`).toBe("Failure");
-      if (sparseRes._tag === "Failure") {
-        expect(sparseRes.failure).toMatchObject({
-          _tag: "InvalidStackConfig",
-          field: expectedField,
-        });
-      }
+      if (sparseRes._tag !== "Failure") throw new Error("Expected the asserted result");
+      expect(sparseRes.failure).toMatchObject({
+        _tag: "InvalidStackConfig",
+        field: expectedField,
+      });
     }
   });
 });
@@ -2028,7 +2045,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                     for (const kvitbitEnv of kvitbitEnvCases) {
                       for (const feedbackEnabled of [false, true] as const) {
                         total++;
-                        const env: Record<string, string | undefined> = {
+                        const env = {
                           ...BASE_GCP_ENV,
                           KVITBIT_STAGE: stage,
                           BOOTSTRAP_FOUNDATION: mode.foundation,
@@ -2046,7 +2063,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                           KVITBIT_EMAIL_MODE: emailMode === "absent" ? undefined : emailMode,
                           KVITBIT_BLOB_DRIVER: blobDriver === "absent" ? undefined : blobDriver,
                           KVITBIT_ENV: kvitbitEnv === "absent" ? undefined : kvitbitEnv,
-                        };
+                        } satisfies Record<string, string | undefined>;
 
                         // Independent deploy.yml preflight specification oracle
                         let expOk = true;
@@ -2071,7 +2088,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                           if (edge.label !== "valid") expOk = false;
                           const hasR = secrets.resend === "true";
                           const hasS = secrets.smtp === "true";
-                          if (!hasR && !hasS) expOk = false;
+                          if (!(hasR || hasS)) expOk = false;
                           if ((emailMode === "resend" || emailMode === "resend+smtp") && !hasR) {
                             expOk = false;
                           }
@@ -2117,7 +2134,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                             serverMaxInstances: 10,
                             appOrigin: ORIGIN_VALUES[origin],
                             emailMode: emailMode === "absent" ? undefined : emailMode,
-                            emailFrom: env.EMAIL_FROM,
+                            emailFrom: env["EMAIL_FROM"],
                             trustedProxyHops: 2,
                             shareKeyVersion: 1,
                             androidAssetlinksSha256: undefined,
@@ -2147,9 +2164,12 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                           }
 
                           const serverEnv: Record<string, string> = {};
-                          for (const v of serverPlainEnv(stackConfig, {
-                            blobsBucket: stackConfig.blobsBucket,
-                            mobileAssetsBucket: stackConfig.mobileAssetsBucket,
+                          for (const v of serverPlainEnv({
+                            config: stackConfig,
+                            buckets: {
+                              blobsBucket: stackConfig.blobsBucket,
+                              mobileAssetsBucket: stackConfig.mobileAssetsBucket,
+                            },
                           })) {
                             serverEnv[v.name] = v.value;
                           }
@@ -2163,7 +2183,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                             );
                           }
 
-                          const workerCfg = buildRunnerWorkerConfig(stackConfig);
+                          const workerCfg = buildRunnerWorkerConfig({ config: stackConfig });
                           const workerEnv: Record<string, string> = {};
                           for (const v of workerCfg.plainEnv) workerEnv[v.name] = v.value;
                           for (const s of workerCfg.secrets) {
@@ -2241,7 +2261,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                 for (const resendEnabled of [false, true] as const) {
                   for (const origin of origins) {
                     total++;
-                    const env: Record<string, string | undefined> = {
+                    const env = {
                       ...BASE_GCP_ENV,
                       KVITBIT_STAGE: stage,
                       BOOTSTRAP_FOUNDATION: mode.foundation,
@@ -2259,13 +2279,16 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                       KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
                       KVITBIT_EMAIL_MODE: emailMode === "absent" ? undefined : emailMode,
                       KVITBIT_BOT_PROTECTION_MODE: botMode === "absent" ? undefined : botMode,
-                    };
+                    } satisfies Record<string, string | undefined>;
 
-                    const activeBootstraps = [
-                      mode.foundation === "true",
-                      mode.feedback === "true",
-                      mode.altcha === "true",
-                    ].filter(Boolean).length;
+                    const activeBootstraps = Arr.filter(
+                      [
+                        mode.foundation === "true",
+                        mode.feedback === "true",
+                        mode.altcha === "true",
+                      ],
+                      Boolean,
+                    ).length;
 
                     let expOk = true;
                     if (stage !== "prod") expOk = false;
@@ -2277,7 +2300,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                     else if (mode.label === "bootstrap_foundation") expOk = true;
                     else {
                       if (origin !== "https_public") expOk = false;
-                      if (!resendEnabled || !altchaEnabled) expOk = false;
+                      if (!(resendEnabled && altchaEnabled)) expOk = false;
                     }
 
                     const actual = validateDeployPreflight(env);
@@ -2316,9 +2339,10 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                         serverMaxInstances: 10,
                         appOrigin: ORIGIN_VALUES[origin],
                         emailMode: emailMode === "absent" ? undefined : emailMode,
-                        emailFrom: env.EMAIL_FROM,
-                        botProtectionMode:
-                          botMode === "absent" ? undefined : (botMode as DeployBotProtectionMode),
+                        emailFrom: env["EMAIL_FROM"],
+                        botProtectionMode: Schema.is(Schema.Literals(["altcha", "none"]))(botMode)
+                          ? botMode
+                          : undefined,
                         trustedProxyHops: 2,
                         shareKeyVersion: 1,
                         androidAssetlinksSha256: undefined,
@@ -2345,9 +2369,12 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                         continue;
                       }
                       const serverEnv: Record<string, string> = {};
-                      for (const v of serverPlainEnv(stackConfig, {
-                        blobsBucket: stackConfig.blobsBucket,
-                        mobileAssetsBucket: stackConfig.mobileAssetsBucket,
+                      for (const v of serverPlainEnv({
+                        config: stackConfig,
+                        buckets: {
+                          blobsBucket: stackConfig.blobsBucket,
+                          mobileAssetsBucket: stackConfig.mobileAssetsBucket,
+                        },
                       })) {
                         serverEnv[v.name] = v.value;
                       }
@@ -2360,7 +2387,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
                           `3-layer bot gap (preflight->server): ${serverRes.ok ? serverRes.value.botProtection?.mode : serverRes.error.message}`,
                         );
                       }
-                      const workerCfg = buildRunnerWorkerConfig(stackConfig);
+                      const workerCfg = buildRunnerWorkerConfig({ config: stackConfig });
                       const workerEnv: Record<string, string> = {};
                       for (const v of workerCfg.plainEnv) workerEnv[v.name] = v.value;
                       for (const s of workerCfg.secrets) {
@@ -2412,7 +2439,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
           const enableTurboCache = (secretMask & 8) !== 0;
           bootstrapMatrixChecked++;
 
-          const env: Record<string, string | undefined> = {
+          const env = {
             ...BASE_GCP_ENV,
             KVITBIT_STAGE: stage,
             BOOTSTRAP_FOUNDATION: bootstrapFoundation ? "true" : "false",
@@ -2429,7 +2456,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
             APP_ORIGIN: "https://kvitbit.cz",
             EMAIL_FROM: "Kvitbit <noreply@kvitbit.cz>",
             KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
-          };
+          } satisfies Record<string, string | undefined>;
 
           let expOk: boolean;
           if (stage !== "prod") expOk = false;
@@ -2505,14 +2532,10 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
           BOOTSTRAP_FOUNDATION: "true",
           [flag]: raw,
         });
-        if (expected === "invalid") {
-          expect(res.ok, `${flag}=${raw}`).toBe(false);
-        } else {
-          expect(res.ok, `${flag}=${raw}`).toBe(true);
-          if (res.ok) {
-            expect(res.normalizedBooleans[flag]).toBe(expected);
-          }
-        }
+        expect(res.ok, `${flag}=${raw}`).toBe(expected !== "invalid");
+        expect(res.ok ? res.normalizedBooleans[flag] : undefined).toBe(
+          expected === "invalid" ? undefined : expected,
+        );
       }
     }
     expect(boolChecks).toBe(72);
@@ -2527,7 +2550,7 @@ describe("verify-deploy-config: deploy.yml preflight & 3-layer soundness", () =>
       expect(
         validateDeployPreflight({
           ...validNormal,
-          KVITBIT_REPO_VARS_JSON: JSON.stringify({ [optOut]: "true" }),
+          KVITBIT_REPO_VARS_JSON: encodeJson({ [optOut]: "true" }),
         }).ok,
         `repo_vars ${optOut}`,
       ).toBe(false);

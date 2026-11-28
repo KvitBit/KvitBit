@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { ConfigView, ReleaseInfo } from "@kvitbit/api-contract";
-import { Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
 import type { Failure } from "../../src/app/api";
 import * as Android from "../../src/page/public/android";
 import * as ErrorPage from "../../src/page/public/error";
@@ -20,32 +23,36 @@ const sampleFailure = (tag = "Unavailable"): Failure => ({
 });
 
 const sampleConfig = (signUp = true): ConfigView =>
-  Schema.decodeUnknownSync(ConfigView)({
-    version: "1.0.0",
-    botProtection: "altcha",
-    uploads: {
-      attachment: { maxBytes: 1024, types: ["application/pdf"] },
-      brandingImage: { maxBytes: 1024, types: ["image/png"] },
-      themeJson: { maxBytes: 1024 },
-    },
-    features: { signUp, mcp: true, apiKeys: true },
-  });
+  Effect.runSync(
+    Schema.decodeEffect(ConfigView)({
+      version: "1.0.0",
+      botProtection: "altcha",
+      uploads: {
+        attachment: { maxBytes: 1024, types: ["application/pdf"] },
+        brandingImage: { maxBytes: 1024, types: ["image/png"] },
+        themeJson: { maxBytes: 1024 },
+      },
+      features: { signUp, mcp: true, apiKeys: true },
+    }),
+  );
 
-const sampleRelease: ReleaseInfo = Schema.decodeUnknownSync(ReleaseInfo)({
-  version: "1.2.3",
-  versionCode: 10203,
-  releasedAt: "2026-11-20T10:00:00Z",
-  apkUrl: "/api/mobile/releases/1.2.3/apk",
-  apkSha256: "aaaa1111bbbb2222",
-  sizeBytes: 15_728_640,
-  signingCertSha256: "cccc3333dddd4444",
-  minAndroidSdk: 26,
-  obtainiumUrl: "obtainium://add/https://kvitbit.cz/api/mobile/releases/latest",
-});
+const sampleRelease: ReleaseInfo = Effect.runSync(
+  Schema.decodeEffect(ReleaseInfo)({
+    version: "1.2.3",
+    versionCode: 10203,
+    releasedAt: "2026-11-20T10:00:00Z",
+    apkUrl: "/api/mobile/releases/1.2.3/apk",
+    apkSha256: "aaaa1111bbbb2222",
+    sizeBytes: 15_728_640,
+    signingCertSha256: "cccc3333dddd4444",
+    minAndroidSdk: 26,
+    obtainiumUrl: "obtainium://add/https://kvitbit.cz/api/mobile/releases/latest",
+  }),
+);
 
 describe("Landing page (Screen 01)", () => {
   test("init loads config with seq=1 and ignores stale seq replies", () => {
-    const ctx = ctxFor({ _tag: "Landing" }, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route: { _tag: "Landing" }, locale: "en", session: anonymous });
     const first = Landing.init({ _tag: "Landing" }, ctx);
     expect(first.model.config._tag).toBe("Loading");
     expect(first.commands?.length).toBe(1);
@@ -65,9 +72,8 @@ describe("Landing page (Screen 01)", () => {
       ctx,
     );
     expect(loaded.model.config._tag).toBe("Loaded");
-    if (loaded.model.config._tag === "Loaded") {
-      expect(loaded.model.config.data.features.signUp).toBe(false);
-    }
+    if (loaded.model.config._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(loaded.model.config.data.features.signUp).toBe(false);
   });
 
   test("SSR renders landing in cs and en with Persuade hero and feature cards", async () => {
@@ -88,7 +94,7 @@ describe("Landing page (Screen 01)", () => {
     ] as const) {
       expect(html).toMatch(new RegExp(`data-slot="landing-tagline"[^>]*>${tagline}</span>`));
       expect(html).toMatch(new RegExp(`data-slot="landing-title"[^>]*>${heading}</h1>`));
-      expect(html.split(heading)).toHaveLength(2);
+      expect(Str.split(html, heading)).toHaveLength(2);
     }
   });
 });
@@ -104,7 +110,7 @@ describe("Legal page (Screen 01)", () => {
     expect(privacyCs.title).toContain("Ochrana osobních údajů");
     expect(privacyCs.html).toContain("GDPR");
 
-    const ctx = ctxFor({ _tag: "Legal", page: "terms" }, { locale: "en" });
+    const ctx = ctxFor({ route: { _tag: "Legal", page: "terms" }, locale: "en" });
     const init = Legal.init({ _tag: "Legal", page: "terms" }, ctx);
     expect(init.model.kind).toBe("terms");
   });
@@ -112,7 +118,7 @@ describe("Legal page (Screen 01)", () => {
 
 describe("Android Download page (Screen 03)", () => {
   test("init fetches release, handles failure/retry, stale-seq, and copy toast", () => {
-    const ctx = ctxFor({ _tag: "AndroidDownload" }, { locale: "en", session: anonymous });
+    const ctx = ctxFor({ route: { _tag: "AndroidDownload" }, locale: "en", session: anonymous });
     const first = Android.init({ _tag: "AndroidDownload" }, ctx);
     expect(first.model.release._tag).toBe("Loading");
 
@@ -134,9 +140,8 @@ describe("Android Download page (Screen 03)", () => {
 
     const retried = Android.update(failed.model, Android.Message.ClickedRetry(), ctx);
     expect(retried.model.release._tag).toBe("Loading");
-    if (retried.model.release._tag === "Loading") {
-      expect(retried.model.release.seq).toBe(2);
-    }
+    if (retried.model.release._tag !== "Loading") throw new Error("Expected Loading");
+    expect(retried.model.release.seq).toBe(2);
 
     const loaded = Android.update(
       retried.model,
@@ -171,7 +176,11 @@ describe("Error pages (Screen 03)", () => {
     expect(noAccess.html).toContain("No access");
     expect(noAccess.html).toContain("Novák Design");
 
-    const ctx = ctxFor({ _tag: "Error", kind: "server" }, { locale: "cs", session: anonymous });
+    const ctx = ctxFor({
+      route: { _tag: "Error", kind: "server" },
+      locale: "cs",
+      session: anonymous,
+    });
     const init = ErrorPage.init({ _tag: "Error", kind: "server" }, ctx);
     expect(ErrorPage.title(init.model, ctx)).toContain("Něco se pokazilo");
     const retried = ErrorPage.update(init.model, ErrorPage.Message.ClickedRetry(), ctx);

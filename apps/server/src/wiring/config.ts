@@ -1,11 +1,16 @@
+import * as Fn from "effect/Function";
 /**
  * Environment configuration for driven-port adapters (`apps/server/src/wiring/**`).
  * Variable names follow the Phase 3 runtime contract agreed on board threads #871/#908/#913.
  */
-import { Config, Effect, Option, Redacted } from "effect";
+
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
+import * as Str from "effect/String";
 import {
   type BlobDriver,
-  type EmailMode,
   InvalidRuntimeConfig,
   liftValidation,
   loadKvitbitEnv,
@@ -13,8 +18,6 @@ import {
   resolveBlobConfig,
   toConfigError,
 } from "../config-contract";
-
-export type { BlobDriver, EmailMode };
 
 export interface EmailWiringConfig {
   readonly mode?: string | undefined;
@@ -46,7 +49,7 @@ const optionalTrimmedString = (
   Effect.map(Config.option(Config.String(name)), (opt) =>
     Option.getOrUndefined(
       Option.flatMap(opt, (v) => {
-        const trimmed = v.trim();
+        const trimmed = Str.trim(v);
         return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
       }),
     ),
@@ -57,7 +60,7 @@ const optionalNonEmptyRedacted = (
 ): Effect.Effect<Option.Option<Redacted.Redacted<string>>, Config.ConfigError> =>
   Effect.map(Config.option(Config.Redacted(name)), (opt) =>
     Option.flatMap(opt, (secret) =>
-      Redacted.value(secret).trim().length > 0 ? Option.some(secret) : Option.none(),
+      secret.pipe(Redacted.value, Str.trim).length > 0 ? Option.some(secret) : Option.none(),
     ),
   );
 
@@ -92,14 +95,15 @@ export const BlobWiringConfigSchema: Effect.Effect<BlobWiringConfig, Config.Conf
 export const ShareSecretsConfigSchema: Effect.Effect<ShareSecretsConfig, Config.ConfigError> =
   Effect.gen(function* () {
     const authSecret = yield* Config.Redacted("BETTER_AUTH_SECRET");
-    if (Redacted.value(authSecret).trim().length === 0) {
-      return yield* Effect.fail(
+    if (authSecret.pipe(Redacted.value, Str.trim).length === 0) {
+      return yield* Fn.pipe(
         toConfigError(
-          new InvalidRuntimeConfig({
+          InvalidRuntimeConfig.make({
             field: "BETTER_AUTH_SECRET",
             reason: "BETTER_AUTH_SECRET must be non-empty",
           }),
         ),
+        Effect.fail,
       );
     }
     const shareKeyVersion = yield* Config.Int("KVITBIT_SHARE_KEY_VERSION").pipe(

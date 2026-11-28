@@ -8,19 +8,25 @@ import {
   uuidV7,
 } from "@kvitbit/ui-port/api";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { useCallback, useRef } from "react";
 import { useApi } from "../../runtime/api-runtime";
 import {
+  fromMobilePromise,
   isRequestIntentExpired,
   requestIntentReconciliationCopy,
   runRequestIntent,
 } from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
+import { requestOwner } from "../request-owner";
+import { runFeatureEffect } from "../ui-effect";
 
 export function useRequestOwner(workspaceId: WorkspaceId) {
   const { state, origin } = useSession();
-  return state.status === "signed-in" ? JSON.stringify([origin, state.user.id, workspaceId]) : null;
+  return state.status === "signed-in" ? requestOwner([origin, state.user.id, workspaceId]) : null;
 }
 
 export function useRequestMutation(workspaceId: WorkspaceId) {
@@ -28,20 +34,21 @@ export function useRequestMutation(workspaceId: WorkspaceId) {
   const owner = useRequestOwner(workspaceId);
 
   return useCallback(
-    async <A, E>(
+    <A, E, P>(
       operation: string,
-      payload: unknown,
+      payload: P,
       call: (api: KvitbitApiClient, key: RequestKey) => Effect.Effect<A, E>,
-    ): Promise<ApiResult<A>> => {
-      if (owner === null) return err(UiError.cancelled);
-      return runRequestIntent(owner, operation, payload, (key) => run((api) => call(api, key)));
-    },
+    ): Promise<ApiResult<A>> =>
+      owner === null
+        ? runFeatureEffect(Effect.succeed(err(UiError.cancelled)))
+        : runRequestIntent(owner, operation, payload, (key) => run((api) => call(api, key))),
     [owner, run],
   );
 }
 
-const paymentFormSlot = (owner: string, target: string) =>
-  `kvitbit.payment-form.v1.${JSON.stringify([owner, target])}`;
+const encodePaymentTarget = Schema.encodeOption(
+  Schema.fromJsonString(Schema.Tuple([Schema.String, Schema.String])),
+);
 
 /**
  * Payment details can legitimately repeat, so each payment form gets its own request-intent
@@ -55,39 +62,56 @@ export function usePaymentMutation(workspaceId: WorkspaceId) {
   const submitting = useRef(false);
 
   return useCallback<ReturnType<typeof useRequestMutation>>(
-    async (target, payload, call) => {
-      if (owner === null || submitting.current) return err(UiError.cancelled);
-      submitting.current = true;
-      try {
-        const slot = paymentFormSlot(owner, target);
-        const scope = await AsyncStorage.getItem(slot);
-        return await runRequestIntent(
-          owner,
-          scope === null ? target : `${target}:${scope}`,
-          payload,
-          (key) => run((api) => call(api, key)),
-          // If this write fails, runRequestIntent reports the outcome as unknown and keeps the
-          // key. A retry then replays the confirmed payment and advances the scope again.
-          () => AsyncStorage.setItem(slot, Effect.runSync(uuidV7)),
-        );
-      } catch {
-        return err(UiError.unexpected());
-      } finally {
-        submitting.current = false;
-      }
-    },
+    (target, payload, call) =>
+      runFeatureEffect(
+        Effect.suspend(() => {
+          if (owner === null || submitting.current) return Effect.succeed(err(UiError.cancelled));
+          const encoded = encodePaymentTarget([owner, target]);
+          if (Option.isNone(encoded)) return Effect.succeed(err(UiError.unexpected()));
+          const slot = `kvitbit.payment-form.v1.${encoded.value}`;
+          submitting.current = true;
+          return Effect.gen(function* () {
+            const scope = yield* fromMobilePromise(() => AsyncStorage.getItem(slot));
+            return yield* fromMobilePromise(() =>
+              runRequestIntent(
+                owner,
+                scope === null ? target : `${target}:${scope}`,
+                payload,
+                (key) => run((api) => call(api, key)),
+                // A failed scope update leaves the original payment key available for replay.
+                () =>
+                  runFeatureEffect(
+                    Effect.flatMap(uuidV7, (nextScope) =>
+                      fromMobilePromise(() => AsyncStorage.setItem(slot, nextScope)),
+                    ),
+                  ),
+              ),
+            );
+          }).pipe(
+            Effect.orElseSucceed(() => err(UiError.unexpected())),
+            Effect.ensuring(
+              Effect.sync(() => {
+                submitting.current = false;
+              }),
+            ),
+          );
+        }),
+      ),
     [owner, run],
   );
 }
 
 /** Text for a failed write, including an unresolved write whose safe replay window closed. */
-export const requestErrorText = (
-  error: UiError,
-  i18n: {
-    readonly local: (copy: typeof requestIntentReconciliationCopy) => string;
-    readonly text: (text: ReturnType<typeof describeError>["text"]) => string;
-  },
-): string =>
+interface RequestErrorTranslator {
+  readonly local: (copy: typeof requestIntentReconciliationCopy) => string;
+  readonly text: (text: ReturnType<typeof describeError>["text"]) => string;
+}
+
+export const requestErrorText: {
+  (error: UiError, i18n: RequestErrorTranslator): string;
+  (i18n: RequestErrorTranslator): (error: UiError) => string;
+} = Fn.dual(2, (error: UiError, i18n: RequestErrorTranslator): string =>
   isRequestIntentExpired(error)
     ? i18n.local(requestIntentReconciliationCopy)
-    : i18n.text(describeError(error).text);
+    : i18n.text(describeError(error).text),
+);

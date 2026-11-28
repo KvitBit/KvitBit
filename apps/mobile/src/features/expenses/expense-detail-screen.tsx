@@ -1,17 +1,17 @@
-import type {
-  CurrencyCode,
-  ExpenseId,
-  ExpenseInput,
-  ExpensePatch,
-  IsoDate,
-  PaymentId,
-  PaymentMethod,
-  VatTreatment,
-} from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
-import { describeError, idempotencyHeaders, ifMatchHeaders } from "@kvitbit/ui-port/api";
-import { formatDate, formatMoney } from "@kvitbit/ui-port/format";
-import { BigDecimal, Option } from "effect";
+import type { RecordPaymentInput } from "@kvitbit/api-contract";
+import type { ExpenseId, PaymentId, PaymentMethod, VatTreatment } from "@kvitbit/domain/contract";
+import { CurrencyCode, IsoDate, MoneyMath } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
+import { describeError, idempotencyHeaders, ifMatchHeaders, UiError } from "@kvitbit/ui-port/api";
+import { formatDate, formatMoney, parseIsoDate } from "@kvitbit/ui-port/format";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Str from "effect/String";
+import type * as Types from "effect/Types";
 import { Download, Edit3, Paperclip, Plus, Share2, Trash2, Upload } from "lucide-react-native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { View } from "react-native";
@@ -19,6 +19,7 @@ import { useI18n } from "../../i18n/i18n-provider";
 import { navigate } from "../../navigation/routes";
 import { useTransfer } from "../../platform/transfer";
 import { useApi, useRemote } from "../../runtime/api-runtime";
+import { fromMobilePromise } from "../../runtime/request-intent";
 import {
   Badge,
   type BadgeTone,
@@ -38,6 +39,7 @@ import {
 import { useWorkspace } from "../../workspace/workspace-provider";
 import { canWriteWorkspace } from "../dashboard/model";
 import { usePaymentMutation, useRequestMutation } from "../documents/request-mutation";
+import { runFeatureEffect, runFeatureSync } from "../ui-effect";
 import { defaultReceiptPicker, type ReceiptPicker } from "./capture-picker";
 import type { RejectedReceipt } from "./capture-queue";
 import {
@@ -77,12 +79,12 @@ const settlementTone = (s: ExpenseSettlement): BadgeTone => {
 };
 
 export function ExpenseDetailScreen(props: {
-  readonly id: ExpenseId | "new";
+  readonly expenseId: ExpenseId | "new";
   readonly initialMode?: "view" | "edit";
   readonly picker?: ReceiptPicker;
 }) {
-  const isNew = props.id === "new";
-  const expenseId = isNew ? null : props.id;
+  const isNew = props.expenseId === "new";
+  const expenseId = isNew ? null : props.expenseId;
   const picker = props.picker ?? defaultReceiptPicker;
 
   const { workspace } = useWorkspace();
@@ -117,18 +119,25 @@ export function ExpenseDetailScreen(props: {
   const [transferBusyId, setTransferBusyId] = useState<string | null>(null);
 
   const detailRemote = useRemote(
-    expenseId === null
-      ? null
-      : (client) => client.expenses.get({ params: { workspaceId: workspace.id, expenseId } }),
-    [workspace.id, expenseId],
+    useMemo(
+      () =>
+        expenseId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              client.expenses.get({ params: { workspaceId: workspace.id, expenseId } }),
+      [workspace.id, expenseId],
+    ),
   );
 
   const paymentsRemote = useRemote(
-    expenseId === null
-      ? null
-      : (client) =>
-          client.payments.listForExpense({ params: { workspaceId: workspace.id, expenseId } }),
-    [workspace.id, expenseId],
+    useMemo(
+      () =>
+        expenseId === null
+          ? null
+          : (client: KvitbitApiClient) =>
+              client.payments.listForExpense({ params: { workspaceId: workspace.id, expenseId } }),
+      [workspace.id, expenseId],
+    ),
   );
 
   const loadedDetail = useMemo(
@@ -152,112 +161,136 @@ export function ExpenseDetailScreen(props: {
     setMode("edit");
   }, [loadedDetail, writable]);
 
-  const handleSave = useCallback(async () => {
-    if (!writable || saving) return;
-    setBannerError(null);
-    const { payload, errors } = buildExpensePayload(form);
-    if (Object.keys(errors).length > 0) {
-      setFieldErrors(errors);
-      return;
-    }
-    setFieldErrors({});
-    setSaving(true);
-    if (isNew) {
-      const res = await runMutation("expenses.record", payload, (client, key) =>
-        client.expenses.record({
-          params: { workspaceId: workspace.id },
-          headers: idempotencyHeaders(key),
-          payload: payload as ExpenseInput,
+  const handleSave = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!writable || saving === true) return;
+          setBannerError(null);
+          const { payload, errors } = buildExpensePayload(form);
+          if (Rec.keys(errors).length > 0) {
+            setFieldErrors(errors);
+            return;
+          }
+          setFieldErrors({});
+          setSaving(true);
+          if (isNew) {
+            const res = yield* fromMobilePromise(() =>
+              runMutation("expenses.record", payload, (client, key) =>
+                client.expenses.record({
+                  params: { workspaceId: workspace.id },
+                  headers: idempotencyHeaders(key),
+                  payload,
+                }),
+              ),
+            );
+            setSaving(false);
+            if (res._tag === "Ok") {
+              const created = decodeExpenseDetail(res.value);
+              if (created === null) {
+                setBannerError(text(describeError(UiError.unexpected()).text));
+                return;
+              }
+              overlay.toast(t("common.toast.saved"));
+              navigate(
+                { _tag: "Expense", ws: workspace.slug, id: created.id, mode: "view" },
+                { replace: true },
+              );
+            } else {
+              const view = describeError(res.error);
+              setBannerError(text(view.text));
+              const mapped: Record<string, string> = {};
+              for (const issue of view.issues) {
+                const keyPath = Arr.join(Arr.map(issue.path, String), ".");
+                if (keyPath !== "") mapped[keyPath] = text(issue.text);
+              }
+              setFieldErrors(mapped);
+            }
+            return;
+          }
+
+          if (expenseId === null || loadedDetail === null) {
+            setSaving(false);
+            return;
+          }
+          const res = yield* fromMobilePromise(() =>
+            api.run((client) =>
+              client.expenses.edit({
+                params: { workspaceId: workspace.id, expenseId },
+                headers: ifMatchHeaders(loadedDetail.revision),
+                payload,
+              }),
+            ),
+          );
+          setSaving(false);
+          if (res._tag === "Ok") {
+            detailRemote.set(res.value);
+            setMode("view");
+            overlay.toast(t("common.toast.saved"));
+          } else {
+            const view = describeError(res.error);
+            setBannerError(text(view.text));
+            const mapped: Record<string, string> = {};
+            for (const issue of view.issues) {
+              const keyPath = Arr.join(Arr.map(issue.path, String), ".");
+              if (keyPath !== "") mapped[keyPath] = text(issue.text);
+            }
+            setFieldErrors(mapped);
+            if (view.staleRevision) detailRemote.reload();
+          }
         }),
-      );
-      setSaving(false);
-      if (res._tag === "Ok") {
-        const created = decodeExpenseDetail(res.value);
-        overlay.toast(t("common.toast.saved"));
-        navigate(
-          { _tag: "Expense", ws: workspace.slug, id: created.id, mode: "view" },
-          { replace: true },
-        );
-      } else {
-        const view = describeError(res.error);
-        setBannerError(text(view.text));
-        const mapped: Record<string, string> = {};
-        for (const issue of view.issues) {
-          const keyPath = issue.path.join(".");
-          if (keyPath !== "") mapped[keyPath] = text(issue.text);
-        }
-        setFieldErrors(mapped);
-      }
-      return;
-    }
+      ),
+    [
+      api,
+      detailRemote,
+      expenseId,
+      form,
+      isNew,
+      loadedDetail,
+      overlay,
+      runMutation,
+      saving,
+      t,
+      text,
+      workspace,
+      writable,
+    ],
+  );
 
-    if (expenseId === null || loadedDetail === null) {
-      setSaving(false);
-      return;
-    }
-    const res = await api.run((client) =>
-      client.expenses.edit({
-        params: { workspaceId: workspace.id, expenseId },
-        headers: ifMatchHeaders(loadedDetail.revision),
-        payload: payload as ExpensePatch,
-      }),
-    );
-    setSaving(false);
-    if (res._tag === "Ok") {
-      detailRemote.set(res.value);
-      setMode("view");
-      overlay.toast(t("common.toast.saved"));
-    } else {
-      const view = describeError(res.error);
-      setBannerError(text(view.text));
-      const mapped: Record<string, string> = {};
-      for (const issue of view.issues) {
-        const keyPath = issue.path.join(".");
-        if (keyPath !== "") mapped[keyPath] = text(issue.text);
-      }
-      setFieldErrors(mapped);
-      if (view.staleRevision) detailRemote.reload();
-    }
-  }, [
-    api,
-    detailRemote,
-    expenseId,
-    form,
-    isNew,
-    loadedDetail,
-    overlay,
-    runMutation,
-    saving,
-    t,
-    text,
-    workspace,
-    writable,
-  ]);
-
-  const handleDeleteExpense = useCallback(async () => {
-    if (!writable || expenseId === null || loadedDetail === null) return;
-    const confirmed = await overlay.confirm({
-      title: t("expenses.detail.removeTitle"),
-      body: t("expenses.detail.removeBody"),
-      confirmLabel: t("common.action.delete"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
-    if (!confirmed) return;
-    const res = await api.run((client) =>
-      client.expenses.remove({
-        params: { workspaceId: workspace.id, expenseId },
-        headers: ifMatchHeaders(loadedDetail.revision),
-      }),
-    );
-    if (res._tag === "Ok") {
-      await rejectedReceipts.clearAll().catch(() => undefined);
-      overlay.toast(t("common.toast.deleted"));
-      navigate({ _tag: "Expenses", ws: workspace.slug, query: {} }, { replace: true });
-    } else {
-      setBannerError(text(describeError(res.error).text));
-    }
-  }, [api, expenseId, loadedDetail, overlay, rejectedReceipts, t, text, workspace, writable]);
+  const handleDeleteExpense = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!writable || expenseId === null || loadedDetail === null) return;
+          const confirmed = yield* fromMobilePromise(() =>
+            overlay.confirm({
+              title: t("expenses.detail.removeTitle"),
+              body: t("expenses.detail.removeBody"),
+              confirmLabel: t("common.action.delete"),
+              cancelLabel: t("common.action.cancel"),
+              destructive: true,
+            }),
+          );
+          if (!confirmed) return;
+          const res = yield* fromMobilePromise(() =>
+            api.run((client) =>
+              client.expenses.remove({
+                params: { workspaceId: workspace.id, expenseId },
+                headers: ifMatchHeaders(loadedDetail.revision),
+              }),
+            ),
+          );
+          if (res._tag === "Ok") {
+            yield* fromMobilePromise(() => rejectedReceipts.clearAll().catch(() => undefined));
+            overlay.toast(t("common.toast.deleted"));
+            navigate({ _tag: "Expenses", ws: workspace.slug, query: {} }, { replace: true });
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
+        }),
+      ),
+    [api, expenseId, loadedDetail, overlay, rejectedReceipts, t, text, workspace, writable],
+  );
 
   const openPaymentEditor = useCallback(
     (detail: ExpenseDetailData) => {
@@ -272,44 +305,57 @@ export function ExpenseDetailScreen(props: {
   );
 
   const handleRecordPayment = useCallback(
-    async (detail: ExpenseDetailData) => {
-      if (!writable || expenseId === null || payBusy) return;
-      setBannerError(null);
-      const cleanedAmount = payAmount.trim().replace(/\s+/g, "").replace(",", ".");
-      const amount = BigDecimal.fromString(cleanedAmount);
-      if (cleanedAmount !== "" && Option.isNone(amount)) {
-        setBannerError(
-          local({ cs: "Zadejte platnou částku.", en: "Enter a valid payment amount." }),
-        );
-        return;
-      }
-      const payload = {
-        target: { expense: expenseId },
-        ...(cleanedAmount !== "" && Option.isSome(amount) && detail.currency !== null
-          ? { amount: MoneyMath.make(amount.value, detail.currency) }
-          : {}),
-        ...(payDate.trim() !== "" ? { paidOn: payDate.trim() as IsoDate } : {}),
-        method: payMethod,
-        ...(payNote.trim() !== "" ? { note: payNote.trim() } : {}),
-      };
-      setPayBusy(true);
-      const res = await runPayment(`payments.record:expense:${expenseId}`, payload, (client, key) =>
-        client.payments.record({
-          params: { workspaceId: workspace.id },
-          headers: idempotencyHeaders(key),
-          payload,
+    (detail: ExpenseDetailData) =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!writable || expenseId === null || payBusy === true) return;
+          setBannerError(null);
+          const cleanedAmount = Str.replace(",", ".")(Str.replace(/\s+/g, "")(Str.trim(payAmount)));
+          const amount = BigDecimal.fromString(cleanedAmount);
+          if (cleanedAmount !== "" && Option.isNone(amount)) {
+            setBannerError(
+              local({ cs: "Zadejte platnou částku.", en: "Enter a valid payment amount." }),
+            );
+            return;
+          }
+          const paidOn = Str.trim(payDate);
+          if (paidOn !== "" && parseIsoDate(paidOn) === undefined) {
+            setBannerError(
+              local({ cs: "Použijte datum RRRR-MM-DD.", en: "Use YYYY-MM-DD date format." }),
+            );
+            return;
+          }
+          const payload: Types.Mutable<RecordPaymentInput> = {
+            target: { expense: expenseId },
+            method: payMethod,
+          };
+          if (cleanedAmount !== "" && Option.isSome(amount) && detail.currency !== null) {
+            payload.amount = MoneyMath.make(amount.value, detail.currency);
+          }
+          if (paidOn !== "") payload.paidOn = IsoDate.make(paidOn);
+          const note = Str.trim(payNote);
+          if (note !== "") payload.note = note;
+          setPayBusy(true);
+          const res = yield* fromMobilePromise(() =>
+            runPayment(`payments.record:expense:${expenseId}`, payload, (client, key) =>
+              client.payments.record({
+                params: { workspaceId: workspace.id },
+                headers: idempotencyHeaders(key),
+                payload,
+              }),
+            ),
+          );
+          setPayBusy(false);
+          if (res._tag === "Ok") {
+            setShowPaymentForm(false);
+            detailRemote.reload();
+            paymentsRemote.reload();
+            overlay.toast(t("common.toast.saved"));
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
         }),
-      );
-      setPayBusy(false);
-      if (res._tag === "Ok") {
-        setShowPaymentForm(false);
-        detailRemote.reload();
-        paymentsRemote.reload();
-        overlay.toast(t("common.toast.saved"));
-      } else {
-        setBannerError(text(describeError(res.error).text));
-      }
-    },
+      ),
     [
       detailRemote,
       expenseId,
@@ -330,35 +376,42 @@ export function ExpenseDetailScreen(props: {
   );
 
   const handleRemovePayment = useCallback(
-    async (paymentId: PaymentId) => {
-      if (!writable) return;
-      const confirmed = await overlay.confirm({
-        title: local({ cs: "Odebrat platbu?", en: "Remove payment?" }),
-        body: t("common.confirm.reasonLabel"),
-        confirmLabel: t("common.action.remove"),
-        cancelLabel: t("common.action.cancel"),
-        destructive: true,
-      });
-      if (!confirmed) return;
-      const reason =
-        removeReason.trim() === ""
-          ? local({ cs: "Odebráno z mobilní aplikace", en: "Removed from mobile app" })
-          : removeReason.trim();
-      const res = await api.run((client) =>
-        client.payments.remove({
-          params: { workspaceId: workspace.id, paymentId },
-          payload: { reason },
+    (paymentId: PaymentId) =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!writable) return;
+          const confirmed = yield* fromMobilePromise(() =>
+            overlay.confirm({
+              title: local({ cs: "Odebrat platbu?", en: "Remove payment?" }),
+              body: t("common.confirm.reasonLabel"),
+              confirmLabel: t("common.action.remove"),
+              cancelLabel: t("common.action.cancel"),
+              destructive: true,
+            }),
+          );
+          if (!confirmed) return;
+          const reason =
+            Str.trim(removeReason) === ""
+              ? local({ cs: "Odebráno z mobilní aplikace", en: "Removed from mobile app" })
+              : Str.trim(removeReason);
+          const res = yield* fromMobilePromise(() =>
+            api.run((client) =>
+              client.payments.remove({
+                params: { workspaceId: workspace.id, paymentId },
+                payload: { reason },
+              }),
+            ),
+          );
+          if (res._tag === "Ok") {
+            setRemoveReason("");
+            detailRemote.reload();
+            paymentsRemote.reload();
+            overlay.toast(t("common.toast.deleted"));
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
         }),
-      );
-      if (res._tag === "Ok") {
-        setRemoveReason("");
-        detailRemote.reload();
-        paymentsRemote.reload();
-        overlay.toast(t("common.toast.deleted"));
-      } else {
-        setBannerError(text(describeError(res.error).text));
-      }
-    },
+      ),
     [
       api,
       detailRemote,
@@ -374,94 +427,116 @@ export function ExpenseDetailScreen(props: {
   );
 
   const handleAttachmentAction = useCallback(
-    async (att: ExpenseAttachmentData, action: "open" | "share") => {
-      if (expenseId === null) return;
-      setBannerError(null);
-      setTransferBusyId(att.id);
-      const dl = await transfer.download({
-        path: `/workspaces/${workspace.id}/expenses/${expenseId}/attachments/${att.id}`,
-        query: { disposition: action === "open" ? "inline" : "attachment" },
-        filename: att.name,
-        contentType: att.contentType,
-      });
-      if (dl._tag === "Err") {
-        setTransferBusyId(null);
-        setBannerError(text(describeError(dl.error).text));
-        return;
-      }
-      const next =
-        action === "open" ? await transfer.open(dl.value) : await transfer.share(dl.value);
-      setTransferBusyId(null);
-      if (next._tag === "Err") {
-        setBannerError(text(describeError(next.error).text));
-      }
-    },
+    (att: ExpenseAttachmentData, action: "open" | "share") =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (expenseId === null) return;
+          setBannerError(null);
+          setTransferBusyId(att.id);
+          const dl = yield* fromMobilePromise(() =>
+            transfer.download({
+              path: `/workspaces/${workspace.id}/expenses/${expenseId}/attachments/${att.id}`,
+              query: { disposition: action === "open" ? "inline" : "attachment" },
+              filename: att.name,
+              contentType: att.contentType,
+            }),
+          );
+          if (dl._tag === "Err") {
+            setTransferBusyId(null);
+            setBannerError(text(describeError(dl.error).text));
+            return;
+          }
+          const next =
+            action === "open"
+              ? yield* fromMobilePromise(() => transfer.open(dl.value))
+              : yield* fromMobilePromise(() => transfer.share(dl.value));
+          setTransferBusyId(null);
+          if (next._tag === "Err") {
+            setBannerError(text(describeError(next.error).text));
+          }
+        }),
+      ),
     [expenseId, text, transfer, workspace.id],
   );
 
   const handleDetachAttachment = useCallback(
-    async (att: ExpenseAttachmentData) => {
-      if (!writable || expenseId === null) return;
-      const confirmed = await overlay.confirm({
-        title: t("expenses.attachmentViewer.detachTitle"),
-        body: att.name,
-        confirmLabel: t("common.action.remove"),
-        cancelLabel: t("common.action.cancel"),
-        destructive: true,
-      });
-      if (!confirmed) return;
-      const res = await api.run((client) =>
-        client.expenses.detach({
-          params: { workspaceId: workspace.id, expenseId, attachmentId: att.id },
+    (att: ExpenseAttachmentData) =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!writable || expenseId === null) return;
+          const confirmed = yield* fromMobilePromise(() =>
+            overlay.confirm({
+              title: t("expenses.attachmentViewer.detachTitle"),
+              body: att.name,
+              confirmLabel: t("common.action.remove"),
+              cancelLabel: t("common.action.cancel"),
+              destructive: true,
+            }),
+          );
+          if (!confirmed) return;
+          const res = yield* fromMobilePromise(() =>
+            api.run((client) =>
+              client.expenses.detach({
+                params: { workspaceId: workspace.id, expenseId, attachmentId: att.id },
+              }),
+            ),
+          );
+          if (res._tag === "Ok") {
+            detailRemote.reload();
+            overlay.toast(t("common.toast.deleted"));
+          } else {
+            setBannerError(text(describeError(res.error).text));
+          }
         }),
-      );
-      if (res._tag === "Ok") {
-        detailRemote.reload();
-        overlay.toast(t("common.toast.deleted"));
-      } else {
-        setBannerError(text(describeError(res.error).text));
-      }
-    },
+      ),
     [api, detailRemote, expenseId, overlay, t, text, workspace.id, writable],
   );
 
-  const handleAddAttachment = useCallback(async () => {
-    if (!writable || expenseId === null) return;
-    setBannerError(null);
-    const picked = await picker.pickDocument();
-    if (picked._tag === "Cancelled") return;
-    if (picked._tag === "PermissionDenied") {
-      setBannerError(t("expenses.capture.cameraDenied"));
-      return;
-    }
-    if (picked._tag === "Error") {
-      setBannerError(picked.message);
-      return;
-    }
-    setUploading(true);
-    setUploadProgress(0);
-    for (const file of picked.files) {
-      const invalid = validateAttachmentFile(file);
-      if (invalid !== null) {
-        setBannerError(
-          invalid === "too_large"
-            ? local({ cs: "Soubor je větší než 20 MB.", en: "File exceeds 20 MB limit." })
-            : t("expenses.attachmentViewer.allowedTypes", { types: "PDF, JPEG, PNG, HEIC" }),
-        );
-        continue;
-      }
-      const uploaded = await transfer.upload({
-        path: `/workspaces/${workspace.id}/expenses/${expenseId}/attachments`,
-        file,
-        onProgress: (p) => setUploadProgress(Math.round(p * 100)),
-      });
-      if (uploaded._tag === "Err") {
-        setBannerError(text(describeError(uploaded.error).text));
-      }
-    }
-    setUploading(false);
-    detailRemote.reload();
-  }, [detailRemote, expenseId, local, picker, t, text, transfer, workspace.id, writable]);
+  const handleAddAttachment = useCallback(
+    () =>
+      runFeatureEffect(
+        Effect.gen(function* () {
+          if (!writable || expenseId === null) return;
+          setBannerError(null);
+          const picked = yield* fromMobilePromise(() => picker.pickDocument());
+          if (picked._tag === "Cancelled") return;
+          if (picked._tag === "PermissionDenied") {
+            setBannerError(t("expenses.capture.cameraDenied"));
+            return;
+          }
+          if (picked._tag === "Error") {
+            setBannerError(picked.message);
+            return;
+          }
+          setUploading(true);
+          setUploadProgress(0);
+          for (const file of picked.files) {
+            const invalid = validateAttachmentFile(file);
+            if (invalid !== null) {
+              setBannerError(
+                invalid === "too_large"
+                  ? local({ cs: "Soubor je větší než 20 MB.", en: "File exceeds 20 MB limit." })
+                  : t("expenses.attachmentViewer.allowedTypes", { types: "PDF, JPEG, PNG, HEIC" }),
+              );
+              continue;
+            }
+            const uploaded = yield* fromMobilePromise(() =>
+              transfer.upload({
+                path: `/workspaces/${workspace.id}/expenses/${expenseId}/attachments`,
+                file,
+                onProgress: (p) => setUploadProgress(Math.round(p * 100)),
+              }),
+            );
+            if (uploaded._tag === "Err") {
+              setBannerError(text(describeError(uploaded.error).text));
+            }
+          }
+          setUploading(false);
+          detailRemote.reload();
+        }),
+      ),
+    [detailRemote, expenseId, local, picker, t, text, transfer, workspace.id, writable],
+  );
 
   const errMsg = (key: string): string | null => {
     const code = fieldErrors[key];
@@ -478,7 +553,10 @@ export function ExpenseDetailScreen(props: {
     const view = describeError(item.error);
     const issueText =
       view.issues.length > 0
-        ? view.issues.map((issue) => text(issue.text)).join(" · ")
+        ? Arr.join(
+            Arr.map(view.issues, (issue) => text(issue.text)),
+            " · ",
+          )
         : text(view.text);
     return (
       <Card key={item.key}>
@@ -500,7 +578,7 @@ export function ExpenseDetailScreen(props: {
             <IconButton
               icon={Trash2}
               label={t("common.action.discard")}
-              onPress={() => void rejectedReceipts.dismiss(item.key)}
+              onPress={() => rejectedReceipts.dismiss(item.key)}
             />
           ) : null}
         </View>
@@ -542,7 +620,7 @@ export function ExpenseDetailScreen(props: {
               label={t("common.action.save")}
               busy={saving}
               disabled={!isNew && loadedDetail === null}
-              onPress={() => void handleSave()}
+              onPress={() => handleSave()}
               testID="expense-save"
             />
           </>
@@ -551,7 +629,7 @@ export function ExpenseDetailScreen(props: {
         {bannerError === null ? null : <Banner text={bannerError} />}
         {rejectedReceipts.rejected.length === 0 ? null : (
           <Section title={t("expenses.detail.attachments")}>
-            {rejectedReceipts.rejected.map(renderRejectedReceipt)}
+            {Arr.map(rejectedReceipts.rejected, renderRejectedReceipt)}
           </Section>
         )}
 
@@ -620,7 +698,7 @@ export function ExpenseDetailScreen(props: {
           <SegmentedChoice
             label={t("common.field.currency")}
             value={form.currency}
-            choices={COMMON_CURRENCIES.map((c) => ({ value: c, label: c }))}
+            choices={Arr.map(COMMON_CURRENCIES, (c) => ({ value: c, label: c }))}
             onChange={(currency) => setForm((f) => ({ ...f, currency }))}
           />
           <TextField
@@ -666,7 +744,7 @@ export function ExpenseDetailScreen(props: {
                   vatRows: [
                     ...f.vatRows,
                     {
-                      id: `vat-${Date.now()}-${f.vatRows.length}`,
+                      id: `vat-${runFeatureSync(Clock.currentTimeMillis)}-${f.vatRows.length}`,
                       treatment: "standard",
                       base: "",
                       vat: "0",
@@ -677,18 +755,18 @@ export function ExpenseDetailScreen(props: {
             />
           }
         >
-          {form.vatRows.map((row, idx) => (
+          {Arr.map(form.vatRows, (row, idx) => (
             <Card key={row.id}>
               <SegmentedChoice<VatTreatment>
                 value={row.treatment}
-                choices={EXPENSE_VAT_TREATMENTS.map((tr) => ({
+                choices={Arr.map(EXPENSE_VAT_TREATMENTS, (tr) => ({
                   value: tr,
                   label: t(`enum.vatTreatment.${tr}`),
                 }))}
                 onChange={(treatment) =>
                   setForm((f) => ({
                     ...f,
-                    vatRows: f.vatRows.map((r, i) => (i === idx ? { ...r, treatment } : r)),
+                    vatRows: Arr.map(f.vatRows, (r, i) => (i === idx ? { ...r, treatment } : r)),
                   }))
                 }
               />
@@ -701,7 +779,7 @@ export function ExpenseDetailScreen(props: {
                     onChangeText={(base) =>
                       setForm((f) => ({
                         ...f,
-                        vatRows: f.vatRows.map((r, i) => (i === idx ? { ...r, base } : r)),
+                        vatRows: Arr.map(f.vatRows, (r, i) => (i === idx ? { ...r, base } : r)),
                       }))
                     }
                     error={errMsg(`vat.${idx}.base`)}
@@ -715,7 +793,7 @@ export function ExpenseDetailScreen(props: {
                     onChangeText={(vat) =>
                       setForm((f) => ({
                         ...f,
-                        vatRows: f.vatRows.map((r, i) => (i === idx ? { ...r, vat } : r)),
+                        vatRows: Arr.map(f.vatRows, (r, i) => (i === idx ? { ...r, vat } : r)),
                       }))
                     }
                     error={errMsg(`vat.${idx}.vat`)}
@@ -726,7 +804,7 @@ export function ExpenseDetailScreen(props: {
                 kind="text"
                 label={t("common.action.remove")}
                 onPress={() =>
-                  setForm((f) => ({ ...f, vatRows: f.vatRows.filter((_, i) => i !== idx) }))
+                  setForm((f) => ({ ...f, vatRows: Arr.filter(f.vatRows, (_, i) => i !== idx) }))
                 }
               />
             </Card>
@@ -778,7 +856,7 @@ export function ExpenseDetailScreen(props: {
             <IconButton
               icon={Trash2}
               label={t("common.action.delete")}
-              onPress={() => void handleDeleteExpense()}
+              onPress={() => handleDeleteExpense()}
             />
           </>
         )
@@ -789,16 +867,19 @@ export function ExpenseDetailScreen(props: {
       <RemoteView state={detailRemote.state} onRetry={detailRemote.reload}>
         {(raw) => {
           const detail = decodeExpenseDetail(raw);
+          if (detail === null) {
+            return <Banner text={text(describeError(UiError.unexpected()).text)} />;
+          }
           const totalLabel =
             detail.total !== null && detail.currency !== null
               ? formatMoney(locale, {
                   amount: detail.total,
-                  currency: detail.currency as CurrencyCode,
+                  currency: detail.currency,
                 })
               : (detail.total ?? "—");
           const czkLabel =
             detail.totalCzk !== null && detail.currency !== "CZK"
-              ? formatMoney(locale, { amount: detail.totalCzk, currency: "CZK" as CurrencyCode })
+              ? formatMoney(locale, { amount: detail.totalCzk, currency: CurrencyCode.make("CZK") })
               : null;
 
           return (
@@ -840,12 +921,13 @@ export function ExpenseDetailScreen(props: {
                 )}
                 {detail.issuedOn === null ? null : (
                   <Text variant="bodyMedium" color="onSurfaceVariant">
-                    {t("expenses.editor.issueDate")}: {formatDate(locale, detail.issuedOn)}
+                    {t("expenses.editor.issueDate")}:{" "}
+                    {formatDate({ locale, date: detail.issuedOn })}
                   </Text>
                 )}
                 {detail.dueOn === null ? null : (
                   <Text variant="bodyMedium" color="onSurfaceVariant">
-                    {t("expenses.editor.dueDate")}: {formatDate(locale, detail.dueOn)}
+                    {t("expenses.editor.dueDate")}: {formatDate({ locale, date: detail.dueOn })}
                   </Text>
                 )}
                 {detail.category === null ? null : (
@@ -858,7 +940,7 @@ export function ExpenseDetailScreen(props: {
 
               {detail.buckets.length === 0 ? null : (
                 <Section title={t("expenses.editor.vatBreakdown")}>
-                  {detail.buckets.map((b) => (
+                  {Arr.map(detail.buckets, (b) => (
                     <ListRow
                       key={`${b.treatment}-${b.ratePercent}`}
                       title={`${t(`enum.vatTreatment.${b.treatment}`)} (${b.ratePercent} %)`}
@@ -867,7 +949,7 @@ export function ExpenseDetailScreen(props: {
                         detail.currency !== null
                           ? formatMoney(locale, {
                               amount: b.gross,
-                              currency: detail.currency as CurrencyCode,
+                              currency: detail.currency,
                             })
                           : b.gross
                       }
@@ -893,7 +975,7 @@ export function ExpenseDetailScreen(props: {
                   ) : null
                 }
               >
-                {!writable || !showPaymentForm ? null : (
+                {!writable || showPaymentForm !== true ? null : (
                   <Card>
                     <TextField
                       label={t("common.field.amount")}
@@ -909,7 +991,7 @@ export function ExpenseDetailScreen(props: {
                     />
                     <SegmentedChoice<PaymentMethod>
                       value={payMethod}
-                      choices={PAYMENT_METHODS.map((m) => ({
+                      choices={Arr.map(PAYMENT_METHODS, (m) => ({
                         value: m,
                         label: t(`enum.paymentMethod.${m}`),
                       }))}
@@ -929,7 +1011,7 @@ export function ExpenseDetailScreen(props: {
                       <Button
                         label={t("common.action.confirm")}
                         busy={payBusy}
-                        onPress={() => void handleRecordPayment(detail)}
+                        onPress={() => handleRecordPayment(detail)}
                         testID="expense-record-payment-submit"
                       />
                     </View>
@@ -938,9 +1020,10 @@ export function ExpenseDetailScreen(props: {
 
                 <RemoteView state={paymentsRemote.state} onRetry={paymentsRemote.reload}>
                   {(rawPayments) => {
-                    const payments = rawPayments
-                      .map(decodePayment)
-                      .filter((p): p is NonNullable<typeof p> => p !== null);
+                    const payments = Arr.filter(
+                      Arr.map(rawPayments, (payment) => decodePayment(payment)),
+                      (p): p is NonNullable<typeof p> => p !== null,
+                    );
                     if (payments.length === 0) {
                       return (
                         <Text variant="meta" color="onSurfaceVariant">
@@ -950,7 +1033,7 @@ export function ExpenseDetailScreen(props: {
                     }
                     return (
                       <>
-                        {payments.map((p) => (
+                        {Arr.map(payments, (p) => (
                           <Card key={p.id}>
                             <View className="flex-row items-center gap-2">
                               <View className="flex-1">
@@ -958,7 +1041,7 @@ export function ExpenseDetailScreen(props: {
                                   {formatMoney(locale, p.amount)}
                                 </Text>
                                 <Text variant="meta" color="onSurfaceVariant">
-                                  {formatDate(locale, p.paidOn)} ·{" "}
+                                  {formatDate({ locale, date: p.paidOn })} ·{" "}
                                   {t(`enum.paymentMethod.${p.method}`)}
                                 </Text>
                                 {p.note === null ? null : <Text variant="bodySmall">{p.note}</Text>}
@@ -967,7 +1050,7 @@ export function ExpenseDetailScreen(props: {
                                 <IconButton
                                   icon={Trash2}
                                   label={t("common.action.remove")}
-                                  onPress={() => void handleRemovePayment(p.id)}
+                                  onPress={() => handleRemovePayment(p.id)}
                                 />
                               ) : null}
                             </View>
@@ -987,12 +1070,12 @@ export function ExpenseDetailScreen(props: {
                       kind="outlined"
                       icon={Upload}
                       label={
-                        uploading
+                        uploading === true
                           ? t("common.state.uploadingPercent", { percent: uploadProgress })
                           : t("expenses.detail.addFiles")
                       }
                       busy={uploading}
-                      onPress={() => void handleAddAttachment()}
+                      onPress={() => handleAddAttachment()}
                       testID="expense-add-attachment"
                     />
                   ) : null
@@ -1004,8 +1087,8 @@ export function ExpenseDetailScreen(props: {
                   </Text>
                 ) : (
                   <>
-                    {rejectedReceipts.rejected.map(renderRejectedReceipt)}
-                    {detail.attachments.map((att) => (
+                    {Arr.map(rejectedReceipts.rejected, renderRejectedReceipt)}
+                    {Arr.map(detail.attachments, (att) => (
                       <Card key={att.id}>
                         <View className="flex-row items-center gap-2">
                           <Paperclip size={18} />
@@ -1024,7 +1107,7 @@ export function ExpenseDetailScreen(props: {
                             icon={Download}
                             label={t("common.action.open")}
                             busy={transferBusyId === att.id}
-                            onPress={() => void handleAttachmentAction(att, "open")}
+                            onPress={() => handleAttachmentAction(att, "open")}
                             testID={`attachment-open-${att.id}`}
                           />
                           <Button
@@ -1032,14 +1115,14 @@ export function ExpenseDetailScreen(props: {
                             icon={Share2}
                             label={t("common.action.share")}
                             disabled={transferBusyId === att.id}
-                            onPress={() => void handleAttachmentAction(att, "share")}
+                            onPress={() => handleAttachmentAction(att, "share")}
                             testID={`attachment-share-${att.id}`}
                           />
                           {writable ? (
                             <IconButton
                               icon={Trash2}
                               label={t("expenses.attachmentViewer.detach")}
-                              onPress={() => void handleDetachAttachment(att)}
+                              onPress={() => handleDetachAttachment(att)}
                             />
                           ) : null}
                         </View>

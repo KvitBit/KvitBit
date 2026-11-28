@@ -1,15 +1,20 @@
 /** Read methods: get, list, history, pdf. */
+
 import type {
-  DocumentId,
+  Caller,
   DocumentQuery,
   FileDownload,
-  IsoDate,
   Locale,
   PageRequest,
   PdfTemplate,
 } from "@kvitbit/domain/contract";
-import { Invalid } from "@kvitbit/domain/contract";
-import { Effect, Stream } from "effect";
+import { DocumentId, Invalid, IsoDate } from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as EffectString from "effect/String";
 import { authorizeInWorkspace } from "../../policy/Policy";
 import { canonicalJson } from "../../shared/canonicalJson";
 import { orUnavailable } from "../../shared/errors";
@@ -20,50 +25,47 @@ import { DocumentsRepo } from "./repo";
 import { now, viewOf } from "./support";
 import { toSummary } from "./view";
 
-export const get = (id: DocumentId) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.read");
+export const get = Effect.fn("get")(
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.read");
     const row = yield* (yield* DocumentsRepo).get(workspaceId, id);
     return yield* viewOf(row);
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 const DEFAULT_LIMIT = 50;
 
 const pageIssue = (path: string, code: "request.malformed" | "page.cursor_mismatch") =>
-  new Invalid({ issues: [{ path: [path], code }] });
+  Invalid.make({ issues: [{ path: [path], code }] });
 
 /**
  * Cursor = base64 of JSON [filter fingerprint (first 16 hex), issuedOn, id]: bound to the filter
  * it came from (`page.cursor_mismatch` otherwise).
  */
-const decodeCursor = (cursor: string, fingerprint: string) => {
-  try {
-    const parsed: unknown = JSON.parse(atob(cursor));
-    if (
-      Array.isArray(parsed) &&
-      parsed.length === 3 &&
-      parsed.every((p) => typeof p === "string") &&
-      parsed[0] === fingerprint
-    ) {
-      return [parsed[1] as IsoDate, parsed[2] as DocumentId] as const;
-    }
-  } catch {
-    // fall through
-  }
-  return null;
-};
+const ListCursor = Schema.StringFromBase64.pipe(
+  Schema.decodeTo(Schema.fromJsonString(Schema.Tuple([Schema.String, IsoDate, DocumentId]))),
+);
+const decodeCursor = Schema.decodeUnknownOption(ListCursor);
+const encodeCursor = Schema.encodeEffect(ListCursor);
 
-export const list = (q: DocumentQuery & PageRequest) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.read");
+export const list = Effect.fn("list")(
+  function* (caller: Caller, q: DocumentQuery & PageRequest) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.read");
     const limit = q.limit ?? DEFAULT_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       return yield* pageIssue("limit", "request.malformed");
     }
     const { cursor: _cursor, limit: _limit, ...filter } = q;
-    const fingerprint = (yield* sha256Hex(canonicalJson(filter))).slice(0, 16);
-    const after = q.cursor === undefined ? undefined : decodeCursor(q.cursor, fingerprint);
-    if (after === null) return yield* pageIssue("cursor", "page.cursor_mismatch");
+    const value_1 = yield* sha256Hex(canonicalJson(filter));
+    const fingerprint = EffectString.slice(0, 16)(value_1);
+    let after: readonly [IsoDate, DocumentId] | undefined;
+    if (q.cursor !== undefined) {
+      const cursor = decodeCursor(q.cursor);
+      if (Option.isNone(cursor) || cursor.value[0] !== fingerprint)
+        return yield* pageIssue("cursor", "page.cursor_mismatch");
+      after = [cursor.value[1], cursor.value[2]];
+    }
     const { today } = yield* now;
     const { rows, more } = yield* (yield* DocumentsRepo).search(
       workspaceId,
@@ -80,40 +82,55 @@ export const list = (q: DocumentQuery & PageRequest) =>
       { after, limit },
     );
     const last = rows.at(-1);
+    const nextCursor =
+      more && last !== undefined
+        ? yield* encodeCursor([fingerprint, last.issuedOn, last.id]).pipe(Effect.orDie)
+        : null;
     return {
-      items: rows.map((row) => toSummary(row, today)),
-      nextCursor: more && last ? btoa(JSON.stringify([fingerprint, last.issuedOn, last.id])) : null,
+      items: EffectArray.map(rows, (row) => toSummary(row, today)),
+      nextCursor,
     };
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 /** The document's audit entries in time order (drafts: create; issued: every change). */
-export const history = (id: DocumentId) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.history");
+export const history = Effect.fn("history")(
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.history");
     yield* (yield* DocumentsRepo).get(workspaceId, id);
     return yield* (yield* CoreStore).audit.history(workspaceId, { entity: "Document", id });
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);
 
 const filenameOf = (number: string | null, id: DocumentId) =>
-  `${(number ?? `draft-${id}`).replace(/[^\p{L}\p{N}._-]+/gu, "-")}.pdf`;
+  `${EffectString.replace(/[^\p{L}\p{N}._-]+/gu, "-")(number ?? `draft-${id}`)}.pdf`;
 
 /** PDF of the current revision through `DocumentRenderer`; locked documents render too (D5). */
-export const pdf = (
-  id: DocumentId,
-  opts?: { readonly template?: PdfTemplate; readonly language?: Locale },
-) =>
-  Effect.gen(function* () {
-    const { workspaceId } = yield* authorizeInWorkspace("document.pdf");
+export const pdf = Effect.fn("pdf")(
+  function* (
+    caller: Caller,
+    id: DocumentId,
+    opts?: { readonly template?: PdfTemplate; readonly language?: Locale },
+  ) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.pdf");
     const row = yield* (yield* DocumentsRepo).get(workspaceId, id);
     const language = opts?.language ?? row.language;
     const view = yield* viewOf(row, { language });
-    const bytes = yield* (yield* DocumentRenderer).render(view, {
-      template: opts?.template ?? "classic",
-      language,
-    });
+    const bytes = yield* (yield* DocumentRenderer).render(
+      view,
+      {
+        template: opts?.template ?? "classic",
+        language,
+      },
+      workspaceId,
+    );
     return {
       filename: filenameOf(row.number, row.id),
       contentType: "application/pdf",
       bytes: Stream.make(bytes),
     } satisfies FileDownload;
-  }).pipe(orUnavailable);
+  },
+  (_) => orUnavailable(_),
+);

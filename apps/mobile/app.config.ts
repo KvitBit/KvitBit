@@ -1,11 +1,23 @@
+// Expo loads its config synchronously before the app runtime exists.
+
 import { existsSync } from "node:fs";
+// This path is resolved on the operating system where Expo loads the config.
+
 import { relative, resolve } from "node:path";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import type { ConfigContext, ExpoConfig } from "expo/config";
 
 // Dynamic Expo config layered over app.json.
 // Imports no local runtime modules: Expo transpiles only app.config.ts itself.
 // Derives Android versionCode from app.json's expo.version (DeskoHub invariant)
 // and points expo-updates at `${EXPO_PUBLIC_API_ORIGIN}/api/mobile/updates/manifest`.
+
+const showString = (value: string) =>
+  Schema.encodeOption(Schema.fromJsonString(Schema.String))(value).pipe(Option.getOrThrow);
 
 const VERSION_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const MAJOR_LIMIT = 2100;
@@ -21,7 +33,7 @@ export const deriveAndroidVersionCode = (version: string | undefined): number =>
   const match = VERSION_RE.exec(version);
   if (match === null) {
     throw new Error(
-      `App version ${JSON.stringify(version)} must be MAJOR.MINOR.PATCH without a prefix, pre-release or build suffix.`,
+      `App version ${showString(version)} must be MAJOR.MINOR.PATCH without a prefix, pre-release or build suffix.`,
     );
   }
   const major = Number(match[1]);
@@ -40,14 +52,15 @@ export const deriveAndroidVersionCode = (version: string | undefined): number =>
 };
 
 export const updatesManifestUrl = (configured: string | undefined): string => {
-  const candidate = configured?.trim() || PRODUCTION_API_ORIGIN;
+  const trimmed = EffectString.trim(configured ?? "");
+  const candidate = trimmed === "" ? PRODUCTION_API_ORIGIN : trimmed;
   const url = URL.parse(candidate);
   const allowed =
     url !== null &&
     (url.protocol === "https:" || (url.protocol === "http:" && PLAIN_HTTP_HOSTS.has(url.hostname)));
   if (!allowed) {
     throw new Error(
-      `EXPO_PUBLIC_API_ORIGIN must be an absolute https URL (plain http only for a local host), got ${JSON.stringify(candidate)}.`,
+      `EXPO_PUBLIC_API_ORIGIN must be an absolute https URL (plain http only for a local host), got ${showString(candidate)}.`,
     );
   }
   return `${url.origin}/api/mobile/updates/manifest`;
@@ -62,16 +75,16 @@ const updatesCodeSigning = (
   env: Readonly<Record<string, string | undefined>>,
   projectRoot: string,
 ): UpdatesCodeSigning => {
-  const setting = env.MOBILE_UPDATES_CODE_SIGNING;
+  const setting = env["MOBILE_UPDATES_CODE_SIGNING"];
   if (setting === undefined || setting === "") return {};
   if (setting !== "required") {
     throw new Error(
-      `MOBILE_UPDATES_CODE_SIGNING must be "required" or unset, got ${JSON.stringify(setting)}.`,
+      `MOBILE_UPDATES_CODE_SIGNING must be "required" or unset, got ${showString(setting)}.`,
     );
   }
+  const configuredPath = EffectString.trim(env["MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE"] ?? "");
   const certPath =
-    env.MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE?.trim() ||
-    "./code-signing/code-signing-certificate.pem";
+    configuredPath === "" ? "./code-signing/code-signing-certificate.pem" : configuredPath;
   const resolvedCertPath = resolve(projectRoot, certPath);
   if (!existsSync(resolvedCertPath)) {
     throw new Error(
@@ -79,15 +92,21 @@ const updatesCodeSigning = (
     );
   }
   return {
-    codeSigningCertificate: relative(projectRoot, resolvedCertPath).replaceAll("\\", "/"),
+    codeSigningCertificate: EffectString.replaceAll(
+      "\\",
+      "/",
+    )(relative(projectRoot, resolvedCertPath)),
     codeSigningMetadata: { keyid: "main", alg: "rsa-v1_5-sha256" },
   };
 };
 
-export default (
-  { config, projectRoot }: ConfigContext,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): ExpoConfig => {
+export const buildAppConfig = ({
+  context: { config, projectRoot },
+  env,
+}: {
+  readonly context: ConfigContext;
+  readonly env: Readonly<Record<string, string | undefined>>;
+}): ExpoConfig => {
   const plugins = [...(config.plugins ?? [])];
   if (!plugins.includes("expo-background-task")) {
     plugins.push("expo-background-task");
@@ -111,10 +130,29 @@ export default (
     updates: {
       ...config.updates,
       enabled: true,
-      url: updatesManifestUrl(env.EXPO_PUBLIC_API_ORIGIN),
+      url: updatesManifestUrl(env["EXPO_PUBLIC_API_ORIGIN"]),
       checkAutomatically: "ON_LOAD",
       fallbackToCacheTimeout: 15_000,
       ...updatesCodeSigning(env, projectRoot),
     },
   };
+};
+
+const optionalEnv = (name: string) =>
+  Config.String(name).pipe(Config.option, Effect.map(Option.getOrUndefined));
+
+export default (context: ConfigContext): ExpoConfig => {
+  const env = Effect.runSync(
+    Effect.all(
+      {
+        EXPO_PUBLIC_API_ORIGIN: optionalEnv("EXPO_PUBLIC_API_ORIGIN"),
+        MOBILE_UPDATES_CODE_SIGNING: optionalEnv("MOBILE_UPDATES_CODE_SIGNING"),
+        MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE: optionalEnv(
+          "MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE",
+        ),
+      },
+      { concurrency: 1 },
+    ),
+  );
+  return buildAppConfig({ context, env });
 };

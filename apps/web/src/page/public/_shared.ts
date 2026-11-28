@@ -2,64 +2,85 @@
  * Private helpers shared across the `public` page group.
  * Never imported outside src/page/public/.
  */
-import { Effect, Schema } from "effect";
+
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { type Client, type Failure, request, type WebServices } from "../../app/api";
+import { writeClipboard } from "../../app/browser";
 import type { Translator } from "../../app/i18n";
 import type { BadgeTone } from "../../ui/kit";
 
 /** Typed wrapper over `app/api.ts#request` allowing distinct success and failure Message types. */
-export const callApi = <A, E, M1, M2>(
+const callApiImpl = <A, E, M1, M2>(
   call: (client: Client) => Effect.Effect<A, E>,
   onSuccess: (a: A) => M1,
   onFailure: (f: Failure) => M2,
 ): Effect.Effect<M1 | M2, never, WebServices> => request<A, E, M1 | M2>(call, onSuccess, onFailure);
 
+export const callApi: {
+  <A, E, M1, M2>(
+    onSuccess: (a: A) => M1,
+    onFailure: (f: Failure) => M2,
+  ): (call: (client: Client) => Effect.Effect<A, E>) => Effect.Effect<M1 | M2, never, WebServices>;
+  <A, E, M1, M2>(
+    call: (client: Client) => Effect.Effect<A, E>,
+    onSuccess: (a: A) => M1,
+    onFailure: (f: Failure) => M2,
+  ): Effect.Effect<M1 | M2, never, WebServices>;
+} = Fn.dual(3, callApiImpl);
+
 /** Renders a `Failure` to a plain user-facing message via the ui-port catalog. */
-export const failureMessage = (t: Translator, failure: Failure): string =>
-  t.translate({
-    key: failure.text.key,
-    ...(failure.text.params === undefined ? {} : { params: failure.text.params }),
-  });
+const failureMessageImpl = (t: Translator, failure: Failure): string =>
+  failure.text.params === undefined
+    ? t.translate({ key: failure.text.key })
+    : t.translate({ key: failure.text.key, params: failure.text.params });
+
+export const failureMessage: {
+  (failure: Failure): (t: Translator) => string;
+  (t: Translator, failure: Failure): string;
+} = Fn.dual(2, failureMessageImpl);
 
 /** Finds the first field-level issue matching `path` on a `Failure`. */
-export const fieldIssue = (
+const fieldIssueImpl = (
   t: Translator,
   failure: Failure | null,
   path: string,
 ): string | undefined => {
   if (failure === null) return undefined;
-  const hit = failure.issues.find((i) => i.path === path);
+  const hit = Option.getOrUndefined(Arr.findFirst(failure.issues, (i) => i.path === path));
   if (hit === undefined) return undefined;
-  return t.translate({
-    key: hit.text.key,
-    ...(hit.text.params === undefined ? {} : { params: hit.text.params }),
-  });
+  return t.translate(hit.text);
 };
 
+export const fieldIssue: {
+  (failure: Failure | null, path: string): (t: Translator) => string | undefined;
+  (t: Translator, failure: Failure | null, path: string): string | undefined;
+} = Fn.dual(3, fieldIssueImpl);
+
 /** Browser clipboard copy wrapped in a never-failing Effect for Effect UI Commands. */
-export const copyToClipboard = <M>(value: string, onDone: (ok: boolean) => M): Effect.Effect<M> =>
-  Effect.tryPromise({
-    try: async () => {
-      if (typeof navigator !== "undefined" && navigator.clipboard?.writeText !== undefined) {
-        await navigator.clipboard.writeText(value);
-        return true;
-      }
-      return false;
-    },
-    catch: () => false,
-  }).pipe(
-    Effect.map((ok) => onDone(ok)),
-    Effect.catch(() => Effect.succeed(onDone(false))),
-  );
+const copyToClipboardImpl = <M>(value: string, onDone: (ok: boolean) => M): Effect.Effect<M> =>
+  writeClipboard(value).pipe(Effect.map(onDone));
+
+export const copyToClipboard: {
+  <M>(onDone: (ok: boolean) => M): (value: string) => Effect.Effect<M>;
+  <M>(value: string, onDone: (ok: boolean) => M): Effect.Effect<M>;
+} = Fn.dual(2, copyToClipboardImpl);
 
 /** Browser hard redirect (used after OAuth consent decision returns an external `redirectTo`). */
-export const redirectLocation = <M>(url: string, onDone: () => M): Effect.Effect<M> =>
+const redirectLocationImpl = <M>(url: string, onDone: () => M): Effect.Effect<M> =>
   Effect.sync(() => {
-    if (typeof location !== "undefined" && typeof location.assign === "function") {
-      location.assign(url);
-    }
+    globalThis.location?.assign(url);
     return onDone();
   });
+
+export const redirectLocation: {
+  <M>(onDone: () => M): (url: string) => Effect.Effect<M>;
+  <M>(url: string, onDone: () => M): Effect.Effect<M>;
+} = Fn.dual(2, redirectLocationImpl);
 
 /** Maps a document settlement state to a kit badge tone. */
 export const settlementTone = (settlement: string): BadgeTone => {
@@ -107,16 +128,15 @@ export const ParsedAddress = Schema.Struct({
 });
 export type ParsedAddress = typeof ParsedAddress.Type;
 
-export const ParsedBankAccount = Schema.Struct({
+const ParsedBankAccount = Schema.Struct({
   name: Schema.optionalKey(NullableText),
   currency: Schema.optionalKey(Schema.String),
   accountNumber: Schema.optionalKey(NullableText),
   iban: Schema.optionalKey(NullableText),
   bic: Schema.optionalKey(NullableText),
 });
-export type ParsedBankAccount = typeof ParsedBankAccount.Type;
 
-export const ParsedIssuer = Schema.Struct({
+const ParsedIssuer = Schema.Struct({
   name: Schema.String,
   ico: Schema.optionalKey(NullableText),
   dic: Schema.optionalKey(NullableText),
@@ -126,66 +146,62 @@ export const ParsedIssuer = Schema.Struct({
   phone: Schema.optionalKey(NullableText),
   web: Schema.optionalKey(NullableText),
   regime: Schema.optionalKey(Schema.String),
-  bankAccount: Schema.optionalKey(Schema.NullOr(ParsedBankAccount)),
+  bankAccount: ParsedBankAccount.pipe(Schema.NullOr, Schema.optionalKey),
 });
-export type ParsedIssuer = typeof ParsedIssuer.Type;
 
-export const ParsedContact = Schema.Struct({
+const ParsedContact = Schema.Struct({
   name: Schema.String,
   ico: Schema.optionalKey(NullableText),
   dic: Schema.optionalKey(NullableText),
   address: Schema.optionalKey(ParsedAddress),
 });
-export type ParsedContact = typeof ParsedContact.Type;
 
-export const ParsedLine = Schema.Struct({
+const ParsedLine = Schema.Struct({
   id: Schema.optionalKey(Schema.String),
   description: Schema.String,
-  quantity: Schema.Union([Schema.String, Schema.Number]),
+  quantity: Schema.Union([Schema.String, Schema.Finite]),
   unit: Schema.optionalKey(NullableText),
-  unitPrice: Schema.Union([Schema.String, Schema.Number]),
-  ratePercent: Schema.optionalKey(Schema.Union([Schema.String, Schema.Number])),
-  amount: Schema.Union([Schema.String, Schema.Number]),
+  unitPrice: Schema.Union([Schema.String, Schema.Finite]),
+  ratePercent: Schema.optionalKey(Schema.Union([Schema.String, Schema.Finite])),
+  amount: Schema.Union([Schema.String, Schema.Finite]),
   treatment: Schema.optionalKey(Schema.String),
 });
-export type ParsedLine = typeof ParsedLine.Type;
 
 const decodeIssuer = Schema.decodeUnknownOption(ParsedIssuer);
 const decodeContact = Schema.decodeUnknownOption(ParsedContact);
 const decodeLine = Schema.decodeUnknownOption(ParsedLine);
 
-export const parseIssuer = (raw: unknown): ParsedIssuer | undefined => {
-  const opt = decodeIssuer(raw);
-  return opt._tag === "Some" ? opt.value : undefined;
-};
-
-export const parseContact = (raw: unknown): ParsedContact | undefined => {
-  const opt = decodeContact(raw);
-  return opt._tag === "Some" ? opt.value : undefined;
-};
-
-export const parseLine = (raw: unknown): ParsedLine | undefined => {
-  const opt = decodeLine(raw);
-  return opt._tag === "Some" ? opt.value : undefined;
-};
+export const parseIssuer = Fn.flow(decodeIssuer, Option.getOrUndefined);
+export const parseContact = Fn.flow(decodeContact, Option.getOrUndefined);
+export const parseLine = Fn.flow(decodeLine, Option.getOrUndefined);
 
 /** Formats a postal address into a single readable line. */
 export const formatAddressLine = (address: ParsedAddress | undefined): string => {
   if (address === undefined) return "";
-  const parts = [
-    address.street ?? "",
-    [address.postalCode ?? "", address.city ?? ""].filter(Boolean).join(" "),
-    address.country ?? "",
-  ].filter(Boolean);
-  return parts.join(", ");
+  const parts = Arr.filter(
+    [
+      address.street ?? "",
+      Arr.join(Arr.filter([address.postalCode ?? "", address.city ?? ""], Boolean), " "),
+      address.country ?? "",
+    ],
+    Boolean,
+  );
+  return Arr.join(parts, ", ");
 };
 
 /** Derives a URL-safe workspace slug from a business name. */
 export const slugifyName = (name: string): string =>
-  name
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 48);
+  Str.slice(
+    0,
+    48,
+  )(
+    Str.replace(
+      /^-+|-+$/g,
+      "",
+    )(
+      Str.replace(
+        /[^a-z0-9]+/g,
+        "-",
+      )(Str.toLowerCase(Str.replace(/[\u0300-\u036f]/g, "")(Str.normalize("NFD")(name)))),
+    ),
+  );

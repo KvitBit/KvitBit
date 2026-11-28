@@ -3,9 +3,9 @@
  * Every color, radius and font utility resolves through `@theme inline` in `src/styles/index.css`
  * to Kvitbit's runtime Material 3 and Elegant/Cozy CSS custom properties.
  */
-import { cn, cva, type VariantProps } from "@kvitbit/ui-port/style";
+import { cn, cva } from "@kvitbit/ui-port/style";
 
-export { cn, cva, type VariantProps };
+export { cn };
 
 export const buttonVariants = cva(
   "inline-flex items-center justify-center gap-1.5 rounded-control border font-medium cursor-pointer no-underline whitespace-nowrap transition-[background-color,border-color,color] duration-150 ease-out disabled:opacity-45 disabled:cursor-not-allowed aria-disabled:opacity-45 aria-disabled:cursor-not-allowed data-[disabled]:opacity-45 data-[disabled]:cursor-not-allowed aria-[busy=true]:cursor-progress aria-[busy=true]:opacity-80 data-[pending]:cursor-progress data-[pending]:opacity-80",
@@ -98,19 +98,6 @@ export const bannerVariants = cva("flex items-start gap-2.5 rounded-panel border
   },
   defaultVariants: { tone: "neutral" },
 });
-
-export const toastVariants = cva(
-  "flex items-center justify-between gap-3 rounded-control px-3.5 py-2.5 text-[0.875rem]",
-  {
-    variants: {
-      tone: {
-        info: "bg-inverse-surface text-inverse-on-surface",
-        error: "bg-error text-on-error",
-      },
-    },
-    defaultVariants: { tone: "info" },
-  },
-);
 
 export const barToneVariants = cva("w-[min(1rem,45%)] min-h-px rounded-t-[2px]", {
   variants: {

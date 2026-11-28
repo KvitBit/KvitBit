@@ -3,13 +3,10 @@
  * scheme's primary with `Blend.harmonize` semantics and laid out on the accent tone table, so
  * they reach the same contrast as `primary` / `primaryContainer` in every variant.
  */
-import {
-  EXTENDED_ROLES,
-  type ExtendedColor,
-  type ExtendedRole,
-  type Hex,
-  type ResolvedScheme,
-} from "@kvitbit/api-contract";
+
+import type { ExtendedColor, ExtendedRole, Hex, ResolvedScheme } from "@kvitbit/api-contract";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 import { harmonize } from "./color/blend";
 import { Hct } from "./color/hct";
 import { TonalPalette } from "./color/palette";
@@ -31,10 +28,10 @@ export const EXTENDED_SOURCE_COLORS: Readonly<Record<ExtendedRole, Hex>> = {
 };
 
 /** Below this chroma a primary has no meaningful hue to harmonize toward (Graphite Atelier). */
-export const HARMONIZE_MIN_PRIMARY_CHROMA = 8;
+const HARMONIZE_MIN_PRIMARY_CHROMA = 8;
 
 /** Harmonize `color` toward `primary`; an achromatic primary leaves it unchanged. */
-export const harmonizeToward = (color: Rgb, primary: Rgb): Rgb =>
+const harmonizeToward = (color: Rgb, primary: Rgb): Rgb =>
   Hct.fromRgb(primary).chroma < HARMONIZE_MIN_PRIMARY_CHROMA ? color : harmonize(color, primary);
 
 const tonesFor = (variant: SchemeVariant) => {
@@ -49,7 +46,7 @@ const tonesFor = (variant: SchemeVariant) => {
 };
 
 /** One extended colour's four roles from an (already harmonized) key colour. */
-export const extendedColorOf = (key: Rgb, variant: SchemeVariant): ExtendedColor => {
+const extendedColorOf = (key: Rgb, variant: SchemeVariant): ExtendedColor => {
   const palette = TonalPalette.fromRgb(key);
   const t = tonesFor(variant);
   return {
@@ -71,26 +68,38 @@ export interface ExtendedInput {
  * seed or the light primary). `inputs` replaces the built-in sources, e.g. from a Material Theme
  * Builder file's `extendedColors`.
  */
-export const extendedScheme = (
-  primary: Hex,
-  variant: SchemeVariant,
-  inputs: Partial<Record<ExtendedRole, ExtendedInput>> = {},
-): ExtendedScheme => {
-  // A malformed primary (e.g. from a platform API) harmonizes nothing rather than toward black.
-  const p = isHex(primary) ? rgbFromHex(primary) : undefined;
-  const one = (role: ExtendedRole): ExtendedColor => {
-    const input = inputs[role] ?? { color: EXTENDED_SOURCE_COLORS[role], harmonized: true };
-    const key = rgbFromHex(input.color);
-    return extendedColorOf(
-      input.harmonized && p !== undefined ? harmonizeToward(key, p) : key,
-      variant,
-    );
-  };
-  const [paid, proforma, overdue, draft] = EXTENDED_ROLES.map(one) as [
-    ExtendedColor,
-    ExtendedColor,
-    ExtendedColor,
-    ExtendedColor,
-  ];
-  return { paid, proforma, overdue, draft };
-};
+export const extendedScheme: {
+  (
+    variant: SchemeVariant,
+    inputs?: Partial<Record<ExtendedRole, ExtendedInput>>,
+  ): (primary: Hex) => ExtendedScheme;
+  (
+    primary: Hex,
+    variant: SchemeVariant,
+    inputs?: Partial<Record<ExtendedRole, ExtendedInput>>,
+  ): ExtendedScheme;
+} = Fn.dual(
+  (args) => Predicate.isString(args[1]),
+  (
+    primary: Hex,
+    variant: SchemeVariant,
+    inputs: Partial<Record<ExtendedRole, ExtendedInput>> = {},
+  ): ExtendedScheme => {
+    // A malformed primary (e.g. from a platform API) harmonizes nothing rather than toward black.
+    const p = isHex(primary) ? rgbFromHex(primary) : undefined;
+    const one = (role: ExtendedRole): ExtendedColor => {
+      const input = inputs[role] ?? { color: EXTENDED_SOURCE_COLORS[role], harmonized: true };
+      const key = rgbFromHex(input.color);
+      return extendedColorOf(
+        input.harmonized && p !== undefined ? harmonizeToward(key, p) : key,
+        variant,
+      );
+    };
+    return {
+      paid: one("paid"),
+      proforma: one("proforma"),
+      overdue: one("overdue"),
+      draft: one("draft"),
+    };
+  },
+);

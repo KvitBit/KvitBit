@@ -22,7 +22,7 @@ import {
   WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 
 // Values ------------------------------------------------------------------------------------
 
@@ -209,14 +209,14 @@ export type NewWorkspaceFields = typeof NewWorkspaceFields.Type;
 /** Concrete `IssuingEntityPatch` (opaque in the domain). Address replaces as a whole. */
 export const IssuingEntityPatchFields = Schema.Struct({
   name: Schema.optional(Schema.String),
-  ico: Schema.optional(Schema.NullOr(Schema.String)),
-  dic: Schema.optional(Schema.NullOr(Schema.String)),
+  ico: Schema.String.pipe(Schema.NullOr, Schema.optional),
+  dic: Schema.String.pipe(Schema.NullOr, Schema.optional),
   address: Schema.optional(Address),
-  legalForm: Schema.optional(Schema.NullOr(Schema.String)),
-  registerEntry: Schema.optional(Schema.NullOr(Schema.String)),
-  email: Schema.optional(Schema.NullOr(Schema.String)),
-  phone: Schema.optional(Schema.NullOr(Schema.String)),
-  web: Schema.optional(Schema.NullOr(Schema.String)),
+  legalForm: Schema.String.pipe(Schema.NullOr, Schema.optional),
+  registerEntry: Schema.String.pipe(Schema.NullOr, Schema.optional),
+  email: Schema.String.pipe(Schema.NullOr, Schema.optional),
+  phone: Schema.String.pipe(Schema.NullOr, Schema.optional),
+  web: Schema.String.pipe(Schema.NullOr, Schema.optional),
   /** A Tax Regime change; documents with an earlier tax point keep the old regime (W2). */
   taxRegime: Schema.optional(TaxRegimePeriod),
 });
@@ -233,9 +233,9 @@ export const SettingsPatchFields = Schema.Struct({
     Schema.Struct({
       pdfTemplate: Schema.optional(PdfTemplate),
       accentColor: Schema.optional(Schema.String),
-      footerText: Schema.optional(Schema.NullOr(Schema.String)),
+      footerText: Schema.String.pipe(Schema.NullOr, Schema.optional),
       /** Checked by the module (theme.* issue codes), so it decodes as any value here. */
-      theme: Schema.optional(Schema.NullOr(Schema.Unknown)),
+      theme: Schema.Unknown.pipe(Schema.NullOr, Schema.optional),
     }),
   ),
   defaults: Schema.optional(
@@ -244,7 +244,7 @@ export const SettingsPatchFields = Schema.Struct({
       language: Schema.optional(Locale),
       dueDays: Schema.optional(Schema.Int),
       paymentMethod: Schema.optional(PaymentMethod),
-      defaultNote: Schema.optional(Schema.NullOr(Schema.String)),
+      defaultNote: Schema.String.pipe(Schema.NullOr, Schema.optional),
       paymentRounding: Schema.optional(PaymentRounding),
       paymentTaxDocumentAutoSend: Schema.optional(Schema.Boolean),
       /** Makes each named series the default of its kind (W3). */
@@ -255,7 +255,7 @@ export const SettingsPatchFields = Schema.Struct({
     Schema.Struct({
       enabled: Schema.optional(Schema.Boolean),
       proformas: Schema.optional(Schema.Boolean),
-      offsetsDays: Schema.optional(Schema.Array(Schema.Int)),
+      offsetsDays: Schema.Int.pipe(Schema.Array, Schema.optional),
     }),
   ),
 });
@@ -264,9 +264,9 @@ export type SettingsPatchFields = typeof SettingsPatchFields.Type;
 /** Concrete `BankAccountInput` (opaque in the domain). */
 export const BankAccountFields = Schema.Struct({
   id: Schema.optional(BankAccountId),
-  name: Schema.optional(Schema.NullOr(Schema.String)),
+  name: Schema.String.pipe(Schema.NullOr, Schema.optional),
   iban: Schema.String,
-  bic: Schema.optional(Schema.NullOr(Schema.String)),
+  bic: Schema.String.pipe(Schema.NullOr, Schema.optional),
   currency: CurrencyCode,
   /** Makes it the default account for its currency; the first account of a currency is. */
   isDefault: Schema.optional(Schema.Boolean),

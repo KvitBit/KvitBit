@@ -1,7 +1,11 @@
-import type { WorkspaceSettingsPatch } from "@kvitbit/domain/contract";
+import { WorkspaceSettingsPatch } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { Plus, X } from "lucide-react-native";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -17,6 +21,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import { canEditWorkspaceSettings } from "./permissions";
 import {
   type FormErrorState,
@@ -25,6 +30,8 @@ import {
   noFormError,
 } from "./settings-feedback";
 import { parseWorkspaceView } from "./workspace-data";
+
+const DIGITS = /^\d+$/;
 
 /** Settings -> Reminders (flow 7.5): overdue reminder schedule with optimistic revision check. */
 export function RemindersSection() {
@@ -36,8 +43,10 @@ export function RemindersSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.workspace.current({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) => client.workspace.current({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
 
   const [enabled, setEnabled] = useState(true);
@@ -59,7 +68,7 @@ export function RemindersSection() {
   }, [remote.state]);
 
   const handleAddOffset = () => {
-    const parsed = Number.parseInt(newOffset.trim(), 10);
+    const parsed = Number.parseInt(Str.trim(newOffset), 10);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 365) return;
     if (!offsets.includes(parsed)) {
       setOffsets([...offsets, parsed].sort((a, b) => a - b));
@@ -68,27 +77,29 @@ export function RemindersSection() {
   };
 
   const handleRemoveOffset = (day: number) => {
-    setOffsets(offsets.filter((d) => d !== day));
+    setOffsets(Arr.filter(offsets, (d) => d !== day));
   };
 
-  const handleSave = async () => {
+  const handleSave = Effect.fn("reminders-section.handleSave")(function* () {
     if (!editable) return;
     setSaving(true);
     setErrorState(noFormError);
-    const payload = {
+    const payload = WorkspaceSettingsPatch.make({
       reminderPolicy: {
         enabled,
         proformas,
         offsetsDays: [...offsets],
       },
-    } as unknown as WorkspaceSettingsPatch;
+    });
 
-    const result = await api.run((client) =>
-      client.workspace.updateSettings({
-        params: inWorkspace(workspace.id),
-        headers: ifMatchHeaders(revision),
-        payload,
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.updateSettings({
+          params: inWorkspace(workspace.id),
+          headers: ifMatchHeaders(revision),
+          payload,
+        }),
+      ),
     );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -98,7 +109,7 @@ export function RemindersSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
@@ -129,7 +140,7 @@ export function RemindersSection() {
                   en: "Also send reminders for proforma invoices",
                 })}
                 value={proformas}
-                disabled={!editable || !enabled}
+                disabled={!editable || enabled !== true}
                 onChange={setProformas}
               />
             </Card>
@@ -143,13 +154,12 @@ export function RemindersSection() {
                 </Text>
               ) : (
                 <View className="flex-row flex-wrap gap-2">
-                  {offsets.map((day) => (
+                  {Arr.map(offsets, (day) => (
                     <Button
                       key={day}
                       kind="tonal"
-                      {...(editable ? { icon: X } : {})}
+                      {...(editable ? { icon: X, disabled: false } : { disabled: true })}
                       label={t("settings.reminders.offset", { count: day })}
-                      disabled={!editable}
                       onPress={() => handleRemoveOffset(day)}
                     />
                   ))}
@@ -173,7 +183,7 @@ export function RemindersSection() {
                     kind="outlined"
                     icon={Plus}
                     label={t("common.action.add")}
-                    disabled={!/^\d+$/.test(newOffset.trim())}
+                    disabled={!DIGITS.test(Str.trim(newOffset))}
                     onPress={handleAddOffset}
                   />
                 </View>
@@ -187,7 +197,7 @@ export function RemindersSection() {
               kind="filled"
               label={t("common.action.saveChanges")}
               busy={saving}
-              onPress={() => void handleSave()}
+              onPress={() => forkFeatureEffect(handleSave())}
             />
           ) : null}
         </View>

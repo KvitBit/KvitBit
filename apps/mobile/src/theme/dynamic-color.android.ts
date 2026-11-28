@@ -4,23 +4,31 @@
  * (which reads `android.R.color.system_accent*` / `system_neutral*` via `ContextCompat.getColor`),
  * falling back safely to `null` on Android < 12 or whenever the native bridge is unavailable.
  */
-import type { Hex } from "@kvitbit/domain/contract";
+
+import { Hex } from "@kvitbit/domain/contract";
 import type { DynamicColorInput } from "@kvitbit/ui-port/theme";
-import * as RN from "react-native";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
+import { NativeModules, Platform } from "react-native";
+import { fromMobilePromise, runMobileEffect } from "../runtime/request-intent";
 
 const ANDROID_MONET_MIN_API = 31;
 
-export interface AndroidDynamicPalette {
-  readonly system_accent1_600?: number;
-  readonly system_accent1_200?: number;
-  readonly system_accent1_500?: number;
-  readonly system_accent2_600?: number;
-  readonly system_accent2_200?: number;
-  readonly system_accent3_600?: number;
-  readonly system_accent3_200?: number;
-  readonly system_neutral1_10?: number;
-  readonly system_neutral1_900?: number;
-}
+const nativePalette = Schema.Struct({
+  system_accent1_600: Schema.optional(Schema.Unknown),
+  system_accent1_200: Schema.optional(Schema.Unknown),
+  system_accent1_500: Schema.optional(Schema.Unknown),
+  system_accent2_600: Schema.optional(Schema.Unknown),
+  system_accent2_200: Schema.optional(Schema.Unknown),
+  system_accent3_600: Schema.optional(Schema.Unknown),
+  system_accent3_200: Schema.optional(Schema.Unknown),
+  system_neutral1_10: Schema.optional(Schema.Unknown),
+  system_neutral1_900: Schema.optional(Schema.Unknown),
+});
+type AndroidDynamicPalette = typeof nativePalette.Type;
 
 export interface AndroidDynamicColorEnv {
   readonly os: string;
@@ -32,39 +40,32 @@ export interface AndroidDynamicColorEnv {
 export const argbToHex = (value: number): Hex | null => {
   if (!Number.isFinite(value)) return null;
   const rgb = (value >>> 0) & 0x00ffffff;
-  return `#${rgb.toString(16).toUpperCase().padStart(6, "0")}` as Hex;
+  return Hex.make(`#${EffectString.padStart(6, "0")(EffectString.toUpperCase(rgb.toString(16)))}`);
 };
 
 const parseApiLevel = (version: number | string): number => {
-  if (typeof version === "number") return version;
+  if (Predicate.isNumber(version)) return version;
   const parsed = Number.parseInt(version, 10);
   return Number.isFinite(parsed) ? parsed : 0;
 };
 
-export const readDefaultAndroidDynamicColorEnv = (): AndroidDynamicColorEnv => {
-  const rn = RN as unknown as {
-    readonly Platform?: { readonly OS?: string; readonly Version?: number | string };
-    readonly NativeModules?: {
-      readonly KvitbitDynamicColor?: {
-        readonly getDynamicPalette?: () => Promise<AndroidDynamicPalette | null>;
-      };
-    };
-  };
-  const nativeModule = rn.NativeModules?.KvitbitDynamicColor;
+const isNativePaletteSource = Schema.is(
+  Schema.Struct({ getDynamicPalette: Schema.declare(Predicate.isFunction) }),
+);
+const decodePalette = Schema.decodeUnknownOption(nativePalette);
+
+const readDefaultAndroidDynamicColorEnv = (): AndroidDynamicColorEnv => {
+  const nativeModule = NativeModules["KvitbitDynamicColor"];
+  const device = { os: Platform.OS, version: Platform.Version };
+  if (!isNativePaletteSource(nativeModule)) return device;
   return {
-    os: rn.Platform?.OS ?? "",
-    version: rn.Platform?.Version ?? 0,
-    ...(typeof nativeModule?.getDynamicPalette === "function"
-      ? {
-          getNativePalette: async () => {
-            try {
-              return (await nativeModule.getDynamicPalette?.()) ?? null;
-            } catch {
-              return null;
-            }
-          },
-        }
-      : {}),
+    ...device,
+    getNativePalette: () =>
+      fromMobilePromise<unknown>(() => nativeModule.getDynamicPalette()).pipe(
+        Effect.map((raw) => Option.getOrNull(decodePalette(raw))),
+        Effect.orElseSucceed(() => null),
+        runMobileEffect,
+      ),
   };
 };
 
@@ -73,26 +74,24 @@ export const readDefaultAndroidDynamicColorEnv = (): AndroidDynamicColorEnv => {
  * (`system_accent1_*`, `system_neutral1_*`) so `dynamicRoles` keeps the OS palette; falls back to
  * a single `Seed` if only `system_accent1_500` resolves, or `null` when unsupported.
  */
-export const makeAndroidDynamicColorReader =
-  (getEnv: () => AndroidDynamicColorEnv = readDefaultAndroidDynamicColorEnv) =>
-  async (): Promise<DynamicColorInput | null> => {
+export const makeAndroidDynamicColorReader = (
+  getEnv: () => AndroidDynamicColorEnv = readDefaultAndroidDynamicColorEnv,
+) => {
+  const readColor = Effect.fn("MobileAndroidDynamicColor.read")(function* () {
     const env = getEnv();
     if (env.os !== "android" || parseApiLevel(env.version) < ANDROID_MONET_MIN_API) {
       return null;
     }
 
-    let palette: AndroidDynamicPalette | null = null;
-    if (env.getNativePalette) {
-      try {
-        palette = await env.getNativePalette();
-      } catch {
-        palette = null;
-      }
-    }
+    const getPalette = env.getNativePalette;
+    const palette =
+      getPalette === undefined
+        ? null
+        : yield* fromMobilePromise(getPalette).pipe(Effect.orElseSucceed(() => null));
 
     const read = (key: keyof AndroidDynamicPalette): Hex | null => {
       const value = palette?.[key];
-      return typeof value === "number" ? argbToHex(value) : null;
+      return Predicate.isNumber(value) ? argbToHex(value) : null;
     };
 
     const lightPrimary = read("system_accent1_600");
@@ -105,25 +104,23 @@ export const makeAndroidDynamicColorReader =
     const darkTertiary = read("system_accent3_200");
 
     if (lightPrimary !== null && darkPrimary !== null) {
-      return {
-        _tag: "Roles",
-        light: {
-          primary: lightPrimary,
-          ...(lightSecondary !== null ? { secondary: lightSecondary } : {}),
-          ...(lightTertiary !== null ? { tertiary: lightTertiary } : {}),
-          ...(lightSurface !== null ? { surface: lightSurface } : {}),
-        },
-        dark: {
-          primary: darkPrimary,
-          ...(darkSecondary !== null ? { secondary: darkSecondary } : {}),
-          ...(darkTertiary !== null ? { tertiary: darkTertiary } : {}),
-          ...(darkSurface !== null ? { surface: darkSurface } : {}),
-        },
+      const light: Partial<Record<"primary" | "secondary" | "tertiary" | "surface", Hex>> = {
+        primary: lightPrimary,
       };
+      if (lightSecondary !== null) light.secondary = lightSecondary;
+      if (lightTertiary !== null) light.tertiary = lightTertiary;
+      if (lightSurface !== null) light.surface = lightSurface;
+      const dark: typeof light = { primary: darkPrimary };
+      if (darkSecondary !== null) dark.secondary = darkSecondary;
+      if (darkTertiary !== null) dark.tertiary = darkTertiary;
+      if (darkSurface !== null) dark.surface = darkSurface;
+      return { _tag: "Roles" as const, light, dark };
     }
 
     const seed = read("system_accent1_500");
-    return seed === null ? null : { _tag: "Seed", seed };
-  };
+    return seed === null ? null : { _tag: "Seed" as const, seed };
+  });
+  return (): Promise<DynamicColorInput | null> => runMobileEffect(readColor());
+};
 
 export const readDynamicColor = makeAndroidDynamicColorReader();

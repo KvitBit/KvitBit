@@ -1,7 +1,9 @@
 import { PgClient } from "@effect/sql-pg";
-import { Config, Effect, type Layer } from "effect";
-import { SqlClient } from "effect/sql";
-import type { SqlError } from "effect/sql/SqlError";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import type * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
+import type * as SqlError from "effect/sql/SqlError";
 
 /**
  * Postgres access for the core modules (core-ports.md §8, §10). Modules run SQL through Effect's
@@ -21,7 +23,7 @@ export const unpooledDatabaseUrl = Config.Redacted("DATABASE_URL_UNPOOLED").pipe
 
 export type PgLayer = Layer.Layer<
   PgClient.PgClient | SqlClient.SqlClient,
-  Config.ConfigError | SqlError
+  Config.ConfigError | SqlError.SqlError
 >;
 
 /**
@@ -42,7 +44,7 @@ export const layerUnpooled: PgLayer = PgClient.layerConfig({ url: unpooledDataba
  */
 export const transaction = <A, E, R>(
   self: Effect.Effect<A, E, R>,
-): Effect.Effect<A, E | SqlError, R | SqlClient.SqlClient> =>
+): Effect.Effect<A, E | SqlError.SqlError, R | SqlClient.SqlClient> =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     return yield* sql.withTransaction(self);

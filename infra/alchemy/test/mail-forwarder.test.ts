@@ -1,13 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { execSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import tls from "node:tls";
 import { gunzipSync } from "node:zlib";
-import { ConfigProvider, Effect, Layer, Option, Redacted } from "effect";
-import { HttpClient, type HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as Arr from "effect/Array";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { loadMailForwarderConfig } from "../src/mail-forwarder/config";
 import {
   decodeQuotedPrintable,
@@ -36,6 +45,36 @@ import {
   serializeMailForwarderConfig,
   sha256Prefixed,
 } from "../src/resources/mail";
+import { fixtureFileSystem, fixturePath, runCommand, systemPath } from "./process-fixture";
+
+const { join } = fixturePath;
+
+const decodeParsedReq = Schema.decodeUnknownResult(
+  Schema.fromJsonString(
+    Schema.Struct({
+      text: Schema.optionalKey(Schema.String),
+      headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    }),
+  ),
+);
+const decodeBigPayload = Schema.decodeUnknownResult(
+  Schema.fromJsonString(
+    Schema.Struct({
+      html: Schema.optionalKey(Schema.String),
+      text: Schema.optionalKey(Schema.String),
+      headers: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+    }),
+  ),
+);
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const inboundByHashPattern = /^inbound\/by-hash\/[a-f0-9]{32}\/\d+-abcdef123456\.eml$/;
+const attachPattern = /^\d{3} /;
+const matchPattern = /^sha256:[a-f0-9]{64}$/;
+const catReconcileVarPattern =
+  /cat <<'RECONCILE' > \/var\/lib\/kvitbit-mail\/reconcile-mail\.sh\n([\s\S]*?)\nRECONCILE/;
 
 const mockHttpClientLayer = (
   handler: (request: HttpClientRequest.HttpClientRequest) => Response,
@@ -72,13 +111,16 @@ describe("Effect MailForwarderConfig", () => {
     expect(ok.forwardTo).toBe("filkalny@gmail.com");
     expect(ok.forwardFrom).toBe("forwarder@kvitbit.com");
     expect(ok.aliases).toEqual(["founder", "ops"]);
-    expect([...ok.allowedRecipients].sort()).toEqual(["founder@kvitbit.com", "ops@kvitbit.com"]);
+    expect([...ok.allowedRecipients].sort(Order.String)).toEqual([
+      "founder@kvitbit.com",
+      "ops@kvitbit.com",
+    ]);
     expect(Option.isSome(ok.resendApiKey)).toBe(true);
     if (Option.isSome(ok.resendApiKey)) {
-      expect(Redacted.value(ok.resendApiKey.value)).toBe("re_secret_value");
+      ok.resendApiKey.value.pipe(Redacted.value, expect).toBe("re_secret_value");
     }
 
-    const missingKey = await Effect.runPromise(
+    const missingKey = await Fn.pipe(
       Effect.flip(
         loadMailForwarderConfig.pipe(
           Effect.provide(
@@ -96,6 +138,7 @@ describe("Effect MailForwarderConfig", () => {
           ),
         ),
       ),
+      Effect.runPromise,
     );
     expect(missingKey).toMatchObject({
       _tag: "InvalidMailForwarderConfig",
@@ -120,14 +163,17 @@ describe("MIME parser", () => {
       displayName: undefined,
     });
 
-    const utf8Raw = [
-      "From: Jan Novák <jan@example.cz>",
-      "To: ops@kvitbit.com",
-      "Subject: Příliš žlutý kůň",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "Úpěl ďábelské ódy.",
-    ].join("\r\n");
+    const utf8Raw = Arr.join(
+      [
+        "From: Jan Novák <jan@example.cz>",
+        "To: ops@kvitbit.com",
+        "Subject: Příliš žlutý kůň",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Úpěl ďábelské ódy.",
+      ],
+      "\r\n",
+    );
     const parsedUtf8 = parseEmail(Buffer.from(utf8Raw, "utf8"));
     expect(parsedUtf8.subject).toBe("Příliš žlutý kůň");
     expect(parsedUtf8.fromDisplayName).toBe("Jan Novák");
@@ -135,63 +181,73 @@ describe("MIME parser", () => {
   });
 
   test("preserves independent interleaved plain and HTML sibling parts in multipart/mixed per RFC 2046 §5.1.3", () => {
-    const raw = [
-      "From: notes@example.com",
-      "To: ops@kvitbit.com",
-      "Subject: Multi-part notes",
-      'Content-Type: multipart/mixed; boundary="mix-b"',
-      "",
-      "--mix-b",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "FIRST",
-      "--mix-b",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p><b>SECOND</b></p>",
-      "--mix-b",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "THIRD",
-      "--mix-b--",
-      "",
-    ].join("\r\n");
+    const raw = Arr.join(
+      [
+        "From: notes@example.com",
+        "To: ops@kvitbit.com",
+        "Subject: Multi-part notes",
+        'Content-Type: multipart/mixed; boundary="mix-b"',
+        "",
+        "--mix-b",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "FIRST",
+        "--mix-b",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p><b>SECOND</b></p>",
+        "--mix-b",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "THIRD",
+        "--mix-b--",
+        "",
+      ],
+      "\r\n",
+    );
 
     const parsed = parseEmail(Buffer.from(raw, "utf8"));
     expect(parsed.text).toBe("FIRST\n\nSECOND\n\nTHIRD");
     expect(parsed.html).toBeDefined();
     const html = parsed.html ?? "";
-    expect(html.indexOf("FIRST")).toBeGreaterThanOrEqual(0);
-    expect(html.indexOf("<b>SECOND</b>")).toBeGreaterThan(html.indexOf("FIRST"));
-    expect(html.indexOf("THIRD")).toBeGreaterThan(html.indexOf("<b>SECOND</b>"));
+    expect(Option.getOrElse(Str.indexOf("FIRST")(html), () => -1)).toBeGreaterThanOrEqual(0);
+    expect(Option.getOrElse(Str.indexOf("<b>SECOND</b>")(html), () => -1)).toBeGreaterThan(
+      Option.getOrElse(Str.indexOf("FIRST")(html), () => -1),
+    );
+    expect(Option.getOrElse(Str.indexOf("THIRD")(html), () => -1)).toBeGreaterThan(
+      Option.getOrElse(Str.indexOf("<b>SECOND</b>")(html), () => -1),
+    );
   });
 
   test("preserves all children of multipart/mixed nested inside multipart/alternative per RFC 2046 §5.1.4", () => {
-    const raw = [
-      "From: notes@example.com",
-      "To: ops@kvitbit.com",
-      "Subject: Nested mixed in alternative",
-      'Content-Type: multipart/alternative; boundary="alt-b"',
-      "",
-      "--alt-b",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "Plain summary",
-      "--alt-b",
-      'Content-Type: multipart/mixed; boundary="mix-inner"',
-      "",
-      "--mix-inner",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>FIRST</p>",
-      "--mix-inner",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>SECOND</p>",
-      "--mix-inner--",
-      "--alt-b--",
-      "",
-    ].join("\r\n");
+    const raw = Arr.join(
+      [
+        "From: notes@example.com",
+        "To: ops@kvitbit.com",
+        "Subject: Nested mixed in alternative",
+        'Content-Type: multipart/alternative; boundary="alt-b"',
+        "",
+        "--alt-b",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Plain summary",
+        "--alt-b",
+        'Content-Type: multipart/mixed; boundary="mix-inner"',
+        "",
+        "--mix-inner",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>FIRST</p>",
+        "--mix-inner",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>SECOND</p>",
+        "--mix-inner--",
+        "--alt-b--",
+        "",
+      ],
+      "\r\n",
+    );
 
     const parsed = parseEmail(Buffer.from(raw, "utf8"));
     expect(parsed.text).toBe("Plain summary");
@@ -199,115 +255,127 @@ describe("MIME parser", () => {
 
     // Nested multipart/alternative inside multipart/alternative: later HTML sibling must
     // replace HTML without discarding the explicit plain-text body from the inner alternative.
-    const nestedAltRaw = [
-      "From: notes@example.com",
-      "To: ops@kvitbit.com",
-      "Subject: Nested alternative",
-      'Content-Type: multipart/alternative; boundary="outer-alt"',
-      "",
-      "--outer-alt",
-      'Content-Type: multipart/alternative; boundary="inner-alt"',
-      "",
-      "--inner-alt",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "Plain version with reference 123",
-      "--inner-alt",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>Inner HTML</p>",
-      "--inner-alt--",
-      "--outer-alt",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>Rich version</p>",
-      "--outer-alt--",
-      "",
-    ].join("\r\n");
+    const nestedAltRaw = Arr.join(
+      [
+        "From: notes@example.com",
+        "To: ops@kvitbit.com",
+        "Subject: Nested alternative",
+        'Content-Type: multipart/alternative; boundary="outer-alt"',
+        "",
+        "--outer-alt",
+        'Content-Type: multipart/alternative; boundary="inner-alt"',
+        "",
+        "--inner-alt",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Plain version with reference 123",
+        "--inner-alt",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Inner HTML</p>",
+        "--inner-alt--",
+        "--outer-alt",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Rich version</p>",
+        "--outer-alt--",
+        "",
+      ],
+      "\r\n",
+    );
     const nestedAltParsed = parseEmail(Buffer.from(nestedAltRaw, "utf8"));
     expect(nestedAltParsed.text).toBe("Plain version with reference 123");
     expect(nestedAltParsed.html).toBe("<p>Rich version</p>");
 
     // Reverse nesting: outer plain text followed by nested HTML-only multipart/alternative
     // must keep the outer authored plain text instead of overwriting with stripped HTML.
-    const reverseNestedAltRaw = [
-      "From: notes@example.com",
-      "To: ops@kvitbit.com",
-      "Subject: Outer plain + inner HTML-only alternative",
-      'Content-Type: multipart/alternative; boundary="outer-rev"',
-      "",
-      "--outer-rev",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "Authored 123",
-      "--outer-rev",
-      'Content-Type: multipart/alternative; boundary="inner-html-only"',
-      "",
-      "--inner-html-only",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>Latest HTML</p>",
-      "--inner-html-only--",
-      "--outer-rev--",
-      "",
-    ].join("\r\n");
+    const reverseNestedAltRaw = Arr.join(
+      [
+        "From: notes@example.com",
+        "To: ops@kvitbit.com",
+        "Subject: Outer plain + inner HTML-only alternative",
+        'Content-Type: multipart/alternative; boundary="outer-rev"',
+        "",
+        "--outer-rev",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Authored 123",
+        "--outer-rev",
+        'Content-Type: multipart/alternative; boundary="inner-html-only"',
+        "",
+        "--inner-html-only",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Latest HTML</p>",
+        "--inner-html-only--",
+        "--outer-rev--",
+        "",
+      ],
+      "\r\n",
+    );
     const reverseNestedAltParsed = parseEmail(Buffer.from(reverseNestedAltRaw, "utf8"));
     expect(reverseNestedAltParsed.text).toBe("Authored 123");
     expect(reverseNestedAltParsed.html).toBe("<p>Latest HTML</p>");
 
     // Mixed child with HTML + plain footer must NOT overwrite an outer authored plain sibling.
-    const mixedHtmlPlainChildRaw = [
-      "From: orders@example.com",
-      "To: ops@kvitbit.com",
-      "Subject: Order ref",
-      'Content-Type: multipart/alternative; boundary="outer-mix"',
-      "",
-      "--outer-mix",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "Order reference 123",
-      "--outer-mix",
-      'Content-Type: multipart/mixed; boundary="inner-mix"',
-      "",
-      "--inner-mix",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>Order details</p>",
-      "--inner-mix",
-      'Content-Type: text/plain; charset="utf-8"',
-      "",
-      "Footer",
-      "--inner-mix--",
-      "--outer-mix--",
-      "",
-    ].join("\r\n");
+    const mixedHtmlPlainChildRaw = Arr.join(
+      [
+        "From: orders@example.com",
+        "To: ops@kvitbit.com",
+        "Subject: Order ref",
+        'Content-Type: multipart/alternative; boundary="outer-mix"',
+        "",
+        "--outer-mix",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Order reference 123",
+        "--outer-mix",
+        'Content-Type: multipart/mixed; boundary="inner-mix"',
+        "",
+        "--inner-mix",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Order details</p>",
+        "--inner-mix",
+        'Content-Type: text/plain; charset="utf-8"',
+        "",
+        "Footer",
+        "--inner-mix--",
+        "--outer-mix--",
+        "",
+      ],
+      "\r\n",
+    );
     const mixedHtmlPlainParsed = parseEmail(Buffer.from(mixedHtmlPlainChildRaw, "utf8"));
     expect(mixedHtmlPlainParsed.text).toBe("Order reference 123");
     expect(mixedHtmlPlainParsed.html).toContain("<p>Order details</p>");
     expect(mixedHtmlPlainParsed.html).toContain("Footer");
 
     // Alternative containing only a mixed child of two HTML parts must keep `\n\n` part boundary in text.
-    const htmlOnlyMixedChildRaw = [
-      "From: orders@example.com",
-      "To: ops@kvitbit.com",
-      "Subject: Two HTML parts",
-      'Content-Type: multipart/alternative; boundary="outer-two"',
-      "",
-      "--outer-two",
-      'Content-Type: multipart/mixed; boundary="inner-two"',
-      "",
-      "--inner-two",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>Order</p>",
-      "--inner-two",
-      'Content-Type: text/html; charset="utf-8"',
-      "",
-      "<p>123</p>",
-      "--inner-two--",
-      "--outer-two--",
-      "",
-    ].join("\r\n");
+    const htmlOnlyMixedChildRaw = Arr.join(
+      [
+        "From: orders@example.com",
+        "To: ops@kvitbit.com",
+        "Subject: Two HTML parts",
+        'Content-Type: multipart/alternative; boundary="outer-two"',
+        "",
+        "--outer-two",
+        'Content-Type: multipart/mixed; boundary="inner-two"',
+        "",
+        "--inner-two",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>Order</p>",
+        "--inner-two",
+        'Content-Type: text/html; charset="utf-8"',
+        "",
+        "<p>123</p>",
+        "--inner-two--",
+        "--outer-two--",
+        "",
+      ],
+      "\r\n",
+    );
     const htmlOnlyMixedParsed = parseEmail(Buffer.from(htmlOnlyMixedChildRaw, "utf8"));
     expect(htmlOnlyMixedParsed.text).toBe("Order\n\n123");
     expect(htmlOnlyMixedParsed.html).toBe("<p>Order</p><hr><p>123</p>");
@@ -328,15 +396,18 @@ describe("MIME parser", () => {
     });
 
     const commentedRaw = Buffer.from(
-      [
-        "From: billing@example.org (Billing)",
-        "Reply-To: accounts(team)@example.org",
-        "To: ops@kvitbit.com",
-        "Subject: Invoice question",
-        'Content-Type: text/plain; charset="utf-8"',
-        "",
-        "Hello",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          "From: billing@example.org (Billing)",
+          "Reply-To: accounts(team)@example.org",
+          "To: ops@kvitbit.com",
+          "Subject: Invoice question",
+          'Content-Type: text/plain; charset="utf-8"',
+          "",
+          "Hello",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const commentedMsg: InboundMessage = {
@@ -356,18 +427,21 @@ describe("MIME parser", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(commentedPayload.reply_to).toBe("accounts@example.org");
+    expect(commentedPayload["reply_to"]).toBe("accounts@example.org");
 
     const caseDistinctRaw = Buffer.from(
-      [
-        "From: billing@example.org",
-        "Reply-To: Billing@example.org",
-        "To: ops@kvitbit.com",
-        "Subject: Case sensitive local-part",
-        'Content-Type: text/html; charset="utf-8"',
-        "",
-        "<p>Hi</p>",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          "From: billing@example.org",
+          "Reply-To: Billing@example.org",
+          "To: ops@kvitbit.com",
+          "Subject: Case sensitive local-part",
+          'Content-Type: text/html; charset="utf-8"',
+          "",
+          "<p>Hi</p>",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const caseDistinctMsg: InboundMessage = {
@@ -383,22 +457,25 @@ describe("MIME parser", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(caseDistinctPayload.reply_to).toBe("Billing@example.org");
-    expect(String(caseDistinctPayload.text)).toContain("Original Reply-To: Billing@example.org");
-    expect(String(caseDistinctPayload.html)).toContain(
+    expect(caseDistinctPayload["reply_to"]).toBe("Billing@example.org");
+    expect(String(caseDistinctPayload["text"])).toContain("Original Reply-To: Billing@example.org");
+    expect(String(caseDistinctPayload["html"])).toContain(
       "<strong>Reply-To:</strong> Billing@example.org",
     );
 
     const utf8ReplyRaw = Buffer.from(
-      [
-        "From: billing@example.org",
-        "Reply-To: žan@example.net",
-        "To: ops@kvitbit.com",
-        "Subject: Dotaz",
-        'Content-Type: text/html; charset="utf-8"',
-        "",
-        "<p>Dobrý den</p>",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          "From: billing@example.org",
+          "Reply-To: žan@example.net",
+          "To: ops@kvitbit.com",
+          "Subject: Dotaz",
+          'Content-Type: text/html; charset="utf-8"',
+          "",
+          "<p>Dobrý den</p>",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const utf8ReplyMsg: InboundMessage = {
@@ -418,9 +495,11 @@ describe("MIME parser", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(utf8ReplyPayload.reply_to).toBeUndefined();
-    expect(String(utf8ReplyPayload.text)).toContain("Original Reply-To: žan@example.net");
-    expect(String(utf8ReplyPayload.html)).toContain("<strong>Reply-To:</strong> žan@example.net");
+    expect(utf8ReplyPayload["reply_to"]).toBeUndefined();
+    expect(String(utf8ReplyPayload["text"])).toContain("Original Reply-To: žan@example.net");
+    expect(String(utf8ReplyPayload["html"])).toContain(
+      "<strong>Reply-To:</strong> žan@example.net",
+    );
 
     // Non-ASCII U+00A0 in local-part must not be stripped by ASCII WSP normalization:
     // keep verbatim UTF-8 address in body and omit ASCII-only reply_to.
@@ -430,14 +509,17 @@ describe("MIME parser", () => {
       displayName: undefined,
     });
     const nbspRaw = Buffer.from(
-      [
-        `From: ${nbspAddr}`,
-        "To: ops@kvitbit.com",
-        "Subject: NBSP local part",
-        'Content-Type: text/plain; charset="utf-8"',
-        "",
-        "Body",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          `From: ${nbspAddr}`,
+          "To: ops@kvitbit.com",
+          "Subject: NBSP local part",
+          'Content-Type: text/plain; charset="utf-8"',
+          "",
+          "Body",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const nbspMsg: InboundMessage = {
@@ -454,21 +536,24 @@ describe("MIME parser", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(nbspPayload.reply_to).toBeUndefined();
-    expect(String(nbspPayload.text)).toContain(`Original From: ${nbspAddr}`);
+    expect(nbspPayload["reply_to"]).toBeUndefined();
+    expect(String(nbspPayload["text"])).toContain(`Original From: ${nbspAddr}`);
 
     // Leading U+00A0 in bare From, bare Reply-To, and folded Reply-To headers must never
     // be stripped by header parsing or folding: omit reply_to and preserve verbatim in text & HTML.
     const leadingNbspAddr = "\u00a0billing@example.org";
     const leadingNbspFromRaw = Buffer.from(
-      [
-        `From: ${leadingNbspAddr}`,
-        "To: ops@kvitbit.com",
-        "Subject: Leading NBSP From",
-        'Content-Type: text/html; charset="utf-8"',
-        "",
-        "<p>Body</p>",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          `From: ${leadingNbspAddr}`,
+          "To: ops@kvitbit.com",
+          "Subject: Leading NBSP From",
+          'Content-Type: text/html; charset="utf-8"',
+          "",
+          "<p>Body</p>",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const leadingNbspFromMsg: InboundMessage = {
@@ -485,13 +570,15 @@ describe("MIME parser", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(leadingNbspFromPayload.reply_to).toBeUndefined();
-    expect(String(leadingNbspFromPayload.text)).toContain(`Original From: ${leadingNbspAddr}`);
-    expect(String(leadingNbspFromPayload.text)).toContain(`Original Reply-To: ${leadingNbspAddr}`);
-    expect(String(leadingNbspFromPayload.html)).toContain(
+    expect(leadingNbspFromPayload["reply_to"]).toBeUndefined();
+    expect(String(leadingNbspFromPayload["text"])).toContain(`Original From: ${leadingNbspAddr}`);
+    expect(String(leadingNbspFromPayload["text"])).toContain(
+      `Original Reply-To: ${leadingNbspAddr}`,
+    );
+    expect(String(leadingNbspFromPayload["html"])).toContain(
       `<strong>From:</strong> ${leadingNbspAddr}`,
     );
-    expect(String(leadingNbspFromPayload.html)).toContain(
+    expect(String(leadingNbspFromPayload["html"])).toContain(
       `<strong>Reply-To:</strong> ${leadingNbspAddr}`,
     );
 
@@ -500,15 +587,18 @@ describe("MIME parser", () => {
       `Reply-To:\r\n ${leadingNbspAddr}`,
     ]) {
       const leadingNbspReplyRaw = Buffer.from(
-        [
-          "From: sender@example.org",
-          replyToHeaderLine,
-          "To: ops@kvitbit.com",
-          "Subject: Leading NBSP Reply-To",
-          'Content-Type: text/html; charset="utf-8"',
-          "",
-          "<p>Body</p>",
-        ].join("\r\n"),
+        Arr.join(
+          [
+            "From: sender@example.org",
+            replyToHeaderLine,
+            "To: ops@kvitbit.com",
+            "Subject: Leading NBSP Reply-To",
+            'Content-Type: text/html; charset="utf-8"',
+            "",
+            "<p>Body</p>",
+          ],
+          "\r\n",
+        ),
         "utf8",
       );
       const leadingNbspReplyMsg: InboundMessage = {
@@ -525,11 +615,11 @@ describe("MIME parser", () => {
         forwardFrom: "forwarder@kvitbit.com",
         maxAttachmentBytes: 7 * 1024 * 1024,
       });
-      expect(leadingNbspReplyPayload.reply_to).toBeUndefined();
-      expect(String(leadingNbspReplyPayload.text)).toContain(
+      expect(leadingNbspReplyPayload["reply_to"]).toBeUndefined();
+      expect(String(leadingNbspReplyPayload["text"])).toContain(
         `Original Reply-To: ${leadingNbspAddr}`,
       );
-      expect(String(leadingNbspReplyPayload.html)).toContain(
+      expect(String(leadingNbspReplyPayload["html"])).toContain(
         `<strong>Reply-To:</strong> ${leadingNbspAddr}`,
       );
     }
@@ -541,14 +631,17 @@ describe("MIME parser", () => {
       displayName: undefined,
     });
     const raw = Buffer.from(
-      [
-        "From: žan@example.net",
-        "To: ops@kvitbit.com",
-        "Subject: Příliš žlutý",
-        'Content-Type: text/plain; charset="utf-8"',
-        "",
-        "Ahoj",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          "From: žan@example.net",
+          "To: ops@kvitbit.com",
+          "Subject: Příliš žlutý",
+          'Content-Type: text/plain; charset="utf-8"',
+          "",
+          "Ahoj",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const msg: InboundMessage = {
@@ -570,8 +663,8 @@ describe("MIME parser", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(payload.reply_to).toBeUndefined();
-    expect(String(payload.text)).toContain("Original From: žan@example.net");
+    expect(payload["reply_to"]).toBeUndefined();
+    expect(String(payload["text"])).toContain("Original From: žan@example.net");
   });
 
   test("decodes quoted-printable soft line breaks and parses multipart mixed + alternative + attachments", () => {
@@ -579,45 +672,48 @@ describe("MIME parser", () => {
     expect(Buffer.from(qp).toString("utf8")).toBe("Hello world!\n");
 
     const pdfBytes = Buffer.from("%PDF-1.4 sample invoice");
-    const raw = [
-      "From: =?UTF-8?B?RmFrdHVyYWNl?= <billing@vendor.cz>",
-      "To: billing@kvitbit.com",
-      "Reply-To: support@vendor.cz",
-      "Subject: =?UTF-8?Q?Faktura_2026-001?=",
-      "Date: Fri, 27 Nov 2026 12:00:00 +0000",
-      "Message-ID: <msg-1@vendor.cz>",
-      'Content-Type: multipart/mixed; boundary="outer-b"',
-      "",
-      "--outer-b",
-      'Content-Type: multipart/alternative; boundary="inner-b"',
-      "",
-      "--inner-b",
-      'Content-Type: text/plain; charset="utf-8"',
-      "Content-Transfer-Encoding: quoted-printable",
-      "",
-      "Dobr=C3=BD den, zas=C3=ADl=C3=A1me fakturu.",
-      "--inner-b",
-      'Content-Type: text/html; charset="utf-8"',
-      "Content-Transfer-Encoding: base64",
-      "",
-      Buffer.from("<p>Dobrý den, <b>faktura</b> v příloze.</p>", "utf8").toString("base64"),
-      "--inner-b--",
-      "--outer-b",
-      'Content-Type: application/pdf; name="faktura.pdf"',
-      'Content-Disposition: attachment; filename="faktura.pdf"',
-      "Content-Transfer-Encoding: base64",
-      "",
-      pdfBytes.toString("base64"),
-      "--outer-b--",
-      "",
-    ].join("\r\n");
+    const raw = Arr.join(
+      [
+        "From: =?UTF-8?B?RmFrdHVyYWNl?= <billing@vendor.cz>",
+        "To: billing@kvitbit.com",
+        "Reply-To: support@vendor.cz",
+        "Subject: =?UTF-8?Q?Faktura_2026-001?=",
+        "Date: Fri, 27 Nov 2026 12:00:00 +0000",
+        "Message-ID: <msg-1@vendor.cz>",
+        'Content-Type: multipart/mixed; boundary="outer-b"',
+        "",
+        "--outer-b",
+        'Content-Type: multipart/alternative; boundary="inner-b"',
+        "",
+        "--inner-b",
+        'Content-Type: text/plain; charset="utf-8"',
+        "Content-Transfer-Encoding: quoted-printable",
+        "",
+        "Dobr=C3=BD den, zas=C3=ADl=C3=A1me fakturu.",
+        "--inner-b",
+        'Content-Type: text/html; charset="utf-8"',
+        "Content-Transfer-Encoding: base64",
+        "",
+        Buffer.from("<p>Dobrý den, <b>faktura</b> v příloze.</p>", "utf8").toString("base64"),
+        "--inner-b--",
+        "--outer-b",
+        'Content-Type: application/pdf; name="faktura.pdf"',
+        'Content-Disposition: attachment; filename="faktura.pdf"',
+        "Content-Transfer-Encoding: base64",
+        "",
+        pdfBytes.toString("base64"),
+        "--outer-b--",
+        "",
+      ],
+      "\r\n",
+    );
 
     const parsed = parseEmail(Buffer.from(raw, "utf8"));
     expect(parsed.subject).toBe("Faktura 2026-001");
     expect(parsed.fromDisplayName).toBe("Fakturace");
     expect(parsed.fromAddress).toBe("billing@vendor.cz");
     expect(parsed.replyToAddress).toBe("support@vendor.cz");
-    expect(parsed.text?.trim()).toBe("Dobrý den, zasíláme fakturu.");
+    expect(Str.trim(parsed.text ?? "")).toBe("Dobrý den, zasíláme fakturu.");
     expect(parsed.html).toContain("<b>faktura</b>");
     expect(parsed.attachments).toHaveLength(1);
     expect(parsed.attachments[0]).toMatchObject({
@@ -637,14 +733,17 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     mailFrom: "bounces@resend.com",
     rcptTo: ["ops@kvitbit.com"],
     rawBytes: Buffer.from(
-      [
-        `From: =?UTF-8?B?${Buffer.from("Resend\r\nBcc: evil@attacker.tld", "utf8").toString("base64")}?= <verify@resend.com>`,
-        "To: ops@kvitbit.com",
-        "Subject: Verify your Resend account",
-        "Content-Type: text/plain; charset=utf-8",
-        "",
-        "Click https://resend.com/verify?token=abc",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          `From: =?UTF-8?B?${Buffer.from("Resend\r\nBcc: evil@attacker.tld", "utf8").toString("base64")}?= <verify@resend.com>`,
+          "To: ops@kvitbit.com",
+          "Subject: Verify your Resend account",
+          "Content-Type: text/plain; charset=utf-8",
+          "",
+          "Click https://resend.com/verify?token=abc",
+        ],
+        "\r\n",
+      ),
       "utf8",
     ),
   };
@@ -653,12 +752,12 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     const fp = computeDeliveryFingerprint(sampleMessage);
     const prefix = buildArchivePrefix(fp);
     const objectName = buildArchiveObjectName(
-      new Date("2026-11-27T12:34:56.789Z"),
+      DateTime.toDateUtc(DateTime.makeUnsafe("2026-11-27T12:34:56.789Z")),
       fp,
       "abcdef123456",
     );
     expect(objectName).toStartWith(prefix);
-    expect(objectName).toMatch(/^inbound\/by-hash\/[a-f0-9]{32}\/\d+-abcdef123456\.eml$/);
+    expect(objectName).toMatch(inboundByHashPattern);
 
     const parsed = parseEmail(sampleMessage.rawBytes);
     const payload = buildResendForwardPayload({
@@ -670,13 +769,13 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
       forwardFrom: "forwarder@kvitbit.com",
       maxAttachmentBytes: 7 * 1024 * 1024,
     });
-    expect(payload.from).not.toContain("\r");
-    expect(payload.from).not.toContain("\n");
-    expect(payload.from).toContain("<forwarder@kvitbit.com>");
-    expect(payload.to).toEqual(["filkalny@gmail.com"]);
-    expect(payload.reply_to).toBe("verify@resend.com");
-    expect(payload.subject).toBe("[ops] Verify your Resend account");
-    expect(String(payload.text)).toContain(`gs://kvitbit-prod-mail-archive-prod/${prefix}`);
+    expect(payload["from"]).not.toContain("\r");
+    expect(payload["from"]).not.toContain("\n");
+    expect(payload["from"]).toContain("<forwarder@kvitbit.com>");
+    expect(payload["to"]).toEqual(["filkalny@gmail.com"]);
+    expect(payload["reply_to"]).toBe("verify@resend.com");
+    expect(payload["subject"]).toBe("[ops] Verify your Resend account");
+    expect(String(payload["text"])).toContain(`gs://kvitbit-prod-mail-archive-prod/${prefix}`);
 
     const fallback = buildResendFallbackPayload({
       message: sampleMessage,
@@ -687,7 +786,7 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
       forwardFrom: "forwarder@kvitbit.com",
       rejectionStatus: 422,
     });
-    expect(String(fallback.text)).toContain(`gs://kvitbit-prod-mail-archive-prod/${prefix}`);
+    expect(String(fallback["text"])).toContain(`gs://kvitbit-prod-mail-archive-prod/${prefix}`);
   });
 
   test("reuses identical Idempotency-Key, archive prefix, and JSON payload across retries even when recipients are reordered", async () => {
@@ -712,16 +811,16 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     }).pipe(
       Layer.provide(
         mockHttpClientLayer((request) => {
-          if (request.url.includes("metadata.google.internal")) {
-            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+          if (Str.includes("metadata.google.internal")(request.url)) {
+            return new Response(encodeJson({ access_token: "tok-1", expires_in: 600 }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
-          if (request.url.includes("storage.googleapis.com")) {
+          if (Str.includes("storage.googleapis.com")(request.url)) {
             const nameParam = new URL(request.url).searchParams.get("name");
-            if (nameParam) uploadedNames.push(nameParam);
-            return new Response(JSON.stringify({ name: "ok" }), {
+            if (nameParam !== null && nameParam !== "") uploadedNames.push(nameParam);
+            return new Response(encodeJson({ name: "ok" }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
@@ -738,7 +837,7 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
           if (attempt === 1) {
             return new Response("upstream timeout", { status: 504 });
           }
-          return new Response(JSON.stringify({ id: "email_deduped" }), {
+          return new Response(encodeJson({ id: "email_deduped" }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
@@ -768,35 +867,35 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(uploadedNames[0]).toStartWith(expectedPrefix);
     expect(uploadedNames[1]).toStartWith(expectedPrefix);
     expect(uploadedNames[0]).not.toBe(uploadedNames[1]);
-    const parsedReq = JSON.parse(resendRequests[0]?.body ?? "{}") as {
-      text?: string;
-      headers?: Record<string, string>;
-    };
+    const parsedReq = decodeParsedReq(resendRequests[0]?.body ?? "{}").pipe(Result.getOrThrow);
     expect(parsedReq.headers?.["X-Kvitbit-Archive-Prefix"]).toBe(expectedArchiveUri);
     expect(parsedReq.text).toContain(expectedArchiveUri);
 
     // Also send the oversized-attachment HTML fixture through the mocked relay and verify the
     // captured Resend HTML banner, text, and header all match that upload's exact directory prefix.
     const htmlWithBigAttachment = Buffer.from(
-      [
-        "From: vendor@example.org",
-        "To: ops@kvitbit.com",
-        "Subject: Huge PDF",
-        'Content-Type: multipart/mixed; boundary="big-b"',
-        "",
-        "--big-b",
-        'Content-Type: text/html; charset="utf-8"',
-        "",
-        "<p>See attachment</p>",
-        "--big-b",
-        'Content-Type: application/pdf; name="huge.pdf"',
-        'Content-Disposition: attachment; filename="huge.pdf"',
-        "Content-Transfer-Encoding: base64",
-        "",
-        Buffer.alloc(256, 65).toString("base64"),
-        "--big-b--",
-        "",
-      ].join("\r\n"),
+      Arr.join(
+        [
+          "From: vendor@example.org",
+          "To: ops@kvitbit.com",
+          "Subject: Huge PDF",
+          'Content-Type: multipart/mixed; boundary="big-b"',
+          "",
+          "--big-b",
+          'Content-Type: text/html; charset="utf-8"',
+          "",
+          "<p>See attachment</p>",
+          "--big-b",
+          'Content-Type: application/pdf; name="huge.pdf"',
+          'Content-Disposition: attachment; filename="huge.pdf"',
+          "Content-Transfer-Encoding: base64",
+          "",
+          Buffer.alloc(256, 65).toString("base64"),
+          "--big-b--",
+          "",
+        ],
+        "\r\n",
+      ),
       "utf8",
     );
     const bigMsg: InboundMessage = {
@@ -816,15 +915,15 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     }).pipe(
       Layer.provide(
         mockHttpClientLayer((request) => {
-          if (request.url.includes("metadata.google.internal")) {
-            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+          if (Str.includes("metadata.google.internal")(request.url)) {
+            return new Response(encodeJson({ access_token: "tok-1", expires_in: 600 }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
-          if (request.url.includes("storage.googleapis.com")) {
+          if (Str.includes("storage.googleapis.com")(request.url)) {
             capturedBigUploadName = new URL(request.url).searchParams.get("name") ?? "";
-            return new Response(JSON.stringify({ name: capturedBigUploadName }), {
+            return new Response(encodeJson({ name: capturedBigUploadName }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
@@ -833,7 +932,7 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
             request.body._tag === "Uint8Array"
               ? Buffer.from(request.body.body).toString("utf8")
               : "";
-          return new Response(JSON.stringify({ id: "email_big" }), {
+          return new Response(encodeJson({ id: "email_big" }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
@@ -847,13 +946,12 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
       }).pipe(Effect.provide(bigLayer)),
     );
     expect(bigRes.smtpCode).toBe(250);
-    const uploadedDir = capturedBigUploadName.slice(0, capturedBigUploadName.lastIndexOf("/") + 1);
+    const uploadedDir = Str.slice(
+      0,
+      Option.getOrElse(Str.lastIndexOf("/")(capturedBigUploadName), () => -1) + 1,
+    )(capturedBigUploadName);
     const bigExpectedUri = `gs://kvitbit-prod-mail-archive-prod/${uploadedDir}`;
-    const bigPayload = JSON.parse(capturedBigResendBody) as {
-      html?: string;
-      text?: string;
-      headers?: Record<string, string>;
-    };
+    const bigPayload = decodeBigPayload(capturedBigResendBody).pipe(Result.getOrThrow);
     expect(bigPayload.html).toContain(bigExpectedUri);
     expect(bigPayload.text).toContain(
       `Omitted large attachment(s): huge.pdf (256 bytes) (see ${bigExpectedUri})`,
@@ -874,13 +972,13 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
       Layer.provide(
         mockHttpClientLayer((request) => {
           urls.push(request.url);
-          if (request.url.includes("metadata.google.internal")) {
-            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+          if (Str.includes("metadata.google.internal")(request.url)) {
+            return new Response(encodeJson({ access_token: "tok-1", expires_in: 600 }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
-          return new Response(JSON.stringify({ name: "inbound/test.eml" }), {
+          return new Response(encodeJson({ name: "inbound/test.eml" }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
@@ -896,8 +994,10 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     );
     expect(result.smtpCode).toBe(250);
     expect(result.archivePath).toStartWith("gs://kvitbit-prod-mail-archive-prod/inbound/");
-    expect(urls.some((u) => u.includes("api.resend.com"))).toBe(false);
-    expect(urls.some((u) => u.includes("storage.googleapis.com/upload/storage/v1/b/"))).toBe(true);
+    expect(Arr.some(urls, (u) => Str.includes("api.resend.com")(u))).toBe(false);
+    expect(
+      Arr.some(urls, (u) => Str.includes("storage.googleapis.com/upload/storage/v1/b/")(u)),
+    ).toBe(true);
   });
 
   test("returns 451 when GCS archival fails (never acknowledges unarchived mail)", async () => {
@@ -911,8 +1011,8 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     }).pipe(
       Layer.provide(
         mockHttpClientLayer((request) => {
-          if (request.url.includes("metadata.google.internal")) {
-            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+          if (Str.includes("metadata.google.internal")(request.url)) {
+            return new Response(encodeJson({ access_token: "tok-1", expires_in: 600 }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
@@ -944,26 +1044,26 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     }).pipe(
       Layer.provide(
         mockHttpClientLayer((request) => {
-          if (request.url.includes("metadata.google.internal")) {
-            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+          if (Str.includes("metadata.google.internal")(request.url)) {
+            return new Response(encodeJson({ access_token: "tok-1", expires_in: 600 }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
-          if (request.url.includes("storage.googleapis.com")) {
-            return new Response(JSON.stringify({ name: "ok" }), {
+          if (Str.includes("storage.googleapis.com")(request.url)) {
+            return new Response(encodeJson({ name: "ok" }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
           resendCalls += 1;
           if (resendStatus === 422 && resendCalls === 1) {
-            return new Response(JSON.stringify({ message: "invalid attachment" }), { status: 422 });
+            return new Response(encodeJson({ message: "invalid attachment" }), { status: 422 });
           }
           if (resendStatus === 429) {
             return new Response("rate limited", { status: 429 });
           }
-          return new Response(JSON.stringify({ id: "email_123" }), {
+          return new Response(encodeJson({ id: "email_123" }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
@@ -997,7 +1097,7 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
       rcptTo: ["alerts@kvitbit.com"],
     };
     const uploadedNames: Array<string> = [];
-    let failAlertUpload = false;
+    const rejectedUploads = new Set<string>();
     const layer = layerMailRelay({
       domain: "kvitbit.com",
       forwardTo: "filkalny@gmail.com",
@@ -1008,24 +1108,24 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     }).pipe(
       Layer.provide(
         mockHttpClientLayer((request) => {
-          if (request.url.includes("metadata.google.internal")) {
-            return new Response(JSON.stringify({ access_token: "tok-1", expires_in: 600 }), {
+          if (Str.includes("metadata.google.internal")(request.url)) {
+            return new Response(encodeJson({ access_token: "tok-1", expires_in: 600 }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
-          if (request.url.includes("storage.googleapis.com")) {
+          if (Str.includes("storage.googleapis.com")(request.url)) {
             const name = new URL(request.url).searchParams.get("name") ?? "";
-            if (failAlertUpload && name.startsWith("inbound/alerts/")) {
+            if (rejectedUploads.has("alerts") && Str.startsWith("inbound/alerts/")(name)) {
               return new Response("alert upload failed", { status: 503 });
             }
             uploadedNames.push(name);
-            return new Response(JSON.stringify({ name }), {
+            return new Response(encodeJson({ name }), {
               status: 200,
               headers: { "content-type": "application/json" },
             });
           }
-          return new Response(JSON.stringify({ id: "email_alert" }), {
+          return new Response(encodeJson({ id: "email_alert" }), {
             status: 200,
             headers: { "content-type": "application/json" },
           });
@@ -1046,7 +1146,7 @@ describe("Effect MailRelay (GCS archive + Resend HTTPS)", () => {
     expect(uploadedNames[0]).toStartWith(expectedHashPrefix);
     expect(uploadedNames[1]).toStartWith(expectedAlertPrefix);
 
-    failAlertUpload = true;
+    rejectedUploads.add("alerts");
     const failed = await Effect.runPromise(
       Effect.gen(function* () {
         const relay = yield* MailRelay;
@@ -1084,7 +1184,7 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
     expect(parseEnvelopePath("<test@example.org/path>", true)).toBeUndefined();
     expect(parseEnvelopePath("<test@192.0.2.1>", true)).toBeUndefined();
     // 60 'é' characters encode to a 66-octet punycode A-label (> 63-octet DNS limit per RFC 5890).
-    expect(parseEnvelopePath(`<test@${"é".repeat(60)}.com>`, true)).toBeUndefined();
+    expect(parseEnvelopePath(`<test@${Str.repeat(60)("é")}.com>`, true)).toBeUndefined();
   });
 
   const runSmtpSession = (
@@ -1105,23 +1205,20 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
         }
         const step = steps[stepIdx];
         stepIdx += 1;
-        if (!step) {
+        if (!(step !== undefined)) {
           sock.end();
           resume(Effect.succeed(replies));
           return;
         }
-        if (step.upgradeTls) {
+        if (step.upgradeTls === true) {
           const prev = sock;
           prev.removeAllListeners("data");
-          const secure = tls.connect(
-            { socket: prev as net.Socket, rejectUnauthorized: false },
-            () => {
-              sock = secure;
-              attach(secure);
-              advance();
-            },
-          );
-          secure.on("error", (err) => resume(Effect.fail(err)));
+          const secure = tls.connect({ socket: prev, rejectUnauthorized: false }, () => {
+            sock = secure;
+            attach(secure);
+            advance();
+          });
+          secure.on("error", (err: Error) => resume(Effect.fail(err)));
           return;
         }
         if (step.send !== undefined) {
@@ -1132,13 +1229,13 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
       const attach = (target: net.Socket | tls.TLSSocket) => {
         target.on("data", (chunk: Buffer) => {
           buf += chunk.toString("utf8");
-          const lines = buf.split("\r\n");
+          const lines = Str.split(buf, "\r\n");
           buf = lines.pop() ?? "";
           let completeReply = false;
           for (const line of lines) {
-            if (!line) continue;
+            if (!(line !== "")) continue;
             replies.push(line);
-            if (/^\d{3} /.test(line)) {
+            if (attachPattern.test(line)) {
               completeReply = true;
             }
           }
@@ -1146,24 +1243,71 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
             advance();
           }
         });
-        target.on("error", (err) => resume(Effect.fail(err)));
+        target.on("error", (err: Error) => resume(Effect.fail(err)));
       };
 
       attach(sock);
     });
 
+  test("returns a temporary SMTP failure when the relay callback throws synchronously", async () => {
+    const replies = await Effect.gen(function* () {
+      const { port } = yield* startSmtpServer({
+        host: "127.0.0.1",
+        port: 0,
+        domain: "kvitbit.com",
+        mxHost: "mx.kvitbit.com",
+        allowedRecipients: new Set(["ops@kvitbit.com"]),
+        onMessage: () => {
+          throw new Error("Synchronous relay failure");
+        },
+      });
+      return yield* runSmtpSession(port, [
+        { send: "EHLO sender.example.com\r\n" },
+        { send: "MAIL FROM:<sender@example.com>\r\n" },
+        { send: "RCPT TO:<ops@kvitbit.com>\r\n" },
+        { send: "DATA\r\n" },
+        { send: "Subject: Relay failure\r\n\r\nBody\r\n.\r\n" },
+        { send: "QUIT\r\n" },
+      ]);
+    }).pipe(Effect.scoped, Effect.runPromise);
+    expect(replies).toContain("451 4.3.0 Temporary local error");
+  });
+
   test("enforces allowlist, bare Postmaster, SMTPUTF8, strict both-sides CRLF DATA termination, size cap, and STARTTLS", async () => {
-    const certDir = mkdtempSync(join(tmpdir(), "kvitbit-smtp-tls-"));
+    const certDir = await Effect.runPromise(
+      fixtureFileSystem.makeTempDirectory({ prefix: "kvitbit-smtp-tls-" }),
+    );
     try {
-      execSync(
-        `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -keyout ${certDir}/key.pem -out ${certDir}/cert.pem -days 1 -nodes -subj "/CN=mx.kvitbit.com"`,
-        { stdio: "ignore" },
+      const certificate = await runCommand({
+        command: [
+          "openssl",
+          "req",
+          "-x509",
+          "-newkey",
+          "ec",
+          "-pkeyopt",
+          "ec_paramgen_curve:prime256v1",
+          "-keyout",
+          `${certDir}/key.pem`,
+          "-out",
+          `${certDir}/cert.pem`,
+          "-days",
+          "1",
+          "-nodes",
+          "-subj",
+          "/CN=mx.kvitbit.com",
+        ],
+      });
+      if (certificate.exitCode !== 0) throw new Error(certificate.stderr);
+      const tlsCert = Buffer.from(
+        await Effect.runPromise(fixtureFileSystem.readFile(`${certDir}/cert.pem`)),
       );
-      const tlsCert = readFileSync(`${certDir}/cert.pem`);
-      const tlsKey = readFileSync(`${certDir}/key.pem`);
+      const tlsKey = Buffer.from(
+        await Effect.runPromise(fixtureFileSystem.readFile(`${certDir}/key.pem`)),
+      );
 
       const received: Array<InboundMessage> = [];
-      const replies = await Effect.runPromise(
+      const replies = await Fn.pipe(
         Effect.scoped(
           Effect.gen(function* () {
             const bound = yield* startSmtpServer({
@@ -1207,6 +1351,7 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
             ]);
           }),
         ),
+        Effect.runPromise,
       );
 
       expect(replies[0]).toBe("220 mx.kvitbit.com ESMTP Kvitbit");
@@ -1219,7 +1364,7 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
 
       expect(received).toHaveLength(1);
       const firstMsg = received[0];
-      if (!firstMsg) throw new Error("expected received message");
+      if (!(firstMsg !== undefined)) throw new Error("expected received message");
       expect(firstMsg.tls).toBe(true);
       expect(firstMsg.mailFrom).toBe("žan@example.net");
       expect(firstMsg.rcptTo).toEqual(["ops@kvitbit.com", "postmaster@kvitbit.com"]);
@@ -1230,7 +1375,7 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
       expect(parsed.text).toContain("smuggle2");
       expect(parsed.text).toContain("still body");
     } finally {
-      rmSync(certDir, { recursive: true, force: true });
+      await Effect.runPromise(fixtureFileSystem.remove(certDir, { recursive: true, force: true }));
     }
   });
 });
@@ -1241,7 +1386,7 @@ describe("Effect mail forwarder bundling, cold-pull reconciler, & Cloud DNS help
     const second = await Effect.runPromise(bundleMailForwarderScript);
     expect(first.sha).toBe(second.sha);
     expect(first.scriptB64Gz).toBe(second.scriptB64Gz);
-    expect(first.sha).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(first.sha).toMatch(matchPattern);
     expect(first.scriptB64Gz.length).toBeLessThan(200 * 1024);
     const decompressed = gunzipSync(Buffer.from(first.scriptB64Gz, "base64")).toString("utf8");
     expect(sha256Prefixed(decompressed)).toBe(first.sha);
@@ -1251,10 +1396,9 @@ describe("Effect mail forwarder bundling, cold-pull reconciler, & Cloud DNS help
   test("generated reconcile-mail.sh cold-pulls image with Docker 29 RepoDigests normalization, decompresses script, and publishes active target", async () => {
     const bundle = await Effect.runPromise(bundleMailForwarderScript);
     const startup = buildMailForwarderStartupScript();
-    const match = startup.match(
-      /cat <<'RECONCILE' > \/var\/lib\/kvitbit-mail\/reconcile-mail\.sh\n([\s\S]*?)\nRECONCILE/,
-    );
-    if (!match?.[1]) throw new Error("Failed to extract reconcile-mail.sh from startup script");
+    const match = Option.getOrNull(Str.match(catReconcileVarPattern)(startup));
+    if (!(match?.[1] !== undefined && match?.[1] !== ""))
+      throw new Error("Failed to extract reconcile-mail.sh from startup script");
     const reconcileScript = match[1];
 
     const runtimeCfg = serializeMailForwarderConfig({
@@ -1272,9 +1416,11 @@ describe("Effect mail forwarder bundling, cold-pull reconciler, & Cloud DNS help
       resendSecretId: undefined,
     });
     const runtimeCfgSha = sha256Prefixed(runtimeCfg);
-    const imageId = `sha256:${"c".repeat(64)}`;
+    const imageId = `sha256:${Str.repeat(64)("c")}`;
 
-    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-mail-reconcile-"));
+    const sandbox = await Effect.runPromise(
+      fixtureFileSystem.makeTempDirectory({ prefix: "kvitbit-mail-reconcile-" }),
+    );
     try {
       const binDir = join(sandbox, "bin");
       const metaDir = join(sandbox, "meta");
@@ -1284,23 +1430,48 @@ describe("Effect mail forwarder bundling, cold-pull reconciler, & Cloud DNS help
       const pulledMarker = join(sandbox, "pulled");
       const runningMarker = join(sandbox, "running");
 
-      execSync(`mkdir -p "${binDir}" "${metaDir}" "${stateDir}" "${runDir}"`);
-      writeFileSync(join(sandbox, "reconcile-mail.sh"), reconcileScript, { mode: 0o700 });
-      writeFileSync(join(metaDir, "kvitbit-mail-image-digest"), MAIL_FORWARDER_BUN_IMAGE_DIGEST);
-      // Test with docker.io/ prefix in metadata while Docker 29 RepoDigests returns short `oven/bun@sha256:...`
-      writeFileSync(
-        join(metaDir, "kvitbit-mail-image-ref"),
-        `docker.io/oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`,
+      for (const dir of [binDir, metaDir, stateDir, runDir]) {
+        await Effect.runPromise(fixtureFileSystem.makeDirectory(dir, { recursive: true }));
+      }
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(join(sandbox, "reconcile-mail.sh"), reconcileScript, {
+          mode: 0o700,
+        }),
       );
-      writeFileSync(join(metaDir, "kvitbit-mail-config"), runtimeCfg);
-      writeFileSync(join(metaDir, "kvitbit-mail-config-sha"), runtimeCfgSha);
-      writeFileSync(join(metaDir, "kvitbit-mail-script-b64gz"), bundle.scriptB64Gz);
-      writeFileSync(join(metaDir, "kvitbit-mail-script-sha"), bundle.sha);
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(
+          join(metaDir, "kvitbit-mail-image-digest"),
+          MAIL_FORWARDER_BUN_IMAGE_DIGEST,
+        ),
+      );
+      // Test with docker.io/ prefix in metadata while Docker 29 RepoDigests returns short `oven/bun@sha256:...`
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(
+          join(metaDir, "kvitbit-mail-image-ref"),
+          `docker.io/oven/bun@${MAIL_FORWARDER_BUN_IMAGE_DIGEST}`,
+        ),
+      );
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(join(metaDir, "kvitbit-mail-config"), runtimeCfg),
+      );
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(join(metaDir, "kvitbit-mail-config-sha"), runtimeCfgSha),
+      );
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(
+          join(metaDir, "kvitbit-mail-script-b64gz"),
+          bundle.scriptB64Gz,
+        ),
+      );
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(join(metaDir, "kvitbit-mail-script-sha"), bundle.sha),
+      );
 
       // Stub curl for GCE metadata, guest-attributes, and localhost /healthz
-      writeFileSync(
-        join(binDir, "curl"),
-        `#!/bin/bash
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(
+          join(binDir, "curl"),
+          `#!/bin/bash
 set -euo pipefail
 url=""
 method="GET"
@@ -1338,13 +1509,15 @@ if [[ "$url" == "http://127.0.0.1:8081/healthz" ]]; then
 fi
 exit 1
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
 
       // Stub docker simulating Docker 29 returning short `oven/bun@sha256:...` in RepoDigests
-      writeFileSync(
-        join(binDir, "docker"),
-        `#!/bin/bash
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(
+          join(binDir, "docker"),
+          `#!/bin/bash
 set -euo pipefail
 if [ "$1" = "pull" ]; then
   touch "${pulledMarker}"
@@ -1362,29 +1535,39 @@ if [ "$1" = "inspect" ]; then
 fi
 exit 1
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
 
-      writeFileSync(
-        join(binDir, "systemctl"),
-        `#!/bin/bash
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(
+          join(binDir, "systemctl"),
+          `#!/bin/bash
 if [ "$1" = "start" ]; then touch "${runningMarker}"; fi
 if [ "$1" = "stop" ]; then rm -f "${runningMarker}"; fi
 exit 0
 `,
-        { mode: 0o755 },
+          { mode: 0o755 },
+        ),
       );
-      writeFileSync(join(binDir, "iptables"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
-      writeFileSync(join(binDir, "chown"), "#!/bin/bash\nexit 0\n", { mode: 0o755 });
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(join(binDir, "iptables"), "#!/bin/bash\nexit 0\n", {
+          mode: 0o755,
+        }),
+      );
+      await Effect.runPromise(
+        fixtureFileSystem.writeFileString(join(binDir, "chown"), "#!/bin/bash\nexit 0\n", {
+          mode: 0o755,
+        }),
+      );
 
-      const result = Bun.spawnSync(["bash", join(sandbox, "reconcile-mail.sh")], {
+      const result = await runCommand({
+        command: ["bash", join(sandbox, "reconcile-mail.sh")],
         env: {
-          PATH: `${binDir}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+          PATH: `${binDir}:${systemPath}`,
           KVITBIT_MAIL_STATE_DIR: stateDir,
           KVITBIT_MAIL_RUN_DIR: runDir,
         },
-        stdout: "pipe",
-        stderr: "pipe",
       });
 
       if (result.exitCode !== 0) {
@@ -1392,29 +1575,38 @@ exit 0
           `reconcile-mail.sh failed (${result.exitCode}): ${result.stderr.toString()}`,
         );
       }
-      expect(readFileSync(guestAttrPath, "utf8")).toBe(
+      expect(await Effect.runPromise(fixtureFileSystem.readFileString(guestAttrPath))).toBe(
         `${MAIL_FORWARDER_BUN_IMAGE_DIGEST}|${runtimeCfgSha}|${bundle.sha}`,
       );
-      const installedScript = readFileSync(join(stateDir, "mail-forwarder.mjs"), "utf8");
+      const installedScript = await Effect.runPromise(
+        fixtureFileSystem.readFileString(join(stateDir, "mail-forwarder.mjs")),
+      );
       expect(sha256Prefixed(installedScript)).toBe(bundle.sha);
-      const envContent = readFileSync(join(runDir, "mail.env"), "utf8");
+      const envContent = await Effect.runPromise(
+        fixtureFileSystem.readFileString(join(runDir, "mail.env")),
+      );
       expect(envContent).toContain("KVITBIT_MAIL_DOMAIN=kvitbit.com");
       expect(envContent).toContain("KVITBIT_MAIL_ALIASES=founder,ops");
       expect(envContent).toContain("KVITBIT_MAIL_RELAY_MODE=archive-only");
     } finally {
-      rmSync(sandbox, { recursive: true, force: true });
+      await Effect.runPromise(fixtureFileSystem.remove(sandbox, { recursive: true, force: true }));
     }
   });
 
   test("formats long Cloud DNS TXT records (>255 bytes DKIM) and normalizes MX records", () => {
     expect(formatCloudDnsTxt("v=DMARC1; p=quarantine")).toBe('"v=DMARC1; p=quarantine"');
-    const longDkim = `v=DKIM1; k=rsa; p=${"A".repeat(380)}`;
+    const longDkim = `v=DKIM1; k=rsa; p=${Str.repeat(380)("A")}`;
     const formatted = formatCloudDnsTxt(longDkim);
-    const chunks = formatted.match(/"[^"]*"/g) ?? [];
+    const chunks = Option.getOrNull(Str.match(/"[^"]*"/g)(formatted)) ?? [];
     expect(chunks.length).toBe(2);
     expect((chunks[0]?.length ?? 0) - 2).toBeLessThanOrEqual(255);
     expect((chunks[1]?.length ?? 0) - 2).toBeLessThanOrEqual(255);
-    expect(chunks.map((c) => c.slice(1, -1)).join("")).toBe(longDkim);
+    expect(
+      Arr.join(
+        Arr.map(chunks, (c) => Str.slice(1, -1)(c)),
+        "",
+      ),
+    ).toBe(longDkim);
 
     expect(normalizeMxRrdata("10 feedback-smtp.eu-west-1.amazonses.com")).toBe(
       "10 feedback-smtp.eu-west-1.amazonses.com.",

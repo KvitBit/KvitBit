@@ -1,3 +1,5 @@
+import { WorkspaceSlug } from "@kvitbit/domain";
+import * as Fn from "effect/Function";
 /**
  * URL <-> Route for the web build (base "/"), with the Shell's access gates: account and workspace
  * routes need a session; a workspace route needs membership of that workspace.
@@ -5,7 +7,11 @@
 
 import { Route as UiRoute } from "@effect/ui";
 import { ViewModels } from "@kvitbit/ui-port";
-import { Option, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { Route } from "./page";
 import type { SessionState } from "./session";
 
@@ -19,16 +25,26 @@ export const href = (route: Route): string => ViewModels.Routes.toPath(route, "/
 /** Returns a safe relative internal path for post-auth redirects, rejecting open redirects. */
 export const safeReturnTo = (raw: string | undefined): string | undefined => {
   if (raw === undefined || raw === "") return undefined;
-  if (!raw.startsWith("/") || raw.startsWith("//") || raw.includes("\\")) return undefined;
+  if (!Str.startsWith("/")(raw) || Str.startsWith("//")(raw) || Str.includes("\\")(raw))
+    return undefined;
   const base = "https://kvitbit.invalid";
   const target = new URL(raw, base);
-  if (target.origin !== base || target.pathname.startsWith("//")) return undefined;
+  if (target.origin !== base || Str.startsWith("//")(target.pathname)) return undefined;
   return target.pathname + target.search + target.hash;
 };
 
 /** The current year as a report period, for nav links into Reports. */
-export const defaultReportRoute = (ws: string, year: number): Route =>
-  ({ _tag: "Reports", ws, report: "revenue", period: String(year) }) as Route;
+const defaultReportRouteImpl = (ws: string, year: number): Route => ({
+  _tag: "Reports",
+  ws: WorkspaceSlug.make(ws),
+  report: "revenue",
+  period: String(year),
+});
+
+export const defaultReportRoute: {
+  (year: number): (ws: string) => Route;
+  (ws: string, year: number): Route;
+} = Fn.dual(2, defaultReportRouteImpl);
 
 export type Gate =
   | { readonly _tag: "Allow" }
@@ -37,7 +53,7 @@ export type Gate =
   | { readonly _tag: "Redirect"; readonly route: Route };
 
 /** What the Shell does with a route given the session (pure). */
-export const gate = (route: Route, session: SessionState, path: string): Gate => {
+const gateImpl = (route: Route, session: SessionState, path: string): Gate => {
   const needs = ViewModels.Routes.requires(route);
   if (needs === "public") return { _tag: "Allow" };
   switch (session._tag) {
@@ -53,7 +69,7 @@ export const gate = (route: Route, session: SessionState, path: string): Gate =>
     case "SignedIn": {
       if (needs === "account") return { _tag: "Allow" };
       const ws = "ws" in route ? route.ws : undefined;
-      const member = session.workspaces.some((w) => w.slug === ws);
+      const member = Arr.some(session.workspaces, (w) => w.slug === ws);
       return member
         ? { _tag: "Allow" }
         : { _tag: "Redirect", route: { _tag: "Error", kind: "no_access" } };
@@ -61,8 +77,13 @@ export const gate = (route: Route, session: SessionState, path: string): Gate =>
   }
 };
 
+export const gate: {
+  (session: SessionState, path: string): (route: Route) => Gate;
+  (route: Route, session: SessionState, path: string): Gate;
+} = Fn.dual(3, gateImpl);
+
 const search = <const Key extends string>(...keys: ReadonlyArray<Key>) =>
-  Object.fromEntries(keys.map((key) => [key, Schema.optionalKey(Schema.String)]));
+  EffectRecord.fromEntries(Arr.map(keys, (key) => [key, Schema.optionalKey(Schema.String)]));
 
 export const magicSignInCallback = "/sign-in?magic=complete";
 
@@ -139,11 +160,11 @@ const webRoutes = UiRoute.union({
 // The shared route codec owns validation and defaults. BrowserRouter owns navigation and
 // leaves requests for the other app and the API to the browser.
 const resolveWeb = (path: string) => {
-  const pathname = path.split(/[?#]/, 1)[0] ?? "";
-  if (/^\/(?:app|api|assets|fonts)(?:\/|$)/.test(pathname)) return Option.none();
+  const pathname = Str.split(path, searchOrFragment)[0];
+  if (reservedBrowserPath.test(pathname)) return Option.none();
   const match = webRoutes.resolve(path);
   if (
-    /\.pdf$/i.test(pathname) &&
+    pdfPath.test(pathname) &&
     (Option.isNone(match) ||
       match.value.notFound ||
       Option.isNone(ViewModels.Routes.fromPath(path, "/")))
@@ -158,3 +179,7 @@ export const BrowserRoutes = {
   parse: (path: string) => Option.map(resolveWeb(path), (resolved) => resolved.route),
   resolve: resolveWeb,
 };
+
+const searchOrFragment = /[?#]/;
+const reservedBrowserPath = /^\/(?:app|api|assets|fonts)(?:\/|$)/;
+const pdfPath = /\.pdf$/i;

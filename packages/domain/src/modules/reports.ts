@@ -1,7 +1,9 @@
 /** Reports module (core-ports section 4.9). Interface only. */
-import type { Effect } from "effect";
-import { Context, Schema } from "effect";
-import type { CurrentCaller } from "../caller";
+
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import type { Caller } from "../caller";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import { ExportId } from "../ids";
 import type { FileDownload } from "../shared";
@@ -74,33 +76,42 @@ export class Reports extends Context.Service<
   Reports,
   {
     readonly run: (
+      caller: Caller,
       q: ReportQuery,
-    ) => Effect.Effect<ReportView, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ReportView, Invalid | Unavailable | Forbidden>;
     readonly export: (
+      caller: Caller,
       q: ReportQuery,
       format: "csv" | "pdf",
-    ) => Effect.Effect<FileDownload, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<FileDownload, Invalid | Unavailable | Forbidden>;
     /** Dashboard tiles and a 12-month cashflow series ending at period.to (report.run). */
     readonly dashboard: (
+      caller: Caller,
       period: ReportPeriod,
-    ) => Effect.Effect<DashboardView, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DashboardView, Invalid | Unavailable | Forbidden>;
     /** CNB fixing for a currency on a date, through the fx_fixings cache (report.run). */
-    readonly fxRate: (q: {
-      readonly currency: CurrencyCode;
-      readonly on: IsoDate;
-    }) => Effect.Effect<FxRateView, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    readonly fxRate: (
+      caller: Caller,
+      q: {
+        readonly currency: CurrencyCode;
+        readonly on: IsoDate;
+      },
+    ) => Effect.Effect<FxRateView, Invalid | Unavailable | Forbidden>;
 
     // Full data export (report.export): ZIP of document PDFs, Expense attachments and CSVs.
     /** Starts the DataExport workflow. Returns the running job when one is already running. */
     readonly startExport: (
+      caller: Caller,
       opts?: RequestOptions,
-    ) => Effect.Effect<ExportJobView, Conflict | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ExportJobView, Conflict | Unavailable | Forbidden>;
     readonly getExport: (
+      caller: Caller,
       id: ExportId,
-    ) => Effect.Effect<ExportJobView, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ExportJobView, NotFound | Unavailable | Forbidden>;
     /** The ZIP. Conflict{illegal_transition, export.not_ready} while running or failed; NotFound after expiry. */
     readonly exportFile: (
+      caller: Caller,
       id: ExportId,
-    ) => Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden>;
   }
->()("kvitbit/Reports") {}
+>()("@kvitbit/domain/modules/reports") {}

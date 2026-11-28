@@ -2,19 +2,21 @@
  * Action modals for the Document detail screen: record/remove payment, send email, cancel,
  * create credit note, and unlock.
  */
+
 import type {
   CurrencyCode,
   DeliveryPurpose,
   DocumentView,
-  IsoDate,
   LineId,
   Locale,
   PaymentMethod,
 } from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
+import { IsoDate, MoneyMath } from "@kvitbit/domain/contract";
 import { formatMoney, parseIsoDate } from "@kvitbit/ui-port/format";
 import { enumKey } from "@kvitbit/ui-port/i18n";
-import { BigDecimal } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Str from "effect/String";
 import { useEffect, useState } from "react";
 import { Modal, ScrollView, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
@@ -27,6 +29,8 @@ import {
   todayIsoPrague,
 } from "./codecs";
 import { PAYMENT_METHODS } from "./editor-model";
+
+const emailSeparator = /[\s,;]+/;
 
 function DialogShell(props: {
   readonly visible: boolean;
@@ -110,9 +114,9 @@ export function RecordPaymentModal(props: {
     setError(null);
     props.onSubmit({
       amount: parsedAmount,
-      paidOn: paidOn as IsoDate,
+      paidOn: IsoDate.make(paidOn),
       method,
-      note: note.trim(),
+      note: Str.trim(note),
     });
   };
 
@@ -156,7 +160,10 @@ export function RecordPaymentModal(props: {
       <SegmentedChoice
         label={t("documents.payment.method")}
         value={method}
-        choices={PAYMENT_METHODS.map((m) => ({ value: m, label: t(enumKey("paymentMethod", m)) }))}
+        choices={Arr.map(PAYMENT_METHODS, (m) => ({
+          value: m,
+          label: t(enumKey({ name: "paymentMethod", value: m })),
+        }))}
         onChange={setMethod}
       />
       <TextField label={t("common.field.note")} value={note} onChangeText={setNote} />
@@ -185,12 +192,12 @@ export function RemovePaymentModal(props: {
   }, [props.visible]);
 
   const submit = () => {
-    if (reason.trim() === "") {
+    if (Str.trim(reason) === "") {
       setError(local({ cs: "Zadejte důvod odstranění.", en: "Enter a reason." }));
       return;
     }
     setError(null);
-    props.onSubmit(reason.trim());
+    props.onSubmit(Str.trim(reason));
   };
 
   return (
@@ -253,7 +260,9 @@ export function SendEmailModal(props: {
   readonly onSubmit: (values: SendEmailFormValues) => void;
 }) {
   const { t } = useI18n();
-  const [recipientsText, setRecipientsText] = useState(() => props.defaultRecipients.join(", "));
+  const [recipientsText, setRecipientsText] = useState(() =>
+    Arr.join(props.defaultRecipients, ", "),
+  );
   const [language, setLanguage] = useState<Locale>(props.defaultLanguage);
   const [purpose, setPurpose] = useState<DeliveryPurpose>("document");
   const [reminders, setReminders] = useState(true);
@@ -261,7 +270,7 @@ export function SendEmailModal(props: {
 
   useEffect(() => {
     if (props.visible) {
-      setRecipientsText(props.defaultRecipients.join(", "));
+      setRecipientsText(Arr.join(props.defaultRecipients, ", "));
       setLanguage(props.defaultLanguage);
       setPurpose("document");
       setReminders(true);
@@ -270,10 +279,10 @@ export function SendEmailModal(props: {
   }, [props.visible, props.defaultRecipients, props.defaultLanguage]);
 
   const submit = () => {
-    const emails = recipientsText
-      .split(/[\s,;]+/)
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
+    const emails = Arr.filter(
+      Arr.map(Str.split(recipientsText, emailSeparator), (s) => Str.trim(s)),
+      (s) => s.length > 0,
+    );
     if (emails.length === 0) {
       setError(t("documents.send.noRecipient"));
       return;
@@ -314,8 +323,8 @@ export function SendEmailModal(props: {
         label={t("documents.send.language")}
         value={language}
         choices={[
-          { value: "cs", label: t(enumKey("locale", "cs")) },
-          { value: "en", label: t(enumKey("locale", "en")) },
+          { value: "cs", label: t(enumKey({ name: "locale", value: "cs" })) },
+          { value: "en", label: t(enumKey({ name: "locale", value: "en" })) },
         ]}
         onChange={setLanguage}
       />
@@ -323,8 +332,8 @@ export function SendEmailModal(props: {
         label={t("documents.send.purpose")}
         value={purpose}
         choices={[
-          { value: "document", label: t(enumKey("deliveryPurpose", "document")) },
-          { value: "reminder", label: t(enumKey("deliveryPurpose", "reminder")) },
+          { value: "document", label: t(enumKey({ name: "deliveryPurpose", value: "document" })) },
+          { value: "reminder", label: t(enumKey({ name: "deliveryPurpose", value: "reminder" })) },
         ]}
         onChange={setPurpose}
       />
@@ -367,19 +376,17 @@ export function CancelDocumentModal(props: {
   }, [props.visible]);
 
   const submit = () => {
-    if (reason.trim() === "") {
+    if (Str.trim(reason) === "") {
       setError(local({ cs: "Zadejte důvod storna.", en: "Enter a reason." }));
       return;
     }
-    if (onDate.trim() !== "" && parseIsoDate(onDate) === undefined) {
+    if (Str.trim(onDate) !== "" && parseIsoDate(onDate) === undefined) {
       setError(local({ cs: "Použijte datum RRRR-MM-DD.", en: "Use YYYY-MM-DD date format." }));
       return;
     }
     setError(null);
-    props.onSubmit({
-      reason: reason.trim(),
-      ...(onDate.trim() !== "" ? { on: onDate as IsoDate } : {}),
-    });
+    const value = { reason: Str.trim(reason) };
+    props.onSubmit(Str.trim(onDate) === "" ? value : { ...value, on: IsoDate.make(onDate) });
   };
 
   return (
@@ -466,21 +473,20 @@ export function CreditNoteModal(props: {
   }, [props.visible, props.parsedLines]);
 
   const submit = () => {
-    if (reason.trim() === "") {
+    if (Str.trim(reason) === "") {
       setError(local({ cs: "Zadejte důvod opravy.", en: "Enter a correction reason." }));
       return;
     }
-    if (correctedOn.trim() !== "" && parseIsoDate(correctedOn) === undefined) {
+    if (Str.trim(correctedOn) !== "" && parseIsoDate(correctedOn) === undefined) {
       setError(local({ cs: "Použijte datum RRRR-MM-DD.", en: "Use YYYY-MM-DD date format." }));
       return;
     }
+    const base = { reason: Str.trim(reason) };
+    const values =
+      Str.trim(correctedOn) === "" ? base : { ...base, correctedOn: IsoDate.make(correctedOn) };
     if (mode === "full") {
       setError(null);
-      props.onSubmit({
-        reason: reason.trim(),
-        lines: "full",
-        ...(correctedOn.trim() !== "" ? { correctedOn: correctedOn as IsoDate } : {}),
-      });
+      props.onSubmit({ ...values, lines: "full" });
       return;
     }
     const selected: Array<{ readonly line: LineId; readonly quantity: BigDecimal.BigDecimal }> = [];
@@ -500,11 +506,7 @@ export function CreditNoteModal(props: {
       return;
     }
     setError(null);
-    props.onSubmit({
-      reason: reason.trim(),
-      lines: selected,
-      ...(correctedOn.trim() !== "" ? { correctedOn: correctedOn as IsoDate } : {}),
-    });
+    props.onSubmit({ ...values, lines: selected });
   };
 
   return (
@@ -553,7 +555,7 @@ export function CreditNoteModal(props: {
           <Text variant="labelMedium" color="onSurfaceVariant">
             {t("documents.creditNote.pickLines")}
           </Text>
-          {props.parsedLines.map((line) => (
+          {Arr.map(props.parsedLines, (line) => (
             <TextField
               key={line.id}
               label={`${line.description} (${formatMoney(
@@ -591,12 +593,12 @@ export function UnlockDocumentModal(props: {
   }, [props.visible]);
 
   const submit = () => {
-    if (reason.trim() === "") {
+    if (Str.trim(reason) === "") {
       setError(local({ cs: "Zadejte důvod odemknutí.", en: "Enter a reason." }));
       return;
     }
     setError(null);
-    props.onSubmit(reason.trim());
+    props.onSubmit(Str.trim(reason));
   };
 
   return (

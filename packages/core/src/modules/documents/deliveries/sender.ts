@@ -2,8 +2,9 @@
  * `DocumentSenderLive`: the real `DocumentSender` (send.ts) that `DocumentsLive` delegates
  * `Documents.send` / `previewSend` to.
  */
-import type { CurrentCaller } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import { IdGenerator } from "../../../shared/ids";
 import { CoreStore } from "../../../store/CoreStore";
 import { DocumentContacts, DocumentIssuers } from "../ports";
@@ -27,8 +28,9 @@ export const DocumentSenderLive: Layer.Layer<DocumentSender, never, DocumentSend
   Layer.effect(
     DocumentSender,
     Effect.gen(function* () {
-      // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+      // Only the build dependencies: the build-time context may hold a RequestOutcome
       // or transaction frame, and providing them per call would override the caller's own.
+      const buildContext = yield* Effect.context<DocumentSenderDeps>();
       const context = Context.pick(
         CoreStore,
         IdGenerator,
@@ -37,16 +39,20 @@ export const DocumentSenderLive: Layer.Layer<DocumentSender, never, DocumentSend
         DocumentContacts,
         DocumentIssuers,
         DeliveryJobs,
-      )(yield* Effect.context<DocumentSenderDeps>());
-      // The call site's context wins: caller, RequestOutcome and an enclosing transaction
+      )(buildContext);
+      // The call site's context wins: RequestOutcome and an enclosing transaction
       // frame (issue with send, recurring issuance), so nested sends are savepoints.
-      const run = <A, E>(effect: Effect.Effect<A, E, DocumentSenderDeps | CurrentCaller>) =>
-        Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+      const run = <A, E>(effect: Effect.Effect<A, E, DocumentSenderDeps>) =>
+        Effect.flatMap(Effect.context<never>(), (callSite) =>
           Effect.provideContext(effect, Context.merge(context, callSite)),
         );
       return DocumentSender.of({
-        send: (id, input, opts) => run(send(id, input, opts)),
-        previewSend: (id, input) => run(previewSend(id, input)),
+        send: Effect.fn("DocumentSender.send")((caller, id, input, opts) =>
+          run(send(caller, id, input, opts)),
+        ),
+        previewSend: Effect.fn("DocumentSender.previewSend")((caller, id, input) =>
+          run(previewSend(caller, id, input)),
+        ),
       });
     }),
   );

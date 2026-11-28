@@ -44,7 +44,14 @@ import { type BetterAuthOptions, type BetterAuthPlugin, betterAuth, type User } 
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { bearer, magicLink } from "better-auth/plugins";
-import { Effect, Exit, Redacted } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import type { BotProtection } from "../altcha";
 import { API_KEY_PREFIX } from "./api-key";
 import type { EmailRateLimiter } from "./email-rate-limit";
@@ -75,7 +82,7 @@ export const authTables = {
 export const OAUTH_SCOPES: ReadonlyArray<string> = [
   `${OAUTH_SCOPE_PREFIX}read`,
   `${OAUTH_SCOPE_PREFIX}write`,
-  ...SCOPE_AREAS.flatMap((area) => [
+  ...Arr.flatMap(SCOPE_AREAS, (area) => [
     `${OAUTH_SCOPE_PREFIX}${area}:read`,
     `${OAUTH_SCOPE_PREFIX}${area}:write`,
   ]),
@@ -98,7 +105,10 @@ export const BOT_PROTECTED_PATHS: Readonly<Record<string, BotScope>> = {
 export const BOT_PROOF_HEADER = "x-altcha";
 
 type Sender<Data> = (data: Data, request?: Request) => Promise<void>;
-type LinkData = { readonly url: string; readonly token: string };
+interface LinkData {
+  readonly url: string;
+  readonly token: string;
+}
 
 /** A before hook in Better Auth's native plugin form: dispatch keeps its return value. */
 export type BeforeHook = NonNullable<NonNullable<BetterAuthPlugin["hooks"]>["before"]>[number];
@@ -162,14 +172,14 @@ const apiKeyPlugin = () => {
         ...plugin.schema.apikey,
         fields: {
           ...plugin.schema.apikey.fields,
-          workspaceId: { type: "string", required: true, input: false },
-          createdBy: { type: "string", required: true, input: false },
-          access: { type: "string", required: true, input: false },
-          scopes: { type: "string[]", required: true, input: false },
+          workspaceId: { type: "string", required: true, input: false } as const,
+          createdBy: { type: "string", required: true, input: false } as const,
+          access: { type: "string", required: true, input: false } as const,
+          scopes: { type: "string[]", required: true, input: false } as const,
         },
       },
     },
-  } as typeof plugin;
+  };
 };
 
 /**
@@ -177,14 +187,17 @@ const apiKeyPlugin = () => {
  * all disabled: apps/server issues and checks keys itself (`./api-key`), and the plugin only
  * contributes its schema.
  */
-export const API_KEY_PLUGIN_PATHS: ReadonlyArray<string> = Object.values(
-  apiKeyPlugin().endpoints,
-).map((endpoint) => endpoint.path);
+export const API_KEY_PLUGIN_PATHS: ReadonlyArray<string> = Arr.map(
+  Rec.values(apiKeyPlugin().endpoints),
+  (endpoint) => endpoint.path,
+);
 
 const failureOf = <E>(exit: Exit.Exit<unknown, E>): E | undefined => {
   if (Exit.isSuccess(exit)) return undefined;
-  const reason = exit.cause.reasons.find((r) => r._tag === "Fail");
-  return reason?._tag === "Fail" ? reason.error : undefined;
+  return Arr.findFirst(exit.cause.reasons, (reason) => reason._tag === "Fail").pipe(
+    Option.map((reason) => reason.error),
+    Option.getOrUndefined,
+  );
 };
 
 const unavailable = (what: string) =>
@@ -197,25 +210,40 @@ const unavailable = (what: string) =>
 const isBotProtected = (ctx: { readonly path?: string }) =>
   ctx.path !== undefined && ctx.path in BOT_PROTECTED_PATHS;
 
+// Better Auth requires a Promise and handles rejected APIErrors itself.
+const runAuthPromise = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => Effect.runPromise(effect);
+
+const isNonEmptyString = Schema.is(Schema.NonEmptyString);
+const isString = Schema.is(Schema.String);
+
+const metadataUrl = (input: string | URL | Request): string =>
+  isString(input) ? input : input instanceof URL ? input.href : input.url;
+
 /**
  * 5 per minute per email across the bot-protected paths, after the proof passed; 429
  * `RateLimited` with `Retry-After`.
  */
 export const emailRateLimitHook = (limiter: EmailRateLimiter): BeforeHook => ({
   matcher: isBotProtected,
-  handler: createAuthMiddleware(async (ctx) => {
-    const email: unknown = ctx.body?.email;
-    if (typeof email !== "string" || email.length === 0) return;
-    const exit = await Effect.runPromiseExit(limiter.consume(email));
-    if (Exit.isFailure(exit)) throw unavailable("Rate limiting");
-    if (exit.value.allowed) return;
-    const seconds = exit.value.retryAfterSeconds;
-    throw new APIError(
-      "TOO_MANY_REQUESTS",
-      { _tag: "RateLimited", code: "RateLimited", retryAfterSeconds: seconds },
-      { "Retry-After": String(seconds) },
-    );
-  }),
+  handler: createAuthMiddleware((ctx) =>
+    runAuthPromise(
+      Effect.gen(function* () {
+        const email: unknown = ctx.body?.email;
+        if (!isNonEmptyString(email)) return;
+        const exit = yield* Effect.exit(limiter.consume(email));
+        if (Exit.isFailure(exit)) return yield* Effect.fail(unavailable("Rate limiting"));
+        if (exit.value.allowed) return;
+        const seconds = exit.value.retryAfterSeconds;
+        return yield* Effect.fail(
+          new APIError(
+            "TOO_MANY_REQUESTS",
+            { _tag: "RateLimited", code: "RateLimited", retryAfterSeconds: seconds },
+            { "Retry-After": String(seconds) },
+          ),
+        );
+      }),
+    ),
+  ),
 });
 
 /**
@@ -225,25 +253,43 @@ export const emailRateLimitHook = (limiter: EmailRateLimiter): BeforeHook => ({
  */
 export const botProtectionHook = (botProtection: BotProtection["Service"]): BeforeHook => ({
   matcher: isBotProtected,
-  handler: createAuthMiddleware(async (ctx) => {
-    const scope = BOT_PROTECTED_PATHS[ctx.path];
-    if (scope === undefined) return;
-    const payload = ctx.headers?.get(BOT_PROOF_HEADER) ?? "";
-    const exit = await Effect.runPromiseExit(botProtection.verify(scope, payload));
-    if (Exit.isSuccess(exit)) return;
-    if (failureOf(exit)?._tag === "InvalidBotProof") {
-      throw new APIError("BAD_REQUEST", {
-        _tag: "InvalidBotProof",
-        code: "InvalidBotProof",
-        message: "Bot protection proof is missing, expired or invalid.",
-      });
-    }
-    throw unavailable("Bot protection");
-  }),
+  handler: createAuthMiddleware((ctx) =>
+    runAuthPromise(
+      Effect.gen(function* () {
+        const scope = BOT_PROTECTED_PATHS[ctx.path];
+        if (scope === undefined) return;
+        const payload = ctx.headers?.get(BOT_PROOF_HEADER) ?? "";
+        const exit = yield* Effect.exit(botProtection.verify(scope, payload));
+        if (Exit.isSuccess(exit)) return;
+        if (failureOf(exit)?._tag === "InvalidBotProof") {
+          return yield* Effect.fail(
+            new APIError("BAD_REQUEST", {
+              _tag: "InvalidBotProof",
+              code: "InvalidBotProof",
+              message: "Bot protection proof is missing, expired or invalid.",
+            }),
+          );
+        }
+        return yield* Effect.fail(unavailable("Bot protection"));
+      }),
+    ),
+  ),
 });
 
 const invalidRequest = (description: string) =>
   new APIError("BAD_REQUEST", { error: "invalid_request", error_description: description });
+
+const isObject = Schema.is(Schema.ObjectKeyword);
+const decodeAuthorizeParams = Schema.decodeUnknownOption(
+  Schema.Struct({
+    state: Schema.optionalKey(Schema.Unknown),
+    resource: Schema.optionalKey(Schema.Unknown),
+  }),
+);
+
+const acceptsClientAuth = Schema.is(Schema.Literals(OAUTH_TOKEN_ENDPOINT_AUTH_METHODS));
+
+const clientAuthDescription = `token_endpoint_auth_method must be one of ${Arr.join(OAUTH_TOKEN_ENDPOINT_AUTH_METHODS, ", ")}`;
 
 /**
  * Section 6.2 step 5: an authorization request needs a non-empty `state` and
@@ -251,32 +297,39 @@ const invalidRequest = (description: string) =>
  */
 export const oauthAuthorizeHook = (mcpResource: string): BeforeHook => ({
   matcher: (ctx) => ctx.path === "/oauth2/authorize",
-  handler: createAuthMiddleware(async (ctx) => {
-    const params: Record<string, unknown> =
-      ctx.method === "POST" && typeof ctx.body === "object" && ctx.body !== null
-        ? ctx.body
-        : (ctx.query ?? {});
-    const { state, resource } = params;
-    if (typeof state !== "string" || state.length === 0) throw invalidRequest("state is required");
-    const resources = Array.isArray(resource) ? resource : [resource];
-    if (resources.length !== 1 || resources[0] !== mcpResource) {
-      throw invalidRequest(`resource must be ${mcpResource}`);
-    }
-  }),
+  handler: createAuthMiddleware((ctx) =>
+    runAuthPromise(
+      Effect.gen(function* () {
+        const raw = ctx.method === "POST" && isObject(ctx.body) ? ctx.body : ctx.query;
+        const params = decodeAuthorizeParams(raw).pipe(Option.getOrUndefined);
+        if (!isNonEmptyString(params?.state)) {
+          return yield* Effect.fail(invalidRequest("state is required"));
+        }
+        const resource = params?.resource;
+        const resources = Arr.isArray(resource) ? resource : [resource];
+        if (resources.length !== 1 || resources[0] !== mcpResource) {
+          return yield* Effect.fail(invalidRequest(`resource must be ${mcpResource}`));
+        }
+      }),
+    ),
+  ),
 });
 
 /** Dynamic registration may only ask for the advertised client authentication methods. */
 export const oauthRegisterHook: BeforeHook = {
   matcher: (ctx) => ctx.path === "/oauth2/register",
-  handler: createAuthMiddleware(async (ctx) => {
+  handler: createAuthMiddleware((ctx) => {
     const method: unknown = ctx.body?.token_endpoint_auth_method;
-    if (method === undefined) return;
-    if (!(OAUTH_TOKEN_ENDPOINT_AUTH_METHODS as ReadonlyArray<unknown>).includes(method)) {
-      throw new APIError("BAD_REQUEST", {
-        error: "invalid_client_metadata",
-        error_description: `token_endpoint_auth_method must be one of ${OAUTH_TOKEN_ENDPOINT_AUTH_METHODS.join(", ")}`,
-      });
-    }
+    return runAuthPromise(
+      method === undefined || acceptsClientAuth(method)
+        ? Effect.void
+        : Effect.fail(
+            new APIError("BAD_REQUEST", {
+              error: "invalid_client_metadata",
+              error_description: clientAuthDescription,
+            }),
+          ),
+    );
   }),
 };
 
@@ -301,54 +354,59 @@ const abortError = (signal: AbortSignal): unknown =>
  * with the abort reason when `signal` aborts before or during the read, never returning a
  * partial body.
  */
-const readBounded = async (
+const readBounded = Effect.fn("readBounded")(function* (
   body: ReadableStream<Uint8Array>,
   limit: number,
   signal: AbortSignal | null | undefined,
-): Promise<Uint8Array | undefined> => {
-  // Cleanup is started, never awaited: a custom stream's cancel may take arbitrarily long,
-  // and the caller's deadline must not wait for it.
-  if (signal?.aborted) {
-    void body.cancel(abortError(signal)).catch(() => undefined);
-    throw abortError(signal);
+) {
+  // A custom stream's cancel may take arbitrarily long. Start it without delaying the response.
+  if (signal?.aborted === true) {
+    const reason = abortError(signal);
+    body.cancel(reason).catch(() => undefined);
+    return yield* Effect.die(reason);
   }
   const reader = body.getReader();
-  let rejectAbort: (reason: unknown) => void = () => undefined;
-  const aborted = new Promise<never>((_, reject) => {
-    rejectAbort = reject;
-  });
-  aborted.catch(() => undefined);
-  const onAbort = () => {
-    if (signal === null || signal === undefined) return;
-    rejectAbort(abortError(signal));
-    void reader.cancel(abortError(signal)).catch(() => undefined);
-  };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  const chunks: Array<Uint8Array> = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await Promise.race([reader.read(), aborted]);
-      if (signal?.aborted) throw abortError(signal);
-      if (done) break;
+  const readChunk = Effect.tryPromise({
+    try: () => reader.read(),
+    catch: (cause) => ({ cause }),
+  }).pipe(Effect.catch(({ cause }) => Effect.die(cause)));
+  const read = Effect.gen(function* () {
+    const chunks: Array<Uint8Array> = [];
+    let size = 0;
+    let chunk = yield* readChunk;
+    while (!chunk.done) {
+      const { value } = chunk;
       size += value.byteLength;
       if (size > limit) {
-        void reader.cancel().catch(() => undefined);
-        return undefined;
+        reader.cancel().catch(() => undefined);
+        return;
       }
       chunks.push(value);
+      chunk = yield* readChunk;
     }
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
+    const bytes = new Uint8Array(size);
+    let offset = 0;
+    for (const bytesRead of chunks) {
+      bytes.set(bytesRead, offset);
+      offset += bytesRead.byteLength;
+    }
+    return bytes;
+  });
+  if (signal === null || signal === undefined) return yield* read;
+  const aborted = Effect.callback<never>((resume) => {
+    const onAbort = () => {
+      const reason = abortError(signal);
+      resume(Effect.die(reason));
+      reader.cancel(reason).catch(() => undefined);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) onAbort();
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+  const bytes = yield* Effect.raceFirst(read, aborted);
+  if (signal.aborted) return yield* Effect.die(abortError(signal));
   return bytes;
-};
+});
 
 /**
  * The same response over a body whose `cancel()` returns at once while the original stream's
@@ -362,13 +420,14 @@ const withDetachedCleanup = (response: Response): Response => {
   const reader = original.getReader();
   const body = new ReadableStream<Uint8Array>(
     {
-      async pull(controller) {
-        const { done, value } = await reader.read();
-        if (done) controller.close();
-        else controller.enqueue(value);
+      pull(controller) {
+        return reader.read().then(({ done, value }) => {
+          if (done) controller.close();
+          else controller.enqueue(value);
+        });
       },
       cancel(reason) {
-        void reader.cancel(reason).catch(() => undefined);
+        reader.cancel(reason).catch(() => undefined);
       },
     },
     { highWaterMark: 0 },
@@ -379,6 +438,15 @@ const withDetachedCleanup = (response: Response): Response => {
     headers: response.headers,
   });
 };
+
+const decodeClientMetadata = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      client_id: Schema.optionalKey(Schema.Unknown),
+      token_endpoint_auth_method: Schema.optionalKey(Schema.Unknown),
+    }),
+  ),
+);
 
 /**
  * Wraps the Client ID Metadata Document transport so a document asking for a client
@@ -396,10 +464,16 @@ const withDetachedCleanup = (response: Response): Response => {
  * original status and headers, so the plugin's 5 KiB document limit and the provider's JWKS
  * limit still apply to them. Aborting the fetch signal aborts the read.
  */
-export const guardClientMetadataFetch =
-  (inner: ClientMetadataResourceFetch): ClientMetadataResourceFetch =>
-  async (input, init) => {
-    const response = await inner(input, init);
+export const guardClientMetadataFetch = (
+  inner: ClientMetadataResourceFetch,
+): ClientMetadataResourceFetch => {
+  const fetchMetadata = Effect.fn("guardClientMetadataFetch")(function* (
+    ...[input, init]: Parameters<ClientMetadataResourceFetch>
+  ) {
+    const response = yield* Effect.suspend(() => {
+      const raw = inner(input, init);
+      return Predicate.isPromiseLike(raw) ? Effect.promise(() => raw) : Effect.succeed(raw);
+    });
     if (response.status !== 200 || response.redirected || response.body === null) {
       return response;
     }
@@ -407,40 +481,26 @@ export const guardClientMetadataFetch =
     if (Number.isFinite(declared) && declared > CLIENT_METADATA_MAX_BYTES) {
       return withDetachedCleanup(response);
     }
-    const bytes = await readBounded(response.body, CLIENT_METADATA_GUARD_MAX_BYTES, init?.signal);
+    const bytes = yield* readBounded(response.body, CLIENT_METADATA_GUARD_MAX_BYTES, init?.signal);
     if (bytes === undefined) {
       return refuseMetadata(413, `Response exceeds ${CLIENT_METADATA_GUARD_MAX_BYTES} bytes`);
     }
-    const passOn = () =>
-      new Response(bytes, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-    let document: unknown;
-    try {
-      document = JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      return passOn();
+    const document = decodeClientMetadata(new TextDecoder().decode(bytes));
+    const url = metadataUrl(input);
+    if (Option.isSome(document)) {
+      const { client_id: clientId, token_endpoint_auth_method: method } = document.value;
+      if (clientId === url && method !== undefined && !acceptsClientAuth(method)) {
+        return refuseMetadata(400, clientAuthDescription);
+      }
     }
-    if (typeof document !== "object" || document === null) return passOn();
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    const { client_id: clientId, token_endpoint_auth_method: method } = document as Record<
-      string,
-      unknown
-    >;
-    if (
-      clientId === url &&
-      method !== undefined &&
-      !(OAUTH_TOKEN_ENDPOINT_AUTH_METHODS as ReadonlyArray<unknown>).includes(method)
-    ) {
-      return refuseMetadata(
-        400,
-        `token_endpoint_auth_method must be one of ${OAUTH_TOKEN_ENDPOINT_AUTH_METHODS.join(", ")}`,
-      );
-    }
-    return passOn();
-  };
+    return new Response(bytes, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
+  });
+  return (input, init) => runAuthPromise(fetchMetadata(input, init));
+};
 
 /** The Better Auth options `makeAuth` passes; exported for inspection in tests. */
 export const authOptions = (config: AuthConfig) => {
@@ -503,9 +563,7 @@ export const authOptions = (config: AuthConfig) => {
       storage: "database",
       window: 60,
       max: 100,
-      customRules: Object.fromEntries(
-        Object.keys(BOT_PROTECTED_PATHS).map((path) => [path, { window: 60, max: 20 }]),
-      ),
+      customRules: Rec.map(BOT_PROTECTED_PATHS, () => ({ window: 60, max: 20 })),
     },
     plugins: [
       guards,

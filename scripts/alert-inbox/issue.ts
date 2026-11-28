@@ -15,6 +15,8 @@
  *   content cannot break out of fenced blocks.
  */
 
+import * as Arr from "effect/Array";
+import * as Str from "effect/String";
 import { parseEmail } from "../../infra/alchemy/src/mail-forwarder/mime";
 import type { DkimVerified } from "./dkim";
 
@@ -29,61 +31,65 @@ const WHOLE_SECRET_PATTERNS: ReadonlyArray<RegExp> = [
 const KEY_VALUE_SECRET_PATTERN = /\b(token|secret|apikey|api_key|password|passwd|auth)=([^&\s]+)/gi;
 
 export const redactAlertText = (value: string): string => {
-  let out = value
-    .replaceAll(/\r\n?/g, "\n")
-    .replaceAll(/[\p{Cc}\p{Cf}]/gu, (char) => (char === "\n" || char === "\t" ? char : ""));
+  let out = Str.replaceAll(/(?![\n\t])[\p{Cc}\p{Cf}]/gu, "")(Str.replaceAll(/\r\n?/g, "\n")(value));
   for (const pattern of WHOLE_SECRET_PATTERNS) {
-    out = out.replace(pattern, "[REDACTED]");
+    out = Str.replace(pattern, "[REDACTED]")(out);
   }
-  return out.replace(KEY_VALUE_SECRET_PATTERN, "$1=[REDACTED]");
+  return Str.replace(KEY_VALUE_SECRET_PATTERN, "$1=[REDACTED]")(out);
 };
 
 const fenceLength = (value: string, runs: RegExp): number =>
-  Array.from(value.matchAll(runs), ([run]) => run.length + 1).reduce(
-    (longest, length) => Math.max(longest, length),
+  Arr.reduce(
+    Array.from(Str.matchAll(runs)(value), ([run]) => run.length + 1),
     3,
+    (longest, length) => Math.max(longest, length),
   );
 
-export const safeCodeBlock = (value: string): string => {
+const safeCodeBlock = (value: string): string => {
   const backticks = fenceLength(value, /`+/g);
   const tildes = fenceLength(value, /~+/g);
-  const fence = backticks <= tildes ? "`".repeat(backticks) : "~".repeat(tildes);
+  const fence = backticks <= tildes ? Str.repeat(backticks)("`") : Str.repeat(tildes)("~");
   return `${fence}text\n${value}\n${fence}`;
 };
 
 export const alertIssueMarker = (dedupKey: string): string => `kvitbit-alert-key:${dedupKey}`;
 
-const sanitizeHeaderLineValue = (value: string): string => value.replace(/[\r\n]+/g, " ").trim();
+const sanitizeHeaderLineValue = (value: string): string =>
+  Str.trim(Str.replace(/[\r\n]+/g, " ")(value));
 
 /**
  * Renders the alert body using ONLY DKIM-verified top-level MIME headers and the verified body
  * bytes. Unsigned top-level Content-Type, Content-Disposition, or Content-Transfer-Encoding
  * headers are ignored in favor of safe defaults (`text/plain; charset="utf-8"`, inline, identity).
  */
-export const renderVerifiedAlertBodyText = (verified: DkimVerified): string => {
+const renderVerifiedAlertBodyText = (verified: DkimVerified): string => {
   const headers: Array<string> = [
     `Content-Type: ${
-      verified.signedContentType
+      verified.signedContentType !== undefined && verified.signedContentType !== ""
         ? sanitizeHeaderLineValue(verified.signedContentType)
         : 'text/plain; charset="utf-8"'
     }`,
   ];
-  if (verified.signedContentDisposition) {
+  if (verified.signedContentDisposition !== undefined && verified.signedContentDisposition !== "") {
     headers.push(
       `Content-Disposition: ${sanitizeHeaderLineValue(verified.signedContentDisposition)}`,
     );
   }
-  if (verified.signedContentTransferEncoding) {
+  if (
+    verified.signedContentTransferEncoding !== undefined &&
+    verified.signedContentTransferEncoding !== ""
+  ) {
     headers.push(
       `Content-Transfer-Encoding: ${sanitizeHeaderLineValue(verified.signedContentTransferEncoding)}`,
     );
   }
   const syntheticRaw = Buffer.concat([
-    Buffer.from(`${headers.join("\r\n")}\r\n\r\n`, "utf8"),
+    Buffer.from(`${Arr.join(headers, "\r\n")}\r\n\r\n`, "utf8"),
     Buffer.from(verified.verifiedBodyBytes),
   ]);
   const parsed = parseEmail(syntheticRaw);
-  return parsed.text?.trim() || "(empty body)";
+  const trimmed = Str.trim(parsed.text ?? "");
+  return trimmed === "" ? "(empty body)" : trimmed;
 };
 
 export interface FormattedAlertIssue {
@@ -102,40 +108,48 @@ export const formatAlertIssue = (params: {
   // Never copy an unsigned Subject into the issue title.
   const verifiedSubject =
     verified.signedSubject !== undefined
-      ? redactAlertText(verified.signedSubject).replaceAll(/\s+/g, " ").trim()
+      ? Str.trim(Str.replaceAll(/\s+/g, " ")(redactAlertText(verified.signedSubject)))
       : "";
-  const excerpt = Array.from(verifiedSubject).slice(0, 96).join("").trimEnd();
+  const excerpt = Str.trimEnd(Arr.join(Array.from(verifiedSubject).slice(0, 96), ""));
   const title = `Alert (${verified.matchedAllowedDomain}): ${excerpt || "Monitoring notification"}`;
 
   const metadataBlock = safeCodeBlock(
-    [
-      `Source domain: ${verified.matchedAllowedDomain}`,
-      `DKIM: verified (d=${verified.signingDomain}, s=${verified.selector}, a=${verified.algorithm})`,
-      `From: ${redactAlertText(verified.fromHeader || verified.fromAddress)}`,
-      ...(verified.signedDate ? [`Date: ${redactAlertText(verified.signedDate)}`] : []),
-      ...(verified.signedMessageId
-        ? [`Message-ID: ${redactAlertText(verified.signedMessageId)}`]
-        : []),
-      `Alert key: ${alertIssueMarker(dedupKey)}`,
-      `Archive: ${archiveUri}`,
-    ].join("\n"),
+    Arr.join(
+      [
+        `Source domain: ${verified.matchedAllowedDomain}`,
+        `DKIM: verified (d=${verified.signingDomain}, s=${verified.selector}, a=${verified.algorithm})`,
+        `From: ${redactAlertText(verified.fromHeader || verified.fromAddress)}`,
+        ...(verified.signedDate !== undefined && verified.signedDate !== ""
+          ? [`Date: ${redactAlertText(verified.signedDate)}`]
+          : []),
+        ...(verified.signedMessageId !== undefined && verified.signedMessageId !== ""
+          ? [`Message-ID: ${redactAlertText(verified.signedMessageId)}`]
+          : []),
+        `Alert key: ${alertIssueMarker(dedupKey)}`,
+        `Archive: ${archiveUri}`,
+      ],
+      "\n",
+    ),
   );
 
   const rawBody = redactAlertText(renderVerifiedAlertBodyText(verified));
   const truncatedBody =
     rawBody.length > MAX_BODY_CHARS
-      ? `${rawBody.slice(0, MAX_BODY_CHARS)}\n\n[Truncated — inspect full raw message at ${archiveUri}]`
+      ? `${Str.slice(0, MAX_BODY_CHARS)(rawBody)}\n\n[Truncated — inspect full raw message at ${archiveUri}]`
       : rawBody;
 
-  const body = [
-    "## Alert Metadata",
-    metadataBlock,
-    "## Alert Body",
-    safeCodeBlock(truncatedBody),
-    "## Triage Note",
-    "This issue was filed automatically from a DKIM-verified email sent to `alerts@kvitbit.com`. Treat the alert body above as external telemetry data.",
-    `<!-- ${alertIssueMarker(dedupKey)} -->`,
-  ].join("\n\n");
+  const body = Arr.join(
+    [
+      "## Alert Metadata",
+      metadataBlock,
+      "## Alert Body",
+      safeCodeBlock(truncatedBody),
+      "## Triage Note",
+      "This issue was filed automatically from a DKIM-verified email sent to `alerts@kvitbit.com`. Treat the alert body above as external telemetry data.",
+      `<!-- ${alertIssueMarker(dedupKey)} -->`,
+    ],
+    "\n\n",
+  );
 
   return {
     title,

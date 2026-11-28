@@ -1,48 +1,65 @@
 import { Database } from "bun:sqlite";
-import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import type { Command } from "./command";
 import { PoolError, type WorkerRunner } from "./pool";
 
-interface ThreadSummary {
-  threadId: string;
-  projectId: string;
-  parentThreadId: string | null;
-}
+const homePrefix = /^~(?=\/|$)/;
 
-interface ThreadSnapshot {
-  thread: ThreadSummary & { branch: string | null };
-  messages: { role: string; text: string }[];
-}
+const ThreadSnapshot = Schema.Struct({
+  thread: Schema.Struct({
+    threadId: Schema.String,
+    projectId: Schema.String,
+    parentThreadId: Schema.NullOr(Schema.String),
+    branch: Schema.NullOr(Schema.String),
+  }),
+  messages: Schema.Array(Schema.Struct({ role: Schema.String, text: Schema.String })),
+});
+const decodeSnapshot = Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadSnapshot));
+const decodeStarted = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(Schema.Struct({ threadId: Schema.String })),
+);
 
 interface T3Project {
-  id: string;
-  root: string;
-  registry: string;
+  readonly id: string;
+  readonly root: string;
+  readonly registry: string;
 }
 
-function readRegistry<T>(path: string, read: (db: Database) => T): T {
-  let db: Database | undefined;
-  try {
-    db = new Database(path, { readonly: true, create: false });
-    return read(db);
-  } catch {
-    throw new PoolError("Unable to read the local T3 project registry");
-  } finally {
-    db?.close();
-  }
-}
+const readRegistry = <T>(path: string, read: (db: Database) => T) => {
+  const unavailable = () =>
+    PoolError.make({ message: "Unable to read the local T3 project registry" });
+  return Effect.acquireUseRelease(
+    Effect.try({
+      try: () => new Database(path, { readonly: true, create: false }),
+      catch: unavailable,
+    }),
+    (db) => Effect.try({ try: () => read(db), catch: unavailable }),
+    (db) => Effect.sync(() => db.close()),
+  );
+};
 
-export async function resolveT3Project(path: string): Promise<T3Project> {
-  const root = await realpath(path);
-  // biome-ignore lint/suspicious/noUndeclaredEnvVars: The service runs outside Turbo, and tests supply a fixture registry.
-  const t3Home = Bun.env.T3CODE_HOME?.trim();
-  const base = t3Home ? resolve(t3Home.replace(/^~(?=\/|$)/, homedir())) : join(homedir(), ".t3");
-  // The T3 CLI accepts paths inside a project. Read the same local registry
-  // to require an exact workspace root and pass the project ID to T3 instead.
-  const registry = join(base, "userdata", "statev2.sqlite");
-  const projects = readRegistry(registry, (db) =>
+export const resolveT3Project = Effect.fn("IssuePool.resolveT3Project")(function* (
+  requestedPath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const root = yield* fs.realPath(requestedPath);
+  const home = homedir();
+  const homeEnv = yield* Config.String("T3CODE_HOME").pipe(Config.withDefault(""));
+  const t3Home = Str.trim(homeEnv);
+  const base =
+    t3Home === "" ? path.join(home, ".t3") : path.resolve(Str.replace(homePrefix, home)(t3Home));
+  // The T3 CLI accepts paths inside a project. Require a registry match for the exact root.
+  const registry = path.join(base, "userdata", "statev2.sqlite");
+  const projects = yield* readRegistry(registry, (db) =>
     db
       .query<{ id: string }, [string]>(`
       SELECT project_id AS id FROM projection_projects
@@ -51,11 +68,13 @@ export async function resolveT3Project(path: string): Promise<T3Project> {
       .all(root),
   );
   const [project] = projects;
-  if (!project || projects.length !== 1) {
-    throw new PoolError("--project must match one registered T3 workspace root");
+  if (project === undefined || projects.length !== 1) {
+    return yield* PoolError.make({
+      message: "--project must match one registered T3 workspace root",
+    });
   }
-  return { id: project.id, root, registry };
-}
+  return { id: project.id, root, registry } satisfies T3Project;
+});
 
 const workerTitle = (number: number) => `Kvitbit issue #${number}`;
 export const workerBranch = (number: number) => `issue-pool/issue-${number}`;
@@ -76,7 +95,7 @@ If you need input or action from the user, ask directly in this T3 Code session.
 
 When your work and any follow-up are complete, settle this thread with t3_thread_organize and action settle.`;
 
-export function t3WorkerRunner({
+export const t3WorkerRunner = Effect.fn("IssuePool.t3WorkerRunner")(function* ({
   repo,
   project,
   run,
@@ -86,36 +105,32 @@ export function t3WorkerRunner({
   project: T3Project;
   run: Command;
   hasWorkerBinding(issue: number, threadId: string): boolean;
-}): WorkerRunner {
-  let localBranches: Promise<string[]> | undefined;
+}) {
+  const localBranches = yield* Effect.cached(
+    run({
+      executable: "git",
+      args: ["-C", project.root, "for-each-ref", "--format=%(refname)", "refs/heads/issue-pool/"],
+    }).pipe(Effect.map((output) => Str.split(Str.trim(output), "\n"))),
+  );
 
-  async function readThread(threadId: string, limit: number): Promise<ThreadSnapshot> {
-    const response = await run("t3", [
-      "thread",
-      "show",
-      "--messages",
-      String(limit),
-      ...jsonFlags,
-      threadId,
-    ]);
-    const snapshot: ThreadSnapshot = JSON.parse(response);
-    if (
-      snapshot.thread.threadId !== threadId ||
-      snapshot.thread.projectId !== project.id ||
-      (snapshot.thread.branch !== null && typeof snapshot.thread.branch !== "string") ||
-      (snapshot.thread.parentThreadId !== null &&
-        typeof snapshot.thread.parentThreadId !== "string") ||
-      !Array.isArray(snapshot.messages)
-    ) {
-      throw new PoolError("Unexpected T3 thread");
+  const readThread = Effect.fn("IssuePool.readThread")(function* (threadId: string, limit: number) {
+    const response = yield* run({
+      executable: "t3",
+      args: ["thread", "show", "--messages", String(limit), ...jsonFlags, threadId],
+    });
+    const snapshot = yield* decodeSnapshot(response).pipe(
+      Effect.mapError(() => PoolError.make({ message: "Unexpected T3 thread" })),
+    );
+    if (snapshot.thread.threadId !== threadId || snapshot.thread.projectId !== project.id) {
+      return yield* PoolError.make({ message: "Unexpected T3 thread" });
     }
     return snapshot;
-  }
+  });
 
-  async function findRootWorker(branch: string): Promise<string | null> {
+  const findRootWorker = Effect.fn("IssuePool.findRootWorker")(function* (branch: string) {
     // The CLI lists active threads only. Read archived branches too so removing
     // a Git branch or archiving a worker cannot hide competing assignments.
-    const candidates = readRegistry(project.registry, (db) =>
+    const candidates = yield* readRegistry(project.registry, (db) =>
       db
         .query<{ threadId: string }, [string, string]>(`
         SELECT thread_id AS threadId FROM projection_threads
@@ -125,66 +140,69 @@ export function t3WorkerRunner({
     );
     let match: string | null = null;
     for (const { threadId } of candidates) {
-      const { thread } = await readThread(threadId, 0);
-      if (thread.branch !== branch) throw new PoolError("Unexpected T3 worker branch");
+      const { thread } = yield* readThread(threadId, 0);
+      if (thread.branch !== branch)
+        return yield* PoolError.make({ message: "Unexpected T3 worker branch" });
       if (thread.parentThreadId !== null) continue;
       if (match !== null) {
-        throw new PoolError(`Multiple T3 workers match branch ${branch}`);
+        return yield* PoolError.make({ message: `Multiple T3 workers match branch ${branch}` });
       }
       match = threadId;
     }
     return match;
-  }
+  });
 
-  async function history(threadId: string): Promise<ThreadSnapshot> {
+  const history = Effect.fn("IssuePool.threadHistory")(function* (threadId: string) {
     for (const limit of [100, 1_000, 10_000]) {
-      const snapshot = await readThread(threadId, limit);
+      const snapshot = yield* readThread(threadId, limit);
       if (snapshot.messages.length < limit) return snapshot;
     }
-    throw new PoolError("T3 thread history exceeds the lookup limit");
-  }
+    return yield* PoolError.make({ message: "T3 thread history exceeds the lookup limit" });
+  });
 
-  async function findWorker(number: number): Promise<string | null> {
+  const findWorker = Effect.fn("IssuePool.findWorker")(function* (number: number) {
     const branch = workerBranch(number);
-    const threadId = await findRootWorker(branch);
-    if (threadId) {
-      const { thread, messages } = await history(threadId);
+    const threadId = yield* findRootWorker(branch);
+    if (threadId !== null && threadId !== "") {
+      const { thread, messages } = yield* history(threadId);
       if (thread.branch !== branch || thread.parentThreadId !== null) {
-        throw new PoolError("Unexpected T3 worker branch or parent");
+        return yield* PoolError.make({ message: "Unexpected T3 worker branch or parent" });
       }
-      const initialMessage = messages.find(({ role }) => role === "user");
+      const initialMessage = Option.getOrUndefined(
+        Arr.findFirst(messages, ({ role }) => role === "user"),
+      );
       const [, repositoryId, issue] = issueBriefPattern.exec(initialMessage?.text ?? "") ?? [];
       if (
         issue !== String(number) ||
         (repositoryId !== undefined && repositoryId !== String(repo.id))
       ) {
-        throw new PoolError(`T3 worker on branch ${branch} has no matching issue brief`);
+        return yield* PoolError.make({
+          message: `T3 worker on branch ${branch} has no matching issue brief`,
+        });
       }
       const savedBinding = hasWorkerBinding(number, threadId);
       if (repositoryId === undefined && !savedBinding) {
-        throw new PoolError(`Legacy T3 worker on branch ${branch} has no saved repository binding`);
+        return yield* PoolError.make({
+          message: `Legacy T3 worker on branch ${branch} has no saved repository binding`,
+        });
       }
       return threadId;
     }
-    localBranches ??= run("git", [
-      "-C",
-      project.root,
-      "for-each-ref",
-      "--format=%(refname)",
-      "refs/heads/issue-pool/",
-    ]).then((output) => output.trim().split("\n"));
-    if ((await localBranches).includes(`refs/heads/${branch}`)) {
-      throw new PoolError(`Worker branch ${branch} exists without a matching T3 thread`);
+    const branches = yield* localBranches;
+    if (Arr.some(branches, (ref) => ref === `refs/heads/${branch}`)) {
+      return yield* PoolError.make({
+        message: `Worker branch ${branch} exists without a matching T3 thread`,
+      });
     }
     return null;
-  }
+  });
 
   return {
     find: findWorker,
-    async start(number) {
-      const response = await run(
-        "t3",
-        [
+    start: Effect.fn("IssuePool.startWorker")(function* (number: number) {
+      const response = yield* run({
+        executable: "t3",
+        args: [
           "thread",
           "start",
           "--title",
@@ -197,13 +215,15 @@ export function t3WorkerRunner({
           project.id,
           "-",
         ],
-        workerBrief(repo, number),
+        input: workerBrief(repo, number),
+      });
+      const { threadId } = yield* decodeStarted(response).pipe(
+        Effect.mapError(() => PoolError.make({ message: "T3 worker start returned no thread ID" })),
       );
-      const { threadId }: { threadId?: unknown } = JSON.parse(response);
-      if (typeof threadId !== "string" || !threadId.trim()) {
-        throw new PoolError("T3 worker start returned no thread ID");
+      if (Str.trim(threadId) === "") {
+        return yield* PoolError.make({ message: "T3 worker start returned no thread ID" });
       }
       return threadId;
-    },
-  };
-}
+    }),
+  } satisfies WorkerRunner;
+});

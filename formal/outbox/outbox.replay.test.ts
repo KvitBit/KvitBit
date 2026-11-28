@@ -14,15 +14,26 @@
  * The job's sealed System caller comes from a RecurringSweep tick (sweep.ts provides it to
  * `start`), since the seal is not exported from any entry point.
  */
+
 import { expect, test } from "bun:test";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import {
   CoreModulesLive,
   DeliveriesRepo,
   DeliveryJobs,
   DocumentsModule,
+  deliveryJob,
   RecurringModule,
   RecurringRepo,
-} from "@kvitbit/core";
+} from "../../packages/core/src/index";
 import {
   CaptureEmailSender,
   CoreReposMemory,
@@ -30,36 +41,33 @@ import {
   RecurringRepoMemory,
   StartedDeliveries,
   TestCoreFakes,
-} from "@kvitbit/core/testing";
-import type {
-  ContactId,
-  CurrentCaller as CurrentCallerTag,
-  DeliveryId,
-  DocumentId,
-  IsoDate,
-  MemberCaller,
-  ScheduleId,
-  SystemCaller,
-  TemplateId,
-  WorkspaceId,
-} from "@kvitbit/domain/contract";
+} from "../../packages/core/src/testing/index";
+import type { MemberCaller, SystemCaller, WorkspaceId } from "../../packages/domain/src/contract";
 import {
+  BankAccountInput,
   Caller,
+  ContactId,
   Contacts,
-  CurrentCaller,
+  type DeliveryId,
   Documents,
+  IsoDate,
+  ScheduleId,
+  TemplateId,
   Templates,
+  UserId,
   Workspaces,
-} from "@kvitbit/domain/contract";
-import type { EmailSender as EmailSenderShape, RegistryRecord } from "@kvitbit/domain/ports";
-import { EmailSender } from "@kvitbit/domain/ports";
-import { BigDecimal, Context, Effect, Exit, Layer, Ref } from "effect";
-import { TestClock } from "effect/testing";
+} from "../../packages/domain/src/contract";
+import type {
+  EmailSender as EmailSenderShape,
+  RegistryRecord,
+} from "../../packages/domain/src/ports";
+import { EmailSender } from "../../packages/domain/src/ports";
 
 const { RecurringIssuance } = RecurringModule;
-const { claim, deliver, dispatch, giveUp, reconcileStaleDeliveries } = DocumentsModule;
+const { claim, deliver, dispatch, giveUp } = deliveryJob;
+const { reconcileStaleDeliveries } = DocumentsModule;
 
-const TODAY = "2026-11-23" as IsoDate;
+const TODAY = IsoDate.make("2026-11-23");
 const NOW = Date.UTC(2026, 10, 23, 9, 0, 0);
 const ICO = "27082440";
 const RECORD: RegistryRecord = {
@@ -75,7 +83,7 @@ const RECORD: RegistryRecord = {
 
 /** Dies once inside the recurring send transaction, after Documents.send queued the delivery. */
 class CrashInSend extends Context.Service<CrashInSend, Ref.Ref<boolean>>()(
-  "formal/outbox/CrashInSend",
+  "kvitbit/formal/outbox/outbox.replay.test/CrashInSend",
 ) {}
 
 const crashingRunRepo = Layer.effectContext(
@@ -106,10 +114,12 @@ const lostStart = Layer.succeed(
 );
 
 const core = (options: { readonly crashInSend?: boolean; readonly loseStart?: boolean } = {}) => {
-  const repos = options.crashInSend
-    ? Layer.merge(CoreReposMemory, crashingRunRepo)
-    : CoreReposMemory;
-  const fakes = options.loseStart ? Layer.merge(TestCoreFakes(), lostStart) : TestCoreFakes();
+  const repos =
+    options.crashInSend === true
+      ? Layer.merge(CoreReposMemory, crashingRunRepo)
+      : Layer.merge(CoreReposMemory, Layer.effect(CrashInSend, Ref.make(false)));
+  const fakes =
+    options.loseStart === true ? Layer.merge(TestCoreFakes(), lostStart) : TestCoreFakes();
   return CoreModulesLive.pipe(
     Layer.provideMerge(Layer.merge(repos, fakes)),
     Layer.provideMerge(InMemoryCorePorts({ registry: { [ICO]: RECORD } })),
@@ -118,6 +128,7 @@ const core = (options: { readonly crashInSend?: boolean; readonly loseStart?: bo
 
 interface World {
   readonly workspaceId: WorkspaceId;
+  readonly owner: MemberCaller;
   readonly templateId: TemplateId;
   readonly scheduleId: ScheduleId;
   /** The sealed System caller of TODAY's RecurringIssuance job, as the sweep hands it out. */
@@ -128,11 +139,12 @@ interface World {
 const captureJobCaller = Effect.flatMap(RecurringIssuance, (r) =>
   Effect.flatMap(Ref.make<SystemCaller | null>(null), (ref) =>
     Effect.flatMap(
-      r.sweep((decision) =>
+      r.sweep((caller, decision) =>
         decision.occurrence !== TODAY
           ? Effect.void
           : Effect.gen(function* () {
-              yield* Ref.set(ref, (yield* CurrentCaller) as SystemCaller);
+              if (caller._tag !== "System") return yield* Effect.die("expected a System caller");
+              yield* Ref.set(ref, caller);
             }),
       ),
       () =>
@@ -144,7 +156,7 @@ const captureJobCaller = Effect.flatMap(RecurringIssuance, (r) =>
   ),
 );
 
-type Services = Layer.Success<ReturnType<typeof core>> | CurrentCallerTag | CrashInSend;
+type Services = Layer.Success<ReturnType<typeof core>> | CrashInSend;
 
 /**
  * A vat_payer Workspace with a customer and a monthly autoSend schedule starting TODAY; `body`
@@ -158,107 +170,99 @@ const scenario = <A, E>(
   return Effect.runPromise(
     Effect.gen(function* () {
       yield* TestClock.setTime(NOW);
-      const owner = (yield* Effect.flatMap(Workspaces, (ws) =>
-        ws.create({ name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" } as never),
-      )) as MemberCaller;
-      return yield* Effect.provideService(
-        Effect.gen(function* () {
-          yield* Effect.flatMap(Workspaces, (ws) =>
-            ws.saveBankAccount({ iban: "CZ65 0800 0000 1920 0014 5399", currency: "CZK" } as never),
-          );
-          const customer = (yield* Effect.flatMap(Contacts, (c) =>
-            c.save({
-              name: "Odběratel a.s.",
-              ico: "25596641",
-              dic: "CZ25596641",
-              address: { city: "Brno", country: "CZ" },
-              roles: ["customer"],
-              billingEmails: ["fakturace@odberatel.cz"],
-            } as never),
-          )) as unknown as { readonly id: ContactId };
-          const t = yield* Templates;
-          const created = (yield* t.save({
-            name: "Monthly hosting",
-            kind: "invoice",
-            contact: customer.id,
-            lines: [
-              {
-                description: "Hosting",
-                quantity: BigDecimal.fromStringUnsafe("1"),
-                unitPrice: BigDecimal.fromStringUnsafe("1250.50"),
-              },
-            ],
-            due: { inDays: 14 },
-          } as never)) as unknown as { readonly id: TemplateId; readonly revision: number };
-          const scheduled = (yield* t.schedule(
-            created.id,
-            { every: { months: 1 }, startOn: TODAY, issueAs: "invoice", autoSend: true } as never,
-            created.revision,
-          )) as unknown as { readonly schedule: { readonly id: ScheduleId } };
-          return yield* body({
-            workspaceId: owner.workspaceId,
-            templateId: created.id,
-            scheduleId: scheduled.schedule.id,
-            job: yield* captureJobCaller,
-          });
-        }),
-        CurrentCaller,
-        owner,
+      const account = Caller.account({
+        userId: UserId.make("01900000-0000-7000-8000-0000000000a1"),
+        email: "owner@example.cz",
+        locale: "cs",
+        channel: "web",
+      });
+      const owner = yield* Effect.flatMap(Workspaces, (ws) =>
+        ws.create(account, { name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" }),
       );
-    }).pipe(
-      Effect.provideService(
-        CurrentCaller,
-        Caller.account({
-          userId: "01900000-0000-7000-8000-0000000000a1" as never,
-          email: "owner@example.cz",
-          locale: "cs",
-          channel: "web",
+      yield* Effect.flatMap(Workspaces, (ws) =>
+        ws.saveBankAccount(
+          owner,
+          BankAccountInput.make({ iban: "CZ65 0800 0000 1920 0014 5399", currency: "CZK" }),
+        ),
+      );
+      const customer = yield* Effect.flatMap(Contacts, (c) =>
+        c.save(owner, {
+          name: "Odběratel a.s.",
+          ico: "25596641",
+          dic: "CZ25596641",
+          address: { city: "Brno", country: "CZ" },
+          roles: ["customer"],
+          billingEmails: ["fakturace@odberatel.cz"],
         }),
-      ),
-      Effect.provide(Layer.merge(layer, TestClock.layer())),
-    ) as Effect.Effect<A, unknown, never>,
+      );
+      const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
+        Effect.orDie,
+      );
+      const t = yield* Templates;
+      const created = yield* t.save(owner, {
+        name: "Monthly hosting",
+        kind: "invoice",
+        contact: contactId,
+        lines: [
+          {
+            description: "Hosting",
+            quantity: BigDecimal.fromStringUnsafe("1"),
+            unitPrice: BigDecimal.fromStringUnsafe("1250.50"),
+          },
+        ],
+        due: { inDays: 14 },
+      });
+      const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(created["id"]).pipe(
+        Effect.orDie,
+      );
+      const scheduled = yield* t.schedule(
+        owner,
+        templateId,
+        { every: { months: 1 }, startOn: TODAY, issueAs: "invoice", autoSend: true },
+        created.revision,
+      );
+      if (scheduled.schedule === null) return yield* Effect.die("expected a recurring schedule");
+      const scheduleId = yield* Schema.decodeUnknownEffect(ScheduleId)(
+        scheduled.schedule["id"],
+      ).pipe(Effect.orDie);
+      const job = yield* captureJobCaller;
+      return yield* body({ workspaceId: owner.workspaceId, owner, templateId, scheduleId, job });
+    }).pipe(Effect.provide(Layer.merge(layer, TestClock.layer()))),
   );
 };
 
-/** Runs `effect` as the sealed System caller of TODAY's RecurringIssuance job. */
-const asJob = <A, E, R>(w: World, effect: Effect.Effect<A, E, R>) =>
-  Effect.provideService(effect, CurrentCaller, w.job);
-
 const runOccurrence = (w: World) =>
-  asJob(
-    w,
-    Effect.flatMap(RecurringIssuance, (r) => r.run(w.scheduleId, TODAY)),
-  );
+  Effect.flatMap(RecurringIssuance, (r) => r.run(w.job, w.scheduleId, TODAY));
 
 /** Issued invoices in the Workspace (OneDocumentPerOccurrence counts documents, not runs). */
-const invoices = Effect.map(
-  Effect.flatMap(Documents, (d) => d.list({ kind: "invoice" } as never)),
-  (page) => page.items.length,
-);
+const invoices = (w: World) =>
+  Effect.map(
+    Effect.flatMap(Documents, (d) => d.list(w.owner, { kind: "invoice" })),
+    (page) => page.items.length,
+  );
 
 /** One RecurringSweep tick whose start runs the workflow body inline (as the sweep's caller). */
 const sweep = Effect.flatMap(RecurringIssuance, (r) =>
-  r.sweep((decision) => Effect.asVoid(r.run(decision.scheduleId, decision.occurrence))),
+  r.sweep((caller, decision) =>
+    Effect.asVoid(r.run(caller, decision.scheduleId, decision.occurrence)),
+  ),
 );
 
 const runs = (w: World) =>
   Effect.map(
-    Effect.flatMap(Templates, (t) => t.runs(w.templateId)),
-    (page) =>
-      page.items as unknown as ReadonlyArray<{
-        readonly occurrence: IsoDate;
-        readonly outcome: string;
-        readonly document: { readonly id: string } | null;
-        readonly delivery: { readonly id: DeliveryId; readonly status: string } | null;
-      }>,
+    Effect.flatMap(Templates, (t) => t.runs(w.owner, w.templateId)),
+    (page) => page.items,
   );
 
 const nextOccurrence = (w: World) =>
-  Effect.map(
-    Effect.flatMap(Templates, (t) => t.get(w.templateId)),
-    (v) =>
-      (v as unknown as { schedule: { nextOccurrence: IsoDate | null } }).schedule.nextOccurrence,
-  );
+  Effect.gen(function* () {
+    const templates = yield* Templates;
+    const view = yield* templates.get(w.owner, w.templateId);
+    if (view.schedule === null) return yield* Effect.die("expected a recurring schedule");
+    return yield* Schema.decodeUnknownEffect(Schema.NullOr(IsoDate))(
+      view.schedule["nextOccurrence"],
+    ).pipe(Effect.orDie);
+  });
 
 const started = Effect.flatMap(StartedDeliveries, Ref.get);
 const status = (w: World, id: DeliveryId) =>
@@ -267,7 +271,7 @@ const status = (w: World, id: DeliveryId) =>
     (row) => row.status,
   );
 const provider = Effect.flatMap(CaptureEmailSender, (c) =>
-  Effect.all({ sent: Ref.get(c.sent), attempts: Ref.get(c.attempts) }),
+  Effect.all({ sent: Ref.get(c.sent), attempts: Ref.get(c.attempts) }, { concurrency: 1 }),
 );
 
 /** pendingSends after the reconcile threshold (2 min, core-ports J1a). */
@@ -290,8 +294,10 @@ const reconcileDeliveries = (jobs?: DeliveryJobs["Service"]) =>
       ? pass
       : Effect.provideService(pass, DeliveryJobs, jobs);
     const starts = (yield* started).slice(before);
-    const ends = yield* Effect.forEach(starts, (s) => deliver(s.workspaceId, s.deliveryId));
-    return { restarted, starts: starts.map((s) => s.deliveryId), ends };
+    const ends = yield* Effect.forEach(starts, (s) => deliver(s.workspaceId, s.deliveryId), {
+      concurrency: 1,
+    });
+    return { restarted, starts: EffectArray.map(starts, (s) => s.deliveryId), ends };
   });
 
 /** A DeliveryJobs that records its starts in StartedDeliveries (as DeliveryJobsMemory does). */
@@ -317,12 +323,13 @@ test("SweepStart, IssueCommit, SendCommit, Hook, Claim, Dispatch(ok), Record: on
     Effect.gen(function* () {
       const tick = yield* sweep;
       const [run] = yield* runs(w);
-      const deliveryId = run?.delivery?.id as DeliveryId;
+      const deliveryId = run?.delivery?.id;
+      if (deliveryId === undefined) throw new Error("expected a delivery after the sweep");
       const startedAfterSend = yield* started;
       const queued = yield* status(w, deliveryId);
       const end = yield* deliver(w.workspaceId, deliveryId);
       return {
-        tick: tick.map((d) => [d.occurrence, d.action]),
+        tick: EffectArray.map(tick, (d) => [d.occurrence, d.action]),
         run,
         deliveryId,
         startedAfterSend,
@@ -336,27 +343,29 @@ test("SweepStart, IssueCommit, SendCommit, Hook, Claim, Dispatch(ok), Record: on
   expect<unknown>(r.tick).toEqual([[TODAY, "issue"]]);
   expect(r.run).toMatchObject({ occurrence: TODAY, outcome: "issued" });
   // NextFollowsIssued: the schedule advanced one occurrence.
-  expect(r.next).toBe("2026-12-23" as IsoDate);
+  expect(r.next).toBe(IsoDate.make("2026-12-23"));
   // Hook: the start was issued after commit, keyed by the delivery id.
-  expect(r.startedAfterSend.map((s) => s.deliveryId)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.startedAfterSend, (s) => s.deliveryId)).toEqual([r.deliveryId]);
   expect(r.queued).toBe("queued");
   expect(r.end).toBe("sent");
-  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.provider.sent, (e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
-test("DupStart, IssueCommit(replay), SendCommit(replay): concurrent and repeated runs issue and queue once", async () => {
+test("DupStart, IssueCommit and SendCommit replays: concurrent and repeated runs issue and queue once", async () => {
   const r = await scenario((w) =>
     Effect.gen(function* () {
       const both = yield* Effect.all([runOccurrence(w), runOccurrence(w)], { concurrency: 2 });
       const again = yield* runOccurrence(w);
       const all = yield* runs(w);
+      const documentId = all[0]?.document?.id;
+      if (documentId === undefined) throw new Error("expected an issued document");
       return {
         both,
         again,
         runs: all,
-        invoices: yield* invoices,
+        invoices: yield* invoices(w),
         rows: yield* Effect.flatMap(DeliveriesRepo, (repo) =>
-          repo.byDocument(w.workspaceId, all[0]?.document?.id as DocumentId),
+          repo.byDocument(w.workspaceId, documentId),
         ),
         started: yield* started,
       };
@@ -364,7 +373,7 @@ test("DupStart, IssueCommit(replay), SendCommit(replay): concurrent and repeated
   );
   // OneDeliveryPerOccurrence: one delivery row for the occurrence's document.
   expect(r.rows).toHaveLength(1);
-  const issued = r.both.map((x) => x.issue._tag === "Issued" && x.issue.replayed);
+  const issued = EffectArray.map(r.both, (x) => x.issue._tag === "Issued" && x.issue.replayed);
   expect(issued.sort()).toEqual([false, true]);
   expect(r.again.issue).toMatchObject({ _tag: "Issued", replayed: true });
   expect(r.again.send).toMatchObject({ _tag: "Queued", replayed: true });
@@ -372,7 +381,7 @@ test("DupStart, IssueCommit(replay), SendCommit(replay): concurrent and repeated
   expect(r.runs).toHaveLength(1);
   expect(r.invoices).toBe(1);
   expect(r.started).toHaveLength(1);
-  expect(r.started[0]?.deliveryId).toBe(r.runs[0]?.delivery?.id as DeliveryId);
+  expect(r.started[0]?.deliveryId).toBe(r.runs[0]?.delivery?.id);
 });
 
 test("SweepStart after the advance: a second tick the same day starts nothing", async () => {
@@ -380,7 +389,7 @@ test("SweepStart after the advance: a second tick the same day starts nothing", 
     Effect.gen(function* () {
       yield* runOccurrence(w);
       const tick = yield* sweep;
-      return { tick, runs: yield* runs(w), invoices: yield* invoices };
+      return { tick, runs: yield* runs(w), invoices: yield* invoices(w) };
     }),
   );
   expect(r.tick).toHaveLength(0);
@@ -394,9 +403,8 @@ test("CrashWorker after IssueCommit, ReconcileRecurring: pendingSends finds the 
   const r = await scenario((w) =>
     Effect.gen(function* () {
       // The process died after the issue transaction committed, before the send step.
-      const issued = yield* asJob(
-        w,
-        Effect.flatMap(RecurringIssuance, (ri) => ri.issue(w.scheduleId, TODAY)),
+      const issued = yield* Effect.flatMap(RecurringIssuance, (ri) =>
+        ri.issue(w.job, w.scheduleId, TODAY),
       );
       const startedBefore = yield* started;
       const pending = yield* pendingSends;
@@ -413,21 +421,25 @@ test("CrashWorker after IssueCommit, ReconcileRecurring: pendingSends finds the 
   );
   expect(r.issued._tag === "Issued" && r.issued.run.send).toBe("pending");
   expect(r.startedBefore).toHaveLength(0);
-  expect(r.pending.map((p) => p.occurrence)).toEqual([TODAY]);
+  expect(EffectArray.map(r.pending, (p) => p.occurrence)).toEqual([TODAY]);
   expect(r.rerun.issue).toMatchObject({ _tag: "Issued", replayed: true });
   expect(r.rerun.send).toMatchObject({ _tag: "Queued", replayed: false });
   expect(r.runs).toHaveLength(1);
   expect(r.started).toHaveLength(1);
 });
 
-test("CrashWorker inside SendCommit: the delivery rolls back and no workflow starts (StartedOnlyCommitted)", async () => {
+// CrashWorker during SendCommit exercises StartedOnlyCommitted.
+test("A crash during the send transaction rolls back delivery and leaves no workflow", async () => {
   const r = await scenario(
     (w) =>
       Effect.gen(function* () {
-        yield* Ref.set(yield* CrashInSend, true);
+        const crash = yield* CrashInSend;
+        yield* Ref.set(crash, true);
         const crashed = yield* Effect.exit(runOccurrence(w));
         const crashedRuns = yield* runs(w);
-        const documentId = crashedRuns[0]?.document?.id as DocumentId;
+        const documentId = crashedRuns[0]?.document?.id;
+        if (documentId === undefined)
+          throw new Error("expected an issued document after the crash");
         const afterCrash = {
           runs: crashedRuns,
           // The delivery row itself is gone, not only the run's link to it.
@@ -453,10 +465,10 @@ test("CrashWorker inside SendCommit: the delivery rolls back and no workflow sta
   expect(r.afterCrash.runs[0]?.delivery ?? null).toBeNull();
   expect(r.afterCrash.rows).toHaveLength(0);
   expect(r.afterCrash.started).toHaveLength(0);
-  expect(r.pending.map((p) => p.occurrence)).toEqual([TODAY]);
+  expect(EffectArray.map(r.pending, (p) => p.occurrence)).toEqual([TODAY]);
   expect(r.rerun.send).toMatchObject({ _tag: "Queued", replayed: false });
   expect(r.started).toHaveLength(1);
-  expect(r.started[0]?.deliveryId).toBe(r.runs[0]?.delivery?.id as DeliveryId);
+  expect(r.started[0]?.deliveryId).toBe(r.runs[0]?.delivery?.id);
 });
 
 test("CrashWorker before Hook, ReconcileDelivery: the committed delivery stays queued and reconcile sends it", async () => {
@@ -467,22 +479,25 @@ test("CrashWorker before Hook, ReconcileDelivery: the committed delivery stays q
         const afterCrash = yield* status(w, deliveryId);
         const pending = yield* pendingSends;
         // OutboxReconcile (J1a) restarts DocumentDelivery with the same key.
-        const reconcile = yield* reconcileDeliveries(yield* recordingJobs);
+        const jobs = yield* recordingJobs;
+        const reconcile = yield* reconcileDeliveries(jobs);
         return { deliveryId, afterCrash, pending, reconcile, provider: yield* provider };
       }),
     { loseStart: true },
   );
   expect(r.afterCrash).toBe("queued");
   expect(r.pending).toHaveLength(0);
-  expect(r.reconcile.restarted.map((d) => [d.deliveryId, d.status])).toEqual([
+  expect(EffectArray.map(r.reconcile.restarted, (d) => [d.deliveryId, d.status])).toEqual([
     [r.deliveryId, "queued"],
   ]);
   expect(r.reconcile.starts).toEqual([r.deliveryId]);
   expect(r.reconcile.ends).toEqual(["sent"]);
-  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.provider.sent, (e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
-test("H3: Claim, CrashDelivery(dispatch), ReconcileRecurring, SweepStart, ReconcileDelivery, Claim(sending), Dispatch, Record: the claimed email is sent once", async () => {
+// Claim, CrashDelivery(dispatch), ReconcileRecurring, SweepStart, ReconcileDelivery,
+// Claim(sending), Dispatch, Record.
+test("H3: Reconcile a claimed delivery after a crash and send the email once", async () => {
   // At 77a5bb7 no entry point recovered a claimed delivery (finding H3). The recurring entry
   // points still find no work; the delivery reconcile restarts the job, which sends.
   const r = await scenario((w) =>
@@ -523,7 +538,7 @@ test("H3: Claim, CrashDelivery(dispatch), ReconcileRecurring, SweepStart, Reconc
   expect(r.afterRecurring.startedAfter).toBe(r.startedBefore);
   expect(r.afterRecurring.status).toBe("sending");
   expect(r.afterRecurring.provider.attempts).toBe(0);
-  expect(r.reconcile.restarted.map((d) => [d.deliveryId, d.status])).toEqual([
+  expect(EffectArray.map(r.reconcile.restarted, (d) => [d.deliveryId, d.status])).toEqual([
     [r.deliveryId, "sending"],
   ]);
   expect(r.reconcile.starts).toEqual([r.deliveryId]);
@@ -531,7 +546,7 @@ test("H3: Claim, CrashDelivery(dispatch), ReconcileRecurring, SweepStart, Reconc
   // Terminal now: the next pass restarts nothing.
   expect(r.again.restarted).toHaveLength(0);
   expect(r.provider.attempts).toBe(1);
-  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.provider.sent, (e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
 test("CrashDelivery(record): the provider accepted, the process died; the resend uses the same key", async () => {
@@ -561,7 +576,7 @@ test("CrashDelivery(record): the provider accepted, the process died; the resend
   expect(r.ends).toEqual(["sent"]);
   // At least once: two provider calls with the delivery id as key (the fake dedupes them).
   expect(r.provider.attempts).toBe(2);
-  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.provider.sent, (e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
 test("Dispatch failures, Record, GiveUp: not accepted retries then gives up, rejected fails, unknown retries to sent", async () => {
@@ -614,7 +629,7 @@ test("Dispatch(not_accepted), Record, CrashDelivery(giveup), ReconcileDelivery: 
   expect(r.afterCrash).toBe("sending");
   expect(r.ends).toEqual(["sent"]);
   expect(r.provider.attempts).toBe(2);
-  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.provider.sent, (e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });
 
 test("Dispatch(not_accepted) twice, Record, CrashDelivery(giveup), ReconcileDelivery: sent on the third call", async () => {
@@ -646,5 +661,5 @@ test("Dispatch(not_accepted) twice, Record, CrashDelivery(giveup), ReconcileDeli
   expect(r.afterSecond).toBe("sending");
   expect(r.ends).toEqual(["sent"]);
   expect(r.provider.attempts).toBe(3);
-  expect(r.provider.sent.map((e) => e.idempotencyKey)).toEqual([r.deliveryId]);
+  expect(EffectArray.map(r.provider.sent, (e) => e.idempotencyKey)).toEqual([r.deliveryId]);
 });

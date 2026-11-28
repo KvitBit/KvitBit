@@ -12,8 +12,11 @@ import {
   Unavailable,
   WorkspaceSummary,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api";
+import * as HttpApiEndpoint from "effect/http-api/HttpApiEndpoint";
+import * as HttpApiGroup from "effect/http-api/HttpApiGroup";
+import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
+import * as OpenApi from "effect/http-api/OpenApi";
+import * as Schema from "effect/Schema";
 import { AltchaChallenge, BotScope } from "../altcha";
 import { ConfigView } from "../edge";
 import { RateLimited, Unauthorized } from "../edge-errors";

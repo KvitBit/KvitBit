@@ -1,9 +1,11 @@
 import "../global.css";
+import * as Effect from "effect/Effect";
 import { Stack, usePathname } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
 import { Platform } from "react-native";
 import { SafeAreaProvider } from "react-native-safe-area-context";
+import { forkFeatureEffect } from "../src/features/ui-effect";
 import { I18nProvider } from "../src/i18n/i18n-provider";
 import {
   registerBackgroundCaptureDrain,
@@ -21,9 +23,9 @@ function Navigator() {
   const { native } = useAppTheme();
   useEffect(() => {
     if (session.state.status === "signed-in") {
-      void registerBackgroundCaptureDrain();
+      forkFeatureEffect(Effect.promise(() => registerBackgroundCaptureDrain()));
     } else if (session.state.status === "signed-out") {
-      void unregisterBackgroundCaptureDrain();
+      forkFeatureEffect(Effect.promise(() => unregisterBackgroundCaptureDrain()));
     }
   }, [session.state.status]);
   if (session.state.status === "restoring") return null;

@@ -3,6 +3,8 @@
  * mappers emit `Text`, never strings; adapters resolve it through the i18n catalogs.
  * Keys follow the catalog's dotted MessageKey spelling (`issue.<IssueCode>` for issues).
  */
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
 export type TextParam = string | number;
 
 export interface Text<K extends string = string> {
@@ -10,7 +12,11 @@ export interface Text<K extends string = string> {
   readonly params?: Readonly<Record<string, TextParam>>;
 }
 
-export const text = <K extends string>(
-  key: K,
-  params?: Readonly<Record<string, TextParam>>,
-): Text<K> => (params === undefined ? { key } : { key, params });
+export const text: {
+  (params?: Readonly<Record<string, TextParam>>): <K extends string>(key: K) => Text<K>;
+  <K extends string>(key: K, params?: Readonly<Record<string, TextParam>>): Text<K>;
+} = Fn.dual(
+  (args) => Predicate.isString(args[0]),
+  <K extends string>(key: K, params?: Readonly<Record<string, TextParam>>): Text<K> =>
+    params === undefined ? { key } : { key, params },
+);

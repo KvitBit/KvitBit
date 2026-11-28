@@ -4,16 +4,18 @@
  * exact §29(2)(c) text and "Reverse charge" the Directive's Art. 226(11a) wording; the other
  * Czech lines are the recommended clarity texts; English lines are product translations.
  */
+
 import type {
   DocumentKind,
   Locale,
-  StatutoryCode,
   StatutoryNote,
   TaxRegime,
   VatTreatment,
 } from "@kvitbit/domain/contract";
+import { StatutoryCode } from "@kvitbit/domain/contract";
+import * as EffectString from "effect/String";
 
-export type { StatutoryNote };
+export type { StatutoryNote } from "@kvitbit/domain/contract";
 
 /** Note codes (the domain's `StatutoryCode` is an opaque placeholder; these are its values). */
 export const STATUTORY_CODES = [
@@ -26,7 +28,10 @@ export const STATUTORY_CODES = [
 ] as const;
 export type StatutoryCodeValue = (typeof STATUTORY_CODES)[number];
 
-type Text = { readonly cs: string; readonly en: string };
+interface Text {
+  readonly cs: string;
+  readonly en: string;
+}
 
 const NOTES: Readonly<Record<Exclude<StatutoryCodeValue, "commercial_register">, Text>> = {
   proforma_not_tax_document: {
@@ -45,9 +50,8 @@ const NOTES: Readonly<Record<Exclude<StatutoryCodeValue, "commercial_register">,
   },
 };
 
-const code = (value: StatutoryCodeValue): StatutoryCode => value as unknown as StatutoryCode;
 const note = (value: StatutoryCodeValue, text: string): StatutoryNote => ({
-  code: code(value),
+  code: StatutoryCode.make(value),
   text,
 });
 
@@ -71,7 +75,7 @@ const TITLES: Readonly<Record<DocumentKind, { readonly tax: Text; readonly plain
 };
 
 /** Title printed on the document; a Proforma is never a tax document. */
-export const title = (input: {
+const title = (input: {
   readonly kind: DocumentKind;
   readonly regime: TaxRegime;
   readonly taxDocument: boolean;
@@ -85,7 +89,7 @@ export const title = (input: {
  * Notes in print order: the Proforma disclaimer, the regime line, one line per non-rated
  * treatment present, then the §435 commercial register line (verbatim, both languages).
  */
-export const notes = (input: {
+const notes = (input: {
   readonly kind: DocumentKind;
   readonly regime: TaxRegime;
   readonly treatments: ReadonlySet<VatTreatment>;
@@ -102,8 +106,11 @@ export const notes = (input: {
   }
   if (input.treatments.has("reverse_charge")) add("reverse_charge");
   if (input.treatments.has("exempt_intra_eu_goods")) add("exempt_intra_eu_goods");
-  const register = input.issuerRegisterEntry?.trim();
-  if (register) out.push(note("commercial_register", register));
+  const register =
+    input.issuerRegisterEntry === undefined || input.issuerRegisterEntry === null
+      ? undefined
+      : EffectString.trim(input.issuerRegisterEntry);
+  if (register !== undefined && register !== "") out.push(note("commercial_register", register));
   return out;
 };
 

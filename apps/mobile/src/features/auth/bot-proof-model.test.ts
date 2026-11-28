@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
 import type { BotProofState } from "../../platform/altcha/bot-proof";
+import { eventually } from "../../testing/eventually";
 import { makeBotProof } from "./bot-proof-model";
 
 describe("makeBotProof", () => {
@@ -7,26 +11,26 @@ describe("makeBotProof", () => {
     const states: BotProofState[] = [];
     let fetchCount = 0;
     const now = 1_000_000;
-    const expiresAt = new Date(now + 60_000).toISOString();
+    const expiresAt = DateTime.formatIso(DateTime.makeUnsafe(now + 60_000));
 
     const controller = makeBotProof({
       origin: "https://kvitbit.test",
       scope: "sign_up",
       now: () => now,
       onState: (s) => states.push(s),
-      fetchChallenge: async () => {
+      fetchChallenge: () => {
         fetchCount += 1;
-        return { _tag: "Challenge", challenge: { parameters: {} } };
+        return Promise.resolve({ _tag: "Challenge", challenge: { parameters: {} } });
       },
-      solveChallenge: async (_ch, opts) => {
-        opts?.onProgress?.(0.5);
-        return { _tag: "Solved", payload: "b64-proof", expiresAt };
+      solveChallenge: ({ onProgress }) => {
+        onProgress?.(0.5);
+        return Promise.resolve({ _tag: "Solved", payload: "b64-proof", expiresAt });
       },
     });
 
     const first = await controller.start();
     expect(first).toEqual({ _tag: "Solved", payload: "b64-proof", expiresAt });
-    expect(states.map((s) => s._tag)).toEqual(["Fetching", "Solving", "Solving", "Solved"]);
+    expect(Arr.map(states, (s) => s._tag)).toEqual(["Fetching", "Solving", "Solving", "Solved"]);
     expect(controller.isExpired()).toBe(false);
 
     // Calling start or ensureFresh again while fresh reuses the solved payload
@@ -44,14 +48,14 @@ describe("makeBotProof", () => {
       now: () => clock,
       marginMs: 10_000,
       onState: () => undefined,
-      fetchChallenge: async () => {
+      fetchChallenge: () => {
         fetchCount += 1;
-        return { _tag: "Challenge", challenge: { parameters: { n: fetchCount } } };
+        return Promise.resolve({ _tag: "Challenge", challenge: { parameters: { n: fetchCount } } });
       },
       solveChallenge: async () => ({
         _tag: "Solved",
         payload: `proof-${fetchCount}`,
-        expiresAt: new Date(clock + 30_000).toISOString(),
+        expiresAt: DateTime.formatIso(DateTime.makeUnsafe(clock + 30_000)),
       }),
     });
 
@@ -83,16 +87,20 @@ describe("makeBotProof", () => {
       scope: "magic_link",
       onState: () => undefined,
       fetchChallenge: async () => ({ _tag: "Challenge", challenge: { parameters: {} } }),
-      solveChallenge: async (_c, opts) => {
+      solveChallenge: async ({ signal }) => {
         call += 1;
         const myCall = call;
         if (myCall === 1) {
-          await new Promise<void>((resolve) => {
-            opts?.signal?.addEventListener("abort", () => {
-              abortedFirst = true;
-              resolve();
-            });
-          });
+          await Effect.runPromise(
+            Effect.callback<void>((resume) => {
+              const onAbort = () => {
+                abortedFirst = true;
+                resume(Effect.void);
+              };
+              if (signal?.aborted === true) onAbort();
+              else signal?.addEventListener("abort", onAbort, { once: true });
+            }),
+          );
           return { _tag: "Aborted" };
         }
         return { _tag: "Solved", payload: "second", expiresAt: null };
@@ -100,7 +108,7 @@ describe("makeBotProof", () => {
     });
 
     const p1 = racing.start();
-    await new Promise((r) => setTimeout(r, 5));
+    await Effect.runPromise(eventually(() => call === 1));
     const p2 = racing.restart();
     await p1;
     const res2 = await p2;

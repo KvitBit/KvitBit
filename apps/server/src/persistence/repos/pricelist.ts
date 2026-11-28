@@ -1,52 +1,73 @@
 /** `PriceListRepo` over `price_list_items`. */
+
 import { PriceListRepo } from "@kvitbit/core";
-import type {
-  CurrencyCode,
-  PriceListItemId,
-  VatTreatment,
-  WorkspaceId,
-} from "@kvitbit/domain/contract";
-import { Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
-import { foldText, formatDecimal, parseDecimal } from "../codec";
-import { col, type DbRow, decodeEach, makeTable, type TableSpec } from "../table";
+import { CurrencyCode, PriceListItemId, VatTreatment } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
+import { decodeWorkspaceId, foldText, formatDecimal, parseDecimal } from "../codec";
+import { col, decodeEach, makeTable, type TableSpec } from "../table";
 
 type PriceListItemRow = Effect.Success<ReturnType<PriceListRepo["Service"]["get"]>>;
+
+const OptionalText = Schema.String.pipe(Schema.NullOr, Schema.optional);
+const decodeRow = Schema.decodeUnknownOption(
+  Schema.Struct({
+    id: Schema.String,
+    workspace_id: Schema.String,
+    name: Schema.String,
+    description: OptionalText,
+    unit: OptionalText,
+    currency: Schema.String,
+    vat: VatTreatment.pipe(Schema.NullOr, Schema.optional),
+    archived_at: OptionalText,
+    created_at: Schema.String,
+    updated_at: Schema.String,
+  }),
+);
 
 const spec: TableSpec<PriceListItemRow> = {
   table: "price_list_items",
   collection: "price_list_items",
   entity: "PriceListItem",
-  select: [
-    "id",
-    "workspace_id",
-    "revision",
-    "name",
-    "description",
-    "unit",
-    col.numeric("unit_price"),
-    "currency",
-    "vat",
-    col.instant("archived_at"),
-    col.instant("created_at"),
-    col.instant("updated_at"),
-  ].join(", "),
-  decode: decodeEach(
-    (row: DbRow): PriceListItemRow => ({
-      id: row.id as PriceListItemId,
-      workspaceId: row.workspace_id as WorkspaceId,
-      revision: Number(row.revision),
-      name: row.name as string,
-      description: (row.description as string | null) ?? null,
-      unit: (row.unit as string | null) ?? null,
-      unitPrice: parseDecimal(row.unit_price),
-      currency: row.currency as CurrencyCode,
-      vat: (row.vat as VatTreatment | null) ?? null,
-      archivedAt: (row.archived_at as string | null) ?? null,
-      createdAt: row.created_at as string,
-      updatedAt: row.updated_at as string,
-    }),
+  select: Arr.join(
+    [
+      "id",
+      "workspace_id",
+      "revision",
+      "name",
+      "description",
+      "unit",
+      col.numeric("unit_price"),
+      "currency",
+      "vat",
+      col.instant("archived_at"),
+      col.instant("created_at"),
+      col.instant("updated_at"),
+    ],
+    ", ",
   ),
+  decode: decodeEach((row): PriceListItemRow => {
+    const stored = Option.getOrThrow(decodeRow(row));
+    return {
+      id: PriceListItemId.make(stored.id),
+      workspaceId: decodeWorkspaceId(stored.workspace_id),
+      revision: Number(row["revision"]),
+      name: stored.name,
+      description: stored.description ?? null,
+      unit: stored.unit ?? null,
+      unitPrice: parseDecimal(row["unit_price"]),
+      currency: CurrencyCode.make(stored.currency),
+      vat: stored.vat ?? null,
+      archivedAt: stored.archived_at ?? null,
+      createdAt: stored.created_at,
+      updatedAt: stored.updated_at,
+    };
+  }),
   encode: (row) => ({
     id: row.id,
     workspace_id: row.workspaceId,
@@ -69,13 +90,14 @@ export const PriceListRepoSql: Layer.Layer<PriceListRepo, never, SqlClient.SqlCl
       const sql = yield* SqlClient.SqlClient;
       const table = makeTable(sql, spec);
       return PriceListRepo.of({
-        get: (workspaceId, id) => table.get(workspaceId, id),
-        getForUpdate: (workspaceId, id, expectedRevision) =>
+        get: Effect.fn("PriceListRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+        getForUpdate: Effect.fn("PriceListRepo.getForUpdate")((workspaceId, id, expectedRevision) =>
           table.getForUpdate(workspaceId, id, expectedRevision),
-        lock: (workspaceId, id) => table.lock(workspaceId, id),
+        ),
+        lock: Effect.fn("PriceListRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
         insert: table.insert,
         update: table.update,
-        list: (workspaceId, filter) =>
+        list: Effect.fn("PriceListRepo.list")((workspaceId, filter) =>
           Effect.map(
             table.select(
               workspaceId,
@@ -86,13 +108,15 @@ export const PriceListRepoSql: Layer.Layer<PriceListRepo, never, SqlClient.SqlCl
               const folded = filter.text === undefined ? "" : foldText(filter.text);
               return folded === ""
                 ? rows
-                : rows.filter((row) =>
-                    [row.name, row.description].some(
-                      (value) => value !== null && foldText(value).includes(folded),
+                : Arr.filter(rows, (row) =>
+                    Arr.some(
+                      [row.name, row.description],
+                      (value) => value !== null && Str.includes(folded)(foldText(value)),
                     ),
                   );
             },
           ),
+        ),
       });
     }),
   );

@@ -3,9 +3,18 @@
  * only the declared type"). The declared type must be allowed and the content must start with
  * that type's signature. The check runs incrementally while streaming and keeps only a few bytes.
  */
-import { Stream } from "effect";
 
-const ascii = (text: string) => [...text].map((c) => c.charCodeAt(0));
+import * as EffectArray from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Stream from "effect/Stream";
+import * as EffectString from "effect/String";
+
+const ascii = (text: string) =>
+  EffectArray.map(EffectArray.fromIterable(text), (c) =>
+    Option.getOrElse(EffectString.charCodeAt(c, 0), () => Number.NaN),
+  );
 
 /** Fixed-prefix signatures. */
 const PREFIXES: Readonly<Record<string, ReadonlyArray<number>>> = {
@@ -15,12 +24,12 @@ const PREFIXES: Readonly<Record<string, ReadonlyArray<number>>> = {
 };
 
 /** HEIC still-image brands registered for image/heic (IANA; ISO/IEC 23008-12 Annex B). */
-export const HEIC_BRANDS: ReadonlySet<string> = new Set(["heic", "heix", "heim", "heis"]);
+const HEIC_BRANDS: ReadonlySet<string> = new Set(["heic", "heix", "heim", "heis"]);
 
 const HEIC = "image/heic";
 
 /** Content types the sniffer knows; an allowed type outside this list is never accepted. */
-export const SNIFFABLE_TYPES: ReadonlyArray<string> = [...Object.keys(PREFIXES), HEIC];
+export const SNIFFABLE_TYPES: ReadonlyArray<string> = [...EffectRecord.keys(PREFIXES), HEIC];
 
 /** An incremental decision: `true` / `false` once known, `undefined` while more bytes are needed. */
 interface Sniffer {
@@ -96,10 +105,13 @@ const snifferFor = (contentType: string): Sniffer => {
 };
 
 /** Whether `bytes` (a whole file or its start) match the declared `contentType`. */
-export const matchesType = (contentType: string, bytes: Uint8Array): boolean => {
+export const matchesType: {
+  (bytes: Uint8Array): (contentType: string) => boolean;
+  (contentType: string, bytes: Uint8Array): boolean;
+} = Fn.dual(2, (contentType: string, bytes: Uint8Array): boolean => {
   const sniffer = snifferFor(contentType);
   return sniffer.feed(bytes) ?? sniffer.end();
-};
+});
 
 /**
  * Wraps `bytes` so the signature is checked while streaming: the stream ends early at the first
@@ -109,11 +121,7 @@ export const matchesType = (contentType: string, bytes: Uint8Array): boolean => 
  * undecided (or matching) passes on to storage, which fails it as too large. Call `verdict()`
  * after the stream was consumed; an empty or short stream is decided on what arrived.
  */
-export const sniffing = (
-  contentType: string,
-  bytes: Stream.Stream<Uint8Array>,
-  maxBytes: number,
-) => {
+const sniffingImpl = (contentType: string, bytes: Stream.Stream<Uint8Array>, maxBytes: number) => {
   const sniffer = snifferFor(contentType);
   let decided: boolean | undefined;
   let consumed = 0;
@@ -127,3 +135,14 @@ export const sniffing = (
   });
   return { stream, verdict: () => decided ?? sniffer.end() };
 };
+export const sniffing: {
+  (
+    bytes: Stream.Stream<Uint8Array>,
+    maxBytes: number,
+  ): (contentType: string) => ReturnType<typeof sniffingImpl>;
+  (
+    contentType: string,
+    bytes: Stream.Stream<Uint8Array>,
+    maxBytes: number,
+  ): ReturnType<typeof sniffingImpl>;
+} = Fn.dual(3, sniffingImpl);

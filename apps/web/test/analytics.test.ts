@@ -1,4 +1,7 @@
 import { expect, mock, test } from "bun:test";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
 import type { PostHogConfig, Properties } from "posthog-js/dist/module.slim.no-external.js";
 import { createPageviewTracker } from "../src/app/analytics";
 
@@ -6,20 +9,24 @@ const origin = "https://kvitbit.test";
 const apiKey = "phc_test";
 const host = "/_kvb";
 const resolvedHost = `${origin}${host}`;
-const nextTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const nextTurn = () => Effect.runPromise(Effect.sleep(1));
 
 test("initializes once and captures only sanitized pageviews", async () => {
   const init = mock((_key: string, _options: Partial<PostHogConfig>) => undefined);
   const capture = mock((_event: "$pageview", _properties: Properties) => undefined);
   const loadConfig = mock(async () => ({ posthog: { apiKey, host } }));
   const loadSdk = mock(async () => ({ init, capture }));
-  const track = createPageviewTracker(origin, loadConfig, loadSdk);
+  const track = createPageviewTracker({
+    origin,
+    loadConfig: Effect.promise(loadConfig),
+    loadSdk: Effect.promise(loadSdk),
+  });
 
-  track("/i/short-secret?email=alice@example.test#fragment");
-  track("/i/short-secret?different=query");
-  track("/w/novak-design/documents/42/edit?tab=items");
+  await Effect.runPromise(track("/i/short-secret?email=alice@example.test#fragment"));
+  await Effect.runPromise(track("/i/short-secret?different=query"));
+  await Effect.runPromise(track("/w/novak-design/documents/42/edit?tab=items"));
   await nextTurn();
-  track("/reset-password?token=secret");
+  await Effect.runPromise(track("/reset-password?token=secret"));
 
   expect(loadConfig).toHaveBeenCalledTimes(1);
   expect(loadSdk).toHaveBeenCalledTimes(1);
@@ -41,7 +48,7 @@ test("initializes once and captures only sanitized pageviews", async () => {
     }),
   );
   expect(capture.mock.calls).toEqual(
-    ["/i/[token]", "/w/[id]/documents/[id]/edit", "/reset-password"].map((path) => [
+    Arr.map(["/i/[token]", "/w/[id]/documents/[id]/edit", "/reset-password"], (path) => [
       "$pageview",
       { $current_url: origin + path, $pathname: path },
     ]),
@@ -68,18 +75,17 @@ test("initializes once and captures only sanitized pageviews", async () => {
   };
   expect(options?.sanitize_properties?.(raw, "$pageview")).toEqual(sanitized);
   const beforeSend = options?.before_send;
-  expect(typeof beforeSend).toBe("function");
-  if (typeof beforeSend === "function") {
-    const uuid = "event-id";
-    expect(
-      beforeSend({ uuid, event: "$pageview", properties: raw, $set: { email: raw.email } }),
-    ).toEqual({
-      uuid,
-      event: "$pageview",
-      properties: sanitized,
-    });
-    expect(beforeSend({ uuid, event: "$autocapture", properties: raw })).toBeNull();
-  }
+  expect(Predicate.isFunction(beforeSend)).toBe(true);
+  if (!Predicate.isFunction(beforeSend)) throw new Error("Expected the asserted result");
+  const uuid = "event-id";
+  expect(
+    beforeSend({ uuid, event: "$pageview", properties: raw, $set: { email: raw.email } }),
+  ).toEqual({
+    uuid,
+    event: "$pageview",
+    properties: sanitized,
+  });
+  expect(beforeSend({ uuid, event: "$autocapture", properties: raw })).toBeNull();
 });
 
 test.each([undefined, { posthog: null }, {}])(
@@ -87,11 +93,15 @@ test.each([undefined, { posthog: null }, {}])(
   async (config) => {
     const loadSdk = mock(() => Promise.reject(new Error("SDK loaded unexpectedly")));
     const loadConfig = mock(async () => config);
-    const track = createPageviewTracker(origin, loadConfig, loadSdk);
+    const track = createPageviewTracker({
+      origin,
+      loadConfig: Effect.promise(loadConfig),
+      loadSdk: Effect.promise(loadSdk),
+    });
 
-    track("/sign-in?returnTo=/w/private");
+    await Effect.runPromise(track("/sign-in?returnTo=/w/private"));
     await nextTurn();
-    track("/sign-up");
+    await Effect.runPromise(track("/sign-up"));
 
     expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(loadSdk).not.toHaveBeenCalled();
@@ -112,13 +122,13 @@ test.each([
   ["/75ed480c81ef90f57173615fa724cfdd2f25ceea", "/[id]"],
 ])("turns %s into %s before calling PostHog", async (path, expected) => {
   const capture = mock((_event: "$pageview", _properties: Properties) => undefined);
-  const track = createPageviewTracker(
+  const track = createPageviewTracker({
     origin,
-    async () => ({ posthog: { apiKey, host } }),
-    async () => ({ init: () => undefined, capture }),
-  );
+    loadConfig: Effect.succeed({ posthog: { apiKey, host } }),
+    loadSdk: Effect.succeed({ init: () => undefined, capture }),
+  });
 
-  track(`${path}?term=private#another-secret`);
+  await Effect.runPromise(track(`${path}?term=private#another-secret`));
   await nextTurn();
 
   expect(capture).toHaveBeenCalledWith("$pageview", {

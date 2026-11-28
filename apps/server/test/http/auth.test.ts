@@ -1,17 +1,44 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { AltchaBotProtection, BotProtection, InvalidBotProof } from "@kvitbit/adapters/altcha";
 import { generateApiKey, generateId } from "@kvitbit/adapters/auth";
+import { WorkspaceId } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
-import { Clock, Effect, Layer, Redacted } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import { PrincipalResolver } from "../../src/auth/PrincipalResolver";
 import { PrincipalResolverLive } from "../../src/auth/PrincipalResolverLive";
-import { type Harness, makeHarness, ORIGIN, TEST_NOW } from "./harness";
+import { type Harness, json, makeHarness, ORIGIN, TEST_NOW } from "./harness";
 
-const hashOpaque = (token: string) =>
-  createHash("sha256").update(token, "utf8").digest("base64url");
+const encodeBase64Url = Schema.encodeEffect(Schema.Uint8ArrayFromBase64Url);
+const hashOpaque = async (token: string) =>
+  encodeBase64Url(
+    new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token))),
+  ).pipe(Effect.runSync);
+const metadataFields = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    issuer: Schema.String,
+    client_id_metadata_document_supported: Schema.Boolean,
+    code_challenge_methods_supported: Schema.Array(Schema.String),
+    scopes_supported: Schema.Array(Schema.String),
+  }),
+);
+const challengeFields = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    parameters: Schema.Struct({
+      algorithm: Schema.String,
+      data: Schema.Struct({ scope: Schema.String }),
+    }),
+    signature: Schema.String,
+  }),
+);
+const fixturePassword = "Integration test password for Better Auth";
 
 describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", () => {
   let harness: Harness | undefined;
@@ -26,13 +53,14 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
 
     const r1 = await harness.fetch("/.well-known/oauth-authorization-server");
     expect(r1.status).toBe(200);
-    const body1 = (await r1.json()) as Record<string, unknown>;
-    expect(body1.issuer).toBe(`${ORIGIN}/api/auth`);
-    expect(body1.client_id_metadata_document_supported).toBe(true);
-    expect(body1.code_challenge_methods_supported).toContain("S256");
-    expect(body1.scopes_supported).toContain("kvitbit:read");
-    expect(body1.scopes_supported).toContain("kvitbit:write");
-    expect(body1.scopes_supported).toContain("offline_access");
+    const body1: unknown = await r1.json();
+    const metadata = metadataFields(body1).pipe(Effect.runSync);
+    expect(metadata.issuer).toBe(`${ORIGIN}/api/auth`);
+    expect(metadata.client_id_metadata_document_supported).toBe(true);
+    expect(metadata.code_challenge_methods_supported).toContain("S256");
+    expect(metadata.scopes_supported).toContain("kvitbit:read");
+    expect(metadata.scopes_supported).toContain("kvitbit:write");
+    expect(metadata.scopes_supported).toContain("offline_access");
 
     const r2 = await harness.fetch("/.well-known/oauth-authorization-server/api/auth");
     expect(r2.status).toBe(200);
@@ -55,23 +83,16 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
     const chRes = await harness.fetch("/api/v1/bot-protection/challenges/sign_up");
     expect(chRes.status).toBe(200);
     expect(chRes.headers.get("cache-control")).toBe("no-store");
-    const challenge = (await chRes.json()) as {
-      parameters: { algorithm: string; data?: { scope?: string } };
-      signature?: string;
-    };
+    const challenge = challengeFields(await chRes.json()).pipe(Effect.runSync);
     expect(challenge.parameters.algorithm).toBe("PBKDF2/SHA-256");
-    expect(challenge.parameters.data?.scope).toBe("sign_up");
-    expect(typeof challenge.signature).toBe("string");
+    expect(challenge.parameters.data.scope).toBe("sign_up");
+    expect(challenge.signature).toEqual(expect.any(String));
 
     // 2. Missing X-Altcha header -> 400 InvalidBotProof
     const blocked = await harness.fetch("/api/auth/sign-up/email", {
       method: "POST",
+      ...json({ email: "jana@example.cz", password: fixturePassword, name: "Jana" }),
       headers: { "content-type": "application/json", origin: ORIGIN },
-      body: JSON.stringify({
-        email: "jana@example.cz",
-        password: "StrongPassword123!",
-        name: "Jana",
-      }),
     });
     expect(blocked.status).toBe(400);
   });
@@ -95,10 +116,10 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
           }),
         verify: (scope, payload) => {
           if (scope !== "sign_up" || payload !== "valid-proof") {
-            return Effect.fail(new InvalidBotProof({ reason: "invalid_solution" }));
+            return Effect.fail(InvalidBotProof.make({ reason: "invalid_solution" }));
           }
           if (used.has(payload)) {
-            return Effect.fail(new InvalidBotProof({ reason: "replayed" }));
+            return Effect.fail(InvalidBotProof.make({ reason: "replayed" }));
           }
           used.add(payload);
           return Effect.void;
@@ -112,32 +133,24 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
 
     const ok = await harness.fetch("/api/auth/sign-up/email", {
       method: "POST",
+      ...json({ email: "jana@example.cz", password: fixturePassword, name: "Jana" }),
       headers: {
         "content-type": "application/json",
         origin: ORIGIN,
         "x-altcha": "valid-proof",
       },
-      body: JSON.stringify({
-        email: "jana@example.cz",
-        password: "StrongPassword123!",
-        name: "Jana",
-      }),
     });
     expect(ok.status).toBe(200);
 
     // Replaying the same proof fails (rule B2)
     const replay = await harness.fetch("/api/auth/sign-up/email", {
       method: "POST",
+      ...json({ email: "petr@example.cz", password: fixturePassword, name: "Petr" }),
       headers: {
         "content-type": "application/json",
         origin: ORIGIN,
         "x-altcha": "valid-proof",
       },
-      body: JSON.stringify({
-        email: "petr@example.cz",
-        password: "StrongPassword123!",
-        name: "Petr",
-      }),
     });
     expect(replay.status).toBe(400);
   });
@@ -189,7 +202,7 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
       Effect.gen(function* () {
         yield* TestClock.setTime(TEST_NOW);
         const sql = yield* SqlClient.SqlClient;
-        yield* sql`update auth.apikey set expires_at = ${new Date(TEST_NOW - 1000)} where id = ${issued.keyId}`;
+        yield* sql`update auth.apikey set expires_at = ${DateTime.toDateUtc(DateTime.makeUnsafe(TEST_NOW - 1000))} where id = ${issued.keyId}`;
       }),
     );
     const expired = await harness.fetch(`/api/v1/workspaces/${ws.workspaceId}/contacts`, {
@@ -202,12 +215,18 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
   test("PrincipalResolverLive.fromMcpBearer enforces #887/#889 (audience, consent grant, scope intersection, locale)", async () => {
     harness = makeHarness({ principalResolver: "live" });
     const userId = generateId();
-    const workspaceId = generateId();
+    const workspaceId = WorkspaceId.make(generateId());
     const clientId = "https://mcp-client.example/metadata.json";
     const consentId = generateId();
     const rawToken = "mcp-opaque-access-token-test-12345";
     const wrongAudToken = "mcp-opaque-wrong-aud-token-67890";
     const expiredToken = "mcp-opaque-expired-token-11111";
+
+    const [tokenHash, wrongAudienceHash, expiredHash] = await Promise.all([
+      hashOpaque(rawToken),
+      hashOpaque(wrongAudToken),
+      hashOpaque(expiredToken),
+    ]);
 
     const resolveMcp = (authHeader?: string, acceptLanguage?: string) => {
       if (harness === undefined) throw new Error("harness not initialized");
@@ -250,22 +269,22 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
         yield* sql`
           insert into auth.oauth_access_token (id, token, client_id, user_id, consent_id, resources, scopes, expires_at)
           values (
-            ${generateId()}, ${hashOpaque(rawToken)}, ${clientId}, ${userId}, ${consentId},
-            ${[`${ORIGIN}/mcp`]}::text[], ${["kvitbit:write"]}::text[], ${new Date(now + 3600_000)}
+            ${generateId()}, ${tokenHash}, ${clientId}, ${userId}, ${consentId},
+            ${[`${ORIGIN}/mcp`]}::text[], ${["kvitbit:write"]}::text[], ${DateTime.toDateUtc(DateTime.makeUnsafe(now + 3600_000))}
           )`;
         // Wrong audience token
         yield* sql`
           insert into auth.oauth_access_token (id, token, client_id, user_id, consent_id, resources, scopes, expires_at)
           values (
-            ${generateId()}, ${hashOpaque(wrongAudToken)}, ${clientId}, ${userId}, ${consentId},
-            ${["https://other.example/mcp"]}::text[], ${["kvitbit:read"]}::text[], ${new Date(now + 3600_000)}
+            ${generateId()}, ${wrongAudienceHash}, ${clientId}, ${userId}, ${consentId},
+            ${["https://other.example/mcp"]}::text[], ${["kvitbit:read"]}::text[], ${DateTime.toDateUtc(DateTime.makeUnsafe(now + 3600_000))}
           )`;
         // Expired token
         yield* sql`
           insert into auth.oauth_access_token (id, token, client_id, user_id, consent_id, resources, scopes, expires_at)
           values (
-            ${generateId()}, ${hashOpaque(expiredToken)}, ${clientId}, ${userId}, ${consentId},
-            ${[`${ORIGIN}/mcp`]}::text[], ${["kvitbit:read"]}::text[], ${new Date(now - 60_000)}
+            ${generateId()}, ${expiredHash}, ${clientId}, ${userId}, ${consentId},
+            ${[`${ORIGIN}/mcp`]}::text[], ${["kvitbit:read"]}::text[], ${DateTime.toDateUtc(DateTime.makeUnsafe(now - 60_000))}
           )`;
       }),
     );
@@ -273,33 +292,32 @@ describe("Auth layer (Better Auth, RFC 8414, PrincipalResolverLive, ALTCHA)", ()
     // Missing header -> missing
     const missing = await resolveMcp();
     expect(missing._tag).toBe("Failure");
-    if (missing._tag === "Failure") expect(missing.failure.reason).toBe("missing");
+    expect(missing.pipe(Result.flip, Result.getOrThrow).reason).toBe("missing");
 
     // Valid token -> McpGrant with intersected scopes and Accept-Language fallback
     const valid = await resolveMcp(`Bearer ${rawToken}`, "en-US,en;q=0.9");
     expect(valid._tag).toBe("Success");
-    if (valid._tag === "Success") {
-      expect(valid.success.channel).toBe("mcp");
-      expect(valid.success.locale).toBe("en");
-      expect(valid.success.credential).toEqual({
-        _tag: "McpGrant",
-        grantId: consentId,
-        clientId,
-        clientName: "Claude Desktop",
-        workspaceId: workspaceId as never,
-        scopes: ["contacts:read", "documents:read", "documents:write"],
-      });
-    }
+    const principal = Result.getOrThrow(valid);
+    expect(principal.channel).toBe("mcp");
+    expect(principal.locale).toBe("en");
+    expect(principal.credential).toEqual({
+      _tag: "McpGrant",
+      grantId: consentId,
+      clientId,
+      clientName: "Claude Desktop",
+      workspaceId,
+      scopes: ["contacts:read", "documents:read", "documents:write"],
+    });
 
     // Wrong audience -> invalid
     const wrongAud = await resolveMcp(`Bearer ${wrongAudToken}`);
     expect(wrongAud._tag).toBe("Failure");
-    if (wrongAud._tag === "Failure") expect(wrongAud.failure.reason).toBe("invalid");
+    expect(wrongAud.pipe(Result.flip, Result.getOrThrow).reason).toBe("invalid");
 
     // Expired -> expired
     const expired = await resolveMcp(`Bearer ${expiredToken}`);
     expect(expired._tag).toBe("Failure");
-    if (expired._tag === "Failure") expect(expired.failure.reason).toBe("expired");
+    expect(expired.pipe(Result.flip, Result.getOrThrow).reason).toBe("expired");
 
     // Rule A1: MCP token rejected on /api/v1
     const crossChannel = await harness.fetch(`/api/v1/workspaces/${workspaceId}/contacts`, {

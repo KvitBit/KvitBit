@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import * as Arr from "effect/Array";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   KVITBIT_PROD_DEFAULTS,
   KVITBIT_TURBO_CACHE_DEFAULTS,
@@ -15,7 +20,24 @@ import {
   turboCacheServiceProps,
 } from "../src/resources/turbo-cache";
 
-const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
+const decodeParsed = Schema.decodeUnknownResult(
+  Schema.fromJsonString(
+    Schema.Struct({
+      rule: Schema.Array(
+        Schema.Struct({
+          action: Schema.Struct({ type: Schema.String }),
+          condition: Schema.Struct({ age: Schema.Finite }),
+        }),
+      ),
+    }),
+  ),
+);
+
+const kvitbitTurboCachePattern = /KVITBIT_TURBO_CACHE_TTL_DAYS/;
+const kvitbitTurboCachePattern2 = /KVITBIT_TURBO_CACHE_MAX_INSTANCES/;
+const turboTokenPattern = /TURBO_TOKEN/;
+
+const SAMPLE_DIGEST = `sha256:${Str.repeat(64)("a")}`;
 
 const PROD_BASE_ENV = {
   KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
@@ -43,7 +65,7 @@ describe("Self-hosted Turborepo remote cache on GCP", () => {
   test("disabled by default with no turbo-cache secret or workload", async () => {
     const config = await loadWithEnv({});
     expect(config.turboCache).toBeUndefined();
-    expect(config.secrets.some((s) => s.environmentVariable === "TURBO_TOKEN")).toBe(false);
+    expect(Arr.some(config.secrets, (s) => s.environmentVariable === "TURBO_TOKEN")).toBe(false);
   });
 
   test("enables GCS bucket, dedicated SA, Secret Manager token, and Cloud Run service when KVITBIT_ENABLE_TURBO_CACHE=true", async () => {
@@ -55,7 +77,9 @@ describe("Self-hosted Turborepo remote cache on GCP", () => {
       maxInstances: KVITBIT_TURBO_CACHE_DEFAULTS.maxInstances,
     });
 
-    const tokenSecret = config.secrets.find((s) => s.environmentVariable === "TURBO_TOKEN");
+    const tokenSecret = Option.getOrUndefined(
+      Arr.findFirst(config.secrets, (s) => s.environmentVariable === "TURBO_TOKEN"),
+    );
     expect(tokenSecret).toEqual({
       environmentVariable: "TURBO_TOKEN",
       secretId: "kvitbit-prod-turbo-cache-token",
@@ -67,14 +91,17 @@ describe("Self-hosted Turborepo remote cache on GCP", () => {
     // Secret container is declared by foundation so bootstrap_turbo_cache_secret can create it,
     // while server/runner SAs receive zero access to TURBO_TOKEN.
     expect(
-      secretDeclarations(config).some((d) => d.id === "Secret-kvitbit-prod-turbo-cache-token"),
+      Arr.some(secretDeclarations(config), (d) => d.id === "Secret-kvitbit-prod-turbo-cache-token"),
     ).toBe(true);
     expect(
-      secretAccessorGrants(config).some((g) => g.secretId === "kvitbit-prod-turbo-cache-token"),
+      Arr.some(
+        secretAccessorGrants(config),
+        (g) => g.secretId === "kvitbit-prod-turbo-cache-token",
+      ),
     ).toBe(false);
 
     const turboCache = config.turboCache;
-    if (!turboCache) throw new Error("expected turboCache config");
+    if (!(turboCache !== undefined)) throw new Error("expected turboCache config");
 
     const bucket = turboCacheBucketProps(config, turboCache);
     expect(bucket).toMatchObject({
@@ -95,13 +122,13 @@ describe("Self-hosted Turborepo remote cache on GCP", () => {
     expect(service.location).toBe("europe-west3");
     expect(service.ingress).toBe("INGRESS_TRAFFIC_ALL");
     const template = service.template;
-    if (!template) throw new Error("expected service.template");
+    if (!(template !== undefined)) throw new Error("expected service.template");
     expect(template.serviceAccount).toBe(
       "kvitbit-prod-turbo-cache@kvitbit-prod.iam.gserviceaccount.com",
     );
     expect(template.scaling).toEqual({ minInstanceCount: 0, maxInstanceCount: 4 });
     const container = template.containers?.[0];
-    if (!container || !("env" in container)) {
+    if (!(container !== undefined && "env" in container)) {
       throw new Error("expected ContainerSpec with env");
     }
     expect(container.image).toBe(KVITBIT_TURBO_CACHE_DEFAULTS.image);
@@ -128,34 +155,30 @@ describe("Self-hosted Turborepo remote cache on GCP", () => {
   });
 
   test("produces valid GCS lifecycle JSON for cache TTL expiration", () => {
-    const parsed = JSON.parse(turboCacheLifecycleJson(30)) as {
-      rule: Array<{ action: { type: string }; condition: { age: number } }>;
-    };
+    const parsed = decodeParsed(turboCacheLifecycleJson(30)).pipe(Result.getOrThrow);
     expect(parsed.rule).toEqual([{ action: { type: "Delete" }, condition: { age: 30 } }]);
   });
 
   test("rejects out-of-range TTL or max instances", async () => {
     await expect(
       loadWithEnv({ KVITBIT_ENABLE_TURBO_CACHE: "true", KVITBIT_TURBO_CACHE_TTL_DAYS: "0" }),
-    ).rejects.toThrow(/KVITBIT_TURBO_CACHE_TTL_DAYS/);
+    ).rejects.toThrow(kvitbitTurboCachePattern);
 
     await expect(
       loadWithEnv({ KVITBIT_ENABLE_TURBO_CACHE: "true", KVITBIT_TURBO_CACHE_MAX_INSTANCES: "99" }),
-    ).rejects.toThrow(/KVITBIT_TURBO_CACHE_MAX_INSTANCES/);
+    ).rejects.toThrow(kvitbitTurboCachePattern2);
 
     const base = await loadWithEnv({});
-    await expect(
-      Effect.runPromise(
-        validateStackConfig({
-          ...base,
-          turboCache: {
-            bucket: "kvitbit-prod-turbo-cache-prod",
-            image: KVITBIT_TURBO_CACHE_DEFAULTS.image,
-            ttlDays: 30,
-            maxInstances: 4,
-          },
-        }),
-      ),
-    ).rejects.toThrow(/TURBO_TOKEN/);
+    await validateStackConfig({
+      ...base,
+      turboCache: {
+        bucket: "kvitbit-prod-turbo-cache-prod",
+        image: KVITBIT_TURBO_CACHE_DEFAULTS.image,
+        ttlDays: 30,
+        maxInstances: 4,
+      },
+    })
+      .pipe(Effect.runPromise, expect)
+      .rejects.toThrow(turboTokenPattern);
   });
 });

@@ -14,15 +14,18 @@ import {
   NumberingSeriesId as NumberingSeriesIdSchema,
   WorkspaceId as WorkspaceIdSchema,
 } from "@kvitbit/domain/contract";
-import type { Option } from "effect";
-import { Context, Effect, Layer, Schema } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import type * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 
 export const SeriesRow = Schema.Struct({
   id: NumberingSeriesIdSchema,
   workspaceId: WorkspaceIdSchema,
-  revision: Schema.Number,
+  revision: Schema.Finite,
   kind: DocumentKindSchema,
   name: Schema.String,
   /** Valid by `Numbering.parsePattern` when stored. */
@@ -37,7 +40,7 @@ export const DEFAULT_PER_KIND = "numbering_series_one_default_per_kind";
 export const NumberingSeriesTable = defineCollection<SeriesRow>({
   name: "numbering_series",
   entity: "NumberingSeries",
-  schema: SeriesRow as unknown as Schema.Codec<SeriesRow, unknown>,
+  schema: SeriesRow,
   unique: [
     {
       name: DEFAULT_PER_KIND,
@@ -75,7 +78,7 @@ export class NumberingSeriesRepo extends Context.Service<
       expectedRevision: number,
     ) => Effect.Effect<SeriesRow, NotFound | Conflict | UniqueViolation | StoreUnavailable>;
   }
->()("kvitbit/core/NumberingSeriesRepo") {}
+>()("@kvitbit/core/modules/numbering/repo/NumberingSeriesRepo") {}
 
 /** In-memory `NumberingSeriesRepo` on `MemoryTables` (tests). */
 export const NumberingSeriesRepoMemory: Layer.Layer<NumberingSeriesRepo, never, MemoryTables> =

@@ -2,34 +2,34 @@ import { Mount } from "@effect/ui";
 import { Html } from "@effect/ui/html";
 import { matchesShortcut } from "@ui-sdk/core";
 import { ariaKeyshortcuts, formatShortcut } from "@ui-sdk/core/shortcuts";
-import { createToaster, type UiToastRegionElement } from "@ui-sdk/web";
-import { Effect, Queue, Schema, Stream } from "effect";
+import { createToaster } from "@ui-sdk/web";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 export { ariaKeyshortcuts, formatShortcut, matchesShortcut };
 
-let registered: Promise<void> | undefined;
-
-export const registerUiSdk = (): Promise<void> => {
-  if (registered === undefined) {
-    registered = Promise.all([
-      import("@ui-sdk/web/alert-dialog"),
-      import("@ui-sdk/web/button"),
-      import("@ui-sdk/web/checkbox"),
-      import("@ui-sdk/web/dialog"),
-      import("@ui-sdk/web/field"),
-      import("@ui-sdk/web/input"),
-      import("@ui-sdk/web/menu"),
-      import("@ui-sdk/web/segmented-control"),
-      import("@ui-sdk/web/select"),
-      import("@ui-sdk/web/separator"),
-      import("@ui-sdk/web/tabs"),
-      import("@ui-sdk/web/textarea"),
-      import("@ui-sdk/web/toast"),
-      import("@ui-sdk/web/toggle"),
-    ]).then(() => undefined);
-  }
-  return registered;
-};
+export const registerUiSdk = Effect.all(
+  [
+    Effect.promise(() => import("@ui-sdk/web/alert-dialog")),
+    Effect.promise(() => import("@ui-sdk/web/button")),
+    Effect.promise(() => import("@ui-sdk/web/checkbox")),
+    Effect.promise(() => import("@ui-sdk/web/dialog")),
+    Effect.promise(() => import("@ui-sdk/web/field")),
+    Effect.promise(() => import("@ui-sdk/web/input")),
+    Effect.promise(() => import("@ui-sdk/web/menu")),
+    Effect.promise(() => import("@ui-sdk/web/segmented-control")),
+    Effect.promise(() => import("@ui-sdk/web/select")),
+    Effect.promise(() => import("@ui-sdk/web/separator")),
+    Effect.promise(() => import("@ui-sdk/web/tabs")),
+    Effect.promise(() => import("@ui-sdk/web/textarea")),
+    Effect.promise(() => import("@ui-sdk/web/toast")),
+    Effect.promise(() => import("@ui-sdk/web/toggle")),
+  ],
+  { concurrency: "unbounded", discard: true },
+);
 
 const ActionDetail = Schema.Struct({});
 const OpenChangeDetail = Schema.Struct({ value: Schema.Boolean });
@@ -245,13 +245,13 @@ export const UiSeparator = Html.customElement({
 export const UiToastRegion = Html.customElement({
   tag: "ui-toast-region",
   properties: {
-    maxVisible: Schema.Number,
+    maxVisible: Schema.Finite,
     expanded: Schema.Boolean,
   },
 });
 
 const ToastEntry = Schema.Struct({
-  id: Schema.Number,
+  id: Schema.Finite,
   text: Schema.String,
   tone: Schema.Literals(["info", "error"]),
 });
@@ -265,21 +265,28 @@ export const SyncToasts = Mount.makeStream(
     },
   },
   (node: HTMLElement, initial, changes) =>
-    Stream.callback<number>((queue) =>
-      Effect.gen(function* () {
+    Stream.callback<number>(
+      Effect.fn("SyncToasts.observe")(function* (queue) {
         const toaster = createToaster({ duration: 5000 });
-        const region = node as UiToastRegionElement;
         const active = new Map<number, string>();
         let disposed = false;
 
         // Defer property assignment until hydration finishes registering custom elements.
         const attach = () => {
-          if (!disposed) region.toaster = toaster;
+          if (!disposed) Reflect.set(node, "toaster", toaster);
         };
-        if (typeof customElements !== "undefined" && customElements.get("ui-toast-region")) {
+        if (
+          globalThis.customElements !== undefined &&
+          globalThis.customElements.get("ui-toast-region") !== undefined
+        ) {
           attach();
-        } else if (typeof customElements !== "undefined") {
-          void customElements.whenDefined("ui-toast-region").then(attach);
+        } else if (globalThis.customElements !== undefined) {
+          yield* Effect.promise(() =>
+            globalThis.customElements.whenDefined("ui-toast-region"),
+          ).pipe(
+            Effect.tap(() => Effect.sync(attach)),
+            Effect.forkScoped,
+          );
         }
 
         const sync = (
@@ -290,13 +297,16 @@ export const SyncToasts = Mount.makeStream(
           }>,
           dismissLabel: string,
         ) => {
-          const wanted = new Set(toasts.map((t) => t.id));
+          const wanted = new Set(Arr.map(toasts, (t) => t.id));
           for (const [id, toastId] of active) {
             if (!wanted.has(id)) {
               active.delete(id);
               toaster.dismiss(toastId);
             }
           }
+          const onDismiss = (id: number) => {
+            if (active.delete(id) && !disposed) Queue.offerUnsafe(queue, id);
+          };
           for (const toast of toasts) {
             if (active.has(toast.id)) continue;
             const toastId = `kb-toast-${toast.id}`;
@@ -305,11 +315,7 @@ export const SyncToasts = Mount.makeStream(
             show(toast.text, {
               id: toastId,
               cancel: { label: dismissLabel },
-              onDismiss: () => {
-                if (active.delete(toast.id) && !disposed) {
-                  Queue.offerUnsafe(queue, toast.id);
-                }
-              },
+              onDismiss: () => onDismiss(toast.id),
             });
           }
         };

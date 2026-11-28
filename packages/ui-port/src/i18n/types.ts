@@ -19,7 +19,9 @@ export type CsMessage = string | CsPlural;
 export type AnyMessage = string | Partial<Record<Intl.LDMLPluralRule, string>>;
 
 /** Shape every `en` catalog section satisfies. */
-export type EnSection = { readonly [key: string]: EnMessage };
+export interface EnSection {
+  readonly [key: string]: EnMessage;
+}
 
 /** The Czech section must have exactly the keys of its English source, plural where it is plural. */
 export type CsSection<E extends EnSection> = {

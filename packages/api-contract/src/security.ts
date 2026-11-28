@@ -14,8 +14,8 @@
  */
 
 import {
+  type Caller,
   Channel,
-  type CurrentCaller,
   Forbidden,
   Invalid,
   Locale,
@@ -25,8 +25,17 @@ import {
   UserId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Schema, SchemaIssue } from "effect";
-import { type HttpApiError, HttpApiMiddleware, HttpApiSecurity } from "effect/http-api";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import type * as HttpApiError from "effect/http-api/HttpApiError";
+import * as HttpApiMiddleware from "effect/http-api/HttpApiMiddleware";
+import * as HttpApiSecurity from "effect/http-api/HttpApiSecurity";
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as Str from "effect/String";
 import { ApiKeyId } from "./api-key";
 import { OriginRejected, PayloadTooLarge, RateLimited, Unauthorized } from "./edge-errors";
 
@@ -61,8 +70,13 @@ export const Principal = Schema.Struct({
 });
 export type Principal = typeof Principal.Type;
 
+/** Caller resolved by HTTP middleware for the current request. */
+export class RequestCaller extends Context.Service<RequestCaller, Caller>()(
+  "@kvitbit/api-contract/security/RequestCaller",
+) {}
+
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()(
-  "kvitbit/edge/Principal",
+  "@kvitbit/api-contract/security/CurrentPrincipal",
 ) {}
 
 /**
@@ -77,41 +91,45 @@ export class SchemaErrors extends HttpApiMiddleware.Service<SchemaErrors>()(
 ) {}
 
 /** `HttpApiSchemaError` kinds raised while decoding the request; the others are response-side. */
-export const REQUEST_SCHEMA_ERROR_KINDS = ["Params", "Query", "Headers", "Payload"] as const;
+const REQUEST_SCHEMA_ERROR_KINDS = ["Params", "Query", "Headers", "Payload"] as const;
 
 const formatIssues = SchemaIssue.makeFormatterStandardSchemaV1();
 
 type IssuePath = ReadonlyArray<string | number>;
 
 const toPathSegment = (segment: PropertyKey | { readonly key: PropertyKey }): string | number => {
-  const key = typeof segment === "object" ? segment.key : segment;
-  return typeof key === "number" ? key : String(key);
+  const key = Predicate.isObjectOrArray(segment) ? segment.key : segment;
+  return Predicate.isNumber(key) ? key : String(key);
 };
+
+const encodeIssuePath = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
 
 /**
  * The failing paths of a request decode error. Payload paths are the body's own field names and
  * array indices (what a form maps to its fields); params, query and headers paths start with the
  * slot (`["query", "limit"]`). A failure at the root of a slot keeps the slot alone.
  */
-export const requestIssuePaths = (
+const requestIssuePaths = (
   error: HttpApiError.HttpApiSchemaError,
 ): readonly [IssuePath, ...Array<IssuePath>] => {
-  const slot = error.kind.toLowerCase();
-  const paths = formatIssues(error.cause.issue).issues.map((issue) =>
-    (issue.path ?? []).map(toPathSegment),
+  const slot = Str.toLowerCase(error.kind);
+  const paths = Arr.map(formatIssues(error.cause.issue).issues, (issue) =>
+    Arr.map(issue.path ?? [], toPathSegment),
   );
-  const prefixed = paths.map((path) =>
+  const prefixed = Arr.map(paths, (path) =>
     error.kind === "Payload" ? (path.length === 0 ? [slot] : path) : [slot, ...path],
   );
-  const [first = [slot], ...rest] = [
-    ...new Map(prefixed.map((path) => [JSON.stringify(path), path] as const)).values(),
-  ];
+  const keyed = Arr.map(
+    prefixed,
+    (path) => [Result.getOrThrow(encodeIssuePath(path)), path] as const,
+  );
+  const [first = [slot], ...rest] = new Map(keyed).values();
   return [first, ...rest];
 };
 
 const malformed = ([first, ...rest]: readonly [IssuePath, ...Array<IssuePath>]) => {
   const issue = (path: IssuePath) => ({ path, code: "request.malformed" as const });
-  return [issue(first), ...rest.map(issue)] as const;
+  return [issue(first), ...Arr.map(rest, issue)] as const;
 };
 
 /**
@@ -119,24 +137,27 @@ const malformed = ([first, ...rest]: readonly [IssuePath, ...Array<IssuePath>]) 
  * `Invalid` with one `request.malformed` issue per failing path (422, section 3.3); response
  * encoding failures (`Body`, `ResponseHeaders`) pass through unchanged and stay 500 defects.
  */
-export const schemaErrorToInvalid = (
-  error: HttpApiError.HttpApiSchemaError,
-): Effect.Effect<never, Invalid | HttpApiError.HttpApiSchemaError> =>
-  REQUEST_SCHEMA_ERROR_KINDS.some((kind) => kind === error.kind)
-    ? Effect.fail(
-        new Invalid({
-          issues: malformed(requestIssuePaths(error)),
-        }),
-      )
-    : Effect.fail(error);
+export const schemaErrorToInvalid = Effect.fn(function* (error: HttpApiError.HttpApiSchemaError) {
+  if (Arr.some(REQUEST_SCHEMA_ERROR_KINDS, (kind) => kind === error.kind)) {
+    return yield* error.pipe(
+      requestIssuePaths,
+      malformed,
+      (issues) => Invalid.make({ issues }),
+      Effect.fail,
+    );
+  }
+  return yield* Effect.fail(error);
+});
 
 /**
  * Session (cookie or bearer) or API Key. Provides the principal and an Account caller. Fails
  * only with Unauthorized; the other edge checks are EdgeGuard's.
+ * HttpApiBuilder supplies these request services to authentication middleware.
+ * @effect-expect-leaking HttpServerRequest | ParsedSearchParams | RouteContext
  */
 export class Authentication extends HttpApiMiddleware.Service<
   Authentication,
-  { provides: CurrentPrincipal | CurrentCaller }
+  { provides: CurrentPrincipal | RequestCaller }
 >()("kvitbit/edge/Authentication", {
   error: Unauthorized.schema,
   security: {
@@ -156,10 +177,10 @@ export class EdgeGuard extends HttpApiMiddleware.Service<
   error: [OriginRejected.schema, RateLimited.schema, PayloadTooLarge.schema],
 }) {}
 
-/** Replaces CurrentCaller with the MemberCaller from Workspaces.enter. Needs Authentication. */
+/** Replaces RequestCaller with the MemberCaller from Workspaces.enter. Needs Authentication. */
 export class WorkspaceMember extends HttpApiMiddleware.Service<
   WorkspaceMember,
-  { provides: CurrentCaller; requires: CurrentPrincipal | CurrentCaller }
+  { provides: RequestCaller; requires: CurrentPrincipal | RequestCaller }
 >()("kvitbit/edge/WorkspaceMember", {
   error: [NotFound.schema, Unavailable.schema, Forbidden.schema],
 }) {}
@@ -175,7 +196,7 @@ export class SessionOnly extends HttpApiMiddleware.Service<
 /** Public Share Link visitor. Provides Caller.shareLinkVisitor from the {token} path segment. */
 export class ShareLinkVisitor extends HttpApiMiddleware.Service<
   ShareLinkVisitor,
-  { provides: CurrentCaller }
+  { provides: RequestCaller }
 >()("kvitbit/edge/ShareLinkVisitor", {
   error: RateLimited.schema,
 }) {}

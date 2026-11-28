@@ -1,7 +1,12 @@
-import type { BankAccountId, BankAccountInput, CurrencyCode } from "@kvitbit/domain/contract";
+import { type BankAccountId, BankAccountInput } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { idempotencyHeaders, inWorkspace } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { Plus, Trash2 } from "lucide-react-native";
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -22,6 +27,8 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { requestOwner } from "../request-owner";
+import { forkFeatureEffect } from "../ui-effect";
 import { canEditWorkspaceSettings } from "./permissions";
 import {
   type FormErrorState,
@@ -61,8 +68,11 @@ export function BankAccountsSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.workspace.listBankAccounts({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.workspace.listBankAccounts({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
 
   const [draft, setDraft] = useState<BankAccountDraft | null>(null);
@@ -80,7 +90,7 @@ export function BankAccountsSection() {
   const openEdit = (account: BankAccountData) => {
     setDraft({
       id: account.id,
-      name: account.name ?? "",
+      name: Option.getOrElse(Option.fromNullOr(account.name), () => ""),
       iban: account.iban,
       bic: account.bic ?? "",
       currency: account.currency,
@@ -89,25 +99,25 @@ export function BankAccountsSection() {
     setErrorState(noFormError);
   };
 
-  const handleSave = async () => {
-    if (!editable || draft === null || session.status !== "signed-in" || saving) return;
+  const handleSave = Effect.fn("bank-accounts-section.handleSave")(function* () {
+    if (!editable || draft === null || session.status !== "signed-in" || saving === true) return;
+    const owner = requestOwner([api.origin, session.user.id, workspace.id]);
+    if (owner === null) return;
     setSaving(true);
     setErrorState(noFormError);
-    const payload = {
-      name: draft.name.trim() || null,
-      iban: draft.iban.replace(/\s+/g, "").toUpperCase(),
-      bic: draft.bic.trim().toUpperCase() || null,
-      currency: draft.currency.trim().toUpperCase() as CurrencyCode,
+    const payload = BankAccountInput.make({
+      name: Str.trim(draft.name) || null,
+      iban: Str.toUpperCase(Str.replace(/\s+/g, "")(draft.iban)),
+      bic: Str.toUpperCase(Str.trim(draft.bic)) || null,
+      currency: Str.toUpperCase(Str.trim(draft.currency)),
       isDefault: draft.isDefault,
-    } as unknown as BankAccountInput;
+    });
 
+    const bankAccountId = draft.id;
     const result =
-      draft.id === undefined
-        ? await runRequestIntent(
-            JSON.stringify([api.origin, session.user.id, workspace.id]),
-            "workspace/createBankAccount",
-            payload,
-            (key) =>
+      bankAccountId === undefined
+        ? yield* Effect.promise(() =>
+            runRequestIntent(owner, "workspace/createBankAccount", payload, (key) =>
               api.run((client) =>
                 client.workspace.createBankAccount({
                   params: inWorkspace(workspace.id),
@@ -115,12 +125,15 @@ export function BankAccountsSection() {
                   payload,
                 }),
               ),
+            ),
           )
-        : await api.run((client) =>
-            client.workspace.updateBankAccount({
-              params: inWorkspace(workspace.id, { bankAccountId: draft.id as BankAccountId }),
-              payload,
-            }),
+        : yield* Effect.promise(() =>
+            api.run((client) =>
+              client.workspace.updateBankAccount({
+                params: inWorkspace(workspace.id, { bankAccountId }),
+                payload,
+              }),
+            ),
           );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -130,23 +143,27 @@ export function BankAccountsSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleMakeDefault = async (account: BankAccountData) => {
+  const handleMakeDefault = Effect.fn("bank-accounts-section.handleMakeDefault")(function* (
+    account: BankAccountData,
+  ) {
     if (!editable) return;
     setErrorState(noFormError);
-    const payload = {
+    const payload = BankAccountInput.make({
       name: account.name,
       iban: account.iban,
       bic: account.bic,
       currency: account.currency,
       isDefault: true,
-    } as unknown as BankAccountInput;
-    const result = await api.run((client) =>
-      client.workspace.updateBankAccount({
-        params: inWorkspace(workspace.id, { bankAccountId: account.id }),
-        payload,
-      }),
+    });
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.updateBankAccount({
+          params: inWorkspace(workspace.id, { bankAccountId: account.id }),
+          payload,
+        }),
+      ),
     );
     if (result._tag === "Ok") {
       remote.reload();
@@ -154,16 +171,21 @@ export function BankAccountsSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const performRemove = async (account: BankAccountData, replacement?: BankAccountId) => {
+  const performRemove = Effect.fn("bank-accounts-section.performRemove")(function* (
+    account: BankAccountData,
+    replacement?: BankAccountId,
+  ) {
     setRemovingId(account.id);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.workspace.removeBankAccount({
-        params: inWorkspace(workspace.id, { bankAccountId: account.id }),
-        query: replacement === undefined ? {} : { replacement },
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.removeBankAccount({
+          params: inWorkspace(workspace.id, { bankAccountId: account.id }),
+          query: replacement === undefined ? {} : { replacement },
+        }),
+      ),
     );
     setRemovingId(null);
     if (result._tag === "Ok") {
@@ -177,29 +199,34 @@ export function BankAccountsSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleRemove = async (account: BankAccountData) => {
+  const handleRemove = Effect.fn("bank-accounts-section.handleRemove")(function* (
+    account: BankAccountData,
+  ) {
     if (!editable) return;
-    const ok = await overlay.confirm({
-      title: t("settings.bankAccounts.removeTitle"),
-      body: account.name ?? account.iban,
-      confirmLabel: t("common.action.remove"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+    const ok = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.bankAccounts.removeTitle"),
+        body: account.name ?? account.iban,
+        confirmLabel: t("common.action.remove"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!ok) return;
-    await performRemove(account);
-  };
+    yield* performRemove(account);
+  });
 
   return (
     <RemoteView state={remote.state} onRetry={remote.reload}>
       {(rawAccounts) => {
-        const accounts = rawAccounts.map(parseBankAccountView);
+        const accounts = Arr.filterMap(rawAccounts, parseBankAccountView);
         const replacementChoices =
           replacementTarget === null
             ? []
-            : accounts.filter(
+            : Arr.filter(
+                accounts,
                 (a) => a.id !== replacementTarget.id && a.currency === replacementTarget.currency,
               );
         return (
@@ -221,7 +248,7 @@ export function BankAccountsSection() {
                   <>
                     <SegmentedChoice<BankAccountId>
                       value={replacementId}
-                      choices={replacementChoices.map((a) => ({
+                      choices={Arr.map(replacementChoices, (a) => ({
                         value: a.id,
                         label: a.name ?? a.iban,
                       }))}
@@ -235,7 +262,7 @@ export function BankAccountsSection() {
                         busy={removingId === replacementTarget.id}
                         onPress={() =>
                           replacementId !== null &&
-                          void performRemove(replacementTarget, replacementId)
+                          forkFeatureEffect(performRemove(replacementTarget, replacementId))
                         }
                       />
                       <Button
@@ -275,7 +302,7 @@ export function BankAccountsSection() {
                   ) : undefined
                 }
               >
-                {accounts.map((account) => (
+                {Arr.map(accounts, (account) => (
                   <Card key={account.id}>
                     <View className="flex-row items-center gap-2">
                       <View className="flex-1">
@@ -308,7 +335,7 @@ export function BankAccountsSection() {
                             label={t("settings.bankAccounts.makeDefault", {
                               currency: account.currency,
                             })}
-                            onPress={() => void handleMakeDefault(account)}
+                            onPress={() => forkFeatureEffect(handleMakeDefault(account))}
                           />
                         )}
                         <Button
@@ -316,7 +343,7 @@ export function BankAccountsSection() {
                           icon={Trash2}
                           label={t("common.action.remove")}
                           busy={removingId === account.id}
-                          onPress={() => void handleRemove(account)}
+                          onPress={() => forkFeatureEffect(handleRemove(account))}
                         />
                       </View>
                     ) : null}
@@ -355,11 +382,11 @@ export function BankAccountsSection() {
                   <SegmentedChoice<string>
                     label={t("common.field.currency")}
                     value={
-                      (COMMON_CURRENCIES as ReadonlyArray<string>).includes(draft.currency)
+                      Arr.some(COMMON_CURRENCIES, (currency) => currency === draft.currency)
                         ? draft.currency
                         : null
                     }
-                    choices={COMMON_CURRENCIES.map((c) => ({ value: c, label: c }))}
+                    choices={Arr.map(COMMON_CURRENCIES, (c) => ({ value: c, label: c }))}
                     onChange={(currency) => setDraft({ ...draft, currency })}
                   />
                   <SwitchRow
@@ -375,8 +402,8 @@ export function BankAccountsSection() {
                       kind="filled"
                       label={t("common.action.save")}
                       busy={saving}
-                      disabled={draft.iban.trim() === ""}
-                      onPress={() => void handleSave()}
+                      disabled={Str.trim(draft.iban) === ""}
+                      onPress={() => forkFeatureEffect(handleSave())}
                     />
                     <Button
                       kind="text"

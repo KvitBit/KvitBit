@@ -1,149 +1,152 @@
 /**
  * Calendar arithmetic on `IsoDate` (a Europe/Prague calendar date, core-ports section 1).
- * Dates are plain proleptic-Gregorian days: adding days or months never touches a clock, so
- * DST cannot shift a date. Only `pragueDate` and `pragueStartOfDay` cross between instants
- * and dates.
+ * Days and months are added on the Gregorian calendar. Prague timezone rules only apply
+ * when converting between an instant and a local calendar date.
  */
-import type { IsoDate } from "@kvitbit/domain/contract";
+import { IsoDate } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 
 const DAY_MS = 86_400_000;
-const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 export interface CalendarDay {
   readonly year: number;
-  readonly month: number; // 1-12
-  readonly day: number; // 1-31
+  readonly month: number;
+  readonly day: number;
 }
 
-const pad = (n: number, width: number): string => String(n).padStart(width, "0");
+const utcMillis = (year: number, month: number, day: number, hour = 0): number =>
+  DateTime.toEpochMillis(DateTime.makeUnsafe({ year, month, day, hour }));
 
-/**
- * UTC milliseconds of a calendar day. `Date.UTC` maps years 0-99 to 1900-1999, so the year is
- * set with `setUTCFullYear`, which takes it literally.
- */
-const utcMillis = (year: number, month: number, day: number, hour = 0): number => {
-  const d = new Date(0);
-  d.setUTCFullYear(year, month - 1, day);
-  d.setUTCHours(hour, 0, 0, 0);
-  return d.getTime();
-};
+export const daysInMonth: {
+  (month: number): (year: number) => number;
+  (year: number, month: number): number;
+} = Fn.dual(
+  2,
+  (year: number, month: number) =>
+    DateTime.toPartsUtc(DateTime.makeUnsafe({ year, month: month + 1, day: 0 })).day,
+);
 
-export const daysInMonth = (year: number, month: number): number =>
-  new Date(utcMillis(year, month + 1, 0)).getUTCDate();
+export const MAX_ISO_DATE = IsoDate.make("9999-12-31");
 
-/** The last date an `IsoDate` (four-digit year) can hold. */
-export const MAX_ISO_DATE = "9999-12-31" as IsoDate;
-
-/** Splits a date; an impossible date (2026-02-30) or a malformed string is a defect. */
+/** Splits a validated Gregorian date. */
 export const parseIsoDate = (date: string): CalendarDay => {
-  const match = ISO_DATE.exec(date);
-  const year = Number(match?.[1]);
-  const month = Number(match?.[2]);
-  const day = Number(match?.[3]);
-  if (!match || month < 1 || month > 12 || day < 1 || day > daysInMonth(year, month)) {
-    throw new Error(`not a calendar date: "${date}"`);
-  }
+  const { year, month, day } = DateTime.toPartsUtc(
+    DateTime.makeUnsafe(`${IsoDate.make(date)}T00:00:00Z`),
+  );
   return { year, month, day };
 };
 
-/** True for a well-formed, existing calendar date. */
-export const isCalendarDate = (date: string): boolean => {
-  try {
-    parseIsoDate(date);
-    return true;
-  } catch {
-    return false;
-  }
-};
+export const isCalendarDate = Schema.is(IsoDate);
 
 export const formatIsoDate = ({ year, month, day }: CalendarDay): IsoDate =>
-  `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)}` as IsoDate;
+  IsoDate.make(DateTime.formatIsoDateUtc(DateTime.makeUnsafe({ year, month, day })));
 
 /** Day number since 1970-01-01. */
-export const toEpochDay = (date: IsoDate): number => {
+export const toEpochDay = (date: IsoDate): number =>
+  DateTime.toEpochMillis(DateTime.makeUnsafe(`${date}T00:00:00Z`)) / DAY_MS;
+
+/** Calendar date for a day number since 1970-01-01. */
+export const fromEpochDay = (epochDay: number): IsoDate =>
+  IsoDate.make(DateTime.formatIsoDateUtc(DateTime.makeUnsafe(epochDay * DAY_MS)));
+
+const atEpochDay = (day: number) => DateTime.make(day * DAY_MS);
+
+export const addDaysWithinRange: {
+  (days: number): (date: IsoDate) => IsoDate | null;
+  (date: IsoDate, days: number): IsoDate | null;
+} = Fn.dual(2, (date: IsoDate, days: number) =>
+  atEpochDay(toEpochDay(date) + days).pipe(
+    Option.map(DateTime.formatIsoDateUtc),
+    Option.filter(isCalendarDate),
+    Option.getOrNull,
+  ),
+);
+
+/** Adds days when the result is known to fit a four-digit ISO year. */
+export const addDays: {
+  (days: number): (date: IsoDate) => IsoDate;
+  (date: IsoDate, days: number): IsoDate;
+} = Fn.dual(2, (date: IsoDate, days: number) => fromEpochDay(toEpochDay(date) + days));
+
+const monthsLater = (day: number, index: number): CalendarDay => {
+  const targetYear = Math.floor(index / 12);
+  const targetMonth = index - targetYear * 12 + 1;
+  return {
+    year: targetYear,
+    month: targetMonth,
+    day: Math.min(day, daysInMonth(targetYear, targetMonth)),
+  };
+};
+
+export const addMonthsWithinRange: {
+  (months: number): (date: IsoDate) => IsoDate | null;
+  (date: IsoDate, months: number): IsoDate | null;
+} = Fn.dual(2, (date: IsoDate, months: number) => {
   const { year, month, day } = parseIsoDate(date);
-  return utcMillis(year, month, day) / DAY_MS;
-};
-
-export const fromEpochDay = (epochDay: number): IsoDate => {
-  const d = new Date(epochDay * DAY_MS);
-  return formatIsoDate({
-    year: d.getUTCFullYear(),
-    month: d.getUTCMonth() + 1,
-    day: d.getUTCDate(),
-  });
-};
-
-/** Whether a computed date still fits `IsoDate` (years 0000-9999). */
-export const isInIsoRange = (date: string): boolean => /^\d{4}-/.test(date) && date.length === 10;
-
-export const addDays = (date: IsoDate, days: number): IsoDate =>
-  fromEpochDay(toEpochDay(date) + days);
-
-/** Adds calendar months; a day past the end of the target month clamps to its last day. */
-export const addMonths = (date: IsoDate, months: number): IsoDate => {
-  const { year, month, day } = parseIsoDate(date);
-  const index = year * 12 + (month - 1) + months;
-  const y = Math.floor(index / 12);
-  const m = index - y * 12 + 1;
-  return formatIsoDate({ year: y, month: m, day: Math.min(day, daysInMonth(y, m)) });
-};
-
-/** Signed whole days from `from` to `to`. */
-export const daysBetween = (from: IsoDate, to: IsoDate): number =>
-  toEpochDay(to) - toEpochDay(from);
-
-/** -1, 0 or 1. Valid `IsoDate`s order as strings. */
-export const compareDates = (a: IsoDate, b: IsoDate): -1 | 0 | 1 => (a < b ? -1 : a > b ? 1 : 0);
-
-const pragueParts = new Intl.DateTimeFormat("en-CA", {
-  timeZone: "Europe/Prague",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-  era: "short",
+  const index = year * 12 + month - 1 + months;
+  return index >= 0 && index < 120_000 ? formatIsoDate(monthsLater(day, index)) : null;
 });
 
-const pragueFields = (epochMillis: number) => {
-  const parts: Record<string, number> = {};
-  let beforeCommonEra = false;
-  for (const p of pragueParts.formatToParts(new Date(epochMillis))) {
-    if (p.type === "era") beforeCommonEra = p.value !== "AD";
-    else if (p.type !== "literal") parts[p.type] = Number(p.value);
-  }
-  // The formatter gives a year of era (1 BC, 2 BC, ...); ISO years count 0, -1, ...
-  if (beforeCommonEra && parts.year !== undefined) parts.year = 1 - parts.year;
-  return parts as Record<"year" | "month" | "day" | "hour" | "minute" | "second", number>;
-};
+/** Adds months, clamping the day to the end of the target month. */
+export const addMonths: {
+  (months: number): (date: IsoDate) => IsoDate;
+  (date: IsoDate, months: number): IsoDate;
+} = Fn.dual(2, (date: IsoDate, months: number) => {
+  const { year, month, day } = parseIsoDate(date);
+  return formatIsoDate(monthsLater(day, year * 12 + month - 1 + months));
+});
+
+/** Signed whole days from `from` to `to`. */
+export const daysBetween: {
+  (to: IsoDate): (from: IsoDate) => number;
+  (from: IsoDate, to: IsoDate): number;
+} = Fn.dual(2, (from: IsoDate, to: IsoDate) => toEpochDay(to) - toEpochDay(from));
+
+/** -1, 0 or 1. Valid ISO dates order as strings. */
+export const compareDates: {
+  (b: IsoDate): (a: IsoDate) => -1 | 0 | 1;
+  (a: IsoDate, b: IsoDate): -1 | 0 | 1;
+} = Fn.dual(2, (a: IsoDate, b: IsoDate) => (a < b ? -1 : a > b ? 1 : 0));
+
+const pragueZone = DateTime.zoneMakeNamedUnsafe("Europe/Prague");
+const pragueTime = (epochMillis: number) =>
+  DateTime.makeZonedUnsafe(epochMillis, { timeZone: pragueZone });
 
 /** The Prague calendar date at an instant (e.g. `Clock.currentTimeMillis`). */
-export const pragueDate = (epochMillis: number): IsoDate => {
-  const f = pragueFields(epochMillis);
-  return formatIsoDate({ year: f.year, month: f.month, day: f.day });
-};
+export const pragueDate = (epochMillis: number): IsoDate =>
+  pragueTime(epochMillis).pipe(DateTime.toParts, formatIsoDate);
 
-/** Prague's UTC offset in milliseconds at an instant (a whole second; LMT +0:57:44 before 1891). */
-const pragueOffset = (epochMillis: number): number => {
-  const at = Math.floor(epochMillis / 1000) * 1000;
-  const f = pragueFields(at);
-  return utcMillis(f.year, f.month, f.day, f.hour) + f.minute * 60_000 + f.second * 1000 - at;
-};
+const pragueOffset = (epochMillis: number): number => DateTime.zonedOffset(pragueTime(epochMillis));
 
 /**
- * The instant of `hour`:00 Prague time on `date` (default midnight), for any offset the zone
- * has had (CET, CEST, local mean time). A wall time skipped by a spring-forward resolves to the
- * first instant after the gap (02:00 -> 03:00 CEST); a repeated one (fall-back) to one of
- * its two instants.
+ * The instant of `hour`:00 Prague time on `date` (default midnight). A skipped spring hour
+ * resolves to the first instant after the gap. A repeated fall hour resolves to its later instant.
  */
-export const pragueStartOfDay = (date: IsoDate, hour = 0): number => {
-  const { year, month, day } = parseIsoDate(date);
-  const wall = utcMillis(year, month, day, hour);
-  const early = wall - pragueOffset(wall);
-  const late = wall - pragueOffset(early);
-  const matches = [early, late].filter((c) => c + pragueOffset(c) === wall);
-  return matches.length > 0 ? Math.min(...matches) : Math.max(early, late);
-};
+export const pragueStartOfDay: {
+  (hour?: number): (date: IsoDate) => number;
+  (date: IsoDate, hour?: number): number;
+} = Fn.dual(
+  (args) => Predicate.isString(args[0]),
+  (date: IsoDate, hour = 0) => {
+    const { year, month, day } = parseIsoDate(date);
+    const wall = utcMillis(year, month, day, hour);
+    const early = wall - pragueOffset(wall);
+    const late = wall - pragueOffset(early);
+    const matches = Arr.filter(
+      [early, late],
+      (candidate) => candidate + pragueOffset(candidate) === wall,
+    );
+    return matches.length > 0 ? Math.min(...matches) : Math.max(early, late);
+  },
+);
+
+const FOUR_DIGIT_YEAR = /^\d{4}-/;
+
+/** Whether a computed date still fits a four-digit ISO year. */
+export const isInIsoRange = (date: string): boolean =>
+  date.length === 10 && FOUR_DIGIT_YEAR.test(date);

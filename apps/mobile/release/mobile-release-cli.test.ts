@@ -1,33 +1,78 @@
 import { describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import appConfig, { deriveAndroidVersionCode } from "../app.config";
-import appJson from "../app.json";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Pred from "effect/Predicate";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { buildAppConfig, deriveAndroidVersionCode } from "../app.config";
+import appJson from "../app.json" with { type: "json" };
+import { runReleaseProcess } from "./release-process.testkit";
 import { apkObjectKey, releaseInfoObjectKey } from "./storage-layout";
 
-const { applyAndroidReleaseSigning } = require("../plugins/with-android-release-signing.cjs") as {
-  applyAndroidReleaseSigning: (contents: string) => string;
-};
+const json = Schema.fromJsonString(Schema.Unknown);
+const parseJson = (value: string) => Schema.decodeOption(json)(value).pipe(Option.getOrThrow);
+const encodeJson = <A>(value: A) => Schema.encodeOption(json)(value).pipe(Option.getOrThrow);
+const bytePairs = /../g;
 
+const { fileSystem, path } = Effect.runSync(
+  Effect.all({ fileSystem: FileSystem.FileSystem, path: Path.Path }, { concurrency: 1 }).pipe(
+    Effect.provide(BunServices.layer),
+  ),
+);
+const { join, resolve } = path;
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
 const CLI_PATH = join(REPO_ROOT, "scripts/release/mobile-release.ts");
-
-const sdkRoot = process.env.ANDROID_HOME ?? process.env.ANDROID_SDK_ROOT;
-const findSdkFile = (directory: string, filename: string): string | undefined => {
-  if (sdkRoot === undefined) return undefined;
-  const root = join(sdkRoot, directory);
-  if (!existsSync(root)) return undefined;
-  return readdirSync(root)
-    .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }))
-    .map((version) => join(root, version, filename))
-    .find(existsSync);
+const appContext: Parameters<typeof buildAppConfig>[0]["context"] = {
+  config: {
+    name: appJson.expo.name,
+    slug: appJson.expo.slug,
+    version: appJson.expo.version,
+    android: { package: appJson.expo.android.package },
+  },
+  projectRoot: resolve(import.meta.dir, ".."),
+  staticConfigPath: null,
+  packageJsonPath: null,
 };
-const aapt2 = findSdkFile("build-tools", "aapt2");
-const apksigner = findSdkFile("build-tools", "apksigner");
-const androidJar = findSdkFile("platforms", "android.jar");
+
+const sdkRoot = Config.String("ANDROID_HOME").pipe(
+  Config.orElse(() => Config.String("ANDROID_SDK_ROOT")),
+  Config.option,
+  Effect.runSync,
+  Option.getOrUndefined,
+);
+const findSdkFile = Effect.fn("MobileReleaseTest.findSdkFile")(function* (
+  directory: string,
+  filename: string,
+) {
+  if (sdkRoot === undefined) return;
+  const root = join(sdkRoot, directory);
+  if (!(yield* fileSystem.exists(root))) return;
+  const entries = yield* fileSystem.readDirectory(root);
+  const versions = [...entries].sort((left, right) =>
+    Str.localeCompare(left, [], { numeric: true })(right),
+  );
+  for (const version of versions) {
+    const candidate = join(root, version, filename);
+    if (yield* fileSystem.exists(candidate)) return candidate;
+  }
+});
+const [aapt2, apksigner, androidJar] = await Effect.runPromise(
+  Effect.all(
+    [
+      findSdkFile("build-tools", "aapt2"),
+      findSdkFile("build-tools", "apksigner"),
+      findSdkFile("platforms", "android.jar"),
+    ],
+    { concurrency: "unbounded" },
+  ),
+);
 const hasApkTools =
   aapt2 !== undefined &&
   apksigner !== undefined &&
@@ -42,78 +87,77 @@ const createSignedTestApk = async (
   const keystorePath = join(workDir, `${fileName}.keystore`);
   const manifest = join(workDir, "AndroidManifest.xml");
   const apkPath = join(workDir, fileName);
-  if (!aapt2 || !apksigner || !androidJar)
+  if (aapt2 === undefined || apksigner === undefined || androidJar === undefined)
     throw new Error("Android SDK is required for the APK test.");
   await Bun.write(
     manifest,
     `<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="${packageName}" android:versionCode="${deriveAndroidVersionCode(appJson.expo.version)}" android:versionName="${appJson.expo.version}"><uses-sdk android:minSdkVersion="24"/><application/></manifest>`,
   );
 
-  const gen = Bun.spawnSync([
-    "keytool",
-    "-genkeypair",
-    "-noprompt",
-    "-keystore",
-    keystorePath,
-    "-storetype",
-    "PKCS12",
-    "-alias",
-    "kvitbit-test",
-    "-keyalg",
-    "RSA",
-    "-keysize",
-    "2048",
-    "-validity",
-    "30",
-    "-dname",
-    "CN=Kvitbit Test",
-    "-storepass",
-    "testpass123",
-    "-keypass",
-    "testpass123",
-  ]);
-  if (gen.exitCode !== 0) throw new Error(gen.stderr.toString());
+  const gen = await runReleaseProcess(
+    ChildProcess.make("keytool", [
+      "-genkeypair",
+      "-noprompt",
+      "-keystore",
+      keystorePath,
+      "-storetype",
+      "PKCS12",
+      "-alias",
+      "kvitbit-test",
+      "-keyalg",
+      "RSA",
+      "-keysize",
+      "2048",
+      "-validity",
+      "30",
+      "-dname",
+      "CN=Kvitbit Test",
+      "-storepass",
+      "testpass123",
+      "-keypass",
+      "testpass123",
+    ]),
+  );
+  if (gen.exitCode !== 0) throw new Error(gen.stderr);
 
-  const linkResult = Bun.spawnSync([
-    aapt2,
-    "link",
-    "-I",
-    androidJar,
-    "--manifest",
-    manifest,
-    "-o",
-    apkPath,
-  ]);
-  if (linkResult.exitCode !== 0) throw new Error(linkResult.stderr.toString());
+  const linkResult = await runReleaseProcess(
+    ChildProcess.make(aapt2, ["link", "-I", androidJar, "--manifest", manifest, "-o", apkPath]),
+  );
+  if (linkResult.exitCode !== 0) throw new Error(linkResult.stderr);
 
-  const signed = Bun.spawnSync([
-    apksigner,
-    "sign",
-    "--ks",
-    keystorePath,
-    "--ks-key-alias",
-    "kvitbit-test",
-    "--ks-pass",
-    "pass:testpass123",
-    "--key-pass",
-    "pass:testpass123",
-    apkPath,
-  ]);
-  if (signed.exitCode !== 0) throw new Error(signed.stderr.toString());
+  const signed = await runReleaseProcess(
+    ChildProcess.make(apksigner, [
+      "sign",
+      "--ks",
+      keystorePath,
+      "--ks-key-alias",
+      "kvitbit-test",
+      "--ks-pass",
+      "pass:testpass123",
+      "--key-pass",
+      "pass:testpass123",
+      apkPath,
+    ]),
+  );
+  if (signed.exitCode !== 0) throw new Error(signed.stderr);
 
-  const cert = Bun.spawnSync([
-    "keytool",
-    "-exportcert",
-    "-keystore",
-    keystorePath,
-    "-alias",
-    "kvitbit-test",
-    "-storepass",
-    "testpass123",
-  ]);
-  if (cert.exitCode !== 0) throw new Error(cert.stderr.toString());
-  const rawDigest = createHash("sha256").update(cert.stdout).digest("hex");
-  const certSha256 = rawDigest.toUpperCase().match(/../g)?.join(":") ?? "";
+  const cert = await runReleaseProcess(
+    ChildProcess.make("keytool", [
+      "-exportcert",
+      "-keystore",
+      keystorePath,
+      "-alias",
+      "kvitbit-test",
+      "-storepass",
+      "testpass123",
+    ]),
+  );
+  if (cert.exitCode !== 0) throw new Error(cert.stderr);
+  const rawDigest = new Bun.CryptoHasher("sha256").update(cert.stdout).digest("hex");
+  const certSha256 = Str.match(bytePairs)(Str.toUpperCase(rawDigest)).pipe(
+    Option.map(Arr.join(":")),
+    Option.getOrElse(() => ""),
+  );
   return { apkPath, certSha256 };
 };
 
@@ -121,31 +165,24 @@ const runCli = async (
   args: readonly string[],
   env: Record<string, string | undefined> = {},
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> => {
-  const proc = Bun.spawn([process.execPath, "run", CLI_PATH, ...args], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ]);
-  return { exitCode, stdout, stderr };
+  const { stdout, stderr, exitCode } = await runReleaseProcess(
+    ChildProcess.make(process.execPath, ["run", CLI_PATH, ...args], {
+      cwd: REPO_ROOT,
+      env,
+      extendEnv: true,
+    }),
+  );
+  return { exitCode, stdout: stdout.toString(), stderr };
 };
 
 describe("app.config.ts", () => {
   test("layers updates.url, android.package, and versionCode over app.json", () => {
-    const resolved = appConfig(
-      {
-        config: appJson.expo as never,
-        projectRoot: resolve(import.meta.dir, ".."),
-        staticConfigPath: null,
-        packageJsonPath: null,
+    const resolved = buildAppConfig({
+      context: appContext,
+      env: {
+        EXPO_PUBLIC_API_ORIGIN: "https://preview.kvitbit.cz/",
       },
-      { EXPO_PUBLIC_API_ORIGIN: "https://preview.kvitbit.cz/" },
-    );
+    });
 
     expect(resolved.android?.package).toBe("cz.kvitbit.app");
     expect(resolved.android?.versionCode).toBe(1000);
@@ -154,21 +191,16 @@ describe("app.config.ts", () => {
   });
 
   test("adds codeSigningCertificate only when MOBILE_UPDATES_CODE_SIGNING=required", () => {
-    const resolved = appConfig(
-      {
-        config: appJson.expo as never,
-        projectRoot: resolve(import.meta.dir, ".."),
-        staticConfigPath: null,
-        packageJsonPath: null,
-      },
-      {
+    const resolved = buildAppConfig({
+      context: appContext,
+      env: {
         MOBILE_UPDATES_CODE_SIGNING: "required",
         MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE: join(
           import.meta.dir,
           "fixtures/ota-public-certificate.pem",
         ),
       },
-    );
+    });
     expect(resolved.updates?.codeSigningCertificate).toBe(
       "release/fixtures/ota-public-certificate.pem",
     );
@@ -181,22 +213,24 @@ describe("app.config.ts", () => {
 
   test("required OTA signing rejects an unprovisioned certificate", () => {
     expect(() =>
-      appConfig(
-        {
-          config: appJson.expo as never,
-          projectRoot: resolve(import.meta.dir, ".."),
-          staticConfigPath: null,
-          packageJsonPath: null,
-        },
-        {
+      buildAppConfig({
+        context: appContext,
+        env: {
           MOBILE_UPDATES_CODE_SIGNING: "required",
           MOBILE_UPDATES_CODE_SIGNING_CERTIFICATE: "./missing.pem",
         },
-      ),
+      }),
     ).toThrow("code-signing certificate was not found");
   });
 
-  test("with-android-release-signing configures release signingConfig instead of debug", () => {
+  test("with-android-release-signing configures release signingConfig instead of debug", async () => {
+    const plugin: unknown = await import(
+      new URL("../plugins/with-android-release-signing.cjs", import.meta.url).href
+    );
+    const isSigningPlugin = Schema.is(
+      Schema.Struct({ applyAndroidReleaseSigning: Schema.declare(Pred.isFunction) }),
+    );
+    if (!isSigningPlugin(plugin)) throw new Error("Expected the Android signing plugin");
     const sampleGradle = `
 android {
     signingConfigs {
@@ -211,12 +245,13 @@ android {
     }
 }
 `;
-    const patched = applyAndroidReleaseSigning(sampleGradle);
+    const patched: unknown = plugin.applyAndroidReleaseSigning(sampleGradle);
+    if (!Schema.is(Schema.String)(patched)) throw new Error("Expected Gradle source");
     expect(patched).toContain("ANDROID_KEYSTORE_PATH");
     expect(patched).toContain("KVITBIT_REQUIRE_RELEASE_SIGNING");
     expect(patched).toContain("signingConfigs.release");
     // Idempotent if applied twice
-    expect(applyAndroidReleaseSigning(patched)).toBe(patched);
+    expect(plugin.applyAndroidReleaseSigning(patched)).toBe(patched);
   });
 });
 
@@ -230,14 +265,15 @@ describe("mobile-release CLI", () => {
 
     const meta = await runCli(["metadata", "--json"]);
     expect(meta.exitCode).toBe(0);
-    const parsed = JSON.parse(meta.stdout) as {
-      version: string;
-      versionCode: number;
-      apkName: string;
-    };
-    expect(parsed.version).toBe(appJson.expo.version);
-    expect(parsed.versionCode).toBe(1000);
-    expect(parsed.apkName).toBe(`kvitbit-${appJson.expo.version}.apk`);
+    expect(Schema.decodeOption(json)(meta.stdout)).toEqual(
+      Option.some(
+        expect.objectContaining({
+          version: appJson.expo.version,
+          versionCode: 1000,
+          apkName: `kvitbit-${appJson.expo.version}.apk`,
+        }),
+      ),
+    );
 
     const badTag = await runCli(["metadata", "--tag", "mobile-v9.9.9"]);
     expect(badTag.exitCode).toBe(1);
@@ -247,29 +283,30 @@ describe("mobile-release CLI", () => {
   test("all subcommands support --dry-run without network or secrets", async () => {
     const build = await runCli(["build", "--dry-run"]);
     expect(build.exitCode).toBe(0);
-    expect(JSON.parse(build.stdout)).toMatchObject({ dryRun: true, command: "build" });
+    expect(parseJson(build.stdout)).toMatchObject({ dryRun: true, command: "build" });
 
     const pubApk = await runCli(["publish-apk", "--dry-run"]);
     expect(pubApk.exitCode).toBe(0);
-    expect(JSON.parse(pubApk.stdout)).toMatchObject({ dryRun: true, command: "publish-apk" });
+    expect(parseJson(pubApk.stdout)).toMatchObject({ dryRun: true, command: "publish-apk" });
 
     const pubOta = await runCli(["publish-ota", "--dry-run", "--platform", "android"]);
     expect(pubOta.exitCode).toBe(0);
-    expect(JSON.parse(pubOta.stdout)).toMatchObject({ dryRun: true, command: "publish-ota" });
+    expect(parseJson(pubOta.stdout)).toMatchObject({ dryRun: true, command: "publish-ota" });
 
     const rollback = await runCli(["rollback", "--dry-run", "--runtime-version", "fp-test"]);
     expect(rollback.exitCode).toBe(0);
-    expect(JSON.parse(rollback.stdout)).toMatchObject({ dryRun: true, command: "rollback" });
+    expect(parseJson(rollback.stdout)).toMatchObject({ dryRun: true, command: "rollback" });
 
     const verify = await runCli(["verify", "--dry-run", "--runtime-version", "fp-test"]);
     expect(verify.exitCode).toBe(0);
-    expect(JSON.parse(verify.stdout)).toMatchObject({ dryRun: true, command: "verify" });
+    expect(parseJson(verify.stdout)).toMatchObject({ dryRun: true, command: "verify" });
   });
 
-  test.skipIf(!hasApkTools)(
-    "publish-apk, publish-ota, rollback, and verify work end-to-end against local storage-dir",
-    async () => {
-      const workDir = await mkdtemp(join(tmpdir(), "kvitbit-release-test-"));
+  describe.skipIf(!hasApkTools)("with Android SDK tools", () => {
+    test("publish-apk, publish-ota, rollback, and verify work end-to-end against local storage-dir", async () => {
+      const workDir = await Effect.runPromise(
+        fileSystem.makeTempDirectory({ prefix: "kvitbit-release-test-" }),
+      );
       try {
         const storageDir = join(workDir, "storage");
         const exportDir = join(workDir, "export");
@@ -282,7 +319,7 @@ describe("mobile-release CLI", () => {
         await Bun.write(join(exportDir, "assets/icon.png"), new Uint8Array([137, 80, 78, 71]));
         await Bun.write(
           join(exportDir, "metadata.json"),
-          JSON.stringify({
+          encodeJson({
             fileMetadata: {
               android: {
                 bundle: "bundles/android.hbc",
@@ -300,7 +337,7 @@ describe("mobile-release CLI", () => {
           "--storage-dir",
           storageDir,
           "--signing-cert-sha256",
-          "ab".repeat(32),
+          Str.repeat(32)("ab"),
         ]);
         expect(wrongCert.exitCode).toBe(1);
         expect(wrongCert.stderr).toContain("does not match expected");
@@ -316,9 +353,17 @@ describe("mobile-release CLI", () => {
           certSha256,
         ]);
         expect(pubApk.exitCode).toBe(0);
-        const pubApkJson = JSON.parse(pubApk.stdout) as {
-          releaseInfo: { signingCertSha256: string };
-        };
+        const readRelease = Schema.decodeUnknownResult(
+          Schema.fromJsonString(
+            Schema.Struct({
+              releaseInfo: Schema.StructWithRest(
+                Schema.Struct({ signingCertSha256: Schema.String }),
+                [Schema.JsonObject],
+              ),
+            }),
+          ),
+        );
+        const pubApkJson = Result.getOrThrow(readRelease(pubApk.stdout));
         expect(pubApkJson.releaseInfo.signingCertSha256).toBe(certSha256);
 
         // A retry after the metadata write returns the original immutable release.
@@ -332,7 +377,9 @@ describe("mobile-release CLI", () => {
           certSha256,
         ]);
         expect(dupApk.exitCode).toBe(0);
-        expect(JSON.parse(dupApk.stdout).releaseInfo).toEqual(pubApkJson.releaseInfo);
+        expect(Result.getOrThrow(readRelease(dupApk.stdout)).releaseInfo).toEqual(
+          pubApkJson.releaseInfo,
+        );
 
         const wrongVersion = await runCli([
           "publish-apk",
@@ -393,10 +440,9 @@ describe("mobile-release CLI", () => {
           "android",
         ]);
         expect(pubOta.exitCode).toBe(0);
-        const otaResult = JSON.parse(pubOta.stdout) as {
-          published: Array<{ assetCount: number; publicationKey: string }>;
-        };
-        expect(otaResult.published[0]?.assetCount).toBe(2);
+        expect(parseJson(pubOta.stdout)).toMatchObject({
+          published: [expect.objectContaining({ assetCount: 2 })],
+        });
 
         // 3. verify storage-dir (update + release + ephemeral RSA signature check)
         const verifyUpdate = await runCli([
@@ -410,15 +456,11 @@ describe("mobile-release CLI", () => {
           "--check-release",
         ]);
         expect(verifyUpdate.exitCode).toBe(0);
-        const verifyJson = JSON.parse(verifyUpdate.stdout) as {
-          ok: boolean;
-          update: { publicationType: string; signatureVerified: boolean };
-          latestRelease: { version: string };
-        };
-        expect(verifyJson.ok).toBe(true);
-        expect(verifyJson.update.publicationType).toBe("update");
-        expect(verifyJson.update.signatureVerified).toBe(true);
-        expect(verifyJson.latestRelease.version).toBe(appJson.expo.version);
+        expect(parseJson(verifyUpdate.stdout)).toMatchObject({
+          ok: true,
+          update: { publicationType: "update", signatureVerified: true },
+          latestRelease: { version: appJson.expo.version },
+        });
 
         // 4. rollback and re-verify
         const rollback = await runCli([
@@ -442,14 +484,13 @@ describe("mobile-release CLI", () => {
           "android",
         ]);
         expect(verifyRollback.exitCode).toBe(0);
-        expect(JSON.parse(verifyRollback.stdout)).toMatchObject({
+        expect(parseJson(verifyRollback.stdout)).toMatchObject({
           ok: true,
           update: { publicationType: "rollBackToEmbedded", signatureVerified: true },
         });
       } finally {
-        await rm(workDir, { recursive: true, force: true });
+        await Effect.runPromise(fileSystem.remove(workDir, { recursive: true, force: true }));
       }
-    },
-    30_000,
-  );
+    }, 30_000);
+  });
 });

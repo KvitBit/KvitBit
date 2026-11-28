@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Record from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   AccountPreferences,
   AccountPreferencesPatch,
@@ -27,6 +33,7 @@ import {
 } from "../src/index";
 
 const WS = "01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f";
+const HEX_COLOR = /^#[0-9A-F]{6}$/i;
 
 describe("entity tags and retry keys", () => {
   test("revision <-> strong ETag", () => {
@@ -39,7 +46,7 @@ describe("entity tags and retry keys", () => {
 
   test("Idempotency-Key is 8 to 128 URL-safe characters", () => {
     expect(Schema.is(IdempotencyKey)("01936f3e-7b4c-7d2a-9f1e-3c5a7b9d1e2f")).toBe(true);
-    for (const bad of ["short", "x".repeat(129), "has space key", "slash/inside"]) {
+    for (const bad of ["short", Str.repeat(129)("x"), "has space key", "slash/inside"]) {
       expect(Schema.is(IdempotencyKey)(bad)).toBe(false);
     }
   });
@@ -48,35 +55,40 @@ describe("entity tags and retry keys", () => {
 describe("edge errors", () => {
   const json = Schema.toCodecJson(EdgeError);
   const samples: ReadonlyArray<EdgeError> = [
-    new Unauthorized({ reason: "reauthentication_required" }),
-    new InvalidBotProof({}),
-    new OriginRejected({}),
-    new PreconditionFailed({ currentRevision: null }),
-    new PayloadTooLarge({ limitBytes: 20 * 1024 * 1024 }),
-    new PreconditionRequired({}),
-    new RateLimited({ retryAfterSeconds: 30 }),
+    Unauthorized.make({ reason: "reauthentication_required" }),
+    InvalidBotProof.make({}),
+    OriginRejected.make({}),
+    PreconditionFailed.make({ currentRevision: null }),
+    PayloadTooLarge.make({ limitBytes: 20 * 1024 * 1024 }),
+    PreconditionRequired.make({}),
+    RateLimited.make({ retryAfterSeconds: 30 }),
   ];
 
-  test.each(samples.map((e) => [e._tag, e] as const))("%s round-trips through JSON", (_, e) => {
-    const encoded = Schema.encodeSync(json)(e);
-    expect(encoded).toMatchObject({ _tag: e._tag });
-    const back = Schema.decodeUnknownSync(json)(encoded);
-    expect(back).toBeInstanceOf(e.constructor);
-    expect(back).toEqual(e);
-  });
+  test.each(Arr.map(samples, (e) => [e._tag, e] as const))(
+    "%s round-trips through JSON",
+    (_, e) => {
+      const encoded = Schema.encodeEffect(json)(e).pipe(Effect.runSync);
+      expect(encoded).toMatchObject({ _tag: e._tag });
+      const back = Schema.decodeEffect(json)(encoded).pipe(Effect.runSync);
+      expect(back).toBeInstanceOf(e.constructor);
+      expect(back).toEqual(e);
+    },
+  );
 
   test("rejects unknown Unauthorized reasons and fractional retry delays", () => {
     expect(() =>
-      Schema.decodeUnknownSync(json)({ _tag: "Unauthorized", reason: "nope" }),
+      Schema.decodeEffect(json)({ _tag: "Unauthorized", reason: "nope" }).pipe(Effect.runSync),
     ).toThrow();
     expect(() =>
-      Schema.decodeUnknownSync(json)({ _tag: "RateLimited", retryAfterSeconds: 1.5 }),
+      Schema.decodeEffect(json)({ _tag: "RateLimited", retryAfterSeconds: 1.5 }).pipe(
+        Effect.runSync,
+      ),
     ).toThrow();
   });
 });
 
 describe("API key and consent payloads", () => {
-  const decodeKey = Schema.decodeUnknownSync(ApiKeyCreate);
+  const decodeKey = Fn.flow(Schema.decodeUnknownEffect(ApiKeyCreate), Effect.runSync);
 
   test("ApiKeyCreate accepts presets and non-empty custom scopes", () => {
     expect(decodeKey({ name: "CI", access: "read" })).toEqual({ name: "CI", access: "read" });
@@ -102,13 +114,13 @@ describe("API key and consent payloads", () => {
   });
 
   test("ConsentDecision is Approve with a Workspace and grant, or Deny", () => {
-    const decode = Schema.decodeUnknownSync(ConsentDecision);
+    const decode = Fn.flow(Schema.decodeUnknownEffect(ConsentDecision), Effect.runSync);
     expect(decode({ _tag: "Deny" })).toEqual({ _tag: "Deny" });
-    expect(decode({ _tag: "Approve", workspace: WS, grant: { access: "read" } })).toEqual({
+    expect<unknown>(decode({ _tag: "Approve", workspace: WS, grant: { access: "read" } })).toEqual({
       _tag: "Approve",
       workspace: WS,
       grant: { access: "read" },
-    } as never);
+    });
     expect(() =>
       decode({ _tag: "Approve", workspace: "not-a-uuid", grant: { access: "read" } }),
     ).toThrow();
@@ -119,22 +131,24 @@ describe("API key and consent payloads", () => {
 describe("theme", () => {
   test("every preset id has a #RRGGBB seed", () => {
     for (const id of ThemePresetId.literals) {
-      expect(ThemePresets[id].seed).toMatch(/^#[0-9A-F]{6}$/i);
+      expect(ThemePresets[id].seed).toMatch(HEX_COLOR);
     }
-    expect(Object.keys(ThemePresets).sort()).toEqual([...ThemePresetId.literals].sort());
+    expect(Arr.sort(Record.keys(ThemePresets), Order.String)).toEqual(
+      Arr.sort(ThemePresetId.literals, Order.String),
+    );
   });
 
   test("seeds match ui-port's tuned presets (packages/ui-port/src/theme/presets.ts)", () => {
-    expect(Object.fromEntries(Object.entries(ThemePresets).map(([id, p]) => [id, p.seed]))).toEqual(
-      {
-        graphite_atelier: "#111111",
-        forest: "#0F5D42",
-        ocean: "#0E6B8C",
-        plum: "#6B2D5C",
-        sand: "#1D4ED8",
-        graphite: "#4B5563",
-      },
-    );
+    expect(
+      Record.fromEntries(Arr.map(Record.toEntries(ThemePresets), ([id, p]) => [id, p.seed])),
+    ).toEqual({
+      graphite_atelier: "#111111",
+      forest: "#0F5D42",
+      ocean: "#0E6B8C",
+      plum: "#6B2D5C",
+      sand: "#1D4ED8",
+      graphite: "#4B5563",
+    });
   });
 
   const extended = {
@@ -144,13 +158,13 @@ describe("theme", () => {
     onColorContainer: "#000000",
   };
   const scheme = {
-    roles: Object.fromEntries(M3_COLOR_ROLES.map((role) => [role, "#123456"])),
+    roles: Record.fromEntries(Arr.map(M3_COLOR_ROLES, (role) => [role, "#123456"])),
     extended: { paid: extended, proforma: extended, overdue: extended, draft: extended },
   };
 
   test("a resolved scheme needs every M3 role and all four extended colours", () => {
-    const decode = Schema.decodeUnknownSync(ResolvedScheme);
-    expect(decode(scheme)).toEqual(scheme as never);
+    const decode = Fn.flow(Schema.decodeUnknownEffect(ResolvedScheme), Effect.runSync);
+    expect<unknown>(decode(scheme)).toEqual(scheme);
     const { primary: _primary, ...missing } = scheme.roles;
     expect(() => decode({ ...scheme, roles: missing })).toThrow();
     expect(() => decode({ ...scheme, roles: { ...scheme.roles, primary: "red" } })).toThrow();
@@ -170,22 +184,24 @@ describe("theme", () => {
       resolvedTheme: null,
       revision: 3,
     };
-    expect(Schema.decodeUnknownSync(AccountPreferences)(prefs)).toEqual(prefs as never);
+    expect<unknown>(
+      Schema.decodeUnknownEffect(AccountPreferences)(prefs).pipe(Effect.runSync),
+    ).toEqual(prefs);
     expect(() =>
-      Schema.decodeUnknownSync(AccountPreferences)({
+      Schema.decodeUnknownEffect(AccountPreferences)({
         ...prefs,
         theme: { ...prefs.theme, mode: "dim" },
-      }),
+      }).pipe(Effect.runSync),
     ).toThrow();
     expect(
-      Schema.decodeUnknownSync(AccountPreferencesPatch)({
+      Schema.decodeUnknownEffect(AccountPreferencesPatch)({
         theme: { ...prefs.theme, source: { _tag: "Seed", seed: "#0F5D42" } },
-      }),
+      }).pipe(Effect.runSync),
     ).toMatchObject({ theme: { source: { _tag: "Seed", seed: "#0F5D42" } } });
     expect(() =>
-      Schema.decodeUnknownSync(AccountPreferencesPatch)({
+      Schema.decodeUnknownEffect(AccountPreferencesPatch)({
         theme: { ...prefs.theme, source: { _tag: "Seed", seed: "#0F5D4" } },
-      }),
+      }).pipe(Effect.runSync),
     ).toThrow();
   });
 });
@@ -202,8 +218,8 @@ describe("stored grants on views", () => {
     lastUsedAt: null,
     expiresAt: null,
   };
-  const secret = `kvb_01JDX3K7M9_${"a".repeat(43)}`;
-  const decodeCreated = Schema.decodeUnknownSync(ApiKeyCreated);
+  const secret = `kvb_01JDX3K7M9_${Str.repeat(43)("a")}`;
+  const decodeCreated = Fn.flow(Schema.decodeUnknownEffect(ApiKeyCreated), Effect.runSync);
 
   test("ApiKeyCreated carries a kvb_ token as its secret", () => {
     expect(String(decodeCreated({ key, secret }).secret)).toBe(secret);

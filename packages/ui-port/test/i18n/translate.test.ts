@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import * as Arr from "effect/Array";
 import {
   enumText,
   fallbackPluralCategory,
@@ -17,7 +18,7 @@ import { text } from "../../src/text";
 
 describe("plural rules", () => {
   test("Czech one/few/many/other", () => {
-    expect([1, 2, 4, 5, 0, 22, 1.5].map((n) => pluralCategory("cs", n))).toEqual([
+    expect(Arr.map([1, 2, 4, 5, 0, 22, 1.5], (n) => pluralCategory("cs", n))).toEqual([
       "one",
       "few",
       "few",
@@ -80,7 +81,9 @@ describe("translate", () => {
     expect(translate("en", message("issue.ico.checksum"))).toBe(
       "This IČO is not valid. Check the digits.",
     );
-    expect(translate("cs", enumText("documentKind", "proforma"))).toBe("Zálohová faktura");
+    expect(translate("cs", enumText({ name: "documentKind", value: "proforma" }))).toBe(
+      "Zálohová faktura",
+    );
   });
 
   test("unknown keys render as the key, missing params stay visible", () => {

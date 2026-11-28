@@ -7,6 +7,7 @@
  * Top-level scalars are the queryable columns (kind, status, number, contactId, issuedOn,
  * dueOn, settlement, ...); nested values are JSON columns in the SQL implementation.
  */
+
 import type { DocumentKind as DocumentKindType } from "@kvitbit/domain/contract";
 import {
   BankAccountId,
@@ -31,7 +32,9 @@ import {
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
 import { defineCollection } from "../../store/tables";
 
 const Text = Schema.NullOr(Schema.String);
@@ -132,7 +135,7 @@ export const GivenFields = Schema.Struct({
   series: Schema.optional(NumberingSeriesId),
   bankAccount: Schema.optional(BankAccountId),
   /** null: pinned "no note" (issued documents keep a resolved null note). */
-  note: Schema.optional(Schema.NullOr(Schema.String)),
+  note: Schema.String.pipe(Schema.NullOr, Schema.optional),
   paymentMethod: Schema.optional(PaymentMethod),
   variableSymbol: Schema.optional(Schema.String),
 });
@@ -155,7 +158,7 @@ export type LinkRecord = typeof LinkRecord.Type;
 export const DocumentRecord = Schema.Struct({
   id: DocumentId,
   workspaceId: WorkspaceId,
-  revision: Schema.Number,
+  revision: Schema.Finite,
 
   kind: DocumentKind,
   status: DocumentStatus,
@@ -230,7 +233,7 @@ export const SCHEDULE_OCCURRENCE = "documents_schedule_occurrence_unique";
 export const DocumentsTable = defineCollection<DocumentRecord>({
   name: "documents",
   entity: "Document",
-  schema: DocumentRecord as unknown as Schema.Codec<DocumentRecord, unknown>,
+  schema: DocumentRecord,
   unique: [
     {
       name: NUMBER_PER_KIND,
@@ -257,12 +260,24 @@ export type DraftableKind = Extract<DocumentKindType, "invoice" | "proforma">;
  * Credit Note is owed by the issuer, so neither is chased. A Proforma with a Final Invoice is
  * settled through it (D8): its Final Invoice is chased instead.
  */
-export const isOverdue = (
-  row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn" | "links">,
-  today: string,
-): boolean =>
-  (row.kind === "invoice" ||
-    (row.kind === "proforma" && !row.links.some((l) => l.relation === "final_invoice_for"))) &&
-  row.status === "issued" &&
-  (row.settlement === "unpaid" || row.settlement === "partially_paid") &&
-  row.dueOn < today;
+export const isOverdue: {
+  (
+    today: string,
+  ): (row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn" | "links">) => boolean;
+  (
+    row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn" | "links">,
+    today: string,
+  ): boolean;
+} = Fn.dual(
+  2,
+  (
+    row: Pick<DocumentRecord, "kind" | "status" | "settlement" | "dueOn" | "links">,
+    today: string,
+  ): boolean =>
+    (row.kind === "invoice" ||
+      (row.kind === "proforma" &&
+        !EffectArray.some(row.links, (l) => l.relation === "final_invoice_for"))) &&
+    row.status === "issued" &&
+    (row.settlement === "unpaid" || row.settlement === "partially_paid") &&
+    row.dueOn < today,
+);

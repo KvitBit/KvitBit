@@ -1,18 +1,59 @@
-import { execFileSync } from "node:child_process";
-import { resolve } from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { gunzipSync } from "node:zlib";
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import type { RenderedPath } from "../test/support";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Path from "effect/Path";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
+const postHogRecord = Schema.Struct({
+  event: Schema.String,
+  properties: Schema.Record(Schema.String, Schema.Unknown),
+});
+const postHogUpload = Schema.decodeUnknownResult(
+  Schema.fromJsonString(
+    Schema.Union([Schema.Struct({ batch: Schema.Array(postHogRecord) }), postHogRecord]),
+  ),
+);
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const createApiKeyPattern = /^(Create API key|Vytvořit API klíč)$/;
+const exportExportovatPattern = /^(Export|Exportovat)$/;
+const posthogPhPattern = /posthog|^ph_/i;
+const kvitbitPattern = /Kvitbit/;
+
+const appTitlePattern = /Kvitbit/;
+const privacyAnchorPattern = /\/legal\/privacy#main$/;
+const rootPathPattern = /\/$/;
+const priceListPathPattern = /\/price-list$/;
+const filteredPriceListPattern = /\/price-list\?text=UX&archived=1$/;
+const retryLabelPattern = /Try again|Retry|Zkusit znovu/i;
+const nonEmptyPattern = /.+/;
+const termsPathPattern = /\/legal\/terms$/;
+const currentInvoiceHeadingPattern = /Current invoice$/;
+const earlierInvoiceHeadingPattern = /Earlier invoice$/;
+const overdueLabelPattern = /^(Overdue|Po splatnosti)$/;
 
 const DEMO_WS = "novak-design";
-const WEB_ROOT = resolve(import.meta.dirname, "..");
-const renderForHydration = (path: string): RenderedPath =>
-  JSON.parse(
-    execFileSync("bun", [resolve(import.meta.dirname, "render.ts"), path], {
-      cwd: WEB_ROOT,
-      encoding: "utf8",
-    }),
+const paths = Effect.runSync(Path.Path.pipe(Effect.provide(Path.layer)));
+const renderFixture = promisify(execFile);
+const hydrationFixture = Schema.fromJsonString(
+  Schema.Struct({ html: Schema.String, hydration: Schema.String }),
+);
+const renderForHydration = async (path: string) => {
+  const { stdout } = await renderFixture(
+    "bun",
+    [paths.resolve(import.meta.dirname, "render.ts"), path],
+    { cwd: paths.resolve(import.meta.dirname, ".."), encoding: "utf8" },
   );
+  return Effect.runSync(Schema.decodeEffect(hydrationFixture)(stdout));
+};
 
 const attachErrorGuards = (page: Page) => {
   const consoleErrors: string[] = [];
@@ -25,8 +66,8 @@ const attachErrorGuards = (page: Page) => {
   });
   return {
     assertClean: () => {
-      expect(consoleErrors, `console errors: ${consoleErrors.join("; ")}`).toEqual([]);
-      expect(pageErrors, `page errors: ${pageErrors.join("; ")}`).toEqual([]);
+      expect(consoleErrors, `console errors: ${Arr.join(consoleErrors, "; ")}`).toEqual([]);
+      expect(pageErrors, `page errors: ${Arr.join(pageErrors, "; ")}`).toEqual([]);
     },
   };
 };
@@ -46,7 +87,7 @@ const expectFilledSegments = async (
   const layout = await group.evaluate((control) => {
     const bounds = control.getBoundingClientRect();
     const container = control.closest('[data-slot="card-title"]') ?? control.parentElement;
-    const buttons = [...control.querySelectorAll("ui-segmented-control-item")].map((button) => {
+    const buttons = Array.from(control.querySelectorAll("ui-segmented-control-item"), (button) => {
       const box = button.getBoundingClientRect();
       const label = document.createRange();
       label.selectNodeContents(button);
@@ -59,7 +100,8 @@ const expectFilledSegments = async (
         verticalOffset: (text.top + text.bottom - box.top - box.bottom) / 2,
       };
     });
-    const buttonWidth = buttons.reduce((total, button) => total + button.width, 0);
+    let buttonWidth = 0;
+    for (const button of buttons) buttonWidth += button.width;
     return {
       buttons,
       containerSpace: (container?.clientWidth ?? 0) - bounds.width,
@@ -74,15 +116,14 @@ const expectFilledSegments = async (
   expect(layout.buttons.length).toBeGreaterThan(1);
   expect(Math.abs(layout.unfilledWidth), "unfilled width inside the selector").toBeLessThan(1);
   expect(layout.overflow, "horizontal overflow").toBeLessThan(1);
-  if (placement === "stretched") {
-    expect(Math.abs(layout.containerSpace), "space in the container").toBeLessThan(1);
-  } else {
-    expect(layout.containerSpace, "space left for other row items").toBeGreaterThan(1);
-  }
-  if (equalWidths) {
-    const widths = layout.buttons.map((button) => button.width);
-    expect(Math.max(...widths) - Math.min(...widths), "option width difference").toBeLessThan(2);
-  }
+  const containerSpaceFits =
+    placement === "stretched" ? Math.abs(layout.containerSpace) < 1 : layout.containerSpace > 1;
+  expect(containerSpaceFits, `${placement} container space: ${layout.containerSpace}`).toBe(true);
+  const widths = Arr.map(layout.buttons, (button) => button.width);
+  const widthDifference = Math.max(...widths) - Math.min(...widths);
+  expect(widthDifference, "option width difference").toBeLessThan(
+    equalWidths ? 2 : Number.POSITIVE_INFINITY,
+  );
   for (const button of layout.buttons) {
     expect(button.labelFits, "label fits inside its button").toBe(true);
     expect(Math.abs(button.horizontalOffset), "horizontal label alignment").toBeLessThan(2);
@@ -93,7 +134,7 @@ const expectFilledSegments = async (
 
 // Guard so `bun test apps/web` (which scans *.spec.ts) does not invoke Playwright's test runner
 // outside Node/Playwright; `bun run --cwd apps/web e2e` executes under Node where `Bun` is absent.
-if (typeof Bun === "undefined") {
+if (!("Bun" in globalThis)) {
   for (const locale of ["en", "cs"]) {
     test.describe(`segmented controls in ${locale}`, () => {
       test.use({ locale });
@@ -120,7 +161,7 @@ if (typeof Bun === "undefined") {
         }
 
         await page.goto(`/w/${DEMO_WS}/settings/api-keys`);
-        await page.getByRole("button", { name: /^(Create API key|Vytvořit API klíč)$/ }).click();
+        await page.getByRole("button", { name: createApiKeyPattern }).click();
         await expectFilledSegments(page.locator("ui-segmented-control"), "stretched");
       });
 
@@ -147,7 +188,7 @@ if (typeof Bun === "undefined") {
           page.locator('[data-slot="report-controls"] ui-segmented-control'),
           "inline",
         );
-        await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
+        await page.getByRole("button", { name: exportExportovatPattern }).click();
         await expectFilledSegments(
           page.getByRole("dialog").locator("ui-segmented-control"),
           "stretched",
@@ -170,11 +211,20 @@ if (typeof Bun === "undefined") {
       });
 
       const modes = await expectFilledSegments(mode, "stretched");
-      expect(modes.some((button) => button.lineCount > 1)).toBe(true);
+      expect(Arr.some(modes, (button) => button.lineCount > 1)).toBe(true);
       const contrasts = await expectFilledSegments(contrast, "stretched");
-      expect(contrasts.every((button) => button.lineCount === 1)).toBe(true);
+      expect(Arr.every(contrasts, (button) => button.lineCount === 1)).toBe(true);
     });
   });
+
+  const exerciseWorkspaceSwitcher = async (page: Page) => {
+    const switcher = page.getByTestId("workspace-switcher");
+    await switcher.click();
+    await expect(switcher).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(switcher).toHaveAttribute("aria-expanded", "false");
+  };
 
   test.describe("web smoke journeys (demo mode)", () => {
     test("sends only cookieless pageviews after a single startup config request", async ({
@@ -182,7 +232,7 @@ if (typeof Bun === "undefined") {
     }) => {
       const host = "/_kvb";
       let configRequests = 0;
-      const uploads: { event: string; properties: Record<string, unknown> }[] = [];
+      const uploads: (typeof postHogRecord.Type)[] = [];
       // Exercise actual ingestion while keeping PostHog's bot filter enabled in production.
       await page.addInitScript(() => {
         Object.defineProperty(navigator, "webdriver", { get: () => false });
@@ -208,11 +258,11 @@ if (typeof Bun === "undefined") {
           const body =
             data[0] === 0x1f
               ? gunzipSync(data).toString()
-              : formData
+              : formData !== null && formData !== ""
                 ? Buffer.from(formData, "base64").toString()
                 : data.toString();
-          const payload = JSON.parse(body);
-          uploads.push(...(payload.batch ?? [payload]));
+          const payload = Result.getOrThrow(postHogUpload(body));
+          uploads.push(...("batch" in payload ? payload.batch : [payload]));
         }
         await route.fulfill({
           json: { status: 1 },
@@ -227,8 +277,8 @@ if (typeof Bun === "undefined") {
       expect(configRequests).toBe(1);
 
       const origin = new URL(page.url()).origin;
-      expect(uploads.map(({ event, properties }) => ({ event, properties }))).toEqual(
-        ["/", "/legal/privacy"].map((path) => ({
+      expect(Arr.map(uploads, ({ event, properties }) => ({ event, properties }))).toEqual(
+        Arr.map(["/", "/legal/privacy"], (path) => ({
           event: "$pageview",
           properties: {
             $current_url: origin + path,
@@ -243,11 +293,17 @@ if (typeof Bun === "undefined") {
       );
       expect(await page.context().cookies()).toEqual([]);
       expect(
-        await page.evaluate(() =>
-          [...Object.keys(localStorage), ...Object.keys(sessionStorage)].filter((key) =>
-            /posthog|^ph_/i.test(key),
-          ),
-        ),
+        await page.evaluate((pattern) => {
+          const matcher = new RegExp(pattern);
+          const keys: string[] = [];
+          for (const storage of [localStorage, sessionStorage]) {
+            for (let index = 0; index < storage.length; index++) {
+              const key = storage.key(index);
+              if (key !== null && matcher.test(key)) keys.push(key);
+            }
+          }
+          return keys;
+        }, posthogPhPattern.source),
       ).toEqual([]);
     });
 
@@ -262,14 +318,19 @@ if (typeof Bun === "undefined") {
         "/android",
       ];
 
-      for (const path of publicPaths) {
-        await page.goto(path, { waitUntil: "domcontentloaded" });
-        const root = page.locator(".kb-root");
-        await expect(root).toBeVisible();
-        await expect(page.locator("#kb-theme-vars")).toBeAttached();
-        await expect(page.locator("#main")).toBeVisible();
-        await expect(page).toHaveTitle(/Kvitbit/);
-      }
+      await Effect.forEach(
+        publicPaths,
+        (path) =>
+          Effect.promise(async () => {
+            await page.goto(path, { waitUntil: "domcontentloaded" });
+            const root = page.locator(".kb-root");
+            await expect(root).toBeVisible();
+            await expect(page.locator("#kb-theme-vars")).toBeAttached();
+            await expect(page.locator("#main")).toBeVisible();
+            await expect(page).toHaveTitle(appTitlePattern);
+          }),
+        { concurrency: 1, discard: true },
+      ).pipe(Effect.runPromise);
 
       errors.assertClean();
     });
@@ -296,19 +357,14 @@ if (typeof Bun === "undefined") {
       for (const style of ["elegant", "cozy"] as const) {
         for (const { locale, labels, passkeyCta } of cases) {
           await page.evaluate(
-            ({ loc, sty }) => {
-              window.localStorage.setItem(
-                "kvitbit.prefs",
-                JSON.stringify({
-                  locale: loc,
-                  style: sty,
-                  mode: "system",
-                  contrast: "standard",
-                  theme: { _tag: "Preset", id: "graphite_atelier" },
-                }),
-              );
-            },
-            { loc: locale, sty: style },
+            (prefs) => globalThis.localStorage.setItem("kvitbit.prefs", prefs),
+            encodeJson({
+              locale,
+              style,
+              mode: "system",
+              contrast: "standard",
+              theme: { _tag: "Preset", id: "graphite_atelier" },
+            }),
           );
           await page.reload({ waitUntil: "domcontentloaded" });
           await page.evaluate(() => document.fonts.ready);
@@ -325,12 +381,12 @@ if (typeof Bun === "undefined") {
             return {
               groupRight: groupRect.right,
               lastBtnRight: btns.at(-1)?.getBoundingClientRect().right ?? 0,
-              items: btns.map((btn) => {
+              items: Array.from(btns, (btn) => {
                 const range = document.createRange();
                 range.selectNodeContents(btn);
                 const lineCount = range.getClientRects().length;
                 return {
-                  text: btn.textContent?.trim() ?? "",
+                  text: btn.textContent ?? "",
                   lineCount,
                   overflowX: btn.scrollWidth > btn.clientWidth + 1,
                 };
@@ -359,18 +415,16 @@ if (typeof Bun === "undefined") {
 
       for (const locale of ["en", "cs"] as const) {
         await page.goto("/onboarding?step=4", { waitUntil: "domcontentloaded" });
-        await page.evaluate((loc) => {
-          window.localStorage.setItem(
-            "kvitbit.prefs",
-            JSON.stringify({
-              locale: loc,
-              style: "elegant",
-              mode: "dark",
-              contrast: "standard",
-              theme: { _tag: "Preset", id: "graphite_atelier" },
-            }),
-          );
-        }, locale);
+        await page.evaluate(
+          (prefs) => globalThis.localStorage.setItem("kvitbit.prefs", prefs),
+          encodeJson({
+            locale,
+            style: "elegant",
+            mode: "dark",
+            contrast: "standard",
+            theme: { _tag: "Preset", id: "graphite_atelier" },
+          }),
+        );
         await page.reload({ waitUntil: "domcontentloaded" });
         await page.evaluate(() => document.fonts.ready);
         await expect(page.locator(".kb-root")).toHaveAttribute("lang", locale);
@@ -394,7 +448,7 @@ if (typeof Bun === "undefined") {
               defaultsBox !== undefined &&
               ledgerBox !== undefined &&
               defaultsBox.top >= ledgerBox.bottom,
-            rows: rowEls.map((row) => {
+            rows: Array.from(rowEls, (row) => {
               const title = row
                 .querySelector('[data-slot="series-row-title"]')
                 ?.getBoundingClientRect();
@@ -442,17 +496,14 @@ if (typeof Bun === "undefined") {
           expect(row.patternAndStartAligned, `${locale} row ${i} pattern and start paired`).toBe(
             true,
           );
-          if (testInfo.project.name === "desktop") {
-            expect(row.sameDesktopLine, `${locale} row ${i} single horizontal ledger row`).toBe(
-              true,
-            );
-          }
-          const prev = geometry.rows[i - 1];
-          if (prev !== undefined) {
-            expect(row.top, `${locale} row ${i} below previous row`).toBeGreaterThanOrEqual(
-              prev.bottom - 1,
-            );
-          }
+          expect(
+            testInfo.project.name !== "desktop" || row.sameDesktopLine,
+            `${locale} row ${i} single horizontal ledger row`,
+          ).toBe(true);
+          const previousBottom = geometry.rows[i - 1]?.bottom ?? Number.NEGATIVE_INFINITY;
+          expect(row.top, `${locale} row ${i} below previous row`).toBeGreaterThanOrEqual(
+            previousBottom - 1,
+          );
         }
       }
 
@@ -492,13 +543,10 @@ if (typeof Bun === "undefined") {
         await expect(page.locator(".kb-root")).toBeVisible();
         await expect(page.locator("#kb-theme-vars")).toBeAttached();
         await expect(page.locator("#main")).toBeVisible();
-        await expect(page).toHaveTitle(/Kvitbit/);
+        await expect(page).toHaveTitle(kvitbitPattern);
 
-        if (testInfo.project.name === "desktop") {
-          await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
-        } else {
-          await expect(page.locator('[data-slot="bottom-nav"]')).toBeVisible();
-        }
+        const navigation = testInfo.project.name === "desktop" ? "sidebar" : "bottom-nav";
+        await expect(page.locator(`[data-slot="${navigation}"]`)).toBeVisible();
       }
 
       errors.assertClean();
@@ -512,22 +560,22 @@ if (typeof Bun === "undefined") {
       const privacy = page.locator('footer a[href^="/legal/privacy"]');
       await privacy.evaluate((link) => {
         link.setAttribute("href", "/legal/privacy#main");
-        document.body.dataset.navigationProbe = "same-document";
+        globalThis.document.body.dataset["navigationProbe"] = "same-document";
       });
       await privacy.scrollIntoViewIfNeeded();
       const originalScroll = await page.evaluate(() => window.scrollY);
       expect(originalScroll).toBeGreaterThan(0);
       await privacy.click();
 
-      await expect(page).toHaveURL(/\/legal\/privacy#main$/);
+      await expect(page).toHaveURL(privacyAnchorPattern);
       await expect(page.locator("#main")).toBeFocused();
       await expect(
         page.locator('body > div[aria-live="assertive"]:not([data-ui-sdk-announcer])'),
-      ).toHaveText(/Kvitbit/);
+      ).toHaveText(appTitlePattern);
       await expect(page.locator("body")).toHaveAttribute("data-navigation-probe", "same-document");
 
       await page.goBack();
-      await expect(page).toHaveURL(/\/$/);
+      await expect(page).toHaveURL(rootPathPattern);
       await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(originalScroll);
       errors.assertClean();
     });
@@ -535,7 +583,7 @@ if (typeof Bun === "undefined") {
     test("applies a price-list search without remounting on input", async ({ page }) => {
       const errors = attachErrorGuards(page);
       await page.goto(`/w/${DEMO_WS}/price-list/`);
-      await expect(page).toHaveURL(/\/price-list$/);
+      await expect(page).toHaveURL(priceListPathPattern);
       const input = page.getByRole("searchbox");
       const archived = page.locator("#pricelist-include-archived");
       await archived.check();
@@ -543,10 +591,10 @@ if (typeof Bun === "undefined") {
       await expect(input).toBeFocused();
       await expect(input).toHaveValue("UX");
       await expect(archived).toBeChecked();
-      await expect(page).toHaveURL(/\/price-list$/);
+      await expect(page).toHaveURL(priceListPathPattern);
 
       await input.press("Enter");
-      await expect(page).toHaveURL(/\/price-list\?text=UX&archived=1$/);
+      await expect(page).toHaveURL(filteredPriceListPattern);
       await expect(page.getByRole("cell", { name: "UX & produktový design" })).toBeVisible();
       await expect(archived).toBeChecked();
 
@@ -605,7 +653,7 @@ if (typeof Bun === "undefined") {
         await page.goto(callback);
         await expect(page.locator("#main").getByRole("alert")).toBeVisible();
         await expect(page).toHaveURL(callback);
-        await page.getByRole("button", { name: /Try again|Retry|Zkusit znovu/i }).click();
+        await page.getByRole("button", { name: retryLabelPattern }).click();
         await expect(page).toHaveURL(destination);
         await expect(page.locator("#main h1")).toBeVisible();
         await expect(page.locator("#main").getByRole("alert")).toHaveCount(0);
@@ -628,7 +676,7 @@ if (typeof Bun === "undefined") {
       await expect(root).toHaveAttribute("data-theme", "light");
 
       await selectUiOption(modeSelect, "system");
-      await expect(root).not.toHaveAttribute("data-theme", /.+/);
+      await expect(root).not.toHaveAttribute("data-theme", nonEmptyPattern);
 
       await expect(localeSelect).toBeVisible();
       await selectUiOption(localeSelect, "en");
@@ -665,21 +713,18 @@ if (typeof Bun === "undefined") {
     }) => {
       const errors = attachErrorGuards(page);
       const path = `/w/${DEMO_WS}`;
-      const rendered = renderForHydration(path);
-      const state = JSON.stringify({ flags: rendered.flags, state: rendered.state }).replaceAll(
-        "<",
-        "\\u003c",
-      );
+      const rendered = await renderForHydration(path);
+      const state = Str.replaceAll("<", "\\u003c")(rendered.hydration);
       await page.route(
         (url) => url.pathname === path,
         async (route) => {
           const response = await route.fetch();
-          const html = (await response.text()).replace(
+          const html = Str.replace(
             '<div id="root"></div>',
             `<div id="root">${rendered.html}</div>
            <script type="application/json" id="kb-state">${state}</script>
-           <script>window.kbServerControl = document.querySelector("#kb-locale")</script>`,
-          );
+           <script>window.kbServerControl = globalThis.document.querySelector("#kb-locale")</script>`,
+          )(await response.text());
           await route.fulfill({ response, body: html });
         },
       );
@@ -689,7 +734,9 @@ if (typeof Bun === "undefined") {
       await expect
         .poll(() =>
           page.evaluate(
-            () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
+            () =>
+              Reflect.get(globalThis, "kbServerControl") ===
+              globalThis.document.querySelector("#kb-locale"),
           ),
         )
         .toBe(true);
@@ -698,7 +745,9 @@ if (typeof Bun === "undefined") {
       await expect(page.locator("html")).toHaveAttribute("lang", "en");
       expect(
         await page.evaluate(
-          () => Reflect.get(window, "kbServerControl") === document.querySelector("#kb-locale"),
+          () =>
+            Reflect.get(globalThis, "kbServerControl") ===
+            globalThis.document.querySelector("#kb-locale"),
         ),
       ).toBe(true);
       errors.assertClean();
@@ -719,20 +768,13 @@ if (typeof Bun === "undefined") {
       await page.goto(`/w/${DEMO_WS}/reports/revenue?period=2026`, {
         waitUntil: "domcontentloaded",
       });
-      await page.getByRole("button", { name: /^(Export|Exportovat)$/ }).click();
+      await page.getByRole("button", { name: exportExportovatPattern }).click();
       const exportDialog = page.getByRole("dialog");
       await expect(exportDialog).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(exportDialog).toHaveCount(0);
 
-      if (testInfo.project.name === "desktop") {
-        const switcher = page.getByTestId("workspace-switcher");
-        await switcher.click();
-        await expect(switcher).toHaveAttribute("aria-expanded", "true");
-        await expect(page.getByRole("menu")).toBeVisible();
-        await page.keyboard.press("Escape");
-        await expect(switcher).toHaveAttribute("aria-expanded", "false");
-      }
+      if (testInfo.project.name === "desktop") await exerciseWorkspaceSwitcher(page);
 
       errors.assertClean();
     });
@@ -741,13 +783,13 @@ if (typeof Bun === "undefined") {
       const token = "demo-unpaid-czk";
       const sharePath = `/i/${token}`;
       await page.addInitScript(
-        ({ token }) => {
-          const transport = window.fetch.bind(window);
+        ({ shareToken }) => {
+          const transport = globalThis.fetch.bind(globalThis);
           let requests = 0;
-          window.fetch = Object.assign(
+          globalThis.fetch = Object.assign(
             async (input: RequestInfo | URL, init?: RequestInit) => {
               const request = input instanceof Request ? input : new Request(input, init);
-              if (new URL(request.url).pathname !== `/api/v1/share/${token}`) {
+              if (new URL(request.url).pathname !== `/api/v1/share/${shareToken}`) {
                 return transport(input, init);
               }
               const current = ++requests;
@@ -755,10 +797,10 @@ if (typeof Bun === "undefined") {
               const response = await transport(new Request(request, { signal: null }));
               const invoice = await response.json();
               if (current === 1) {
-                await new Promise<void>((release) =>
-                  Reflect.set(window, "kbReleaseOldShare", release),
-                );
-                Reflect.set(window, "kbOldShareReturned", true);
+                const gate = Promise.withResolvers<void>();
+                Reflect.set(globalThis, "kbReleaseOldShare", gate.resolve);
+                await gate.promise;
+                Reflect.set(globalThis, "kbOldShareReturned", true);
               }
               return Response.json({
                 ...invoice,
@@ -768,36 +810,36 @@ if (typeof Bun === "undefined") {
             { preconnect: () => undefined },
           );
         },
-        { token },
+        { shareToken: token },
       );
       await page.goto("/", { waitUntil: "domcontentloaded" });
       await expect(page.locator('[data-slot="landing"]')).toBeVisible();
 
-      await page.evaluate((sharePath) => {
+      await page.evaluate((targetPath) => {
         for (const [href, label] of [
-          [sharePath, "Open the share"],
+          [targetPath, "Open the share"],
           ["/legal/terms", "Open terms"],
         ] as const) {
-          const anchor = document.createElement("a");
+          const anchor = globalThis.document.createElement("a");
           anchor.href = href;
           anchor.textContent = label;
-          document.body.appendChild(anchor);
+          globalThis.document.body.appendChild(anchor);
         }
       }, sharePath);
 
       await page.getByRole("link", { name: "Open the share", exact: true }).click();
-      await page.waitForFunction(
-        () => typeof Reflect.get(window, "kbReleaseOldShare") === "function",
-      );
+      await page.waitForFunction(() => Reflect.has(globalThis, "kbReleaseOldShare"));
       await page.getByRole("link", { name: "Open terms", exact: true }).click();
-      await expect(page).toHaveURL(/\/legal\/terms$/);
+      await expect(page).toHaveURL(termsPathPattern);
       await page.getByRole("link", { name: "Open the share", exact: true }).click();
-      await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
+      await expect(page.getByRole("heading", { name: currentInvoiceHeadingPattern })).toBeVisible();
 
-      await page.evaluate(() => Reflect.get(window, "kbReleaseOldShare")());
-      await page.waitForFunction(() => Reflect.get(window, "kbOldShareReturned") === true);
-      await expect(page.getByRole("heading", { name: /Current invoice$/ })).toBeVisible();
-      await expect(page.getByRole("heading", { name: /Earlier invoice$/ })).toHaveCount(0);
+      await page.evaluate(() => Reflect.get(globalThis, "kbReleaseOldShare")());
+      await page.waitForFunction(() => Reflect.get(globalThis, "kbOldShareReturned") === true);
+      await expect(page.getByRole("heading", { name: currentInvoiceHeadingPattern })).toBeVisible();
+      await expect(page.getByRole("heading", { name: earlierInvoiceHeadingPattern })).toHaveCount(
+        0,
+      );
     });
 
     test("follows the mobile app link as a native document navigation", async ({ page }) => {
@@ -829,10 +871,10 @@ if (typeof Bun === "undefined") {
       page.on("request", (request) => {
         if (request.resourceType() === "document") documentRequests += 1;
       });
-      await page.clock.install({ time: new Date("2026-11-24T23:59:30.000Z") });
+      await page.clock.install({ time: "2026-11-24T23:59:30.000Z" });
       await page.goto("/i/demo-unpaid-czk");
       await expect(page.locator('a[href*="/pdf?"]')).toBeVisible();
-      const overdue = page.locator("#main").getByText(/^(Overdue|Po splatnosti)$/);
+      const overdue = page.locator("#main").getByText(overdueLabelPattern);
       await expect(overdue).toHaveCount(0);
 
       await page.clock.fastForward(31_000);
@@ -844,19 +886,19 @@ if (typeof Bun === "undefined") {
     test("refreshes an open share on visibility change when the midnight timer has not run", async ({
       page,
     }) => {
-      await page.clock.install({ time: new Date("2026-11-24T23:59:30.000Z") });
+      await page.clock.install({ time: "2026-11-24T23:59:30.000Z" });
       await page.goto("/i/demo-unpaid-czk");
       await expect(page.locator('a[href*="/pdf?"]')).toBeVisible();
-      const overdue = page.locator("#main").getByText(/^(Overdue|Po splatnosti)$/);
+      const overdue = page.locator("#main").getByText(overdueLabelPattern);
       let reloaded = false;
       page.on("framenavigated", (frame) => {
         if (frame === page.mainFrame()) reloaded = true;
       });
 
       // Move wall time past midnight without advancing the pending timer.
-      await page.clock.setSystemTime(new Date("2026-11-25T00:00:01.000Z"));
+      await page.clock.setSystemTime("2026-11-25T00:00:01.000Z");
       await expect(overdue).toHaveCount(0);
-      await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+      await page.evaluate(() => globalThis.document.dispatchEvent(new Event("visibilitychange")));
       await expect(overdue).toBeVisible();
       expect(reloaded).toBe(false);
     });

@@ -2,32 +2,39 @@
  * The five shared errors (core-ports section 3). Each carries its HTTP status, so HttpApi and
  * MCP encode them without per-endpoint mapping. Use `X.schema` where the status matters.
  */
-import { Schema } from "effect";
-import { HttpApiSchema } from "effect/http-api";
+
+import * as HttpApiSchema from "effect/http-api/HttpApiSchema";
+import * as Schema from "effect/Schema";
 import { Action, IssueCode } from "./action";
 import { EntityKind } from "./vocabulary";
 
-export class NotFound extends Schema.TaggedError<NotFound>()("NotFound", {
+// Keep the nominal brand outside the public error fields.
+declare const coreErrorBrand: unique symbol;
+interface CoreErrorBrand {
+  readonly [coreErrorBrand]: true;
+}
+
+export class NotFound extends Schema.TaggedError<NotFound, CoreErrorBrand>()("NotFound", {
   entity: EntityKind,
   id: Schema.String,
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("NotFound")); // 404
 }
 
-export class Forbidden extends Schema.TaggedError<Forbidden>()("Forbidden", {
+export class Forbidden extends Schema.TaggedError<Forbidden, CoreErrorBrand>()("Forbidden", {
   action: Action,
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("Forbidden")); // 403
 }
 
 export const Issue = Schema.Struct({
-  path: Schema.Array(Schema.Union([Schema.String, Schema.Number])),
+  path: Schema.Array(Schema.Union([Schema.String, Schema.Finite])),
   code: IssueCode, // stable i18n key; presenters localize cs/en
   params: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
 export type Issue = typeof Issue.Type;
 
-export class Invalid extends Schema.TaggedError<Invalid>()("Invalid", {
+export class Invalid extends Schema.TaggedError<Invalid, CoreErrorBrand>()("Invalid", {
   issues: Schema.NonEmptyArray(Issue),
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("UnprocessableEntity")); // 422
@@ -42,9 +49,9 @@ export const ConflictReason = Schema.Literals([
 ]);
 export type ConflictReason = typeof ConflictReason.Type;
 
-export class Conflict extends Schema.TaggedError<Conflict>()("Conflict", {
+export class Conflict extends Schema.TaggedError<Conflict, CoreErrorBrand>()("Conflict", {
   reason: ConflictReason,
-  currentRevision: Schema.optional(Schema.Number),
+  currentRevision: Schema.optional(Schema.Int),
   detail: Schema.optional(IssueCode),
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("Conflict")); // 409
@@ -58,9 +65,9 @@ export const UnavailableDependency = Schema.Literals([
 ]);
 export type UnavailableDependency = typeof UnavailableDependency.Type;
 
-export class Unavailable extends Schema.TaggedError<Unavailable>()("Unavailable", {
+export class Unavailable extends Schema.TaggedError<Unavailable, CoreErrorBrand>()("Unavailable", {
   dependency: UnavailableDependency,
-  retryAfterSeconds: Schema.optional(Schema.Number),
+  retryAfterSeconds: Schema.optional(Schema.Finite),
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("ServiceUnavailable")); // 503
 }

@@ -1,24 +1,38 @@
+import { TestCaller } from "../helpers/callerContext";
 /**
  * Shared setup for the payments-flow e2e tests: a vat_payer Workspace onboarded through
  * `Workspaces.create` on a fresh `TestCore`, with CZK and EUR bank accounts and a customer and a
  * supplier saved through `Contacts`. Every step goes through the service tags.
  */
+
 import type {
-  ContactId,
   ContactView,
-  CurrencyCode,
-  CurrentCaller,
-  DocumentId,
   DocumentInput,
   DocumentView,
   ExpenseId,
-  IsoDate,
   MemberCaller,
 } from "@kvitbit/domain/contract";
-import { Contacts, Documents, MoneyMath, Payments, Workspaces } from "@kvitbit/domain/contract";
+import {
+  BankAccountInput,
+  ContactId,
+  Contacts,
+  CurrencyCode,
+  type DocumentId,
+  Documents,
+  type ExpenseView,
+  IsoDate,
+  MoneyMath,
+  Payments,
+  Workspaces,
+} from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
-import type { Exit } from "effect";
-import { BigDecimal, Effect, Stream } from "effect";
+import * as EffectArray from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { decodeView } from "../../src/modules/expenses";
 import type { TestCoreServices } from "../../src/testing";
 import { account, asCaller, runCore } from "../helpers";
@@ -26,11 +40,11 @@ import { fixing } from "../modules/documents/fixtures";
 
 export const dec = (s: string) => BigDecimal.fromStringUnsafe(s);
 /** Normalized decimal string, for assertions. */
-export const str = (d: BigDecimal.BigDecimal) => BigDecimal.format(BigDecimal.normalize(d));
+export const str = (d: BigDecimal.BigDecimal) => d.pipe(BigDecimal.normalize, BigDecimal.format);
 
-export const CZK = "CZK" as CurrencyCode;
-export const EUR = "EUR" as CurrencyCode;
-export const TODAY = "2026-11-23" as IsoDate;
+const CZK = CurrencyCode.make("CZK");
+export const EUR = CurrencyCode.make("EUR");
+export const TODAY = IsoDate.make("2026-11-23");
 
 /** The issuer's IČO, with a CompanyRegistry record (prefills name, address and DIČ). */
 const ICO = "27082440";
@@ -43,50 +57,56 @@ const RECORD: RegistryRecord = {
   terminatedOn: null,
 };
 
-export interface World {
+interface World {
   readonly owner: MemberCaller;
   readonly customer: ContactId;
   readonly supplier: ContactId;
 }
 
-export type Body<A, E> = (world: World) => Effect.Effect<A, E, TestCoreServices | CurrentCaller>;
+type Body<A, E> = (world: World) => Effect.Effect<A, E, TestCoreServices | TestCaller>;
 
 /**
  * Runs `body` as the owner of a new vat_payer Workspace on a fresh TestCore (TestClock at
  * TEST_NOW, CNB fixing EUR = 25.000 on 2026-11-23).
  */
-export const inWorkspace = <A, E>(body: Body<A, E>): Promise<Exit.Exit<A, E | unknown>> =>
+export const inWorkspace = <A, E>(body: Body<A, E>) =>
   runCore(
     account(),
     Effect.gen(function* () {
       const owner = yield* Effect.flatMap(Workspaces, (ws) =>
-        ws.create({ name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" } as never),
+        ws.create(account(), { name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" }),
       );
       return yield* asCaller(
         owner,
         Effect.gen(function* () {
           const ws = yield* Workspaces;
-          yield* ws.saveBankAccount({
-            iban: "CZ65 0800 0000 1920 0014 5399",
-            currency: "CZK",
-          } as never);
-          yield* ws.saveBankAccount({ iban: "DE89370400440532013000", currency: "EUR" } as never);
+          yield* ws.saveBankAccount(
+            owner,
+            BankAccountInput.make({
+              iban: "CZ65 0800 0000 1920 0014 5399",
+              currency: "CZK",
+            }),
+          );
+          yield* ws.saveBankAccount(
+            owner,
+            BankAccountInput.make({ iban: "DE89370400440532013000", currency: "EUR" }),
+          );
           const contacts = yield* Contacts;
-          const customer = yield* contacts.save({
+          const customer = yield* contacts.save(owner, {
             name: "Odběratel a.s.",
             ico: "25596641",
             dic: "CZ25596641",
             address: { city: "Brno", country: "CZ" },
             roles: ["customer"],
             billingEmails: ["fakturace@odberatel.cz"],
-          } as never);
-          const supplier = yield* contacts.save({
+          });
+          const supplier = yield* contacts.save(owner, {
             name: "Dodavatel s.r.o.",
             ico: "27074358",
             dic: "CZ27074358",
             address: { city: "Praha", country: "CZ" },
             roles: ["supplier"],
-          } as never);
+          });
           return yield* body({
             owner,
             customer: contactId(customer),
@@ -100,47 +120,71 @@ export const inWorkspace = <A, E>(body: Body<A, E>): Promise<Exit.Exit<A, E | un
 
 export const ok = <A, E>(exit: Exit.Exit<A, E>): A => {
   if (exit._tag === "Failure")
-    throw new Error(
-      `expected success, got ${JSON.stringify(exit.cause, (_, v) => (typeof v === "bigint" ? String(v) : v))}`,
-    );
+    throw new Error("Expected payments flow to succeed", { cause: exit.cause });
   return exit.value;
 };
 
-const contactId = (v: ContactView) => (v as unknown as { readonly id: ContactId }).id;
-export const docId = (v: DocumentView) => v.id as DocumentId;
+const decodeContactId = Schema.decodeUnknownResult(ContactId);
+const contactId = (view: ContactView) => Result.getOrThrow(decodeContactId(view["id"]));
+export const docId = (v: DocumentView) => v.id;
 
 /** 2 x 1000 standard + 1 x 500 reduced: base 2500, VAT 420 + 60, gross 2980 CZK. */
-export const issueInvoice = (contact: ContactId, extra: Partial<DocumentInput> = {}) =>
+export const issueInvoice = ({
+  contact,
+  ...extra
+}: Partial<DocumentInput> & { readonly contact: ContactId }) =>
   Effect.flatMap(Documents, (d) =>
-    d.issue({
-      input: {
-        kind: "invoice",
-        contact,
-        lines: [
-          { description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") },
-          { description: "Kniha", unitPrice: dec("500"), vat: "reduced" },
-        ],
-        issuedOn: TODAY,
-        ...extra,
-      } as DocumentInput,
-    }),
+    Effect.flatMap(TestCaller, (caller) =>
+      d.issue(caller, {
+        input: {
+          kind: "invoice",
+          contact,
+          lines: [
+            { description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") },
+            { description: "Kniha", unitPrice: dec("500"), vat: "reduced" },
+          ],
+          issuedOn: TODAY,
+          ...extra,
+        },
+      }),
+    ),
   );
 
-export const money = (amount: string, currency: CurrencyCode = CZK) =>
+const money = (amount: string, currency: CurrencyCode = CZK) =>
   MoneyMath.make(dec(amount), currency);
 
-export const payDocument = (document: DocumentId, amount?: string, currency = CZK) =>
-  Effect.flatMap(Payments, (p) =>
-    p.record({
-      target: { document },
-      ...(amount === undefined ? {} : { amount: money(amount, currency) }),
-    }),
-  );
+export const payDocument = ({
+  document,
+  amount,
+  currency = CZK,
+}: {
+  readonly document: DocumentId;
+  readonly amount?: string;
+  readonly currency?: CurrencyCode;
+}) =>
+  Effect.flatMap(Payments, (p) => {
+    const target = { document };
+    return Effect.flatMap(TestCaller, (caller) =>
+      p.record(
+        caller,
+        amount === undefined ? { target } : { target, amount: money(amount, currency) },
+      ),
+    );
+  });
 
-export const payExpense = (expense: ExpenseId, amount?: string) =>
-  Effect.flatMap(Payments, (p) =>
-    p.record({ target: { expense }, ...(amount === undefined ? {} : { amount: money(amount) }) }),
-  );
+export const payExpense = ({
+  expense,
+  amount,
+}: {
+  readonly expense: ExpenseId;
+  readonly amount?: string;
+}) =>
+  Effect.flatMap(Payments, (p) => {
+    const target = { expense };
+    return Effect.flatMap(TestCaller, (caller) =>
+      p.record(caller, amount === undefined ? { target } : { target, amount: money(amount) }),
+    );
+  });
 
 /**
  * A complete CZK Expense from `supplier`: 100 + 21 % VAT = 121 CZK, tax point TODAY.
@@ -158,11 +202,11 @@ export const expenseInput = (supplier: ContactId) => ({
   tags: [],
 });
 
-export const expenseFields = decodeView;
+export const expenseFields = (view: ExpenseView) => decodeView(view);
 
 export const bodyText = (bytes: Stream.Stream<Uint8Array>) =>
   Effect.map(Stream.runCollect(bytes), (chunks) =>
     new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-      Uint8Array.from(chunks.flatMap((c) => [...c])),
+      Uint8Array.from(EffectArray.flatMap(chunks, (c) => [...c])),
     ),
   );

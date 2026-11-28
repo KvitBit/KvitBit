@@ -3,7 +3,8 @@
  * `TemplateView` is an open struct (revision and schedule.pausedReason specified); this schema
  * fixes the rest, so request-log replays (C3) round-trip the template's decimals.
  */
-import type { IsoDate, RecurringRunView, TemplateView } from "@kvitbit/domain/contract";
+
+import type { RecurringRunView, TemplateView } from "@kvitbit/domain/contract";
 import {
   IsoDate as IsoDateSchema,
   IssueCode,
@@ -11,7 +12,9 @@ import {
   TemplateId,
   TemplateInput,
 } from "@kvitbit/domain/contract";
-import { Schema } from "effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type { DeliveryStatus } from "./deliveries";
 import type { RunRow, ScheduleRow, TemplateRow } from "./repo";
 import { ruleOf } from "./sweep";
@@ -45,12 +48,6 @@ export const TemplateViewSchema = Schema.Struct({
 });
 export type TemplateViewValue = typeof TemplateViewSchema.Type;
 
-/** The schema as the domain's open `TemplateView` codec (for `withIdempotency`). */
-export const TemplateViewCodec = TemplateViewSchema as unknown as Schema.Codec<
-  TemplateView,
-  unknown
->;
-
 export const scheduleView = (row: ScheduleRow): typeof ScheduleViewSchema.Type => {
   const rule = ruleOf(row);
   return {
@@ -67,7 +64,10 @@ export const scheduleView = (row: ScheduleRow): typeof ScheduleViewSchema.Type =
   };
 };
 
-export const templateView = (row: TemplateRow, schedule: ScheduleRow | null): TemplateView => {
+export const templateView: {
+  (schedule: ScheduleRow | null): (row: TemplateRow) => TemplateView;
+  (row: TemplateRow, schedule: ScheduleRow | null): TemplateView;
+} = Fn.dual(2, (row: TemplateRow, schedule: ScheduleRow | null): TemplateView => {
   const view: TemplateViewValue = {
     id: row.id,
     name: row.name,
@@ -76,29 +76,42 @@ export const templateView = (row: TemplateRow, schedule: ScheduleRow | null): Te
     input: row.input,
     schedule: schedule === null ? null : scheduleView(schedule),
   };
-  return view as unknown as TemplateView;
-};
+  return view;
+});
 
 /** A run's delivery always exists (FK `schedule_runs_delivery_fk`); a missing one is a bug. */
-const statusOf = (deliveries: ReadonlyMap<string, DeliveryStatus>, id: string): DeliveryStatus => {
-  const status = deliveries.get(id);
-  if (status === undefined) throw new Error(`schedule run delivery ${id} has no status`);
-  return status;
-};
+class MissingRunDelivery extends Schema.TaggedError<
+  MissingRunDelivery,
+  { readonly brand: unique symbol }
+>()("MissingRunDelivery", {
+  id: Schema.String,
+}) {
+  override get message(): string {
+    return `schedule run delivery ${this.id} has no status`;
+  }
+}
+
+const statusOf = (deliveries: ReadonlyMap<string, DeliveryStatus>, id: string): DeliveryStatus =>
+  Option.fromUndefinedOr(deliveries.get(id)).pipe(
+    Option.getOrThrowWith(() => MissingRunDelivery.make({ id })),
+  );
 
 /** Throws (a defect inside Effect) when a run's delivery has no status. */
-export const runView = (
-  row: RunRow,
-  deliveries: ReadonlyMap<string, DeliveryStatus>,
-): RecurringRunView => ({
-  occurrence: row.occurrence as IsoDate,
-  outcome: row.outcome,
-  at: row.at,
-  document:
-    row.documentId === null ? null : { id: row.documentId, number: row.documentNumber ?? "" },
-  delivery:
-    row.deliveryId === null
-      ? null
-      : { id: row.deliveryId, status: statusOf(deliveries, row.deliveryId) },
-  failure: row.failure,
-});
+export const runView: {
+  (deliveries: ReadonlyMap<string, DeliveryStatus>): (row: RunRow) => RecurringRunView;
+  (row: RunRow, deliveries: ReadonlyMap<string, DeliveryStatus>): RecurringRunView;
+} = Fn.dual(
+  2,
+  (row: RunRow, deliveries: ReadonlyMap<string, DeliveryStatus>): RecurringRunView => ({
+    occurrence: row.occurrence,
+    outcome: row.outcome,
+    at: row.at,
+    document:
+      row.documentId === null ? null : { id: row.documentId, number: row.documentNumber ?? "" },
+    delivery:
+      row.deliveryId === null
+        ? null
+        : { id: row.deliveryId, status: statusOf(deliveries, row.deliveryId) },
+    failure: row.failure,
+  }),
+);

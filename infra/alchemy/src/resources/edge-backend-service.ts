@@ -1,8 +1,10 @@
+import type { InputProps } from "alchemy";
 import { Unowned } from "alchemy/AdoptPolicy";
 import * as Provider from "alchemy/Provider";
 import { Resource } from "alchemy/Resource";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
-import { HttpClientRequest } from "effect/http";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import {
@@ -24,7 +26,7 @@ import { resolvedStringProp } from "./provider-inputs";
  * Cloud CDN settings of a backend that caches. Only the fields the
  * Kvitbit edge sets; Google fills the rest with its defaults.
  */
-export interface EdgeCdnPolicy {
+interface EdgeCdnPolicy {
   readonly cacheMode: "USE_ORIGIN_HEADERS";
   readonly negativeCaching: boolean;
   readonly cacheKeyPolicy: {
@@ -35,12 +37,12 @@ export interface EdgeCdnPolicy {
 }
 
 /** The CDN settings Compute reports for a backend that caches. */
-export interface EdgeLiveCdnPolicy extends Omit<EdgeCdnPolicy, "cacheMode"> {
+interface EdgeLiveCdnPolicy extends Omit<EdgeCdnPolicy, "cacheMode"> {
   /** Any Compute cache mode, so drift from the declared one shows. */
   readonly cacheMode: string;
 }
 
-export interface EdgeLogConfig {
+interface EdgeLogConfig {
   readonly enable: boolean;
   /** Fraction of requests logged; only meaningful while `enable` is true. */
   readonly sampleRate?: number;
@@ -92,7 +94,11 @@ export type EdgeBackendService = Resource<
   EdgeBackendServiceProps,
   EdgeBackendServiceAttributes
 >;
-export const EdgeBackendService = Resource<EdgeBackendService>("Kvitbit.EdgeBackendService");
+const EdgeBackendService = Resource<EdgeBackendService>("Kvitbit.EdgeBackendService");
+
+export const declareEdgeBackendService =
+  (id: string) => (props: InputProps<EdgeBackendServiceProps>) =>
+    EdgeBackendService(id, props);
 
 const LiveBackendService = Schema.Struct({
   id: Schema.optional(Schema.String),
@@ -103,7 +109,10 @@ const LiveBackendService = Schema.Struct({
   fingerprint: Schema.optional(Schema.String),
   loadBalancingScheme: Schema.optional(Schema.String),
   protocol: Schema.optional(Schema.String),
-  backends: Schema.optional(Schema.Array(Schema.Struct({ group: Schema.optional(Schema.String) }))),
+  backends: Schema.Struct({ group: Schema.optional(Schema.String) }).pipe(
+    Schema.Array,
+    Schema.optional,
+  ),
   securityPolicy: Schema.optional(Schema.String),
   enableCDN: Schema.optional(Schema.Boolean),
   cdnPolicy: Schema.optional(
@@ -141,7 +150,7 @@ const toAttributes = (project: string, live: LiveBackendService): EdgeBackendSer
     creationTimestamp: live.creationTimestamp ?? "",
     loadBalancingScheme: live.loadBalancingScheme ?? "",
     protocol: live.protocol ?? "",
-    backendGroups: (live.backends ?? []).flatMap((backend) =>
+    backendGroups: Arr.flatMap(live.backends ?? [], (backend) =>
       backend.group === undefined ? [] : [backend.group],
     ),
     securityPolicy: live.securityPolicy,
@@ -188,7 +197,7 @@ const desiredBody = (props: EdgeBackendServiceProps, description: string) => {
 };
 
 /** The declared fields the live backend does not match. */
-export const backendServiceDrift = (
+const backendServiceDrift = (
   props: EdgeBackendServiceProps,
   description: string,
   live: LiveBackendService,
@@ -196,7 +205,7 @@ export const backendServiceDrift = (
   const drift: Array<string> = [];
   if ((live.description ?? "") !== description) drift.push("description");
   if (live.protocol !== props.protocol) drift.push("protocol");
-  const groups = (live.backends ?? []).map((backend) => computeResourcePath(backend.group));
+  const groups = Arr.map(live.backends ?? [], (backend) => computeResourcePath(backend.group));
   if (groups.length !== 1 || groups[0] !== computeResourcePath(props.backendGroup)) {
     drift.push("backends");
   }
@@ -244,12 +253,11 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
   diff: Effect.fn(function* ({ news, olds, output }) {
     const previous = olds ?? output;
     if (previous === undefined) {
-      return undefined;
+      return;
     }
     // Identity fields are plain strings; an unresolved one cannot differ yet.
-    const changed = (key: "project" | "name" | "loadBalancingScheme") => {
-      return Option.exists(resolvedStringProp(key)(news), (next) => next !== previous[key]);
-    };
+    const changed = (key: "project" | "name" | "loadBalancingScheme") =>
+      Option.exists(resolvedStringProp(key)(news), (next) => next !== previous[key]);
     if (changed("project") || changed("name")) {
       return { action: "replace" as const, deleteFirst: false };
     }
@@ -257,7 +265,6 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
       // The same name cannot exist twice, so the old one goes first.
       return { action: "replace" as const, deleteFirst: true };
     }
-    return undefined;
   }),
 
   read: Effect.fn(function* ({ id, olds, output, previous }) {
@@ -270,11 +277,11 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
       LiveBackendService,
     );
     if (live === undefined) {
-      return undefined;
+      return;
     }
     const attributes = toAttributes(project, live);
     const owned =
-      (yield* isOwnedDescription(id, live.description)) ||
+      (yield* isOwnedDescription({ id, description: live.description })) ||
       (previous !== undefined && previous.selfLink === live.selfLink);
     return owned ? attributes : Unowned(attributes);
   }),
@@ -284,16 +291,16 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
     const { project, name } = news;
     const resource = `Backend service ${name}`;
     const url = backendServiceUrl(project, name);
-    const description = yield* ownedDescription(id, news.description);
+    const description = yield* ownedDescription({ id, description: news.description });
     const body = desiredBody(news, description);
     // Every readback must still be the object admitted below.
     let admittedId: string | undefined;
     const read = (operation: string) =>
       api.get(resource, url, LiveBackendService).pipe(
-        Effect.flatMap((live) => requirePresent(resource, operation, live)),
+        Effect.flatMap((candidate) => requirePresent({ resource, operation, live: candidate })),
         Effect.filterOrFail(
-          (live) => admittedId === undefined || live.id === admittedId,
-          () => new EdgeComputeResourceUnowned({ resource }),
+          (candidate) => admittedId === undefined || candidate.id === admittedId,
+          () => EdgeComputeResourceUnowned.make({ resource }),
         ),
       );
 
@@ -313,19 +320,19 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
       live = yield* read("insert");
       // A conflict is success only if the existing backend is ours, as
       // after a retried insert whose first attempt went through.
-      if (!(yield* isAdmitted(id, insertedId, live))) {
-        return yield* new EdgeComputeResourceUnowned({ resource });
+      if (!(yield* isAdmitted({ id, admittedId: insertedId, live }))) {
+        return yield* EdgeComputeResourceUnowned.make({ resource });
       }
-    } else if (!(yield* isAdmitted(id, output?.id, live))) {
+    } else if (!(yield* isAdmitted({ id, admittedId: output?.id, live }))) {
       // Never take over a foreign backend: adoption admits only the object
       // it read, by ID.
-      return yield* new EdgeComputeResourceUnowned({ resource });
+      return yield* EdgeComputeResourceUnowned.make({ resource });
     }
 
     admittedId = live.id;
 
     if (live.loadBalancingScheme !== news.loadBalancingScheme) {
-      return yield* new EdgeComputeResourceNotConverged({
+      return yield* EdgeComputeResourceNotConverged.make({
         resource,
         fields: ["loadBalancingScheme"],
       });
@@ -354,11 +361,11 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
           ),
         );
       if (patched.operation !== undefined) {
-        yield* requireAdmittedTarget(
+        yield* requireAdmittedTarget({
           resource,
           admittedId,
-          yield* api.settle(resource, project, patched.operation),
-        );
+          settled: yield* api.settle(resource, project, patched.operation),
+        });
       }
       live = yield* read("patch");
       if (patched.operation !== undefined) {
@@ -376,11 +383,11 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
           }),
         ),
       );
-      yield* requireAdmittedTarget(
+      yield* requireAdmittedTarget({
         resource,
         admittedId,
-        yield* api.settle(resource, project, attached),
-      );
+        settled: yield* api.settle(resource, project, attached),
+      });
       live = yield* read("setSecurityPolicy");
     }
 
@@ -389,7 +396,7 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
       ...(securityPolicyDrift(news, live) ? ["securityPolicy"] : []),
     ];
     if (remaining.length > 0) {
-      return yield* new EdgeComputeResourceNotConverged({
+      return yield* EdgeComputeResourceNotConverged.make({
         resource,
         fields: remaining,
       });
@@ -403,7 +410,7 @@ export const EdgeBackendServiceProvider = Provider.succeed(EdgeBackendService, {
     const url = backendServiceUrl(output.project, output.name);
     // A same-name object someone else recreated is not ours to delete.
     const live = yield* api.get(resource, url, LiveBackendService);
-    if (live === undefined || !(yield* isAdmitted(id, output.id, live))) {
+    if (live === undefined || !(yield* isAdmitted({ id, admittedId: output.id, live }))) {
       return;
     }
     const deleted = yield* api.delete(resource, url);

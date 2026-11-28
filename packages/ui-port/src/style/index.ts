@@ -1,6 +1,8 @@
 import { EXTENDED_ROLES, M3_COLOR_ROLES } from "@kvitbit/api-contract";
 import { cva, type VariantProps } from "class-variance-authority";
 import { type ClassValue, clsx } from "clsx";
+import * as Arr from "effect/Array";
+import * as Str from "effect/String";
 import { extendTailwindMerge } from "tailwind-merge";
 import type { EffectiveTheme } from "../theme/engine";
 import { kebab } from "../theme/serialize";
@@ -19,14 +21,14 @@ export interface TailwindTokenBinding {
 }
 
 export const TAILWIND_COLOR_TOKENS: ReadonlyArray<TailwindTokenBinding> = [
-  ...M3_COLOR_ROLES.map((role) => {
+  ...Arr.map(M3_COLOR_ROLES, (role) => {
     const name = kebab(role);
     return {
       tailwindVar: `--color-${name}` as const,
       sourceVar: `--md-sys-color-${name}` as const,
     };
   }),
-  ...EXTENDED_ROLES.flatMap((role) => [
+  ...Arr.flatMap(EXTENDED_ROLES, (role) => [
     {
       tailwindVar: `--color-${role}` as const,
       sourceVar: `--kb-color-${role}` as const,
@@ -58,8 +60,8 @@ export const TAILWIND_FONT_TOKENS: ReadonlyArray<TailwindTokenBinding> = [
   { tailwindVar: "--font-mono", sourceVar: "--kb-font-mono" },
 ];
 
-export const TAILWIND_COLOR_NAMES: ReadonlyArray<string> = TAILWIND_COLOR_TOKENS.map((t) =>
-  t.tailwindVar.slice("--color-".length),
+export const TAILWIND_COLOR_NAMES: ReadonlyArray<string> = Arr.map(TAILWIND_COLOR_TOKENS, (t) =>
+  Str.slice("--color-".length)(t.tailwindVar),
 );
 
 const twMerge = extendTailwindMerge({

@@ -1,0 +1,6 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+JsThrowStatement() as $statement where {
+  register_diagnostic(span=$statement, message="[no-throw-in-effect-modules] Return a typed failure or make the lookup total.", severity="error")
+}

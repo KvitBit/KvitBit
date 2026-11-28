@@ -7,20 +7,18 @@ import {
   formatFileSize,
   formatMoney,
   NBSP,
-  render,
   renderEmail,
 } from "@kvitbit/adapters/templates/email";
-import { CurrencyCode, IsoDate, type Locale, type Money } from "@kvitbit/domain/contract";
-import { BigDecimal, Schema } from "effect";
+import { CurrencyCode, IsoDate, type Locale, MoneyMath } from "@kvitbit/domain/contract";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Fn from "effect/Function";
+import * as Rec from "effect/Record";
+import * as Str from "effect/String";
 
-const cur = Schema.decodeUnknownSync(CurrencyCode);
-const date = Schema.decodeUnknownSync(IsoDate);
-const money = (amount: string, currency = "CZK"): Money => ({
-  amount: BigDecimal.fromStringUnsafe(amount),
-  currency: cur(currency),
-});
+const money = (amount: string, currency = "CZK") =>
+  MoneyMath.make(BigDecimal.fromStringUnsafe(amount), CurrencyCode.make(currency));
 /** Writes expected strings with "_" where a U+00A0 must be. */
-const nb = (s: string): string => s.replaceAll("_", NBSP);
+const nb = Str.replaceAll("_", NBSP);
 
 const workspace = {
   name: "Ateliér Kalný s.r.o.",
@@ -32,7 +30,7 @@ const footer = {
   replyTo: "fakturace@atelierkalny.cz",
 };
 
-const fixtures: Record<string, EmailTemplate> = {
+const fixtures = {
   "E01 verify": {
     id: "E01",
     variant: "verify",
@@ -66,7 +64,7 @@ const fixtures: Record<string, EmailTemplate> = {
     role: "member",
     url: "https://kvitbit.app/invite/xyz",
     validForDays: 7,
-    expiresOn: date("2026-11-30"),
+    expiresOn: IsoDate.make("2026-11-30"),
   },
   E05: {
     id: "E05",
@@ -74,7 +72,7 @@ const fixtures: Record<string, EmailTemplate> = {
     documentKind: "invoice",
     documentNumber: "2026-0042",
     amount: money("58100"),
-    dueDate: date("2026-11-16"),
+    dueDate: IsoDate.make("2026-11-16"),
     variableSymbol: "20260042",
     bankAccount: "2101482910/2010",
     shareUrl: "https://kvitbit.app/i/tok",
@@ -88,7 +86,7 @@ const fixtures: Record<string, EmailTemplate> = {
     documentKind: "invoice",
     documentNumber: "2026-0042",
     amountDue: money("58100"),
-    dueDate: date("2026-11-16"),
+    dueDate: IsoDate.make("2026-11-16"),
     daysOverdue: 10,
     variableSymbol: "20260042",
     shareUrl: "https://kvitbit.app/i/tok",
@@ -113,14 +111,14 @@ const fixtures: Record<string, EmailTemplate> = {
     id: "E08",
     workspaceName: "Ateliér Kalný s.r.o.",
     scheduleName: "Měsíční paušál — Nordic Craft GmbH",
-    occurrenceDate: date("2026-11-01"),
+    occurrenceDate: IsoDate.make("2026-11-01"),
     reason: "Kontakt nemá e-mail pro automatické odeslání.",
     url: "https://kvitbit.app/w/ak/schedules/1",
   },
-};
+} satisfies Record<string, EmailTemplate>;
 
 /** Per fixture and locale: subject, then fragments the text part must contain. */
-const expected: Record<string, Record<Locale, readonly [string, ReadonlyArray<string>]>> = {
+const expected = {
   "E01 verify": {
     cs: [
       "Potvrďte svou e-mailovou adresu — Kvitbit",
@@ -243,20 +241,30 @@ const expected: Record<string, Record<Locale, readonly [string, ReadonlyArray<st
       ["[Needs attention]", nb("for 1_Nov_2026"), "Reason:"],
     ],
   },
-};
+} satisfies Record<keyof typeof fixtures, Record<Locale, readonly [string, ReadonlyArray<string>]>>;
 
 const LEFTOVERS = ["{{", "undefined", "null", "NaN", "[object Object]"];
+const HTML_TAGS = /<[^>]+>/g;
+const FRAGMENT_SEPARATOR = /\n|: /;
+const FRAGMENT_DELIMITERS = /^\[|\]$|:$/g;
+const HTML_TAG = /<\/?[a-z][^>]*>/i;
+const UNSAFE_HTML = /<script|<link|@import|javascript:/i;
+const CUSTOM_MESSAGE_HTML = /Line one [^<]*<br>Line two<\/p><p[^>]*>Second paragraph/;
+const HEADER_LINE_BREAK = /[\r\n]/;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+const WRAPPED_EMAIL = /word-break:break-all;">a{60}@example\.com/;
+const INVOICE_WORDING = /faktur|invoice/i;
 
 describe("renderEmail: every template in cs and en", () => {
-  for (const [name, template] of Object.entries(fixtures)) {
+  for (const [name, template] of Rec.toEntries(fixtures)) {
     for (const locale of ["cs", "en"] as const) {
       test(`${name} ${locale}`, () => {
         const out = renderEmail(template, locale);
-        const [subject, fragments] = expected[name]?.[locale] ?? ["", []];
+        const [subject, fragments] = expected[name][locale];
         expect(out.subject).toBe(subject);
         for (const f of fragments) expect(out.text).toContain(f);
 
-        expect(out.html.startsWith("<!DOCTYPE html>")).toBe(true);
+        expect(Str.startsWith("<!DOCTYPE html>")(out.html)).toBe(true);
         expect(out.html).toContain(`<html lang="${locale}"`);
         expect(out.html).toContain(
           '<table role="presentation" class="kb-container kb-card" width="600"',
@@ -265,42 +273,47 @@ describe("renderEmail: every template in cs and en", () => {
         expect(out.html).toContain(`<title>${escapeHtml(subject)}</title>`);
         // The same content reaches the HTML part: labels and values (split at the text part's
         // "Label: value" and line breaks) in its visible text, URLs in an href.
-        const htmlText = out.html
-          .replace(/<[^>]+>/g, "")
-          .replaceAll("&nbsp;", NBSP)
-          .replaceAll("&amp;", "&")
-          .replaceAll("&#39;", "'")
-          .replaceAll("&quot;", '"');
+        const htmlText = Fn.pipe(
+          out.html,
+          Str.replace(HTML_TAGS, ""),
+          Str.replaceAll("&nbsp;", NBSP),
+          Str.replaceAll("&amp;", "&"),
+          Str.replaceAll("&#39;", "'"),
+          Str.replaceAll("&quot;", '"'),
+        );
         for (const f of fragments)
-          for (const piece of f.split(/\n|: /).map((s) => s.replace(/^\[|\]$|:$/g, "").trim())) {
+          for (const fragment of Str.split(f, FRAGMENT_SEPARATOR)) {
+            const piece = Fn.pipe(fragment, Str.replace(FRAGMENT_DELIMITERS, ""), Str.trim);
             if (piece.length === 0) continue;
-            if (piece.startsWith("http")) expect(out.html).toContain(`href="${escapeHtml(piece)}"`);
-            else expect(htmlText).toContain(piece);
+            const isUrl = Str.startsWith("http")(piece);
+            expect(isUrl ? out.html : htmlText).toContain(
+              isUrl ? `href="${escapeHtml(piece)}"` : piece,
+            );
           }
 
         for (const part of [out.subject, out.html, out.text])
           for (const bad of LEFTOVERS) expect(part).not.toContain(bad);
-        expect(out.text).not.toMatch(/<\/?[a-z][^>]*>/i);
+        expect(out.text).not.toMatch(HTML_TAG);
         expect(out.html).not.toContain(NBSP);
-        expect(out.html).not.toMatch(/<script|<link|@import|javascript:/i);
+        expect(out.html).not.toMatch(UNSAFE_HTML);
       });
     }
   }
 
   test("account emails carry the Kvitbit tile, workspace emails the Workspace initials and accent", () => {
-    const e02 = renderEmail(fixtures.E02 as EmailTemplate, "cs").html;
+    const e02 = renderEmail(fixtures.E02, "cs").html;
     expect(e02).toContain(">K</div>");
     expect(e02).toContain("background:#111111");
-    const e05 = renderEmail(fixtures.E05 as EmailTemplate, "cs").html;
+    const e05 = renderEmail(fixtures.E05, "cs").html;
     expect(e05).toContain(">AK</div>");
-    expect(e05).toContain('bgcolor="#0F5D42"');
+    expect(e05).toContain(`bgcolor="${workspace.accent.color}"`);
     expect(e05).toContain("color:#FFFFFF");
   });
 
   test("an invalid accent falls back to brand ink instead of reaching the CSS", () => {
     const html = renderEmail(
       {
-        ...(fixtures.E04 as Extract<EmailTemplate, { id: "E04" }>),
+        ...fixtures.E04,
         workspace: { name: "X", accent: { color: "red;background:url(x)", onColor: "#FFFFFF" } },
       },
       "en",
@@ -335,7 +348,7 @@ describe("HTML escaping of injected values", () => {
     );
     expect(out.html).toContain('href="https://kvitbit.app/i/a?x=1&amp;y=2"');
     expect(out.html).toContain("Line two");
-    expect(out.html).toMatch(/Line one [^<]*<br>Line two<\/p><p[^>]*>Second paragraph/);
+    expect(out.html).toMatch(CUSTOM_MESSAGE_HTML);
     expect(out.html).toContain("a&quot;b@c.cz");
     expect(out.subject).toBe(`Subj ${evil}`);
     expect(out.text).toContain(evil);
@@ -344,16 +357,13 @@ describe("HTML escaping of injected values", () => {
   test("E08 reason and schedule name, E04 inviter are escaped", () => {
     const e08 = renderEmail(
       {
-        ...(fixtures.E08 as Extract<EmailTemplate, { id: "E08" }>),
+        ...fixtures.E08,
         reason: evil,
         scheduleName: evil,
       },
       "en",
     ).html;
-    const e04 = renderEmail(
-      { ...(fixtures.E04 as Extract<EmailTemplate, { id: "E04" }>), inviterName: evil },
-      "cs",
-    ).html;
+    const e04 = renderEmail({ ...fixtures.E04, inviterName: evil }, "cs").html;
     for (const html of [e08, e04]) {
       expect(html).not.toContain("<script>");
       expect(html).toContain("&lt;script&gt;");
@@ -386,10 +396,10 @@ describe("formatting", () => {
   });
 
   test("dates", () => {
-    expect(formatDate(date("2026-11-16"), "cs")).toBe(nb("16._11._2026"));
-    expect(formatDate(date("2026-01-05"), "cs")).toBe(nb("5._1._2026"));
-    expect(formatDate(date("2026-11-16"), "en")).toBe(nb("16_Nov_2026"));
-    expect(formatDate(date("2026-01-05"), "en")).toBe(nb("5_Jan_2026"));
+    expect(formatDate(IsoDate.make("2026-11-16"), "cs")).toBe(nb("16._11._2026"));
+    expect(formatDate(IsoDate.make("2026-01-05"), "cs")).toBe(nb("5._1._2026"));
+    expect(formatDate(IsoDate.make("2026-11-16"), "en")).toBe(nb("16_Nov_2026"));
+    expect(formatDate(IsoDate.make("2026-01-05"), "en")).toBe(nb("5_Jan_2026"));
   });
 
   test("durations use Czech plural forms", () => {
@@ -411,14 +421,14 @@ describe("formatting", () => {
   });
 
   test("HTML writes NBSP as &nbsp;; text keeps U+00A0", () => {
-    const out = renderEmail(fixtures.E05 as EmailTemplate, "cs");
+    const out = renderEmail(fixtures.E05, "cs");
     expect(out.html).toContain("58&nbsp;100,00&nbsp;Kč");
     expect(out.text).toContain(nb("58_100,00_Kč"));
   });
 });
 
 describe("document kinds in E05", () => {
-  const { paymentQr: _qr, ...base } = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
+  const { paymentQr: _qr, ...base } = fixtures.E05;
   test.each([
     ["proforma", "cs", "Zálohová faktura 2026-0042", "Zobrazit zálohovou fakturu a QR kód"],
     ["payment_tax_document", "cs", "Daňový doklad k přijaté platbě 2026-0042", "Přijatá platba"],
@@ -427,15 +437,15 @@ describe("document kinds in E05", () => {
   ] as const)("%s %s", (kind, locale, subjectStart, textFragment) => {
     const qr = kind === "proforma" ? { paymentQr: "spayd" as const } : {};
     const out = renderEmail({ ...base, ...qr, documentKind: kind }, locale);
-    expect(out.subject.startsWith(subjectStart)).toBe(true);
+    expect(Str.startsWith(subjectStart)(out.subject)).toBe(true);
     expect(out.text).toContain(textFragment);
-    if (kind !== "proforma") expect(out.text).not.toContain("QR");
+    expect(Str.includes("QR")(out.text)).toBe(kind === "proforma");
   });
 });
 
 describe("payment QR wording follows the document's actual QR", () => {
-  const e05 = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
-  const e06 = fixtures.E06 as Extract<EmailTemplate, { id: "E06" }>;
+  const e05 = fixtures.E05;
+  const e06 = fixtures.E06;
   const { paymentQr: _a, ...e05NoQr } = e05;
   const { paymentQr: _b, ...e06NoQr } = e06;
 
@@ -473,56 +483,48 @@ describe("payment QR wording follows the document's actual QR", () => {
 });
 
 describe("subjects and overrides", () => {
-  const e05 = fixtures.E05 as Extract<EmailTemplate, { id: "E05" }>;
+  const e05 = fixtures.E05;
 
   test("line breaks in interpolated names and overrides collapse to one header line", () => {
     const out = renderEmail({ ...e05, workspace: { name: "Ateliér\r\nKalný" } }, "cs");
     expect(out.subject).toBe(nb("Faktura 2026-0042 — Ateliér Kalný (58_100,00_Kč)"));
     expect(renderEmail({ ...e05, subject: " A\n\nB " }, "en").subject).toBe("A B");
-    const e04 = fixtures.E04 as Extract<EmailTemplate, { id: "E04" }>;
+    const e04 = fixtures.E04;
     expect(renderEmail({ ...e04, inviterName: "Filip\nKalný" }, "en").subject).not.toMatch(
-      /[\r\n]/,
+      HEADER_LINE_BREAK,
     );
   });
 
   test("blank subject and message overrides fall back to the defaults", () => {
     const out = renderEmail({ ...e05, subject: "  \n ", message: " \n\n " }, "cs");
-    expect(out.subject.startsWith("Faktura 2026-0042")).toBe(true);
+    expect(Str.startsWith("Faktura 2026-0042")(out.subject)).toBe(true);
     expect(out.text).toContain("v příloze zasíláme fakturu 2026-0042");
   });
 });
 
 describe("dark mode", () => {
   test("Kvitbit ink accents carry the dark-mode swap; workspace accents do not", () => {
-    const account = renderEmail(fixtures.E03 as EmailTemplate, "cs").html;
+    const account = renderEmail(fixtures.E03, "cs").html;
     expect(account).toContain(".kb-accent{background:#FAFAFA!important;}");
     expect(account).toContain(".kb-link{color:#FAFAFA!important;}");
-    expect(account.match(/class="kb-accent"/g)?.length).toBe(2); // stripe and button cell
-    expect(account.match(/class="kb-on-accent"/g)?.length).toBe(2); // tile and button text
+    expect(Str.split(account, 'class="kb-accent"').length - 1).toBe(2); // stripe and button cell
+    expect(Str.split(account, 'class="kb-on-accent"').length - 1).toBe(2); // tile and button text
     expect(account).toContain('class="kb-link"');
-    const ws = renderEmail(fixtures.E05 as EmailTemplate, "cs").html;
+    const ws = renderEmail(fixtures.E05, "cs").html;
     expect(ws).not.toContain('class="kb-accent"');
     expect(ws).not.toContain('class="kb-on-accent"');
-    const pill = renderEmail(fixtures.E08 as EmailTemplate, "en").html;
+    const pill = renderEmail(fixtures.E08, "en").html;
     expect(pill).toContain('class="kb-error"');
   });
 });
 
 describe("review round 1 regressions", () => {
-  test("render is the public alias of renderEmail", () => {
-    expect(render(fixtures.E02 as EmailTemplate, "en")).toEqual(
-      renderEmail(fixtures.E02 as EmailTemplate, "en"),
-    );
-  });
-
   test("initials keep astral letters whole and the HTML stays well-formed", () => {
-    const e04 = fixtures.E04 as Extract<EmailTemplate, { id: "E04" }>;
+    const e04 = fixtures.E04;
     for (const name of ["𠮷田商店", "𠮷田 商店", "s.r.o."]) {
       const html = renderEmail({ ...e04, workspace: { name } }, "cs").html;
       // No lone surrogate (String#isWellFormed is outside this repo's TS lib).
-      expect(html).not.toMatch(
-        /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/,
-      );
+      expect(html).not.toMatch(LONE_SURROGATE);
     }
     expect(renderEmail({ ...e04, workspace: { name: "𠮷田 商店" } }, "cs").html).toContain(
       ">𠮷商</div>",
@@ -532,26 +534,26 @@ describe("review round 1 regressions", () => {
   test("long unbroken values may wrap inside the card", () => {
     const html = renderEmail(
       {
-        ...(fixtures.E02 as Extract<EmailTemplate, { id: "E02" }>),
-        email: `${"a".repeat(60)}@example.com`,
+        ...fixtures.E02,
+        email: `${Str.repeat(60)("a")}@example.com`,
       },
       "en",
     ).html;
     expect(html).toContain("overflow-wrap:anywhere");
-    expect(html).toMatch(/word-break:break-all;">a{60}@example\.com/);
+    expect(html).toMatch(WRAPPED_EMAIL);
   });
 
   test("E08 wording does not assume an Invoice", () => {
     for (const locale of ["cs", "en"] as const) {
-      const out = renderEmail(fixtures.E08 as EmailTemplate, locale);
-      expect(out.subject + out.text).not.toMatch(/faktur|invoice/i);
+      const out = renderEmail(fixtures.E08, locale);
+      expect(out.subject + out.text).not.toMatch(INVOICE_WORDING);
     }
   });
 
   test("E06 uses the workspace reminder subject and message", () => {
     const out = renderEmail(
       {
-        ...(fixtures.E06 as Extract<EmailTemplate, { id: "E06" }>),
+        ...fixtures.E06,
         subject: "Custom reminder <2026-0042>",
         message: "First custom paragraph.\n\nSecond & last.",
       },

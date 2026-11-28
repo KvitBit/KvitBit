@@ -1,3 +1,6 @@
+import * as Effect from "effect/Effect";
+import { runMobileEffect } from "../runtime/request-intent";
+
 /**
  * What tests put in place of `expo-updates`, which Bun can't load (it needs
  * the native Expo modules). A test registers it before importing the module
@@ -9,16 +12,22 @@
 export const expoUpdatesStandIn = {
   isEnabled: false,
   isEmbeddedLaunch: true,
-  checkForUpdateAsync: async () => ({
-    isAvailable: false as const,
-    isRollBackToEmbedded: false as const,
-    manifest: undefined,
-    reason: undefined,
-  }),
-  fetchUpdateAsync: async () => ({
-    isNew: false as const,
-    isRollBackToEmbedded: false as const,
-    manifest: undefined,
-  }),
-  reloadAsync: async () => undefined,
+  checkForUpdateAsync: () =>
+    runMobileEffect(
+      Effect.succeed({
+        isAvailable: false as const,
+        isRollBackToEmbedded: false as const,
+        manifest: undefined,
+        reason: undefined,
+      }),
+    ),
+  fetchUpdateAsync: () =>
+    runMobileEffect(
+      Effect.succeed({
+        isNew: false as const,
+        isRollBackToEmbedded: false as const,
+        manifest: undefined,
+      }),
+    ),
+  reloadAsync: () => runMobileEffect(Effect.void),
 };

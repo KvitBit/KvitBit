@@ -1,10 +1,35 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { BRANDING_IMAGE_MAX_BYTES } from "@kvitbit/api-contract";
+import { BRANDING_IMAGE_MAX_BYTES, BrandingView } from "@kvitbit/api-contract";
+import { ImageRef, Invalid, OpenStruct } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
 
 let h: Harness;
 let owner: TestUser;
 let base: string;
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+const decodeBranding = Fn.flow(
+  Schema.decodeUnknownEffect(
+    Schema.toEncoded(
+      Schema.Struct({
+        ...BrandingView.fields,
+        resolvedTheme: Schema.NullOr(OpenStruct({ schemes: Schema.JsonObject })),
+      }),
+    ),
+  ),
+  Effect.runSync,
+);
+const decodeInvalid = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.toEncoded(Invalid)),
+  Effect.runSync,
+);
+const decodeImageRef = Fn.flow(Schema.decodeUnknownEffect(ImageRef), Effect.runSync);
 
 /** Minimal valid 1x1 PNG (starts with the 8-byte PNG signature). */
 const VALID_PNG = new Uint8Array([
@@ -45,12 +70,7 @@ describe("branding group", () => {
   test("getBranding and updateBranding with If-Match and resolvedTheme", async () => {
     const getRes = await h.fetch(base, { headers: as.mobile(owner) });
     expect(getRes.status).toBe(200);
-    const initial = (await getRes.json()) as {
-      pdfTemplate: string;
-      theme: unknown;
-      resolvedTheme: unknown;
-      revision: number;
-    };
+    const initial = decodeBranding(await getRes.json());
     expect(initial.pdfTemplate).toBe("classic");
     expect(initial.theme).toBeNull();
     expect(initial.resolvedTheme).toBeNull();
@@ -87,8 +107,8 @@ describe("branding group", () => {
       },
     });
     expect(badTheme.status).toBe(422);
-    const badBody = (await badTheme.json()) as { issues: Array<{ code: string }> };
-    expect(badBody.issues[0]?.code).toBe("theme.json_invalid");
+    const badBody = decodeInvalid(await badTheme.json());
+    expect(badBody.issues[0].code).toBe("theme.json_invalid");
 
     // Valid update with Preset theme populates resolvedTheme with all 6 schemes
     const ok = await h.fetch(base, {
@@ -106,15 +126,11 @@ describe("branding group", () => {
       },
     });
     expect(ok.status).toBe(200);
-    const updated = (await ok.json()) as {
-      pdfTemplate: string;
-      resolvedTheme: { schemes: Record<string, { roles: Record<string, string> }> } | null;
-      revision: number;
-    };
+    const updated = decodeBranding(await ok.json());
     expect(updated.pdfTemplate).toBe("modern_minimal");
     expect(ok.headers.get("etag")).toBe(`"${updated.revision}"`);
     expect(updated.resolvedTheme).not.toBeNull();
-    expect(Object.keys(updated.resolvedTheme?.schemes ?? {}).sort()).toEqual([
+    expect(Arr.sort(Rec.keys(updated.resolvedTheme?.schemes ?? {}), Order.String)).toEqual([
       "dark",
       "darkHigh",
       "darkMedium",
@@ -124,9 +140,9 @@ describe("branding group", () => {
     ]);
 
     // Subsequent GET also returns resolvedTheme
-    const afterGet = (await (await h.fetch(base, { headers: as.mobile(owner) })).json()) as {
-      resolvedTheme: unknown;
-    };
+    const afterGet = decodeBranding(
+      await (await h.fetch(base, { headers: as.mobile(owner) })).json(),
+    );
     expect(afterGet.resolvedTheme).toEqual(updated.resolvedTheme);
   });
 
@@ -154,10 +170,10 @@ describe("branding group", () => {
     // Valid PNG upload -> 200 ImageRef
     const putRes = await upload("logo", VALID_PNG, "image/png");
     expect(putRes.status).toBe(200);
-    const ref = (await putRes.json()) as { contentType: string; bytes: number; sha256: string };
+    const ref = decodeImageRef(await putRes.json());
     expect(ref.contentType).toBe("image/png");
     expect(ref.bytes).toBe(VALID_PNG.byteLength);
-    expect(ref.sha256).toMatch(/^[0-9a-f]{64}$/);
+    expect(ref.sha256).toMatch(SHA256_HEX);
 
     // Download returns exact bytes + strong ETag + private cache + nosniff
     const getRes = await h.fetch(`${base}/logo`, { headers: as.mobile(owner) });

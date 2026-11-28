@@ -1,17 +1,24 @@
 import { describe, expect, test } from "bun:test";
-import { BigDecimal } from "effect";
+import type { CnbFixing } from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { MalformedFeed, parseDailyTxt } from "../../src/fx";
 import { FRIDAY_FEED } from "./support";
 
-const rate = (fixing: ReturnType<typeof parseDailyTxt>, code: string) =>
-  fixing.rates.find((r) => r.code === code);
+const rate = (fixing: CnbFixing, code: string) =>
+  Option.getOrUndefined(Arr.findFirst(fixing.rates, (r) => r.code === code));
+
+const wrongColumns = "foo|bar";
+const columns = Arr.join(["země", "měna", "množství", "kód", "kurz"], "|");
 
 describe("parseDailyTxt", () => {
   test("reads the header date and sequence and every row", () => {
-    const fixing = parseDailyTxt(FRIDAY_FEED);
+    const fixing = Effect.runSync(parseDailyTxt(FRIDAY_FEED));
     expect<unknown>(fixing.fixingDate).toBe("2026-11-20");
     expect(fixing.sequence).toBe(223);
-    expect<unknown>(fixing.rates.map((r) => r.code)).toEqual([
+    expect<unknown>(Arr.map(fixing.rates, (r) => r.code)).toEqual([
       "AUD",
       "EUR",
       "IDR",
@@ -22,29 +29,32 @@ describe("parseDailyTxt", () => {
   });
 
   test("keeps množství and reads the decimal comma exactly", () => {
-    const fixing = parseDailyTxt(FRIDAY_FEED);
+    const fixing = Effect.runSync(parseDailyTxt(FRIDAY_FEED));
     const jpy = rate(fixing, "JPY");
     expect(jpy?.quantity).toBe(100);
     expect(rate(fixing, "IDR")?.quantity).toBe(1000);
-    expect(jpy && BigDecimal.format(jpy.rate)).toBe("15.123");
+    expect(jpy === undefined ? undefined : BigDecimal.format(jpy.rate)).toBe("15.123");
     const eur = rate(fixing, "EUR");
     expect(eur?.quantity).toBe(1);
-    expect(eur && BigDecimal.equals(eur.rate, BigDecimal.fromStringUnsafe("24.335"))).toBe(true);
+    expect(
+      eur !== undefined && BigDecimal.equals(eur.rate, BigDecimal.fromStringUnsafe("24.335")),
+    ).toBe(true);
   });
 
   test("accepts CRLF line endings and an integer rate", () => {
-    const text = "20.11.2026 #223\r\nzemě|měna|množství|kód|kurz\r\nX|y|1|XAU|1000\r\n";
-    const fixing = parseDailyTxt(text);
-    expect(fixing.rates[0] && BigDecimal.format(fixing.rates[0].rate)).toBe("1000");
+    const text = `20.11.2026 #223\r\n${columns}\r\nX|y|1|XAU|1000\r\n`;
+    const fixing = Effect.runSync(parseDailyTxt(text));
+    expect(
+      fixing.rates[0] === undefined ? undefined : BigDecimal.format(fixing.rates[0].rate),
+    ).toBe("1000");
   });
 
-  const columns = "země|měna|množství|kód|kurz";
   test.each([
     ["empty body", ""],
     ["HTML error page", "<html><body>Chyba</body></html>"],
     ["header without sequence", `20.11.2026\n${columns}\nEMU|euro|1|EUR|24,335`],
     ["impossible date", `31.02.2026 #40\n${columns}\nEMU|euro|1|EUR|24,335`],
-    ["wrong column header", "20.11.2026 #223\nfoo|bar\nEMU|euro|1|EUR|24,335"],
+    ["wrong column header", `20.11.2026 #223\n${wrongColumns}\nEMU|euro|1|EUR|24,335`],
     ["no rows", `20.11.2026 #223\n${columns}\n`],
     ["missing cell", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR`],
     ["decimal point", `20.11.2026 #223\n${columns}\nEMU|euro|1|EUR|24.335`],
@@ -58,6 +68,6 @@ describe("parseDailyTxt", () => {
     ["unsafe sequence", `20.11.2026 #99999999999999999\n${columns}\nEMU|euro|1|EUR|24,335`],
     ["zero quantity", `20.11.2026 #223\n${columns}\nEMU|euro|0|EUR|24,335`],
   ])("rejects %s", (_, text) => {
-    expect(() => parseDailyTxt(text)).toThrow(MalformedFeed);
+    parseDailyTxt(text).pipe(Effect.flip, Effect.runSync, expect).toBeInstanceOf(MalformedFeed);
   });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ExpenseId } from "@kvitbit/domain/contract";
+import { ExpenseId } from "@kvitbit/domain";
 import * as Expenses from "../../src/page/records/expenses";
 import {
   computeExpensePreview,
@@ -69,8 +69,8 @@ const SAMPLE_VIEW: ExpenseViewRecord = {
 describe("Expenses page TEA", () => {
   test("init loads expenses list and uses Czech term Náklady in cs", () => {
     const route: Expenses.Route = { _tag: "Expenses", ws: WS, query: {} };
-    const ctxCs = ctxFor(route, { locale: "cs" });
-    const ctxEn = ctxFor(route, { locale: "en" });
+    const ctxCs = ctxFor({ route, locale: "cs" });
+    const ctxEn = ctxFor({ route, locale: "en" });
     const res = Expenses.init(route, ctxCs);
     expect(res.model.list._tag).toBe("Loading");
     expect(res.commands?.length).toBe(1);
@@ -80,7 +80,7 @@ describe("Expenses page TEA", () => {
 
   test("stale-seq safety drops out-of-order list responses", () => {
     const route: Expenses.Route = { _tag: "Expenses", ws: WS, query: {} };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Expenses.init(route, ctx);
     // Switch filter bumps seq to 2
     model = Expenses.update(
@@ -103,10 +103,9 @@ describe("Expenses page TEA", () => {
       ctx,
     ).model;
     expect(model.list._tag).toBe("Loaded");
-    if (model.list._tag === "Loaded") {
-      expect(model.list.data).toHaveLength(1);
-      expect(model.list.data[0]?.status).toBe("incomplete");
-    }
+    if (model.list._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(model.list.data).toHaveLength(1);
+    expect(model.list.data[0]?.status).toBe("incomplete");
   });
 
   test("VAT & FX math preview computes partial deductibility and CNB CZK equivalent", () => {
@@ -148,7 +147,7 @@ describe("Expenses page TEA", () => {
 
   test("editor validates supplier IČO before calling ARES and fills supplier on success", () => {
     const route: Expenses.Route = { _tag: "Expense", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Expenses.init(route, ctx);
     model = Expenses.update(
       model,
@@ -203,7 +202,7 @@ describe("Expenses page TEA", () => {
 
   test("currency change to EUR fetches CNB FX rate and updates preview", () => {
     const route: Expenses.Route = { _tag: "Expense", ws: WS, id: "new", mode: "edit" };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     const { model } = Expenses.init(route, ctx);
     const changed = Expenses.update(
       model,
@@ -226,10 +225,10 @@ describe("Expenses page TEA", () => {
     const route: Expenses.Route = {
       _tag: "Expense",
       ws: WS,
-      id: SAMPLE_VIEW.id as ExpenseId,
+      id: ExpenseId.make(SAMPLE_VIEW.id),
       mode: "view",
     };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = Expenses.init(route, ctx);
     model = Expenses.update(
       model,

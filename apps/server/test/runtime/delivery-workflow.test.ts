@@ -13,9 +13,17 @@ import {
   Workspaces,
 } from "@kvitbit/domain/contract";
 import { EmailNotAccepted, EmailSender } from "@kvitbit/domain/ports";
-import { BigDecimal, Cause, Duration, Effect, Layer, Option, Schedule, Schema } from "effect";
-import { SqlClient } from "effect/sql";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
+import * as TestClock from "effect/testing/TestClock";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { PgliteTestDatabase } from "../../src/persistence";
@@ -25,7 +33,7 @@ import {
   makeWorkflowHandlersLayer,
 } from "../../src/runtime/workflows";
 import { DeliveryJobsLive } from "../../src/wiring/workflows";
-import { asCaller, runSqlCore } from "../persistence/conformance/sqlCore";
+import { runSqlCore } from "../persistence/conformance/sqlCore";
 
 test.each([
   { succeeds: true, expired: false, expectedAttempts: 2, terminal: "sent" },
@@ -49,67 +57,67 @@ test.each([
           attemptedKeys.push(idempotencyKey);
           return succeeds && attemptedKeys.length === 2
             ? Effect.succeed({ provider: "fixture", providerMessageId: "sent" })
-            : Effect.fail(new EmailNotAccepted({}));
+            : Effect.fail(EmailNotAccepted.make({}));
         }),
     });
-    const exit = await runSqlCore(
-      Caller.account({ ...user, channel: "web", locale: "cs" }),
-      Effect.gen(function* () {
+    const exit = await runSqlCore({
+      effect: Effect.gen(function* () {
         const workspaces = yield* Workspaces;
         const contacts = yield* Contacts;
         const documents = yield* Documents;
-        const caller = yield* workspaces.create({ name: "Delivery fixture" });
-        return yield* asCaller(
-          caller,
-          Effect.gen(function* () {
-            const contact = yield* contacts.save({ name: "Buyer", roles: ["customer"] });
-            const doc = yield* documents.issue({
-              input: {
-                kind: "invoice",
-                contact: Schema.decodeUnknownSync(ContactId)(contact.id),
-                issuedOn: IsoDate.make("2026-11-23"),
-                currency: CurrencyCode.make("CZK"),
-                due: { inDays: 14 },
-                paymentMethod: "cash",
-                lines: [
-                  {
-                    description: "Fixture",
-                    quantity: BigDecimal.fromBigInt(1n),
-                    unitPrice: BigDecimal.fromBigInt(50n),
-                  },
-                ],
-              },
-            });
-            const { deliveryId: id } = yield* documents.send(doc.id, {
-              to: ["buyer@example.test"],
-            });
-            if (expired) {
-              // A recovered intent keeps its original time budget even without a live execution.
-              const sql = yield* SqlClient.SqlClient;
-              yield* sql`UPDATE deliveries SET workflow_started_at = '2020-01-01T00:00:00Z'
-                WHERE workspace_id = ${caller.workspaceId} AND id = ${id}`;
-            }
-            const outcome = yield* DocumentDeliveryWorkflow.execute({
-              workspaceId: caller.workspaceId,
-              deliveryId: id,
-            }).pipe(Effect.provide(workflow), Effect.provideService(EmailSender, email));
-            const updated = yield* documents.get(doc.id);
-            return {
-              id,
-              outcome,
-              status: updated.deliveries.find((entry) => entry.id === id)?.status,
-            };
-          }),
+        const caller = yield* workspaces.create(
+          Caller.account({ ...user, channel: "web", locale: "cs" }),
+          { name: "Delivery fixture" },
         );
+        const contact = yield* contacts.save(caller, { name: "Buyer", roles: ["customer"] });
+        const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
+        const doc = yield* documents.issue(caller, {
+          input: {
+            kind: "invoice",
+            contact: contactId,
+            issuedOn: IsoDate.make("2026-11-23"),
+            currency: CurrencyCode.make("CZK"),
+            due: { inDays: 14 },
+            paymentMethod: "cash",
+            lines: [
+              {
+                description: "Fixture",
+                quantity: BigDecimal.fromBigInt(1n),
+                unitPrice: BigDecimal.fromBigInt(50n),
+              },
+            ],
+          },
+        });
+        const { deliveryId: id } = yield* documents.send(caller, doc.id, {
+          to: ["buyer@example.test"],
+        });
+        if (expired) {
+          // A recovered intent keeps its original time budget even without a live execution.
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`UPDATE deliveries SET workflow_started_at = '2020-01-01T00:00:00Z'
+                WHERE workspace_id = ${caller.workspaceId} AND id = ${id}`;
+        }
+        const outcome = yield* DocumentDeliveryWorkflow.execute({
+          workspaceId: caller.workspaceId,
+          deliveryId: id,
+        }).pipe(Effect.provide(workflow), Effect.provideService(EmailSender, email));
+        const updated = yield* documents.get(caller, doc.id);
+        return {
+          id,
+          outcome,
+          status: Option.getOrUndefined(
+            Arr.findFirst(updated.deliveries, (entry) => entry.id === id),
+          )?.status,
+        };
       }),
-      { users: [user] },
-    );
+      options: { users: [user] },
+    });
     expect(exit).toMatchObject({
       _tag: "Success",
       value: { outcome: terminal, status: terminal },
     });
     expect(attemptedKeys).toHaveLength(expectedAttempts);
-    if (!expired) expect(new Set(attemptedKeys).size).toBe(1);
+    expect(new Set(attemptedKeys).size).toBe(expired ? 0 : 1);
   },
   30_000,
 );
@@ -191,21 +199,22 @@ test("the default delivery retry policy caps spacing and total elapsed time", as
       const schedule = yield* Schedule.toStep(DEFAULT_DELIVERY_RETRY_SCHEDULE);
       const delays: number[] = [];
       let elapsed = 0;
-      for (;;) {
-        const next = yield* schedule(elapsed, undefined).pipe(
-          Effect.catchIf(Cause.isDone, () => Effect.succeed(null)),
-        );
-        if (next === null) return delays;
+      const nextStep = (time: number) =>
+        schedule(time, undefined).pipe(Effect.catchIf(Cause.isDone, () => Effect.succeed(null)));
+      let next = yield* nextStep(elapsed);
+      while (next !== null) {
         const delay = Duration.toMillis(next[1]);
         delays.push(delay);
         elapsed += delay;
+        next = yield* nextStep(elapsed);
       }
+      return delays;
     }),
   );
   expect(waits[0]).toBe(30_000);
   expect(waits[1]).toBe(60_000);
   expect(Math.max(...waits)).toBe(3_600_000);
-  const total = waits.reduce((sum, delay) => sum + delay, 0);
+  const total = Arr.reduce(waits, 0, (sum, delay) => sum + delay);
   expect(total).toBeLessThanOrEqual(86_400_000);
   expect(total).toBeGreaterThan(86_400_000 - 3_600_000);
 });

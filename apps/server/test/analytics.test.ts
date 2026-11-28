@@ -1,9 +1,12 @@
 import { expect, mock, test } from "bun:test";
 import { WorkspaceId } from "@kvitbit/domain/contract";
-import { ConfigProvider, Effect } from "effect";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
 import { PostHogConfig } from "../src/config";
 import { Analytics, makeAnalyticsLayer } from "../src/runtime/analytics";
 import { captureAnalytics, posthogSettings } from "./analytics-fixture";
+
+const distinctIdPattern = /^[a-f\d-]{36}$/;
 
 const readConfig = (env: Record<string, string>) =>
   Effect.runPromise(PostHogConfig.parse(ConfigProvider.fromEnv({ env })));
@@ -61,7 +64,7 @@ test("analytics allowlists event fields, validates IDs, and awaits the SDK flush
   };
   let captureCountAtShutdown = 0;
   shutdown.mockImplementation(async () => {
-    await new Promise<void>((resume) => setImmediate(resume));
+    await Effect.runPromise(Effect.yieldNow);
     captureCountAtShutdown = capture.mock.calls.length;
   });
 
@@ -196,7 +199,7 @@ test("analytics allowlists event fields, validates IDs, and awaits the SDK flush
     [
       {
         event: "share_link_opened",
-        distinctId: expect.stringMatching(/^[a-f\d-]{36}$/),
+        distinctId: expect.stringMatching(distinctIdPattern),
         options: { process_person_profile: false },
       },
     ],

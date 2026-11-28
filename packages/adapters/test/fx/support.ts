@@ -5,8 +5,9 @@ import { PGlite } from "@electric-sql/pglite";
 import { ExchangeRates } from "@kvitbit/domain/ports";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
-import { Effect, Layer } from "effect";
-import type { SqlClient } from "effect/sql";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import type * as SqlClient from "effect/sql/SqlClient";
 
 /** Friday 2026-11-20 in the shape CNB serves it (a few currencies, illustrative rates). */
 export const FRIDAY_FEED = `20.11.2026 #223
@@ -27,14 +28,17 @@ export type Reply = { readonly status?: number; readonly body: string } | Error;
  */
 export const scriptedFetch = (replies: Readonly<Record<string, Reply>>) => {
   const calls: Array<URL> = [];
-  const fetch = (async (input: Request | string | URL) => {
-    const url = new URL(input instanceof Request ? input.url : input.toString());
-    calls.push(url);
-    const reply = replies[url.searchParams.get("date") ?? ""];
-    if (reply instanceof Error) throw reply;
-    if (reply === undefined) return new Response("not found", { status: 404 });
-    return new Response(reply.body, { status: reply.status ?? 200 });
-  }) as typeof globalThis.fetch;
+  const fetch: typeof globalThis.fetch = Object.assign(
+    (input: Request | string | URL) => {
+      const url = new URL(input instanceof Request ? input.url : input.toString());
+      calls.push(url);
+      const reply = replies[url.searchParams.get("date") ?? ""];
+      if (reply instanceof Error) return Promise.reject(reply);
+      if (reply === undefined) return Promise.resolve(new Response("not found", { status: 404 }));
+      return Promise.resolve(new Response(reply.body, { status: reply.status ?? 200 }));
+    },
+    { preconnect: () => undefined },
+  );
   return { fetch, calls };
 };
 
@@ -45,13 +49,10 @@ export const migratedPglite: Layer.Layer<SqlClient.SqlClient | PgliteClient.Pgli
   PgliteClient.layerFrom(
     Effect.gen(function* () {
       const client = yield* Effect.acquireRelease(
-        Effect.promise(async () => {
-          const pglite = new PGlite();
-          await migrate(drizzle({ client: pglite }), { migrationsFolder });
-          return pglite;
-        }),
+        Effect.sync(() => new PGlite()),
         (pglite) => Effect.promise(() => pglite.close()),
       );
+      yield* Effect.promise(() => migrate(drizzle({ client }), { migrationsFolder }));
       return yield* PgliteClient.fromClient({ liveClient: client });
     }),
   ).pipe(Layer.orDie);

@@ -12,15 +12,22 @@
  * chunk by chunk while reading; a body over the limit cancels its session, so no object is
  * created. `get` streams the download, `delete` treats 404 as done.
  */
+
 import { type BlobKey, BlobMissing, BlobStorage, BlobUnavailable } from "@kvitbit/domain/ports";
-import { Config, Data, Duration, Effect, Layer, Schedule, Stream } from "effect";
-import {
-  Headers,
-  HttpClient,
-  HttpClientRequest,
-  type HttpClientResponse,
-  UrlParams,
-} from "effect/http";
+import * as Config from "effect/Config";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Headers from "effect/http/Headers";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import type * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as UrlParams from "effect/http/UrlParams";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { checkKey, consumeBounded } from "./common";
 import { GcsAccessToken } from "./gcs-access-token";
 
@@ -43,16 +50,21 @@ export interface GcsBlobStorageOptions {
   readonly chunkSize?: number | undefined;
 }
 
+const trailingSlashes = /\/+$/;
+const persistedRange = /^bytes=0-(\d+)$/;
 const chunkGranularity = 256 * 1024;
 
 /** Why an attempt failed when another may succeed. */
-class Transient extends Data.TaggedError("Transient")<{ readonly cause: unknown }> {}
+class Transient extends Schema.TaggedError<Transient, { readonly brand: unique symbol }>()(
+  "Transient",
+  { cause: Schema.Defect() },
+) {}
 
 const isTransientStatus = (status: number) => status === 408 || status === 429 || status >= 500;
 
 /** `bytes=0-N` from a 308: the persisted byte count, N + 1; none persisted without a header. */
 const persistedBytes = (response: HttpClientResponse.HttpClientResponse) => {
-  const match = /^bytes=0-(\d+)$/.exec(response.headers.range ?? "");
+  const match = persistedRange.exec(response.headers["range"] ?? "");
   return match?.[1] === undefined ? 0 : Number(match[1]) + 1;
 };
 
@@ -66,7 +78,10 @@ const make = (
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
     const tokens = yield* GcsAccessToken;
-    const endpoint = (options.endpoint ?? "https://storage.googleapis.com").replace(/\/+$/, "");
+    const endpoint = Str.replace(
+      trailingSlashes,
+      "",
+    )(options.endpoint ?? "https://storage.googleapis.com");
     const bucket = encodeURIComponent(options.bucket);
     const objectUrl = (key: BlobKey) =>
       `${endpoint}/storage/v1/b/${bucket}/o/${encodeURIComponent(key)}`;
@@ -104,62 +119,57 @@ const make = (
         : Effect.map(bodyText(response), (body) => ({
             operation,
             status: response.status,
-            body: body.slice(0, 500),
+            body: Str.slice(0, 500)(body),
           }));
     const refused = (operation: string, response: HttpClientResponse.HttpClientResponse) =>
       Effect.flatMap(statusCause(operation, response), (cause) =>
-        Effect.fail(new BlobUnavailable({ cause })),
+        Effect.fail(BlobUnavailable.make({ cause })),
       );
 
-    const getToken = tokens.get.pipe(Effect.mapError((cause) => new BlobUnavailable({ cause })));
-    const execute = (
+    const getToken = tokens.get.pipe(Effect.mapError((cause) => BlobUnavailable.make({ cause })));
+    const execute = Effect.fn("GcsBlob.execute")(function* (
       operation: string,
       request: HttpClientRequest.HttpClientRequest,
       token: string,
-    ) =>
-      Effect.gen(function* () {
-        // A resumable session URI is an upload credential: keep its id and the `Location`
-        // that carries it out of spans and rendered errors.
-        const urlNames = yield* UrlParams.CurrentRedactedNames;
-        const headerNames = yield* Headers.CurrentRedactedNames;
-        return yield* client
-          .execute(HttpClientRequest.bearerToken(request, token))
-          .pipe(
-            Effect.provideService(UrlParams.CurrentRedactedNames, [...urlNames, "upload_id"]),
-            Effect.provideService(Headers.CurrentRedactedNames, [...headerNames, "location"]),
-          );
-      }).pipe(
+    ) {
+      // A resumable session URI is an upload credential. Keep the id and Location out of telemetry.
+      const urlNames = yield* UrlParams.CurrentRedactedNames;
+      const headerNames = yield* Headers.CurrentRedactedNames;
+      return yield* client.execute(HttpClientRequest.bearerToken(request, token)).pipe(
+        Effect.provideService(UrlParams.CurrentRedactedNames, [...urlNames, "upload_id"]),
+        Effect.provideService(Headers.CurrentRedactedNames, [...headerNames, "location"]),
         Effect.timeoutOrElse({
           duration: timeout,
           orElse: () => Effect.fail({ operation, reason: "timeout" }),
         }),
-        Effect.mapError((cause) => new Transient({ cause })),
+        Effect.mapError((cause) => Transient.make({ cause })),
       );
+    });
 
     /**
      * One request. A 401 drops the token and resends once, at once, if a refresh yields a
      * different one. A transient status or a lost connection fails with `Transient`; a token
      * failure is final (the token layer retries on its own).
      */
-    const attempt = (operation: string, request: HttpClientRequest.HttpClientRequest) =>
-      Effect.gen(function* () {
-        const token = yield* getToken;
-        let response = yield* execute(operation, request, token);
-        if (response.status === 401) {
-          yield* tokens.invalidate(token);
-          const fresh = yield* getToken;
-          if (fresh === token) return yield* refused(operation, response);
-          yield* drain(response);
-          response = yield* execute(operation, request, fresh);
-          if (response.status === 401) return yield* refused(operation, response);
-        }
-        if (isTransientStatus(response.status)) {
-          return yield* Effect.fail(
-            new Transient({ cause: yield* statusCause(operation, response) }),
-          );
-        }
-        return response;
-      });
+    const attempt = Effect.fn("attempt")(function* (
+      operation: string,
+      request: HttpClientRequest.HttpClientRequest,
+    ) {
+      const token = yield* getToken;
+      let response = yield* execute(operation, request, token);
+      if (response.status === 401) {
+        yield* tokens.invalidate(token);
+        const fresh = yield* getToken;
+        if (fresh === token) return yield* refused(operation, response);
+        yield* drain(response);
+        response = yield* execute(operation, request, fresh);
+        if (response.status === 401) return yield* refused(operation, response);
+      }
+      if (isTransientStatus(response.status)) {
+        return yield* Transient.make({ cause: yield* statusCause(operation, response) });
+      }
+      return response;
+    });
 
     const delayFor = (failures: number) => Duration.millis(backoff * 2 ** (failures - 1));
 
@@ -171,27 +181,26 @@ const make = (
           times: retries,
           while: (error) => error._tag === "Transient",
         }),
-        Effect.catchTag("Transient", ({ cause }) => Effect.fail(new BlobUnavailable({ cause }))),
+        Effect.catchTag("Transient", ({ cause }) => Effect.fail(BlobUnavailable.make({ cause }))),
       );
 
     // Resumable uploads -------------------------------------------------------------------
 
-    const startSession = (key: BlobKey, contentType: string) =>
-      Effect.gen(function* () {
-        const response = yield* send(
-          "put",
-          HttpClientRequest.post(uploadUrl).pipe(
-            HttpClientRequest.setUrlParams({ uploadType: "resumable", name: key }),
-            HttpClientRequest.setHeader("X-Upload-Content-Type", contentType),
-          ),
-        );
-        const location = response.headers.location;
-        if (response.status !== 200 || location === undefined) {
-          return yield* refused("put", response);
-        }
-        yield* drain(response);
-        return location;
-      });
+    const startSession = Effect.fn("startSession")(function* (key: BlobKey, contentType: string) {
+      const response = yield* send(
+        "put",
+        HttpClientRequest.post(uploadUrl).pipe(
+          HttpClientRequest.setUrlParams({ uploadType: "resumable", name: key }),
+          HttpClientRequest.setHeader("X-Upload-Content-Type", contentType),
+        ),
+      );
+      const location = response.headers["location"];
+      if (response.status !== 200 || location === undefined) {
+        return yield* refused("put", response);
+      }
+      yield* drain(response);
+      return location;
+    });
 
     /** Frees an unfinished session; nothing was committed, so failures are ignored. */
     const cancelSession = (session: string) =>
@@ -223,18 +232,19 @@ const make = (
       );
       const loop = (from: number, failures: number): Effect.Effect<void, BlobUnavailable> => {
         if (failures > retries) {
-          return Effect.fail(new BlobUnavailable({ cause: "resumable upload made no progress" }));
+          return Effect.fail(BlobUnavailable.make({ cause: "resumable upload made no progress" }));
         }
         const settle = (answer: ChunkAnswer, nextFailures: number, afterTransient: boolean) => {
           if (answer._tag === "Done") {
-            return total === undefined
-              ? Effect.fail(new BlobUnavailable({ cause: "GCS finalized the upload early" }))
-              : Effect.void;
+            if (total === undefined) {
+              return Effect.fail(BlobUnavailable.make({ cause: "GCS finalized the upload early" }));
+            }
+            return Effect.void;
           }
           if (answer.bytes === end && total === undefined) return Effect.void;
           if (answer.bytes < start || answer.bytes > end) {
             return Effect.fail(
-              new BlobUnavailable({ cause: { reason: "persisted offset out of range", answer } }),
+              BlobUnavailable.make({ cause: { reason: "persisted offset out of range", answer } }),
             );
           }
           // Resend the rest. A transient failure was already counted; a 308 that persisted
@@ -256,7 +266,7 @@ const make = (
           Effect.flatMap((answer) => settle(answer, failures, false)),
           Effect.catchTag("Transient", (error) =>
             failures + 1 > retries
-              ? Effect.fail(new BlobUnavailable({ cause: error.cause }))
+              ? Effect.fail(BlobUnavailable.make({ cause: error.cause }))
               : Effect.sleep(delayFor(failures + 1)).pipe(
                   Effect.andThen(send("session", status)),
                   Effect.flatMap(answerOf),
@@ -268,128 +278,118 @@ const make = (
       return loop(start, 0);
     };
 
-    const mediaUpload = (key: BlobKey, data: Uint8Array, contentType: string) =>
-      Effect.gen(function* () {
-        const response = yield* send(
-          "put",
-          HttpClientRequest.post(uploadUrl).pipe(
-            HttpClientRequest.setUrlParams({ uploadType: "media", name: key }),
-            HttpClientRequest.bodyUint8Array(data, contentType),
-          ),
-        );
-        if (response.status !== 200) return yield* refused("put", response);
-        yield* drain(response);
-      });
+    const mediaUpload = Effect.fn("mediaUpload")(function* (
+      key: BlobKey,
+      data: Uint8Array,
+      contentType: string,
+    ) {
+      const response = yield* send(
+        "put",
+        HttpClientRequest.post(uploadUrl).pipe(
+          HttpClientRequest.setUrlParams({ uploadType: "media", name: key }),
+          HttpClientRequest.bodyUint8Array(data, contentType),
+        ),
+      );
+      if (response.status !== 200) return yield* refused("put", response);
+      yield* drain(response);
+    });
 
     return BlobStorage.of({
-      put: (key, body, meta) =>
-        Effect.gen(function* () {
-          yield* checkKey(key);
-          // One buffer per upload, reused for every chunk: it starts small so short bodies
-          // stay cheap and grows once, to `chunkSize`.
-          const state: {
-            buffer: Uint8Array;
-            filled: number;
-            sent: number;
-            session: string | undefined;
-          } = {
-            buffer: new Uint8Array(Math.min(chunkSize, chunkGranularity)),
-            filled: 0,
-            sent: 0,
-            session: undefined,
-          };
-          /** Sends the full buffer, opening the session first if needed, then reuses it. */
-          const flush = Effect.gen(function* () {
-            const session = state.session ?? (yield* startSession(key, meta.contentType));
-            state.session = session;
-            yield* sendChunk(
-              session,
-              state.buffer.subarray(0, state.filled),
-              state.sent,
-              undefined,
-            );
-            state.sent += state.filled;
-            state.filled = 0;
-          });
-          // A full chunk is sent only once more bytes arrive, so a body of at most one chunk
-          // always takes the single-request path.
-          const onChunk = (chunk: Uint8Array) =>
-            Effect.gen(function* () {
-              let rest = chunk;
-              while (rest.byteLength > 0) {
-                if (state.filled === chunkSize) yield* flush;
-                if (state.filled === state.buffer.byteLength) {
-                  const grown = new Uint8Array(chunkSize);
-                  grown.set(state.buffer.subarray(0, state.filled));
-                  state.buffer = grown;
-                }
-                const take = Math.min(state.buffer.byteLength - state.filled, rest.byteLength);
-                // Copies, so a producer reusing its buffer cannot change what is sent.
-                state.buffer.set(rest.subarray(0, take), state.filled);
-                state.filled += take;
-                rest = rest.subarray(take);
-              }
-            });
-          const upload = Effect.gen(function* () {
-            const consumed = yield* consumeBounded(body, meta.maxBytes, onChunk);
-            const last = state.buffer.subarray(0, state.filled);
-            if (state.session === undefined) {
-              yield* mediaUpload(key, last, meta.contentType);
-            } else {
-              yield* sendChunk(state.session, last, state.sent, consumed.bytes);
+      put: Effect.fn("BlobStorage.put")(function* (key, body, meta) {
+        yield* checkKey(key);
+        // One buffer per upload, reused for every chunk: it starts small so short bodies
+        // stay cheap and grows once, to `chunkSize`.
+        const state = {
+          buffer: new Uint8Array(Math.min(chunkSize, chunkGranularity)),
+          filled: 0,
+          sent: 0,
+          session: Option.none<string>(),
+        };
+        /** Sends the full buffer, opening the session first if needed, then reuses it. */
+        const flush = Effect.gen(function* () {
+          const session = Option.isSome(state.session)
+            ? state.session.value
+            : yield* startSession(key, meta.contentType);
+          state.session = Option.some(session);
+          yield* sendChunk(session, state.buffer.subarray(0, state.filled), state.sent, undefined);
+          state.sent += state.filled;
+          state.filled = 0;
+        });
+        // A full chunk is sent only once more bytes arrive, so a body of at most one chunk
+        // always takes the single-request path.
+        const onChunk = Effect.fn("onChunk")(function* (chunk: Uint8Array) {
+          let rest = chunk;
+          while (rest.byteLength > 0) {
+            if (state.filled === chunkSize) yield* flush;
+            if (state.filled === state.buffer.byteLength) {
+              const grown = new Uint8Array(chunkSize);
+              grown.set(state.buffer.subarray(0, state.filled));
+              state.buffer = grown;
             }
-            return consumed;
-          });
-          const { bytes, sha256 } = yield* upload.pipe(
-            Effect.onExit((exit) =>
-              exit._tag === "Failure" && state.session !== undefined
-                ? cancelSession(state.session)
-                : Effect.void,
-            ),
-          );
-          return { key, bytes, sha256 };
-        }),
-      get: (key) =>
-        Effect.gen(function* () {
-          yield* checkKey(key);
-          const response = yield* send(
-            "get",
-            HttpClientRequest.get(objectUrl(key)).pipe(
-              HttpClientRequest.setUrlParams({ alt: "media" }),
-            ),
-          );
-          if (response.status === 404) {
-            yield* drain(response);
-            return yield* Effect.fail(new BlobMissing({ key }));
+            const take = Math.min(state.buffer.byteLength - state.filled, rest.byteLength);
+            // Copies, so a producer reusing its buffer cannot change what is sent.
+            state.buffer.set(rest.subarray(0, take), state.filled);
+            state.filled += take;
+            rest = rest.subarray(take);
           }
-          if (response.status !== 200) return yield* refused("get", response);
-          // An empty object may come with no body at all, which `response.stream` rejects.
-          if (response.headers["content-length"] === "0") {
-            yield* drain(response);
-            return Stream.empty;
+        });
+        const upload = Effect.gen(function* () {
+          const consumed = yield* consumeBounded(body, meta.maxBytes, onChunk);
+          const last = state.buffer.subarray(0, state.filled);
+          if (Option.isNone(state.session)) {
+            yield* mediaUpload(key, last, meta.contentType);
+          } else {
+            yield* sendChunk(state.session.value, last, state.sent, consumed.bytes);
           }
-          // The port's stream has no error channel: a connection lost or stalled mid-body is a
-          // defect.
-          return response.stream.pipe(
-            Stream.timeoutOrElse({
-              duration: idleTimeout,
-              orElse: () =>
-                Stream.die(
-                  new BlobUnavailable({ cause: { operation: "get", reason: "idle timeout" } }),
-                ),
-            }),
-            Stream.orDie,
-          );
-        }),
-      delete: (key) =>
-        Effect.gen(function* () {
-          yield* checkKey(key);
-          const response = yield* send("delete", HttpClientRequest.delete(objectUrl(key)));
-          if (response.status !== 200 && response.status !== 204 && response.status !== 404) {
-            return yield* refused("delete", response);
-          }
+          return consumed;
+        });
+        const { bytes, sha256 } = yield* upload.pipe(
+          Effect.onError(() => {
+            if (Option.isSome(state.session)) return cancelSession(state.session.value);
+            return Effect.void;
+          }),
+        );
+        return { key, bytes, sha256 };
+      }),
+      get: Effect.fn("BlobStorage.get")(function* (key) {
+        yield* checkKey(key);
+        const response = yield* send(
+          "get",
+          HttpClientRequest.get(objectUrl(key)).pipe(
+            HttpClientRequest.setUrlParams({ alt: "media" }),
+          ),
+        );
+        if (response.status === 404) {
           yield* drain(response);
-        }),
+          return yield* BlobMissing.make({ key });
+        }
+        if (response.status !== 200) return yield* refused("get", response);
+        // An empty object may come with no body at all, which `response.stream` rejects.
+        if (response.headers["content-length"] === "0") {
+          yield* drain(response);
+          return Stream.empty;
+        }
+        // The port's stream has no error channel: a connection lost or stalled mid-body is a
+        // defect.
+        return response.stream.pipe(
+          Stream.timeoutOrElse({
+            duration: idleTimeout,
+            orElse: () =>
+              Stream.die(
+                BlobUnavailable.make({ cause: { operation: "get", reason: "idle timeout" } }),
+              ),
+          }),
+          Stream.orDie,
+        );
+      }),
+      delete: Effect.fn("BlobStorage.delete")(function* (key) {
+        yield* checkKey(key);
+        const response = yield* send("delete", HttpClientRequest.delete(objectUrl(key)));
+        if (response.status !== 200 && response.status !== 204 && response.status !== 404) {
+          return yield* refused("delete", response);
+        }
+        yield* drain(response);
+      }),
     });
   });
 

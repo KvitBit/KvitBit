@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { Effect, Layer } from "effect";
-import { HttpClient, type HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as Effect from "effect/Effect";
+import * as HttpClient from "effect/http/HttpClient";
+import type * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import { GcsAccessToken, GcsAccessTokens, metadataServerTokenUrl } from "../../src/blob/index";
 
 /** A metadata server answering with `answers` in turn (the last one repeats). */
@@ -28,14 +32,17 @@ const run = <A, E>(
 ) =>
   Effect.runPromise(
     Effect.gen(function* () {
-      return yield* f(yield* GcsAccessToken);
+      const GcsAccessToken_1 = yield* GcsAccessToken;
+      return yield* f(GcsAccessToken_1);
     }).pipe(Effect.provide(layer)),
   );
 
 describe("GcsAccessTokens.metadataServer", () => {
   test("asks the metadata server with Metadata-Flavor and caches the token", async () => {
     const server = metadata([token("t1", 3600), token("t2", 3600)]);
-    const tokens = await run(server.layer, (t) => Effect.all([t.get, t.get, t.get]));
+    const tokens = await run(server.layer, (t) =>
+      Effect.all([t.get, t.get, t.get], { concurrency: 1 }),
+    );
     expect(tokens).toEqual(["t1", "t1", "t1"]);
     expect(server.seen).toHaveLength(1);
     expect(server.seen[0]?.url).toBe(metadataServerTokenUrl);
@@ -44,7 +51,9 @@ describe("GcsAccessTokens.metadataServer", () => {
 
   test("refreshes a token within a minute of expiry", async () => {
     const server = metadata([token("t1", 60), token("t2", 3600)]);
-    const tokens = await run(server.layer, (t) => Effect.all([t.get, t.get, t.get]));
+    const tokens = await run(server.layer, (t) =>
+      Effect.all([t.get, t.get, t.get], { concurrency: 1 }),
+    );
     expect(tokens).toEqual(["t1", "t2", "t2"]);
   });
 
@@ -66,7 +75,9 @@ describe("GcsAccessTokens.metadataServer", () => {
     const refused = metadata([() => new Response("secret detail", { status: 403 })]);
     const error = await run(refused.layer, (t) => Effect.flip(t.get));
     expect(error).toMatchObject({ _tag: "GcsAccessTokenError", reason: "status", httpStatus: 403 });
-    expect(JSON.stringify(error)).not.toContain("secret detail");
+    const encodeJson = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+    const serialized = encodeJson(error).pipe(Effect.runSync);
+    expect(serialized).not.toContain("secret detail");
 
     const malformed = metadata([() => Response.json({ access_token: "" })]);
     const invalid = await run(malformed.layer, (t) => Effect.flip(t.get));

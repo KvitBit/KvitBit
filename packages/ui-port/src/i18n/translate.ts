@@ -1,3 +1,7 @@
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Predicate from "effect/Predicate";
+import * as Str from "effect/String";
 import { formatExact, roundedDecimal } from "../format/number";
 import type { Text, TextParam } from "../text";
 import { catalogs, type EnCatalog, isMessageKey, type MessageKey } from "./catalog";
@@ -25,7 +29,7 @@ const pluralRules = new Map<Locale, Intl.PluralRules | null>();
 const rulesFor = (locale: Locale): Intl.PluralRules | null => {
   let rules = pluralRules.get(locale);
   if (rules === undefined) {
-    rules = typeof Intl.PluralRules === "function" ? new Intl.PluralRules(INTL_TAG[locale]) : null;
+    rules = Predicate.isFunction(Intl.PluralRules) ? new Intl.PluralRules(INTL_TAG[locale]) : null;
     pluralRules.set(locale, rules);
   }
   return rules;
@@ -38,14 +42,23 @@ const shown = (n: number): number =>
   Number.isFinite(n) ? Number(roundedDecimal(n, 0, PARAM_FRACTION_DIGITS)) : n;
 
 /** Plural category of `count` in `locale` (cs: one, few, many, other; en: one, other). */
-export const pluralCategory = (locale: Locale, count: number): Intl.LDMLPluralRule => {
+export const pluralCategory: {
+  (count: number): (locale: Locale) => Intl.LDMLPluralRule;
+  (locale: Locale, count: number): Intl.LDMLPluralRule;
+} = Fn.dual(2, (locale: Locale, count: number): Intl.LDMLPluralRule => {
   const n = Math.abs(shown(count));
   return rulesFor(locale)?.select(n) ?? fallbackPlural(locale, n);
-};
+});
 
 /** Exported for tests: the fallback must agree with Intl where Intl exists. */
-export const fallbackPluralCategory = (locale: Locale, count: number): Intl.LDMLPluralRule =>
-  fallbackPlural(locale, Math.abs(shown(count)));
+export const fallbackPluralCategory: {
+  (count: number): (locale: Locale) => Intl.LDMLPluralRule;
+  (locale: Locale, count: number): Intl.LDMLPluralRule;
+} = Fn.dual(
+  2,
+  (locale: Locale, count: number): Intl.LDMLPluralRule =>
+    fallbackPlural(locale, Math.abs(shown(count))),
+);
 
 /**
  * Number params: exact digits, up to 3 decimals, grouped only from five digits so years and
@@ -64,27 +77,32 @@ const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
  * ICU-lite interpolation: replaces `{name}` with the param. Numbers are formatted for the
  * locale (see `formatParam`); missing params leave the placeholder visible so gaps show in review.
  */
-export const interpolate = (
-  locale: Locale,
-  template: string,
-  params?: Readonly<Record<string, TextParam>>,
-): string =>
-  template.replace(PLACEHOLDER, (whole, name: string) => {
-    const value = params?.[name];
-    if (value === undefined) return whole;
-    return typeof value === "number" ? formatParam(locale, value) : value;
-  });
+export const interpolate: {
+  (template: string, params?: Readonly<Record<string, TextParam>>): (locale: Locale) => string;
+  (locale: Locale, template: string, params?: Readonly<Record<string, TextParam>>): string;
+} = Fn.dual(
+  (args) => Predicate.isString(args[1]),
+  (locale: Locale, template: string, params?: Readonly<Record<string, TextParam>>): string =>
+    Arr.join(
+      Arr.map(Str.split(template, PLACEHOLDER), (part, index) => {
+        if (index % 2 === 0) return part;
+        const value = params?.[part];
+        if (value === undefined) return `{${part}}`;
+        return Predicate.isNumber(value) ? formatParam(locale, value) : value;
+      }),
+      "",
+    ),
+);
 
 const selectForm = (
   locale: Locale,
-  message: AnyMessage,
+  entry: AnyMessage,
   params?: Readonly<Record<string, TextParam>>,
 ): string => {
-  if (typeof message === "string") return message;
-  const count = params?.count;
-  const n = typeof count === "number" ? count : Number(count);
+  if (Predicate.isString(entry)) return entry;
+  const n = Number(params?.["count"]);
   const category = Number.isFinite(n) ? pluralCategory(locale, n) : "other";
-  return message[category] ?? message.other ?? "";
+  return entry[category] ?? entry.other ?? "";
 };
 
 /** Raw message for a key in a locale, falling back to `FALLBACK_LOCALE` (en). */
@@ -98,7 +116,10 @@ const lookup = (locale: Locale, key: MessageKey): { message: AnyMessage; locale:
  * Resolves a `Text` descriptor. Unknown keys (a sibling emitted a key the catalog lacks)
  * render as the key itself so the gap is visible instead of blank.
  */
-export const translate = (locale: Locale, text: Text): string => {
+export const translate: {
+  (text: Text): (locale: Locale) => string;
+  (locale: Locale, text: Text): string;
+} = Fn.dual(2, (locale: Locale, text: Text): string => {
   if (!isMessageKey(text.key)) return text.key;
   const found = lookup(locale, text.key);
   return interpolate(
@@ -106,7 +127,7 @@ export const translate = (locale: Locale, text: Text): string => {
     selectForm(found.locale, found.message, text.params),
     text.params,
   );
-};
+});
 
 /** Typed translation of one key. */
 export const t = <K extends MessageKey>(locale: Locale, key: K, ...params: ParamsArg<K>): string =>

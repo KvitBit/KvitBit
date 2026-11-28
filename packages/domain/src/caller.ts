@@ -1,5 +1,5 @@
 /** Caller context (core-ports section 2.1). */
-import { Context, Schema } from "effect";
+import * as Schema from "effect/Schema";
 import type { InvitationToken, ShareToken, UserId, VisitorHash, WorkspaceId } from "./ids";
 import { DeliveryId, DocumentId, ExportId, ScheduleId } from "./ids";
 import type { Scope } from "./scope";
@@ -82,16 +82,14 @@ export type Caller =
   | InvitationHolderCaller
   | SystemCaller;
 
-export class CurrentCaller extends Context.Service<CurrentCaller, Caller>()("kvitbit/Caller") {}
-
 /** Edge constructors. There is deliberately no constructor for System. */
-export const Caller: {
+export const Caller = {
+  account: (a): AccountCaller => ({ ...a, _tag: "Account" }),
+  shareLinkVisitor: (v): ShareLinkVisitorCaller => ({ ...v, _tag: "ShareLinkVisitor" }),
+  invitationHolder: (i): InvitationHolderCaller => ({ ...i, _tag: "InvitationHolder" }),
+} as const satisfies {
   readonly account: (a: Omit<AccountCaller, "_tag">) => AccountCaller;
   readonly shareLinkVisitor: (v: Omit<ShareLinkVisitorCaller, "_tag">) => ShareLinkVisitorCaller;
   readonly invitationHolder: (i: Omit<InvitationHolderCaller, "_tag">) => InvitationHolderCaller;
   // MemberCaller comes only from Workspaces.enter (core-ports 4.1), which checks membership.
-} = {
-  account: (a) => ({ ...a, _tag: "Account" }),
-  shareLinkVisitor: (v) => ({ ...v, _tag: "ShareLinkVisitor" }),
-  invitationHolder: (i) => ({ ...i, _tag: "InvitationHolder" }),
 };

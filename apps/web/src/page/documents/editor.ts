@@ -7,9 +7,9 @@ import type { Html } from "@effect/ui/html";
  * override badges, and save draft / issue / save issued edit flows.
  */
 import {
-  type BankAccountId,
-  type ContactId,
-  type CurrencyCode,
+  BankAccountId,
+  ContactId,
+  CurrencyCode,
   DocumentId,
   DocumentInput,
   DocumentPatch,
@@ -17,21 +17,37 @@ import {
   FxRateView,
   type IsoDate,
   type LineInput,
-  type NumberingSeriesId,
+  NumberingSeriesId,
   NumberingSeriesView,
-  type PriceListItemId,
+  PriceListItemId,
   type TaxRegime,
   type VatTreatment,
   type WorkspaceId,
 } from "@kvitbit/domain";
 import { I18n, ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Effect, Result, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Equal from "effect/Equal";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as Struct from "effect/Struct";
+import type * as Types from "effect/Types";
 import { renderSVG } from "uqr";
 import { Failure } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { svgImage } from "../../ui/html";
@@ -90,7 +106,8 @@ import {
   WorkspaceInfoData,
 } from "./shared";
 
-export type Route = RouteOf<"DocumentNew" | "DocumentEdit">;
+export const Route = Schema.Union([RouteCases.DocumentNew, RouteCases.DocumentEdit]);
+export type Route = typeof Route.Type;
 
 const CopyTable: Copy<
   | "newInvoiceTitle"
@@ -398,7 +415,7 @@ const DraftWrite = Schema.Struct({
 type DraftWrite = typeof DraftWrite.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   lookups: Remote.remoteSchema(LookupsData),
   fxLookup: Remote.remoteSchema(FxRateView),
   kind: Schema.Literals(["invoice", "proforma"]),
@@ -522,22 +539,26 @@ const loadLookupsCommand = (
   seq: Remote.Seq,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "LoadEditorLookups",
     (c) =>
-      Effect.all({
-        workspace: c.workspace.current({ params: { workspaceId } }).pipe(Effect.option),
-        contacts: c.contacts.search({ params: { workspaceId }, query: { limit: 100 } }),
-        priceList: c.priceList.list({ params: { workspaceId }, query: {} }),
-        series: c.workspace.listSeries({ params: { workspaceId } }),
-        bankAccounts: c.workspace.listBankAccounts({ params: { workspaceId } }),
-        templates: c.templates.list({ params: { workspaceId } }),
-        existingDoc:
-          route._tag === "DocumentEdit"
-            ? c.documents.get({ params: { workspaceId, documentId: route.id } })
-            : route.from?._tag === "Duplicate"
-              ? c.documents.get({ params: { workspaceId, documentId: route.from.id } })
-              : Effect.succeed(null),
-      }),
+      Effect.all(
+        {
+          workspace: c.workspace.current({ params: { workspaceId } }).pipe(Effect.option),
+          contacts: c.contacts.search({ params: { workspaceId }, query: { limit: 100 } }),
+          priceList: c.priceList.list({ params: { workspaceId }, query: {} }),
+          series: c.workspace.listSeries({ params: { workspaceId } }),
+          bankAccounts: c.workspace.listBankAccounts({ params: { workspaceId } }),
+          templates: c.templates.list({ params: { workspaceId } }),
+          existingDoc:
+            route._tag === "DocumentEdit"
+              ? c.documents.get({ params: { workspaceId, documentId: route.id } })
+              : route.from?._tag === "Duplicate"
+                ? c.documents.get({ params: { workspaceId, documentId: route.from.id } })
+                : Effect.succeed(null),
+        },
+        { concurrency: 1 },
+      ),
     (res): Message =>
       Message.LoadedLookups({
         seq,
@@ -562,6 +583,7 @@ const loadFxCommand = (
   seq: Remote.Seq,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "LoadFxRate",
     (c) => c.reports.fxRate({ params: { workspaceId, currency }, query: { on } }),
     (data): Message => Message.LoadedFx({ seq, data }),
@@ -569,7 +591,7 @@ const loadFxCommand = (
   );
 
 const applyTemplateToModel = (model: Model, tpl: TemplateViewData): Model => {
-  const lines: Array<EditorLine> = tpl.input.lines.map((line, i) => ({
+  const lines: Array<EditorLine> = Arr.map(tpl.input.lines, (line, i) => ({
     key: `tpl-${i + 1}`,
     itemId: line.item ?? null,
     description: line.description ?? "",
@@ -598,7 +620,7 @@ const applyTemplateToModel = (model: Model, tpl: TemplateViewData): Model => {
 const hydrateFromDocument = (model: Model, doc: DocumentView, isEdit: boolean): Model => {
   const contact = readContactSnapshot(doc.contact);
   const rawLines = readLines(doc.lines);
-  const lines: Array<EditorLine> = rawLines.map((l, idx) => ({
+  const lines: Array<EditorLine> = Arr.map(rawLines, (l, idx) => ({
     key: `doc-${idx + 1}`,
     itemId: l.item,
     description: l.description,
@@ -631,7 +653,7 @@ const hydrateFromDocument = (model: Model, doc: DocumentView, isEdit: boolean): 
   };
 };
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const today = todayPrague();
   const regime: TaxRegime = ctx.workspace?.taxRegime ?? "vat_payer";
   const base: Model = {
@@ -685,9 +707,16 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
   };
 };
 
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
 const resolveEffective = (model: Model): ViewModels.EffectiveBilling => {
   const data = Remote.dataOf(model.lookups);
-  const contact = data?.contacts.find((c) => c.id === model.contactId);
+  const contact = Arr.findFirst(data?.contacts ?? [], (c) => c.id === model.contactId).pipe(
+    Option.getOrUndefined,
+  );
   const wsDefaults = data?.workspace?.defaults;
   const seriesByKind: Partial<Record<"invoice" | "proforma", NumberingSeriesId>> = {};
   for (const s of data?.series ?? []) {
@@ -696,30 +725,28 @@ const resolveEffective = (model: Model): ViewModels.EffectiveBilling => {
     }
   }
   const parsedDue =
-    model.dueDaysOverride !== null && /^\d+$/.test(model.dueDaysOverride)
+    model.dueDaysOverride !== null && wholeNumberText.test(model.dueDaysOverride)
       ? Number(model.dueDaysOverride)
       : undefined;
 
-  const docValues: ViewModels.DocumentBillingValues = {
-    ...(model.currencyOverride === null
-      ? {}
-      : { currency: model.currencyOverride as CurrencyCode }),
-    ...(model.languageOverride === null ? {} : { language: model.languageOverride }),
-    ...(parsedDue === undefined ? {} : { dueDays: parsedDue }),
-    ...(model.paymentMethodOverride === null ? {} : { paymentMethod: model.paymentMethodOverride }),
-    ...(model.seriesOverride === null ? {} : { series: model.seriesOverride as NumberingSeriesId }),
-    ...(model.noteOverride === null ? {} : { note: model.noteOverride }),
-  };
-  const wsValues: ViewModels.WorkspaceBillingDefaults = {
-    ...(wsDefaults?.currency === undefined ? {} : { currency: wsDefaults.currency }),
-    ...(wsDefaults?.language === undefined ? {} : { language: wsDefaults.language }),
-    ...(wsDefaults?.dueDays === undefined ? {} : { dueDays: wsDefaults.dueDays }),
-    ...(wsDefaults?.paymentMethod === undefined ? {} : { paymentMethod: wsDefaults.paymentMethod }),
-    seriesByKind,
-    ...(wsDefaults?.defaultNote === null || wsDefaults?.defaultNote === undefined
-      ? {}
-      : { defaultNote: wsDefaults.defaultNote }),
-  };
+  const docValues: Types.Mutable<ViewModels.DocumentBillingValues> = {};
+  if (model.currencyOverride !== null)
+    docValues.currency = CurrencyCode.make(model.currencyOverride);
+  if (model.languageOverride !== null) docValues.language = model.languageOverride;
+  if (parsedDue !== undefined) docValues.dueDays = parsedDue;
+  if (model.paymentMethodOverride !== null) docValues.paymentMethod = model.paymentMethodOverride;
+  if (model.seriesOverride !== null)
+    docValues.series = NumberingSeriesId.make(model.seriesOverride);
+  if (model.noteOverride !== null) docValues.note = model.noteOverride;
+
+  const wsValues: Types.Mutable<ViewModels.WorkspaceBillingDefaults> = { seriesByKind };
+  if (wsDefaults !== undefined) {
+    wsValues.currency = wsDefaults.currency;
+    wsValues.language = wsDefaults.language;
+    wsValues.dueDays = wsDefaults.dueDays;
+    wsValues.paymentMethod = wsDefaults.paymentMethod;
+    if (wsDefaults.defaultNote !== null) wsValues.defaultNote = wsDefaults.defaultNote;
+  }
 
   return ViewModels.resolveBilling({
     kind: model.kind,
@@ -738,21 +765,23 @@ const buildDocumentInput = (
   if (model.contactId === "") return { ok: false, error: txt(locale, "needContact") };
   const validLines: Array<LineInput> = [];
   for (const line of model.lines) {
-    if (line.description.trim() === "") continue;
+    if (Str.trim(line.description) === "") continue;
     const qty = parseDecimalText(line.quantity);
     const price = parseDecimalText(line.unitPrice);
     if (qty === undefined || price === undefined)
       return { ok: false, error: txt(locale, "needLines") };
-    validLines.push({
-      ...(line.itemId === null ? {} : { item: line.itemId as PriceListItemId }),
-      description: line.description.trim(),
+    const entry: Types.Mutable<LineInput> = {
+      description: Str.trim(line.description),
       quantity: qty,
-      ...(line.unit.trim() === "" ? {} : { unit: line.unit.trim() }),
       unitPrice: price,
       vat: line.vat,
-    });
+    };
+    if (line.itemId !== null) entry.item = PriceListItemId.make(line.itemId);
+    const unit = Str.trim(line.unit);
+    if (unit !== "") entry.unit = unit;
+    validLines.push(entry);
   }
-  if (validLines.length === 0) return { ok: false, error: txt(locale, "needLines") };
+  if (!Arr.isArrayNonEmpty(validLines)) return { ok: false, error: txt(locale, "needLines") };
 
   const effective = resolveEffective(model);
   const issuedOn = isIsoDateString(model.issuedOn) ? model.issuedOn : todayPrague();
@@ -761,33 +790,35 @@ const buildDocumentInput = (
   const fxRate = model.manualFx ? parseDecimalText(model.fxRateInput) : undefined;
   const fxQty = Number.parseInt(model.fxQuantityInput, 10);
 
-  const input: DocumentInput = {
+  const input: Types.Mutable<DocumentInput> = {
     kind: model.kind,
-    contact: model.contactId as ContactId,
-    lines: validLines as [LineInput, ...Array<LineInput>],
+    contact: ContactId.make(model.contactId),
+    lines: validLines,
     currency: effective.currency.value,
     issuedOn,
     taxableSupplyOn,
     due: { inDays: effective.dueDays.value },
     language: effective.language.value,
-    ...(effective.series.value === null ? {} : { series: effective.series.value }),
-    ...(model.bankAccountId === "" ? {} : { bankAccount: model.bankAccountId as BankAccountId }),
     pricesIncludeVat: model.pricesIncludeVat,
-    ...(model.variableSymbol.trim() === "" ? {} : { variableSymbol: model.variableSymbol.trim() }),
-    ...(model.orderNumber.trim() === "" ? {} : { orderNumber: model.orderNumber.trim() }),
-    ...(effective.note.value === "" ? {} : { note: effective.note.value }),
     paymentMethod: effective.paymentMethod.value,
-    ...(model.manualFx && fxRate !== undefined && Number.isInteger(fxQty) && fxQty >= 1
-      ? { fx: { manual: { rate: fxRate, quantity: fxQty } } }
-      : {}),
   };
+  if (effective.series.value !== null) input.series = effective.series.value;
+  if (model.bankAccountId !== "") input.bankAccount = BankAccountId.make(model.bankAccountId);
+  const variableSymbol = Str.trim(model.variableSymbol);
+  if (variableSymbol !== "") input.variableSymbol = variableSymbol;
+  const orderNumber = Str.trim(model.orderNumber);
+  if (orderNumber !== "") input.orderNumber = orderNumber;
+  if (effective.note.value !== "") input.note = effective.note.value;
+  if (model.manualFx && fxRate !== undefined && Number.isInteger(fxQty) && fxQty >= 1) {
+    input.fx = { manual: { rate: fxRate, quantity: fxQty } };
+  }
   return { ok: true, input };
 };
 
 const PREVIEW_DEBOUNCE_MS = 400;
 const AUTOSAVE_DEBOUNCE_MS = 3000;
 
-const encodeDocumentInput = Schema.encodeSync(DocumentInput);
+const encodeDocumentInput = Schema.encodeOption(DocumentInput);
 
 const buildDraftPatch = (input: DocumentInput, savedInput: DocumentInput | null): DocumentPatch => {
   const patch = {
@@ -809,17 +840,20 @@ const buildDraftPatch = (input: DocumentInput, savedInput: DocumentInput | null)
   } satisfies DocumentPatch;
 
   // The view omits some saved settings. Preserve those when the user edits unrelated fields.
-  const before = savedInput === null ? null : encodeDocumentInput(savedInput);
-  const after = encodeDocumentInput(input);
-  const fields = Object.keys(patch) as Array<keyof typeof patch>;
-  return Object.fromEntries(
-    fields
-      .filter(
+  const before =
+    savedInput === null ? undefined : Option.getOrUndefined(encodeDocumentInput(savedInput));
+  const after = Option.getOrUndefined(encodeDocumentInput(input));
+  const fields = Struct.keys(patch);
+  return EffectRecord.fromEntries(
+    Arr.map(
+      Arr.filter(
+        fields,
         (field) =>
           patch[field] !== undefined &&
-          (before === null || JSON.stringify(before[field]) !== JSON.stringify(after[field])),
-      )
-      .map((field) => [field, patch[field]]),
+          (before === undefined || !Equal.equals(before[field], after?.[field])),
+      ),
+      (field) => [field, patch[field]],
+    ),
   );
 };
 
@@ -898,7 +932,9 @@ const runDraftWrite = (
     return {
       model: next,
       commands: [
-        mintRequestKeyCommand("MintDraftWriteKey", (key) => Message.GotRequestKey({ key })),
+        mintRequestKeyCommand("MintDraftWriteKey", (requestKey) =>
+          Message.GotRequestKey({ key: requestKey }),
+        ),
       ],
     };
   }
@@ -907,6 +943,7 @@ const runDraftWrite = (
     model: next,
     commands: [
       apiCommand(
+        Message,
         "WriteDraft",
         (c) => {
           switch (operation._tag) {
@@ -944,7 +981,7 @@ const runDraftWrite = (
 };
 
 const retainedVariableSymbol = (model: Model): string | undefined =>
-  model.variableSymbol.trim() === "" ? model.savedInput?.variableSymbol : undefined;
+  Str.trim(model.variableSymbol) === "" ? model.savedInput?.variableSymbol : undefined;
 
 const startDraftWrite = (
   model: Model,
@@ -1006,10 +1043,10 @@ const changedDocumentFields = (
   after: DocumentView,
   locale: PageContext["locale"],
 ): ReadonlyArray<string> => {
-  const encode = Schema.encodeSync(DocumentView);
-  const old = encode(before);
-  const latest = encode(after);
-  const differs = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+  const encode = Schema.encodeOption(DocumentView);
+  const old = Option.getOrUndefined(encode(before));
+  const latest = Option.getOrUndefined(encode(after));
+  if (old === undefined || latest === undefined) return [];
   const fields = [
     ["customerLabel", old.contact, latest.contact],
     ["issuedOn", old.dates.issuedOn, latest.dates.issuedOn],
@@ -1021,7 +1058,10 @@ const changedDocumentFields = (
     ["fxSection", old.fx, latest.fx],
     ["grandTotal", old.totals.gross, latest.totals.gross],
   ] as const;
-  return fields.filter(([, a, b]) => differs(a, b)).map(([label]) => txt(locale, label));
+  return Arr.map(
+    Arr.filter(fields, ([, a, b]) => !Equal.equals(a, b)),
+    ([label]) => txt(locale, label),
+  );
 };
 
 const showSavedDocument = (model: Model, doc: DocumentView): PageReturn<Model, Message> => ({
@@ -1034,7 +1074,7 @@ const showSavedDocument = (model: Model, doc: DocumentView): PageReturn<Model, M
     submitError: null,
   },
   outMessage: Intent_.navigate(
-    href({ _tag: "Document", ws: (model.route as Route).ws, id: doc.id, tab: "preview" }),
+    href({ _tag: "Document", ws: model.route.ws, id: doc.id, tab: "preview" }),
   ),
 });
 
@@ -1057,20 +1097,16 @@ const maybeLoadFx = (
   };
 };
 
-export const update = (
+const updateImpl = (
   model: Model,
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> => {
   const ws = ctx.workspace;
-  const route = model.route as Route;
+  const route = model.route;
   const regime: TaxRegime = ws?.taxRegime ?? "vat_payer";
 
-  if (
-    writeFreezesForm(model) &&
-    /^(Changed|Cleared|Selected|Added|Moved|Removed|Updated|Toggled)/.test(message._tag)
-  )
-    return { model };
+  if (writeFreezesForm(model) && editedFieldTag.test(message._tag)) return { model };
 
   return Message.match(message, {
     LoadedLookups: ({ seq, data }) => {
@@ -1088,7 +1124,9 @@ export const update = (
       ) {
         next = hydrateFromDocument(next, data.existingDoc, false);
       } else if (route._tag === "DocumentNew" && route.from?._tag === "Template") {
-        const tpl = data.templates.find((t) => t.id === route.from?.id);
+        const tpl = Arr.findFirst(data.templates, (t) => t.id === route.from?.id).pipe(
+          Option.getOrUndefined,
+        );
         if (tpl !== undefined) next = applyTemplateToModel(next, tpl);
       }
       return maybeLoadFx(next, ws?.id);
@@ -1104,7 +1142,9 @@ export const update = (
     }),
     SelectedTemplate: ({ templateId }) => {
       const data = Remote.dataOf(model.lookups);
-      const tpl = data?.templates.find((t) => t.id === templateId);
+      const tpl = Arr.findFirst(data?.templates ?? [], (t) => t.id === templateId).pipe(
+        Option.getOrUndefined,
+      );
       if (tpl === undefined) return { model };
       const fxRes = maybeLoadFx(applyTemplateToModel(model, tpl), ws?.id);
       return scheduleAfterEdit(fxRes.model, ws?.id, fxRes.commands);
@@ -1125,11 +1165,12 @@ export const update = (
         !canRole(ws.role, "document.draft")
       )
         return { model };
-      const ico = model.aresIco.trim();
+      const ico = Str.trim(model.aresIco);
       return {
         model: { ...model, aresBusy: true, aresError: null },
         commands: [
           apiCommand(
+            Message,
             "AresQuickAdd",
             (c) =>
               c.contacts.fromIco({
@@ -1170,7 +1211,7 @@ export const update = (
                 ...data,
                 contacts: [
                   contact,
-                  ...data.contacts.filter((existing) => existing.id !== contact.id),
+                  ...Arr.filter(data.contacts, (existing) => existing.id !== contact.id),
                 ],
               },
             };
@@ -1279,12 +1320,17 @@ export const update = (
       ),
     AddedPriceListItem: ({ itemId }) => {
       const data = Remote.dataOf(model.lookups);
-      const item = data?.priceList.find((p) => p.id === itemId);
+      const item = Arr.findFirst(data?.priceList ?? [], (p) => p.id === itemId).pipe(
+        Option.getOrUndefined,
+      );
       if (item === undefined) return { model };
       const line: EditorLine = {
         key: `l${model.nextLineKey}`,
         itemId: item.id,
-        description: item.description ? `${item.name} — ${item.description}` : item.name,
+        description:
+          item.description !== null && item.description !== ""
+            ? `${item.name} — ${item.description}`
+            : item.name,
         quantity: "1",
         unit: item.unit ?? "ks",
         unitPrice: decimalToInput(item.unitPrice),
@@ -1303,12 +1349,15 @@ export const update = (
       scheduleAfterEdit(
         {
           ...model,
-          lines: model.lines.map((l) => (l.key === key ? { ...l, [field]: value } : l)),
+          lines: Arr.map(model.lines, (l) => (l.key === key ? { ...l, [field]: value } : l)),
         },
         ws?.id,
       ),
     MovedLine: ({ key, direction }) => {
-      const idx = model.lines.findIndex((l) => l.key === key);
+      const idx = Option.getOrElse(
+        Arr.findFirstIndex(model.lines, (l) => l.key === key),
+        () => -1,
+      );
       if (idx < 0) return { model };
       const swap = direction === "up" ? idx - 1 : idx + 1;
       if (swap < 0 || swap >= model.lines.length) return { model };
@@ -1327,7 +1376,7 @@ export const update = (
           lines:
             model.lines.length <= 1
               ? [emptyLine(model.nextLineKey, regime)]
-              : model.lines.filter((l) => l.key !== key),
+              : Arr.filter(model.lines, (l) => l.key !== key),
           nextLineKey: model.lines.length <= 1 ? model.nextLineKey + 1 : model.nextLineKey,
         },
         ws?.id,
@@ -1342,6 +1391,7 @@ export const update = (
         model: { ...model, serverPreview: { _tag: "Loading", seq } },
         commands: [
           apiCommand(
+            Message,
             "PreviewDocument",
             (c) =>
               c.documents.preview({
@@ -1462,20 +1512,17 @@ export const update = (
       if (!built.ok) return { model: { ...model, submitError: built.error } };
       const allowNumberOverride = canRole(ws.role, "document.overrideNumber");
       const { series: _draftSeries, ...changes } = buildDraftPatch(built.input, model.savedInput);
-      const patch: DocumentPatch = {
-        ...changes,
-        ...(allowNumberOverride &&
-        model.numberOverride.trim() !== "" &&
-        model.numberOverride.trim() !== model.savedDoc.number
-          ? { number: model.numberOverride.trim() }
-          : {}),
-        ...(model.refreshParties ? { refreshParties: true } : {}),
-      };
+      const patch: Types.Mutable<DocumentPatch> = changes;
+      const number = Str.trim(model.numberOverride);
+      if (allowNumberOverride && number !== "" && number !== model.savedDoc.number)
+        patch.number = number;
+      if (model.refreshParties) patch.refreshParties = true;
       const { id: editId, revision: editRev } = model.savedDoc;
       return {
         model: { ...model, submitting: true, submitError: null },
         commands: [
           apiCommand(
+            Message,
             "SaveIssuedEdit",
             (c) =>
               c.documents.edit({
@@ -1505,9 +1552,10 @@ export const update = (
         model: { ...model, revisionState: "loading" },
         commands: [
           apiCommand(
+            Message,
             "ReloadDocumentRevision",
             (c) => c.documents.get({ params: { workspaceId: ws.id, documentId: doc.id } }),
-            (doc): Message => Message.LoadedRevision({ doc }),
+            (loadedDoc): Message => Message.LoadedRevision({ doc: loadedDoc }),
             (failure): Message => Message.FailedRevision({ failure }),
           ),
         ],
@@ -1551,7 +1599,12 @@ export const update = (
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   if (model.savedDoc?.status === "issued") return txt(ctx.locale, "editIssuedTitle");
   if (model.route._tag === "DocumentEdit" || model.savedDoc !== null) {
     return txt(ctx.locale, "editDraftTitle");
@@ -1560,6 +1613,11 @@ export const title = (model: Model, ctx: PageContext): string => {
     ? txt(ctx.locale, "newProformaTitle")
     : txt(ctx.locale, "newInvoiceTitle");
 };
+
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
 
 const computePreview = (model: Model, regime: TaxRegime): ViewModels.LivePreview | null => {
   const effective = resolveEffective(model);
@@ -1577,7 +1635,7 @@ const computePreview = (model: Model, regime: TaxRegime): ViewModels.LivePreview
           ? { rate: cnbFx.rate, quantity: cnbFx.quantity }
           : null;
 
-  const previewLines: Array<ViewModels.PreviewLine> = model.lines.map((l) => ({
+  const previewLines: Array<ViewModels.PreviewLine> = Arr.map(model.lines, (l) => ({
     quantity: parseDecimalText(l.quantity) ?? BigDecimal.fromBigInt(0n),
     unitPrice: parseDecimalText(l.unitPrice) ?? BigDecimal.fromBigInt(0n),
     treatment: l.vat,
@@ -1597,11 +1655,11 @@ const computePreview = (model: Model, regime: TaxRegime): ViewModels.LivePreview
   return Result.isSuccess(res) ? res.success : null;
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
-  const route = model.route as Route;
+  const route = model.route;
   if (ws === null) {
     return page(h, [banner(h, { text: sharedCopy(locale, "noWorkspace"), tone: "error" })]);
   }
@@ -1630,7 +1688,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           }
         : null;
   const isIssuedEdit = model.savedDoc?.status === "issued";
-  const selectedContact = data?.contacts.find((c) => c.id === model.contactId);
+  const selectedContact = Arr.findFirst(data?.contacts ?? [], (c) => c.id === model.contactId).pipe(
+    Option.getOrUndefined,
+  );
   const cnbFx = Remote.dataOf(model.fxLookup);
 
   const issuedIso = isIsoDateString(model.issuedOn) ? model.issuedOn : todayPrague();
@@ -1753,31 +1813,43 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const vatOptions: ReadonlyArray<{ readonly value: VatTreatment; readonly label: string }> =
     regime === "vat_payer"
       ? [
-          { value: "standard", label: textOf(t, I18n.enumText("vatTreatment", "standard")) },
-          { value: "reduced", label: textOf(t, I18n.enumText("vatTreatment", "reduced")) },
+          {
+            value: "standard",
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "standard" })),
+          },
+          {
+            value: "reduced",
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "reduced" })),
+          },
           {
             value: "reverse_charge",
-            label: textOf(t, I18n.enumText("vatTreatment", "reverse_charge")),
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "reverse_charge" })),
           },
           {
             value: "exempt_intra_eu_goods",
-            label: textOf(t, I18n.enumText("vatTreatment", "exempt_intra_eu_goods")),
+            label: textOf(
+              t,
+              I18n.enumText({ name: "vatTreatment", value: "exempt_intra_eu_goods" }),
+            ),
           },
           {
             value: "outside_scope",
-            label: textOf(t, I18n.enumText("vatTreatment", "outside_scope")),
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "outside_scope" })),
           },
         ]
       : [
           {
             value: "outside_scope",
-            label: textOf(t, I18n.enumText("vatTreatment", "outside_scope")),
+            label: textOf(t, I18n.enumText({ name: "vatTreatment", value: "outside_scope" })),
           },
           ...(regime === "identified_person"
             ? [
                 {
                   value: "reverse_charge" as const,
-                  label: textOf(t, I18n.enumText("vatTreatment", "reverse_charge")),
+                  label: textOf(
+                    t,
+                    I18n.enumText({ name: "vatTreatment", value: "reverse_charge" }),
+                  ),
                 },
               ]
             : []),
@@ -1809,7 +1881,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       onChange: (templateId) => Message.SelectedTemplate({ templateId }),
                       options: [
                         { value: "", label: txt(locale, "quickTemplateNone") },
-                        ...data.templates.map((tpl) => ({ value: tpl.id, label: tpl.name })),
+                        ...Arr.map(data.templates, (tpl) => ({ value: tpl.id, label: tpl.name })),
                       ],
                     }),
                   ],
@@ -1836,7 +1908,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               onChange: (contactId) => Message.SelectedContact({ contactId }),
               options: [
                 { value: "", label: txt(locale, "customerPlaceholder") },
-                ...data.contacts.map((c) => ({
+                ...Arr.map(data.contacts, (c) => ({
                   value: c.id,
                   label: c.ico !== null ? `${c.name} (${c.ico})` : c.name,
                 })),
@@ -1971,8 +2043,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     value: effective.language.value,
                     onChange: (value) => Message.ChangedLanguage({ value }),
                     options: [
-                      { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
-                      { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
+                      {
+                        value: "cs",
+                        label: textOf(t, I18n.enumText({ name: "locale", value: "cs" })),
+                      },
+                      {
+                        value: "en",
+                        label: textOf(t, I18n.enumText({ name: "locale", value: "en" })),
+                      },
                     ],
                   }),
                 ]),
@@ -1996,19 +2074,22 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                     options: [
                       {
                         value: "bank_transfer",
-                        label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+                        label: textOf(
+                          t,
+                          I18n.enumText({ name: "paymentMethod", value: "bank_transfer" }),
+                        ),
                       },
                       {
                         value: "cash",
-                        label: textOf(t, I18n.enumText("paymentMethod", "cash")),
+                        label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "cash" })),
                       },
                       {
                         value: "card",
-                        label: textOf(t, I18n.enumText("paymentMethod", "card")),
+                        label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "card" })),
                       },
                       {
                         value: "other",
-                        label: textOf(t, I18n.enumText("paymentMethod", "other")),
+                        label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "other" })),
                       },
                     ],
                   }),
@@ -2044,12 +2125,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           onChange: (value) => Message.ChangedSeries({ value }),
                           options: [
                             { value: "", label: txt(locale, "seriesDefault") },
-                            ...data.series
-                              .filter((s) => s.kind === model.kind)
-                              .map((s) => ({
+                            ...Arr.map(
+                              Arr.filter(data.series, (s) => s.kind === model.kind),
+                              (s) => ({
                                 value: s.id,
                                 label: `${s.name} (${s.nextNumber})`,
-                              })),
+                              }),
+                            ),
                           ],
                         }),
                       ]),
@@ -2062,7 +2144,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 onChange: (value) => Message.ChangedBankAccount({ value }),
                 options: [
                   { value: "", label: txt(locale, "bankAccountAuto") },
-                  ...data.bankAccounts.map((b) => ({
+                  ...Arr.map(data.bankAccounts, (b) => ({
                     value: b.id,
                     label: `${b.name ?? b.iban ?? b.accountNumber ?? b.id} (${b.currency})`,
                   })),
@@ -2175,7 +2257,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       onChange: (itemId) => Message.AddedPriceListItem({ itemId }),
                       options: [
                         { value: "", label: txt(locale, "addFromPriceList") },
-                        ...data.priceList.map((p) => ({
+                        ...Arr.map(data.priceList, (p) => ({
                           value: p.id,
                           label: `${p.name} (${fmtNum(locale, p.unitPrice)} ${p.currency})`,
                         })),
@@ -2189,7 +2271,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 small: true,
               }),
             ]),
-            ...model.lines.map((line, index) =>
+            ...Arr.map(model.lines, (line, index) =>
               h.div
                 .key(line.key)
                 .class(
@@ -2283,7 +2365,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       cardTitle(h, txt(locale, "previewTitle"), [
         badge(
           h,
-          textOf(t, I18n.enumText("documentKind", model.kind)),
+          textOf(t, I18n.enumText({ name: "documentKind", value: model.kind })),
           model.kind === "proforma" ? "proforma" : "outline",
         ),
       ]),
@@ -2334,7 +2416,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         ]),
                       ]),
                       h.tbody.children(
-                        displayBuckets.map((b) =>
+                        Arr.map(displayBuckets, (b) =>
                           h.tr.children([
                             h.td.children([fmtVatRate(locale, b.ratePercent)]),
                             h.td.class("text-right").children([fmtNum(locale, b.base, 2)]),
@@ -2402,7 +2484,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   : []),
               ]),
           ]),
-      ...(serverDoc?.fx == null
+      ...(serverDoc === null || serverDoc.fx === null
         ? []
         : [
             h.p
@@ -2411,10 +2493,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 `${txt(locale, "fxRate")} ${serverDoc.fx.quantity} ${serverDoc.totals.gross.currency} = ${fmtNum(locale, serverDoc.fx.rate, 3)} CZK`,
               ]),
           ]),
-      ...(serverDoc?.statutoryNotes.map((note) =>
+      ...Arr.map(serverDoc?.statutoryNotes ?? [], (note) =>
         h.p.class(cn(ui.small, ui.muted)).children([note.text]),
-      ) ?? []),
-      ...(serverDoc?.paymentQr == null
+      ),
+      ...(serverDoc === null || serverDoc.paymentQr === null
         ? []
         : [
             h.img
@@ -2440,7 +2522,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             text:
               model.revisionChanges.length === 0
                 ? txt(locale, "reviewRevision")
-                : `${txt(locale, "reviewRevision")} ${txt(locale, "changedFields")}: ${model.revisionChanges.join(", ")}.`,
+                : `${txt(locale, "reviewRevision")} ${txt(locale, "changedFields")}: ${Arr.join(model.revisionChanges, ", ")}.`,
             tone: "info",
           }),
         ]
@@ -2462,3 +2544,11 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ]),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);
+
+const wholeNumberText = /^\d+$/;
+const editedFieldTag = /^(Changed|Cleared|Selected|Added|Moved|Removed|Updated|Toggled)/;

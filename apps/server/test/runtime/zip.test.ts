@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { Effect, Stream } from "effect";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import { streamZip } from "../../src/runtime/zip";
 
 test("the archive emits its first header before reading any file contents", async () => {
@@ -37,7 +39,7 @@ test("taking one header closes the entry stream without pulling a second entry",
     ),
   );
 
-  await Effect.runPromise(streamZip(entries).pipe(Stream.take(1), Stream.runDrain));
+  await entries.pipe(streamZip, Stream.take(1), Stream.runDrain, Effect.runPromise);
 
   expect(next).toBe(false);
   expect(closed).toBe(true);
@@ -49,10 +51,13 @@ test("the archive propagates entry enumeration and body failures", async () => {
     Stream.fail(failure),
     Stream.make({ name: "invoice.txt", bytes: Stream.fail(failure) }),
   ];
-  for (const source of sources) {
-    const result = await Effect.runPromise(streamZip(source).pipe(Stream.runDrain, Effect.flip));
-    expect(result).toBe(failure);
-  }
+  const results = await Effect.runPromise(
+    Effect.forEach(sources, (source) => source.pipe(streamZip, Stream.runDrain, Effect.flip), {
+      concurrency: 1,
+    }),
+  );
+  expect(results[0]).toBe(failure);
+  expect(results[1]).toBe(failure);
 });
 
 test("an empty archive emits only the classic end record", async () => {
@@ -89,15 +94,15 @@ test("the ZIP64 directory records the first count reserved as a classic sentinel
   let written = 0;
   let lastChunk: Uint8Array = new Uint8Array(0);
 
-  await Effect.runPromise(
-    streamZip(entries).pipe(
-      Stream.runForEach((chunk) =>
-        Effect.sync(() => {
-          written += chunk.byteLength;
-          lastChunk = chunk;
-        }),
-      ),
+  await entries.pipe(
+    streamZip,
+    Stream.runForEach((chunk) =>
+      Effect.sync(() => {
+        written += chunk.byteLength;
+        lastChunk = chunk;
+      }),
     ),
+    Effect.runPromise,
   );
 
   const footer = new DataView(lastChunk.buffer, lastChunk.byteOffset, lastChunk.byteLength);
@@ -116,7 +121,7 @@ test("the ZIP64 descriptor and directory preserve a file size above four GiB", a
   const blocks = 4097;
   const bytes = Stream.range(1, blocks).pipe(Stream.map(() => block));
   // 46 fixed central header bytes, 20 extra bytes, and 65,469 UTF-8 name bytes.
-  const name = `${"é".repeat(32_734)}x`;
+  const name = `${Str.repeat(32_734)("é")}x`;
 
   const archive = await Effect.runPromise(streamZip([{ name, bytes }]).pipe(Stream.runCollect));
 
@@ -139,9 +144,10 @@ test("the ZIP64 descriptor and directory preserve a file size above four GiB", a
 test("the archive rejects a central record made too long by its ZIP64 size fields", async () => {
   const block = new Uint8Array(1024 * 1024);
   const bytes = Stream.range(1, 4097).pipe(Stream.map(() => block));
-  const name = "é".repeat(32_735);
+  const name = Str.repeat(32_735)("é");
 
-  await expect(
-    Effect.runPromise(streamZip([{ name, bytes }]).pipe(Stream.runDrain)),
-  ).rejects.toThrow("ZIP filename is too long");
+  const archive = streamZip([{ name, bytes }]);
+  await expect(archive.pipe(Stream.runDrain, Effect.runPromise)).rejects.toThrow(
+    "ZIP filename is too long",
+  );
 }, 30_000);

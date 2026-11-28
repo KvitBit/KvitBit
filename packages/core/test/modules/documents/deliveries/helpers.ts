@@ -3,15 +3,16 @@ import type {
   Caller,
   ContactDefaults,
   ContactId,
-  CurrentCaller,
   DocumentId,
-  IsoDate,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Documents } from "@kvitbit/domain/contract";
-import type { Layer } from "effect";
-import { Effect } from "effect";
-import { TestClock } from "effect/testing";
+import { type Conflict, Documents, IsoDate, type NotFound } from "@kvitbit/domain/contract";
+import * as Effect from "effect/Effect";
+import type * as Exit from "effect/Exit";
+import * as Fn from "effect/Function";
+import type * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
+import * as TestClock from "effect/testing/TestClock";
 import type { DocumentRecord, IssuerForDocument } from "../../../../src/modules/documents";
 import {
   DocumentFixtures,
@@ -19,15 +20,17 @@ import {
   DocumentsRepo,
 } from "../../../../src/modules/documents";
 import { NumberingSeries } from "../../../../src/modules/numbering";
+import type { StoreUnavailable, UniqueViolation } from "../../../../src/store/CoreStore";
 import { CoreStore } from "../../../../src/store/CoreStore";
 import type { InMemoryPortsLive } from "../../../../src/testing";
 import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../../helpers";
+import { TestCaller } from "../../../helpers/callerContext";
 import { CZ_BUYER, contact, invoiceInput, issuer, seed } from "../fixtures";
 
 export type DeliveryServices =
   | Layer.Success<typeof DocumentsDeliveryTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 const NO_SERIES = { seriesByKind: {} };
 
@@ -54,30 +57,55 @@ const defaultSeries = Effect.flatMap(CoreStore, (store) =>
 );
 
 /** Runs `body` as `caller` (default owner) over the delivery test layer after `seed()`. */
-export const deliveryScenario = <A, E>(
-  body: Effect.Effect<A, E, DeliveryServices>,
-  options: { readonly caller?: Caller } = {},
-) =>
-  runTest(
-    options.caller ?? member("owner"),
-    Effect.andThen(seed("vat_payer", NO_SERIES), Effect.andThen(defaultSeries, body)).pipe(
-      Effect.provide(DocumentsDeliveryTestLayer),
+interface DeliveryOptions {
+  readonly caller?: Caller;
+}
+
+export const deliveryScenario: {
+  (
+    options?: DeliveryOptions,
+  ): <A, E>(
+    body: Effect.Effect<A, E, DeliveryServices>,
+  ) => Promise<Exit.Exit<A, E | StoreUnavailable>>;
+  <A, E>(
+    body: Effect.Effect<A, E, DeliveryServices>,
+    options?: DeliveryOptions,
+  ): Promise<Exit.Exit<A, E | StoreUnavailable>>;
+} = Fn.dual(
+  (args) => Effect.isEffect(args[0]),
+  <A, E>(body: Effect.Effect<A, E, DeliveryServices>, options: DeliveryOptions = {}) =>
+    runTest(
+      options.caller ?? member("owner"),
+      Effect.andThen(seed("vat_payer", NO_SERIES), Effect.andThen(defaultSeries, body)).pipe(
+        Effect.provide(DocumentsDeliveryTestLayer),
+      ),
     ),
-  );
+);
 
 /** Issues an Invoice (default CZ_BUYER, due 2026-12-07) and returns its id. */
 export const issueInvoice = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
   Effect.gen(function* () {
-    const view = yield* (yield* Documents).issue({ input: invoiceInput(extra) });
-    return view.id as DocumentId;
+    const testCaller = yield* TestCaller;
+    const view = yield* (yield* Documents).issue(testCaller, { input: invoiceInput(extra) });
+    return view.id;
   });
 
 /** Replaces a Contact's defaults (e.g. its reminder policy). */
-export const setContactDefaults = (
-  defaults: ContactDefaults,
-  id: ContactId = CZ_BUYER,
-  workspaceId: WorkspaceId = WORKSPACE_A,
-) => Effect.flatMap(DocumentFixtures, (f) => f.putContact(workspaceId, contact(id, { defaults })));
+export const setContactDefaults: {
+  (
+    id?: ContactId,
+    workspaceId?: WorkspaceId,
+  ): (defaults: ContactDefaults) => Effect.Effect<void, never, DocumentFixtures>;
+  (
+    defaults: ContactDefaults,
+    id?: ContactId,
+    workspaceId?: WorkspaceId,
+  ): Effect.Effect<void, never, DocumentFixtures>;
+} = Fn.dual(
+  (args) => Predicate.isObject(args[0]),
+  (defaults: ContactDefaults, id: ContactId = CZ_BUYER, workspaceId: WorkspaceId = WORKSPACE_A) =>
+    Effect.flatMap(DocumentFixtures, (f) => f.putContact(workspaceId, contact(id, { defaults }))),
+);
 
 /** Replaces Workspace A's reminder policy. */
 export const setWorkspaceReminders = (reminders: IssuerForDocument["reminders"]) =>
@@ -87,16 +115,28 @@ export const setWorkspaceReminders = (reminders: IssuerForDocument["reminders"])
 
 /** Moves the TestClock to 09:00 UTC on `date`. */
 export const at = (date: string) =>
-  TestClock.setTime(Date.parse(`${date}T09:00:00Z`)).pipe(Effect.as(date as IsoDate));
+  TestClock.setTime(Date.parse(`${date}T09:00:00Z`)).pipe(Effect.as(IsoDate.make(date)));
 
 /** Test-only direct write of a document's stored fields (e.g. settlement, dueOn). */
-export const patchDocument = (id: DocumentId, patch: Partial<DocumentRecord>) =>
-  Effect.flatMap(CoreStore, (store) =>
-    store.transaction(
-      Effect.gen(function* () {
-        const repo = yield* DocumentsRepo;
-        const row = yield* repo.lock(WORKSPACE_A, id);
-        return yield* repo.update({ ...row, ...patch }, row.revision);
-      }),
+type PatchResult = Effect.Effect<
+  DocumentRecord,
+  NotFound | Conflict | UniqueViolation | StoreUnavailable,
+  CoreStore | DocumentsRepo
+>;
+
+export const patchDocument: {
+  (patch: Partial<DocumentRecord>): (id: DocumentId) => PatchResult;
+  (id: DocumentId, patch: Partial<DocumentRecord>): PatchResult;
+} = Fn.dual(
+  2,
+  (id: DocumentId, patch: Partial<DocumentRecord>): PatchResult =>
+    Effect.flatMap(CoreStore, (store) =>
+      store.transaction(
+        Effect.gen(function* () {
+          const repo = yield* DocumentsRepo;
+          const row = yield* repo.lock(WORKSPACE_A, id);
+          return yield* repo.update({ ...row, ...patch }, row.revision);
+        }),
+      ),
     ),
-  );
+);

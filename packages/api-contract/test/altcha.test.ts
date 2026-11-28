@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Schema } from "effect";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   ALTCHA_HEADER_MAX_LENGTH,
   AltchaChallenge,
@@ -14,13 +17,12 @@ const challenge = {
   signature: "abcdef0123",
 };
 const solved = { challenge, solution: { counter: 4242, time: 812 } };
-/** Drops the brand so decoded values compare against plain literals. */
-const plain = (value: unknown): unknown => value;
+const json = Schema.fromJsonString(Schema.Unknown);
 
 describe("ALTCHA schemas", () => {
   test("challenge is a non-empty JSON object", () => {
-    const decode = Schema.decodeUnknownSync(AltchaChallenge);
-    expect(plain(decode(challenge))).toEqual(challenge);
+    const decode = Fn.flow(Schema.decodeUnknownEffect(AltchaChallenge), Effect.runSync);
+    expect<Schema.Json>(decode(challenge)).toEqual(challenge);
     expect(() => decode({})).toThrow();
     expect(() => decode([challenge])).toThrow();
     expect(() => decode("challenge")).toThrow();
@@ -28,8 +30,8 @@ describe("ALTCHA schemas", () => {
   });
 
   test("challenge values must be JSON values", () => {
-    const decode = Schema.decodeUnknownSync(AltchaChallenge);
-    expect(plain(decode({ a: [1, true, null], b: { c: "d" } }))).toEqual({
+    const decode = Fn.flow(Schema.decodeUnknownEffect(AltchaChallenge), Effect.runSync);
+    expect<Schema.Json>(decode({ a: [1, true, null], b: { c: "d" } })).toEqual({
       a: [1, true, null],
       b: { c: "d" },
     });
@@ -39,40 +41,44 @@ describe("ALTCHA schemas", () => {
   });
 
   test("X-Altcha header is base64 JSON of an object and round-trips", () => {
-    const header = btoa(JSON.stringify(solved));
-    const decoded = Schema.decodeUnknownSync(AltchaPayloadFromHeader)(header);
-    expect(plain(decoded)).toEqual(solved);
-    const encoded = Schema.encodeSync(AltchaPayloadFromHeader)(decoded);
-    expect(JSON.parse(atob(encoded))).toEqual(solved);
-    expect(
-      plain(Schema.decodeUnknownSync(AltchaHeaders)({ "x-altcha": header })["x-altcha"]),
+    const header = btoa(
+      '{"challenge":{"parameters":{"algorithm":"PBKDF2/SHA-256","nonce":"4d6f6f6e","expiresAt":1795000000},"signature":"abcdef0123"},"solution":{"counter":4242,"time":812}}',
+    );
+    const decoded = Schema.decodeEffect(AltchaPayloadFromHeader)(header).pipe(Effect.runSync);
+    expect<Schema.Json>(decoded).toEqual(solved);
+    const encoded = Schema.encodeEffect(AltchaPayloadFromHeader)(decoded).pipe(Effect.runSync);
+    expect(Schema.decodeEffect(json)(atob(encoded)).pipe(Effect.runSync)).toEqual(solved);
+    expect<Schema.Json>(
+      Schema.decodeEffect(AltchaHeaders)({ "x-altcha": header }).pipe(Effect.runSync)["x-altcha"],
     ).toEqual(solved);
   });
 
   test("header rejects bad base64, non-JSON and JSON that is not an object", () => {
-    const decode = Schema.decodeUnknownSync(AltchaPayloadFromHeader);
+    const decode = Fn.flow(Schema.decodeUnknownEffect(AltchaPayloadFromHeader), Effect.runSync);
     expect(() => decode("%%%not-base64%%%")).toThrow();
     expect(() => decode(btoa("not json"))).toThrow();
-    for (const json of ["[1,2]", '"text"', "42", "null", "true"]) {
-      expect(() => decode(btoa(json))).toThrow();
+    for (const body of ["[1,2]", '"text"', "42", "null", "true"]) {
+      expect(() => decode(btoa(body))).toThrow();
     }
-    expect(() => Schema.decodeUnknownSync(AltchaHeaders)({})).toThrow();
+    expect(() => Schema.decodeUnknownEffect(AltchaHeaders)({}).pipe(Effect.runSync)).toThrow();
   });
 
   test("header rejects values over the length bound", () => {
     expect(ALTCHA_HEADER_MAX_LENGTH).toBe(8192);
-    const decode = Schema.decodeUnknownSync(AltchaPayloadFromHeader);
-    const fits = (n: number) => btoa(JSON.stringify({ pad: "x".repeat(n) }));
+    const decode = Fn.flow(Schema.decodeUnknownEffect(AltchaPayloadFromHeader), Effect.runSync);
+    const fits = (length: number) => btoa(`{"pad":"${Str.repeat(length)("x")}"}`);
     let n = 0;
     while (fits(n + 3).length <= ALTCHA_HEADER_MAX_LENGTH) n += 3;
     expect(fits(n).length).toBeLessThanOrEqual(ALTCHA_HEADER_MAX_LENGTH);
-    expect(plain(decode(fits(n)))).toEqual({ pad: "x".repeat(n) });
+    expect<Schema.Json>(decode(fits(n))).toEqual({ pad: Str.repeat(n)("x") });
     expect(fits(n + 3).length).toBeGreaterThan(ALTCHA_HEADER_MAX_LENGTH);
     expect(() => decode(fits(n + 3))).toThrow();
   });
 
   test("bot scopes are the five signed scopes", () => {
-    expect(Schema.decodeUnknownSync(BotScope)("invitation_accept")).toBe("invitation_accept");
-    expect(() => Schema.decodeUnknownSync(BotScope)("sign_out")).toThrow();
+    expect(Schema.decodeEffect(BotScope)("invitation_accept").pipe(Effect.runSync)).toBe(
+      "invitation_accept",
+    );
+    expect(() => Schema.decodeUnknownEffect(BotScope)("sign_out").pipe(Effect.runSync)).toThrow();
   });
 });

@@ -1,3 +1,4 @@
+import * as Fn from "effect/Function";
 import type { ReadyUpdate } from "./ota-update";
 
 /**
@@ -32,7 +33,10 @@ export const selectUpdatePrompt = ({
  * ready until the reload, so a later empty or failed check keeps it, and a
  * newer one replaces it: a reload launches only the newest.
  */
-export const nextReadyUpdate = (
-  previous: ReadyUpdate | undefined,
-  found: ReadyUpdate | undefined,
-): ReadyUpdate | undefined => found ?? previous;
+export const nextReadyUpdate: {
+  (found: ReadyUpdate | undefined): (previous: ReadyUpdate | undefined) => ReadyUpdate | undefined;
+  (previous: ReadyUpdate | undefined, found: ReadyUpdate | undefined): ReadyUpdate | undefined;
+} = Fn.dual(
+  2,
+  (previous: ReadyUpdate | undefined, found: ReadyUpdate | undefined) => found ?? previous,
+);

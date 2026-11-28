@@ -1,7 +1,11 @@
 import "./styles/index.css";
-import { type Renderer, Router } from "@effect/ui";
+import { Router } from "@effect/ui";
 import { BrowserHost, BrowserRouter, HtmlHydrate } from "@effect/ui/html";
-import { Effect, Layer } from "effect";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import { StartupConfig, WebServicesLive } from "./app/api";
 import { RunApi } from "./app/commands";
 import { loadBrowserPrefs } from "./app/prefs";
@@ -9,47 +13,46 @@ import { BrowserRoutes } from "./app/routing";
 import { utcDateAt } from "./app/utc-date";
 import { demoEnabled, demoRoutes } from "./demo";
 import { installDemoFetch } from "./demo/router";
-import { App, browserAnalytics, type Flags, Navigate } from "./main";
+import { App, browserAnalytics, Flags, Navigate } from "./main";
 import { registerUiSdk } from "./ui/sdk";
 
-if (demoEnabled()) installDemoFetch(demoRoutes);
+if (demoEnabled()) installDemoFetch({ routes: demoRoutes, run: Effect.runPromise });
 
-const container = document.getElementById("root");
-if (container === null) throw new Error("Missing #root for the application");
+const Bootstrap = Schema.fromJsonString(
+  Schema.Struct({
+    flags: Flags,
+    state: Schema.JsonObject,
+  }),
+);
+const readBootstrap = Schema.decodeUnknownOption(Bootstrap);
+const state = readBootstrap(document.querySelector("#kb-state")?.textContent);
 
-const bootstrap = document.getElementById("kb-state")?.textContent;
-const state: { readonly flags: Flags; readonly state: Renderer.State } | undefined = bootstrap
-  ? JSON.parse(bootstrap)
-  : undefined;
-
-const host =
-  state === undefined
-    ? Layer.unwrap(
+const host = Layer.unwrap(
+  Effect.gen(function* () {
+    const container = document.querySelector<HTMLDivElement>("#root");
+    if (container === null) return yield* Effect.die("Missing #root for the application");
+    if (Option.isSome(state)) {
+      const { flags, state: saved } = state.value;
+      return Layer.effectDiscard(
         Effect.gen(function* () {
-          yield* Effect.promise(() => registerUiSdk());
-          const router = yield* Router.Router;
-          const prefs = loadBrowserPrefs();
-          document.documentElement.lang = prefs.locale;
-          return BrowserHost.mount(
-            App,
-            {
-              path: router.location().url,
-              today: utcDateAt(Date.now()),
-              prefs,
-              session: { _tag: "Unknown" },
-            },
-            container,
-          );
-        }),
-      )
-    : Layer.effectDiscard(
-        Effect.gen(function* () {
-          // Adopt server nodes first so HtmlHydrate does not strip attributes added on upgrade.
-          const root = yield* HtmlHydrate.hydrateEffect(App, state.flags, container, state.state);
+          const root = yield* HtmlHydrate.hydrateEffect(App, flags, container, saved);
           yield* root.adopted;
-          yield* Effect.promise(() => registerUiSdk());
+          yield* registerUiSdk;
         }),
       );
+    }
+    yield* registerUiSdk;
+    const router = yield* Router.Router;
+    const prefs = yield* loadBrowserPrefs;
+    const now = yield* Clock.currentTimeMillis;
+    document.documentElement.lang = prefs.locale;
+    return BrowserHost.mount(
+      App,
+      { path: router.location().url, today: utcDateAt(now), prefs, session: { _tag: "Unknown" } },
+      container,
+    );
+  }),
+);
 
 const router = BrowserRouter.layer({ routes: BrowserRoutes });
 const webServices = StartupConfig.layer.pipe(Layer.provideMerge(WebServicesLive));
@@ -57,5 +60,5 @@ const layers = Layer.mergeAll(
   RunApi.fromClient,
   Navigate.layer,
   browserAnalytics(location.origin),
-).pipe(Layer.provide(webServices), Layer.provideMerge(router));
-Effect.runFork(Layer.launch(host.pipe(Layer.provide(layers))));
+).pipe(Layer.provideMerge(webServices), Layer.provideMerge(router));
+host.pipe(Layer.provide(layers), Layer.launch, Effect.runFork);

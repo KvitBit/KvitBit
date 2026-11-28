@@ -1,3 +1,8 @@
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Result from "effect/Result";
 import { addNetworkStateListener } from "expo-network";
 import { router, useGlobalSearchParams, usePathname } from "expo-router";
 import { useEffect, useRef } from "react";
@@ -9,19 +14,28 @@ import {
   listPendingSharedFiles,
   subscribeSharedFiles,
 } from "../../platform/capture/share-intent";
+import { fromMobilePromise } from "../../runtime/request-intent";
 import { useOverlay } from "../../ui";
+import { runFeatureCallback, runFeatureEffect } from "../ui-effect";
+import { captureQueue } from "./capture-queue-instance";
 import { importSharedReceipts } from "./capture-share";
-import { captureQueue, useCaptureAccess, useCaptureNetwork } from "./use-expense-capture";
+import { useCaptureAccess, useCaptureNetwork } from "./use-expense-capture";
 
 export function ExpenseCaptureRuntime() {
-  const { current, all } = useCaptureAccess();
+  const { current: access, all } = useCaptureAccess();
   const network = useCaptureNetwork();
-  const { t, local } = useI18n();
-  const { toast } = useOverlay();
-  const pathname = usePathname();
-  const { captureId } = useGlobalSearchParams<{ captureId?: string }>();
-  const active = useRef({ pathname, captureId, t, local, toast });
-  active.current = { pathname, captureId, t, local, toast };
+  const i18n = useI18n();
+  const overlay = useOverlay();
+  const route = useGlobalSearchParams<{ captureId?: string }>();
+  const latest = {
+    pathname: usePathname(),
+    captureId: route.captureId,
+    t: i18n.t,
+    local: i18n.local,
+    toast: overlay.toast,
+  };
+  const active = useRef(latest);
+  active.current = latest;
 
   useEffect(() => {
     if (all.length === 0) return;
@@ -30,7 +44,7 @@ export function ExpenseCaptureRuntime() {
     let requested = false;
     let reconnect = false;
     let signedIn = true;
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelRetry: (() => void) | undefined;
 
     function drain(online = false) {
       if (disposed) return;
@@ -39,21 +53,32 @@ export function ExpenseCaptureRuntime() {
         requested = true;
         return;
       }
-      clearTimeout(timer);
+      cancelRetry?.();
       running = true;
       const options = { reconnect, signedIn };
       reconnect = false;
       signedIn = false;
-      void Promise.allSettled(all.map((access) => captureQueue.drain(access, network, options)))
+      runFeatureEffect(
+        Effect.forEach(
+          all,
+          (candidate) =>
+            fromMobilePromise(() => captureQueue.drain(candidate, network, options)).pipe(
+              Effect.result,
+            ),
+          {
+            concurrency: "unbounded",
+          },
+        ),
+      )
         .then((results) => {
           if (disposed) return;
-          let nextAt = Infinity;
+          let nextAt = Number.POSITIVE_INFINITY;
           for (const result of results) {
-            if (result.status === "rejected") continue;
-            nextAt = Math.min(nextAt, result.value.nextAt ?? Infinity);
-            for (const job of result.value.completed) {
+            if (Result.isFailure(result)) continue;
+            nextAt = Math.min(nextAt, result.success.nextAt ?? Number.POSITIVE_INFINITY);
+            for (const job of result.success.completed) {
               const { toast, t } = active.current;
-              const rejected = job.files.some(({ result: file }) => file?.kind === "rejected");
+              const rejected = Arr.some(job.files, ({ result: file }) => file?.kind === "rejected");
               const id = job.expenseId;
               if (id === null) continue;
               toast(t(rejected ? "error.invalid" : "common.toast.saved"), {
@@ -63,7 +88,19 @@ export function ExpenseCaptureRuntime() {
               });
             }
           }
-          if (nextAt !== Infinity) timer = setTimeout(drain, Math.max(0, nextAt - Date.now()));
+          if (nextAt !== Number.POSITIVE_INFINITY) {
+            cancelRetry = runFeatureCallback({
+              effect: Clock.currentTimeMillis.pipe(
+                Effect.flatMap((now) => Effect.sleep(Math.max(0, nextAt - now))),
+              ),
+              onExit: (exit) => {
+                if (Exit.isSuccess(exit)) {
+                  cancelRetry = undefined;
+                  drain();
+                }
+              },
+            });
+          }
         })
         .finally(() => {
           running = false;
@@ -79,13 +116,13 @@ export function ExpenseCaptureRuntime() {
       if (state === "active") drain();
     });
     const connection = addNetworkStateListener((state) => {
-      if (state.isConnected && state.isInternetReachable !== false) drain(true);
+      if (state.isConnected === true && state.isInternetReachable !== false) drain(true);
     });
     drain();
 
     return () => {
       disposed = true;
-      clearTimeout(timer);
+      cancelRetry?.();
       unsubscribe();
       app.remove();
       connection.remove();
@@ -93,7 +130,6 @@ export function ExpenseCaptureRuntime() {
   }, [all, network]);
 
   useEffect(() => {
-    const access = current;
     if (access === null) return;
     let disposed = false;
     let running = false;
@@ -105,7 +141,7 @@ export function ExpenseCaptureRuntime() {
         return;
       }
       running = true;
-      void importSharedReceipts(access, captureQueue, {
+      importSharedReceipts(access, captureQueue, {
         list: listPendingSharedFiles,
         acknowledge: acknowledgeSharedFiles,
       })
@@ -124,7 +160,7 @@ export function ExpenseCaptureRuntime() {
           if (staged.job === undefined) return;
           const href = hrefOf({ _tag: "ExpenseCapture", ws: access.scope.workspaceSlug });
           if (pathname === href && captureId === staged.job.key) return;
-          router.push(`${href}?captureId=${encodeURIComponent(staged.job.key)}` as never);
+          router.push(`${href}?captureId=${encodeURIComponent(staged.job.key)}`);
         })
         .catch(() => {
           if (!disposed && access.canWrite())
@@ -148,7 +184,7 @@ export function ExpenseCaptureRuntime() {
       unsubscribe();
       app.remove();
     };
-  }, [current]);
+  }, [access]);
 
   return null;
 }

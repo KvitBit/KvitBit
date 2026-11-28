@@ -5,17 +5,21 @@
  * accounts and branding. Core-internal; it takes a `workspaceId` the calling module already
  * scoped from its own caller, and performs no policy check.
  */
+
 import type {
   BankAccountId,
-  DocumentKind,
   IsoDate,
-  NumberingSeriesId,
   TaxRegime,
   WorkspaceId,
   WorkspaceSlug,
 } from "@kvitbit/domain/contract";
 import { NotFound } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as EffectRecord from "effect/Record";
 import type { WorkspaceBillingDefaults, WorkspaceReminderPolicy } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { BankAccountViewFields, Branding, IssuingEntity, PaymentRounding } from "./model";
@@ -58,7 +62,7 @@ export class WorkspaceSnapshots extends Context.Service<
       id: BankAccountId,
     ) => Effect.Effect<BankAccountViewFields, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/WorkspaceSnapshots") {}
+>()("@kvitbit/core/modules/workspaces/snapshots/WorkspaceSnapshots") {}
 
 export const WorkspaceSnapshotsLive: Layer.Layer<
   WorkspaceSnapshots,
@@ -74,62 +78,64 @@ export const WorkspaceSnapshotsLive: Layer.Layer<
       byCurrency: Readonly<Record<string, BankAccountId>>,
     ) => byCurrency[account.currency] === account.id;
     return {
-      get: (workspaceId, asOf) =>
-        Effect.gen(function* () {
-          const row = yield* repo.getWorkspace(workspaceId);
-          const accounts = (yield* repo.listBankAccounts(workspaceId)).filter((a) => !a.archived);
-          const seriesByKind: { [K in DocumentKind]?: NumberingSeriesId } = {};
-          for (const s of yield* series.list(workspaceId, asOf)) {
-            if (s.isDefault) seriesByKind[s.kind] = s.id;
-          }
-          return {
-            workspaceId,
-            revision: row.revision,
-            slug: row.slug,
-            name: row.name,
-            closed: row.closed,
-            issuingEntity: row.issuingEntity,
-            taxRegime: regimeOn(row.taxRegimes, asOf),
-            billing: {
-              currency: row.defaults.currency,
-              language: row.defaults.language,
-              dueDays: row.defaults.dueDays,
-              paymentMethod: row.defaults.paymentMethod,
-              seriesByKind,
-              defaultNote: row.defaults.defaultNote,
-            },
-            paymentRounding: row.defaults.paymentRounding,
-            paymentTaxDocumentAutoSend: row.defaults.paymentTaxDocumentAutoSend,
-            reminders: row.reminders,
-            bankAccounts: accounts.map((a) => ({
-              id: a.id,
-              name: a.name,
-              iban: a.iban,
-              bic: a.bic,
-              currency: a.currency,
-              isDefault: view(a, row.bankAccountByCurrency),
-              revision: a.revision,
-            })),
-            branding: row.branding,
-          };
-        }),
-      bankAccount: (workspaceId, id) =>
-        Effect.gen(function* () {
-          const account = yield* repo.getBankAccount(workspaceId, id);
-          const row = yield* repo.getWorkspace(workspaceId);
-          if (account.archived) {
-            return yield* new NotFound({ entity: "BankAccount", id });
-          }
-          return {
-            id: account.id,
-            name: account.name,
-            iban: account.iban,
-            bic: account.bic,
-            currency: account.currency,
-            isDefault: view(account, row.bankAccountByCurrency),
-            revision: account.revision,
-          };
-        }),
+      get: Effect.fn("WorkspaceSnapshots.get")(function* (workspaceId, asOf) {
+        const row = yield* repo.getWorkspace(workspaceId);
+        const value = yield* repo.listBankAccounts(workspaceId);
+        const accounts = EffectArray.filter(value, (a) => !a.archived);
+        const configuredSeries = yield* series.list(workspaceId, asOf);
+        const seriesByKind = Fn.pipe(
+          configuredSeries,
+          EffectArray.filter((entry) => entry.isDefault),
+          EffectArray.map((entry) => [entry.kind, entry.id] as const),
+          EffectRecord.fromEntries,
+        );
+        return {
+          workspaceId,
+          revision: row.revision,
+          slug: row.slug,
+          name: row.name,
+          closed: row.closed,
+          issuingEntity: row.issuingEntity,
+          taxRegime: regimeOn(row.taxRegimes, asOf),
+          billing: {
+            currency: row.defaults.currency,
+            language: row.defaults.language,
+            dueDays: row.defaults.dueDays,
+            paymentMethod: row.defaults.paymentMethod,
+            seriesByKind,
+            defaultNote: row.defaults.defaultNote,
+          },
+          paymentRounding: row.defaults.paymentRounding,
+          paymentTaxDocumentAutoSend: row.defaults.paymentTaxDocumentAutoSend,
+          reminders: row.reminders,
+          bankAccounts: EffectArray.map(accounts, (a) => ({
+            id: a.id,
+            name: a.name,
+            iban: a.iban,
+            bic: a.bic,
+            currency: a.currency,
+            isDefault: view(a, row.bankAccountByCurrency),
+            revision: a.revision,
+          })),
+          branding: row.branding,
+        };
+      }),
+      bankAccount: Effect.fn("WorkspaceSnapshots.bankAccount")(function* (workspaceId, id) {
+        const account = yield* repo.getBankAccount(workspaceId, id);
+        const row = yield* repo.getWorkspace(workspaceId);
+        if (account.archived) {
+          return yield* NotFound.make({ entity: "BankAccount", id });
+        }
+        return {
+          id: account.id,
+          name: account.name,
+          iban: account.iban,
+          bic: account.bic,
+          currency: account.currency,
+          isDefault: view(account, row.bankAccountByCurrency),
+          revision: account.revision,
+        };
+      }),
     };
   }),
 );

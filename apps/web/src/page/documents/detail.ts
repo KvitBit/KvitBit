@@ -1,5 +1,6 @@
 import { UiSchema } from "@effect/ui";
 import type { Html } from "@effect/ui/html";
+import type { RecordPaymentInput, SendInput } from "@kvitbit/api-contract";
 /**
  * Screen 11 — Document Detail & Action Dialogs: invoice preview, Payments list, Share Link
  * create/copy/revoke, Send email dialog, Record Payment dialog, Proforma -> PTD -> Final Invoice
@@ -7,23 +8,34 @@ import type { Html } from "@effect/ui/html";
  */
 import {
   AuditEntry,
-  type DeliveryPurpose,
+  DeliveryPurpose,
   type DocumentId,
   DocumentView,
-  type Locale,
+  Locale,
   MoneyMath,
-  type PaymentId,
-  type PaymentMethod,
+  PaymentId,
+  PaymentMethod,
   ShareViewEvent,
   type WorkspaceId,
 } from "@kvitbit/domain";
-import { I18n, ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Effect, Schema } from "effect";
+import { I18n } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import type * as Types from "effect/Types";
 import { Failure } from "../../app/api";
 import type { PageCommand } from "../../app/commands";
 import { type Copy, copy, textOf, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import type { Markup } from "../../ui/html";
@@ -79,7 +91,8 @@ import {
   todayPrague,
 } from "./shared";
 
-export type Route = RouteOf<"Document">;
+export const Route = RouteCases.Document;
+export type Route = typeof Route.Type;
 
 const CopyTable: Copy<
   | "title"
@@ -425,7 +438,7 @@ const PendingWriteKind = Schema.Literals([
 type PendingWriteKind = typeof PendingWriteKind.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   detail: Remote.remoteSchema(DetailBundle),
   activeDialog: ActiveDialog,
   busy: Schema.Boolean,
@@ -493,19 +506,23 @@ const loadDetailCommand = (
   seq: Remote.Seq,
 ): PageCommand<Message> =>
   apiCommand(
+    Message,
     "LoadDocumentDetail",
     (c) =>
-      Effect.all({
-        doc: c.documents.get({ params: { workspaceId, documentId } }),
-        payments: c.payments.listForDocument({ params: { workspaceId, documentId } }),
-        history: c.documents.history({ params: { workspaceId, documentId } }),
-        shareViews: c.shareLinks
-          .views({ params: { workspaceId, documentId }, query: { limit: 25 } })
-          .pipe(
-            Effect.map((p) => p.items),
-            Effect.catch(() => Effect.succeed([])),
-          ),
-      }),
+      Effect.all(
+        {
+          doc: c.documents.get({ params: { workspaceId, documentId } }),
+          payments: c.payments.listForDocument({ params: { workspaceId, documentId } }),
+          history: c.documents.history({ params: { workspaceId, documentId } }),
+          shareViews: c.shareLinks
+            .views({ params: { workspaceId, documentId }, query: { limit: 25 } })
+            .pipe(
+              Effect.map((p) => p.items),
+              Effect.orElseSucceed(() => []),
+            ),
+        },
+        { concurrency: 1 },
+      ),
     (res): Message =>
       Message.LoadedDetail({
         seq,
@@ -519,25 +536,16 @@ const loadDetailCommand = (
     (failure): Message => Message.FailedDetail({ seq, failure }),
   );
 
-const dialogPermission = (dialog: NonNullable<typeof ActiveDialog.Type>): DocumentAction => {
-  switch (dialog) {
-    case "send":
-      return "document.send";
-    case "payment":
-    case "removePayment":
-      return "payment.write";
-    case "issue":
-      return "document.issue";
-    case "cancel":
-      return "document.cancel";
-    case "correct":
-      return "document.correct";
-    case "unlock":
-      return "document.unlock";
-    case "final":
-      return "document.finalInvoice";
-  }
-};
+const dialogPermissions = {
+  send: "document.send",
+  payment: "payment.write",
+  removePayment: "payment.write",
+  issue: "document.issue",
+  cancel: "document.cancel",
+  correct: "document.correct",
+  unlock: "document.unlock",
+  final: "document.finalInvoice",
+} satisfies Record<NonNullable<typeof ActiveDialog.Type>, DocumentAction>;
 
 const documentActions = (
   doc: DocumentView,
@@ -574,11 +582,11 @@ const documentActions = (
   };
 };
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const today = todayPrague();
   const initialDialog = route.dialog ?? null;
   const allowedDialog =
-    initialDialog !== null && canRole(ctx.workspace?.role, dialogPermission(initialDialog))
+    initialDialog !== null && canRole(ctx.workspace?.role, dialogPermissions[initialDialog])
       ? initialDialog
       : null;
   const base: Model = {
@@ -607,6 +615,11 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     commands: [loadDetailCommand(ctx.workspace.id, route.id, Remote.seqOf(detail))],
   };
 };
+
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
 
 const reloadDetail = (
   model: Model,
@@ -642,25 +655,27 @@ const executeIdempotentWrite = (
   const headers = idempotencyHeaders(key);
   switch (action) {
     case "send": {
-      const recipients = model.sendTo
-        .split(",")
-        .map((s) => s.trim())
-        .filter((s) => s !== "");
+      const recipients = Arr.filter(
+        Arr.map(Str.split(model.sendTo, ","), (s) => Str.trim(s)),
+        (s) => s !== "",
+      );
+      const payload: Types.Mutable<SendInput> = {
+        language: Locale.make(model.sendLanguage),
+        purpose: DeliveryPurpose.make(model.sendPurpose),
+        reminders: model.sendReminders,
+      };
+      if (recipients.length > 0) payload.to = recipients;
       return {
         model: base,
         commands: [
           apiCommand(
+            Message,
             "SendDocument",
             (c) =>
               c.documents.send({
                 params: { workspaceId: ws.id, documentId: route.id },
                 headers,
-                payload: {
-                  ...(recipients.length === 0 ? {} : { to: recipients }),
-                  language: model.sendLanguage as Locale,
-                  purpose: model.sendPurpose as DeliveryPurpose,
-                  reminders: model.sendReminders,
-                },
+                payload,
               }),
             (): Message =>
               Message.ActionSucceeded({ toast: txt(locale, "toastSent"), reload: true }),
@@ -675,22 +690,25 @@ const executeIdempotentWrite = (
       const amountVal =
         parsed !== undefined ? MoneyMath.make(parsed, bundle.doc.totals.gross.currency) : undefined;
       const paidOn = isIsoDateString(model.payDate) ? model.payDate : undefined;
+      const payload: Types.Mutable<RecordPaymentInput> = {
+        target: { document: route.id },
+        method: PaymentMethod.make(model.payMethod),
+      };
+      if (amountVal !== undefined) payload.amount = amountVal;
+      if (paidOn !== undefined) payload.paidOn = paidOn;
+      const note = Str.trim(model.payNote);
+      if (note !== "") payload.note = note;
       return {
         model: base,
         commands: [
           apiCommand(
+            Message,
             "RecordPayment",
             (c) =>
               c.payments.record({
                 params: { workspaceId: ws.id },
                 headers,
-                payload: {
-                  target: { document: route.id },
-                  ...(amountVal === undefined ? {} : { amount: amountVal }),
-                  ...(paidOn === undefined ? {} : { paidOn }),
-                  method: model.payMethod as PaymentMethod,
-                  ...(model.payNote.trim() === "" ? {} : { note: model.payNote.trim() }),
-                },
+                payload,
               }),
             (res): Message => {
               const ptd = res.issued[0];
@@ -706,11 +724,12 @@ const executeIdempotentWrite = (
       };
     }
     case "cancel": {
-      const reason = model.reasonText.trim();
+      const reason = Str.trim(model.reasonText);
       return {
         model: base,
         commands: [
           apiCommand(
+            Message,
             "CancelDocument",
             (c) =>
               c.documents.cancel({
@@ -729,11 +748,12 @@ const executeIdempotentWrite = (
       };
     }
     case "correct": {
-      const reason = model.reasonText.trim();
+      const reason = Str.trim(model.reasonText);
       return {
         model: base,
         commands: [
           apiCommand(
+            Message,
             "IssueCreditNote",
             (c) =>
               c.documents.correct({
@@ -762,6 +782,7 @@ const executeIdempotentWrite = (
         model: base,
         commands: [
           apiCommand(
+            Message,
             "IssueFinalInvoice",
             (c) =>
               c.documents.issueFinalInvoice({
@@ -790,6 +811,7 @@ const executeIdempotentWrite = (
         model: base,
         commands: [
           apiCommand(
+            Message,
             "IssueDraftFromDetail",
             (c) =>
               c.documents.issueDraft({
@@ -834,13 +856,13 @@ const startIdempotentWrite = (
   };
 };
 
-export const update = (
+const updateImpl = (
   model: Model,
   message: Message,
   ctx: PageContext,
 ): PageReturn<Model, Message> => {
   const ws = ctx.workspace;
-  const route = model.route as Route;
+  const route = model.route;
   const bundle = Remote.dataOf(model.detail);
 
   const actions = bundle === undefined ? undefined : documentActions(bundle.doc, ws?.role);
@@ -849,9 +871,9 @@ export const update = (
     model.detail._tag === "Loaded" &&
     !model.busy &&
     (model.pendingAction === null || model.pendingAction === action);
-  const canSubmit = (dialog: NonNullable<typeof ActiveDialog.Type>) =>
-    model.activeDialog === dialog && canStart(dialog);
-  if ((model.busy || model.pendingAction !== null) && /^(Changed|Toggled)/.test(message._tag))
+  const canSubmit = (currentDialog: NonNullable<typeof ActiveDialog.Type>) =>
+    model.activeDialog === currentDialog && canStart(currentDialog);
+  if ((model.busy || model.pendingAction !== null) && editedFieldTag.test(message._tag))
     return { model };
 
   return Message.match(message, {
@@ -866,10 +888,10 @@ export const update = (
           detail,
           activeDialog:
             model.activeDialog !== null && allowed[model.activeDialog] ? model.activeDialog : null,
-          sendTo: model.sendTo === "" ? (contact?.billingEmails.join(", ") ?? "") : model.sendTo,
+          sendTo: model.sendTo === "" ? Arr.join(contact?.billingEmails ?? [], ", ") : model.sendTo,
           payAmount:
             model.payAmount === ""
-              ? BigDecimal.format(BigDecimal.normalize(data.doc.totals.gross.amount))
+              ? data.doc.totals.gross.amount.pipe(BigDecimal.normalize, BigDecimal.format)
               : model.payAmount,
           payMethod: data.doc.paymentMethod,
         },
@@ -962,26 +984,27 @@ export const update = (
       model: { ...model, reasonText: value },
     }),
     SubmittedCancel: () => {
-      if (ws === null || !canSubmit("cancel") || model.reasonText.trim() === "") {
+      if (ws === null || !canSubmit("cancel") || Str.trim(model.reasonText) === "") {
         return { model };
       }
       return startIdempotentWrite(model, "cancel", ws, route, bundle, ctx.locale);
     },
     SubmittedCreditNote: () => {
-      if (ws === null || !canSubmit("correct") || model.reasonText.trim() === "") {
+      if (ws === null || !canSubmit("correct") || Str.trim(model.reasonText) === "") {
         return { model };
       }
       return startIdempotentWrite(model, "correct", ws, route, bundle, ctx.locale);
     },
     SubmittedUnlock: () => {
-      if (ws === null || !canSubmit("unlock") || model.reasonText.trim() === "") {
+      if (ws === null || !canSubmit("unlock") || Str.trim(model.reasonText) === "") {
         return { model };
       }
-      const reason = model.reasonText.trim();
+      const reason = Str.trim(model.reasonText);
       return {
         model: { ...model, busy: true, dialogError: null },
         commands: [
           apiCommand(
+            Message,
             "UnlockDocument",
             (c) =>
               c.documents.unlock({
@@ -1000,16 +1023,17 @@ export const update = (
         ws === null ||
         !canSubmit("removePayment") ||
         model.removingPaymentId === null ||
-        model.reasonText.trim() === ""
+        Str.trim(model.reasonText) === ""
       ) {
         return { model };
       }
-      const paymentId = model.removingPaymentId as PaymentId;
-      const reason = model.reasonText.trim();
+      const paymentId = PaymentId.make(model.removingPaymentId);
+      const reason = Str.trim(model.reasonText);
       return {
         model: { ...model, busy: true, dialogError: null },
         commands: [
           apiCommand(
+            Message,
             "RemovePayment",
             (c) =>
               c.payments.remove({
@@ -1044,6 +1068,7 @@ export const update = (
         model: { ...model, busy: true },
         commands: [
           apiCommand(
+            Message,
             "LockDocument",
             (c) => c.documents.lock({ params: { workspaceId: ws.id, documentId: route.id } }),
             (): Message =>
@@ -1061,6 +1086,7 @@ export const update = (
         model: { ...model, busy: true },
         commands: [
           apiCommand(
+            Message,
             "DiscardDraft",
             (c) =>
               c.documents.discardDraft({
@@ -1085,6 +1111,7 @@ export const update = (
         model: { ...model, busy: true },
         commands: [
           apiCommand(
+            Message,
             "CreateShareLink",
             (c) => c.shareLinks.create({ params: { workspaceId: ws.id, documentId: route.id } }),
             (): Message =>
@@ -1109,11 +1136,13 @@ export const update = (
       ),
     }),
     ClickedRevokeShare: () => {
-      if (ws === null || bundle?.doc.share == null || !canStart("share")) return { model };
+      if (ws === null || bundle === undefined || bundle.doc.share === null || !canStart("share"))
+        return { model };
       return {
         model: { ...model, busy: true },
         commands: [
           apiCommand(
+            Message,
             "RevokeShareLink",
             (c) => c.shareLinks.revoke({ params: { workspaceId: ws.id, documentId: route.id } }),
             (): Message =>
@@ -1156,19 +1185,30 @@ export const update = (
               pendingRequestKey: preserveRequestKey(failure) ? model.pendingRequestKey : null,
               pendingAction: preserveRequestKey(failure) ? model.pendingAction : null,
             },
-            ...(model.activeDialog === null
-              ? { outMessage: Intent_.toast(textOf(translator(ctx.locale), failure.text), "error") }
-              : {}),
+            outMessage:
+              model.activeDialog === null
+                ? Intent_.toast(textOf(translator(ctx.locale), failure.text), "error")
+                : undefined,
           }
         : { model },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 };
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (model: Model, ctx: PageContext): string => {
   const bundle = Remote.dataOf(model.detail);
   if (bundle === undefined) return txt(ctx.locale, "title");
   return bundle.doc.number ?? txt(ctx.locale, "draftTitle");
 };
+
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
 
 const renderActiveDialog = (
   h: Html.H<Message>,
@@ -1204,8 +1244,8 @@ const renderActiveDialog = (
               value: model.sendLanguage,
               onChange: (value) => Message.ChangedSendLanguage({ value }),
               options: [
-                { value: "cs", label: textOf(t, I18n.enumText("locale", "cs")) },
-                { value: "en", label: textOf(t, I18n.enumText("locale", "en")) },
+                { value: "cs", label: textOf(t, I18n.enumText({ name: "locale", value: "cs" })) },
+                { value: "en", label: textOf(t, I18n.enumText({ name: "locale", value: "en" })) },
               ],
             }),
             selectField(h, {
@@ -1217,11 +1257,11 @@ const renderActiveDialog = (
               options: [
                 {
                   value: "document",
-                  label: textOf(t, I18n.enumText("deliveryPurpose", "document")),
+                  label: textOf(t, I18n.enumText({ name: "deliveryPurpose", value: "document" })),
                 },
                 {
                   value: "reminder",
-                  label: textOf(t, I18n.enumText("deliveryPurpose", "reminder")),
+                  label: textOf(t, I18n.enumText({ name: "deliveryPurpose", value: "reminder" })),
                 },
               ],
             }),
@@ -1277,11 +1317,23 @@ const renderActiveDialog = (
               options: [
                 {
                   value: "bank_transfer",
-                  label: textOf(t, I18n.enumText("paymentMethod", "bank_transfer")),
+                  label: textOf(
+                    t,
+                    I18n.enumText({ name: "paymentMethod", value: "bank_transfer" }),
+                  ),
                 },
-                { value: "cash", label: textOf(t, I18n.enumText("paymentMethod", "cash")) },
-                { value: "card", label: textOf(t, I18n.enumText("paymentMethod", "card")) },
-                { value: "other", label: textOf(t, I18n.enumText("paymentMethod", "other")) },
+                {
+                  value: "cash",
+                  label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "cash" })),
+                },
+                {
+                  value: "card",
+                  label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "card" })),
+                },
+                {
+                  value: "other",
+                  label: textOf(t, I18n.enumText({ name: "paymentMethod", value: "other" })),
+                },
               ],
             }),
             textField(h, {
@@ -1327,7 +1379,7 @@ const renderActiveDialog = (
               label: txt(locale, "dlgCancelSubmit"),
               onClick: Message.SubmittedCancel(),
               variant: "danger",
-              disabled: model.reasonText.trim() === "",
+              disabled: Str.trim(model.reasonText) === "",
               busy: model.busy,
             }),
           ],
@@ -1356,7 +1408,7 @@ const renderActiveDialog = (
               label: txt(locale, "dlgCreditSubmit"),
               onClick: Message.SubmittedCreditNote(),
               variant: "primary",
-              disabled: model.reasonText.trim() === "",
+              disabled: Str.trim(model.reasonText) === "",
               busy: model.busy,
             }),
           ],
@@ -1385,7 +1437,7 @@ const renderActiveDialog = (
               label: txt(locale, "dlgUnlockSubmit"),
               onClick: Message.SubmittedUnlock(),
               variant: "primary",
-              disabled: model.reasonText.trim() === "",
+              disabled: Str.trim(model.reasonText) === "",
               busy: model.busy,
             }),
           ],
@@ -1415,7 +1467,7 @@ const renderActiveDialog = (
               label: txt(locale, "dlgRemovePaySubmit"),
               onClick: Message.SubmittedRemovePayment(),
               variant: "danger",
-              disabled: model.reasonText.trim() === "",
+              disabled: Str.trim(model.reasonText) === "",
               busy: model.busy,
             }),
           ],
@@ -1460,11 +1512,11 @@ const renderActiveDialog = (
   }
 };
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const { locale } = ctx;
   const t = translator(locale);
   const ws = ctx.workspace;
-  const route = model.route as Route;
+  const route = model.route;
   if (ws === null) {
     return page(h, [banner(h, { text: sharedCopy(locale, "noWorkspace"), tone: "error" })]);
   }
@@ -1749,7 +1801,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             ],
             [
               txt(locale, "paymentMethod"),
-              textOf(t, I18n.enumText("paymentMethod", doc.paymentMethod)),
+              textOf(t, I18n.enumText({ name: "paymentMethod", value: doc.paymentMethod })),
             ],
             ...(issuer?.bankAccount !== null && issuer?.bankAccount !== undefined
               ? [
@@ -1770,7 +1822,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 header: txt(locale, "colQty"),
                 align: "end",
                 numeric: true,
-                cell: (l) => `${fmtNum(locale, l.quantity)}${l.unit ? ` ${l.unit}` : ""}`,
+                cell: (l) =>
+                  `${fmtNum(locale, l.quantity)}${l.unit !== null && l.unit !== "" ? ` ${l.unit}` : ""}`,
               },
               {
                 header: txt(locale, "colPrice"),
@@ -1836,7 +1889,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   .class(ui.stack)
                   .children([
                     h.span.class(cn(ui.small, ui.muted)).children([txt(locale, "statutoryNotes")]),
-                    ...doc.statutoryNotes.map((n) => h.p.class(ui.small).children([n.text])),
+                    ...Arr.map(doc.statutoryNotes, (n) => h.p.class(ui.small).children([n.text])),
                   ]),
               ]
             : []),
@@ -1847,7 +1900,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               card(h, [
                 cardTitle(h, txt(locale, "relatedDocs")),
                 h.div.class("flex flex-col gap-2").children(
-                  doc.related.map((rel) =>
+                  Arr.map(doc.related, (rel) =>
                     h.a
                       .class(
                         "flex items-center justify-between gap-2 rounded-control border border-outline-variant bg-surface-container-low px-2.5 py-2 no-underline hover:border-outline",
@@ -1863,7 +1916,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                             h.span
                               .class(cn(ui.small, ui.muted))
                               .children([
-                                textOf(t, I18n.enumText("documentRelation", rel.relation)),
+                                textOf(
+                                  t,
+                                  I18n.enumText({ name: "documentRelation", value: rel.relation }),
+                                ),
                               ]),
                             mono(h, rel.number),
                           ]),
@@ -1879,7 +1935,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           doc.deliveries.length === 0
             ? h.p.class(cn(ui.small, ui.muted)).children([txt(locale, "noDeliveries")])
             : h.ul.class(auditListClass).children(
-                doc.deliveries.map((del) =>
+                Arr.map(doc.deliveries, (del) =>
                   h.li
                     .key(del.id)
                     .class(auditItemClass)
@@ -1887,10 +1943,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                       h.div
                         .class(ui.spread)
                         .children([
-                          h.span.class(ui.small).children([del.to.join(", ")]),
+                          h.span.class(ui.small).children([Arr.join(del.to, ", ")]),
                           badge(
                             h,
-                            textOf(t, I18n.enumText("deliveryStatus", del.status)),
+                            textOf(t, I18n.enumText({ name: "deliveryStatus", value: del.status })),
                             del.status === "sent"
                               ? "paid"
                               : del.status === "failed"
@@ -1933,7 +1989,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             },
             {
               header: txt(locale, "payColMethod"),
-              cell: (p) => textOf(t, I18n.enumText("paymentMethod", p.method)),
+              cell: (p) => textOf(t, I18n.enumText({ name: "paymentMethod", value: p.method })),
             },
             {
               header: txt(locale, "payColAmount"),
@@ -1979,16 +2035,14 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : doc.share === null
         ? emptyState(h, {
             title: txt(locale, "shareNone"),
-            ...(canWriteShare
-              ? {
-                  action: button(h, {
-                    label: txt(locale, "shareCreate"),
-                    onClick: Message.ClickedCreateShare(),
-                    variant: "primary",
-                    busy: model.busy,
-                  }),
-                }
-              : {}),
+            action: canWriteShare
+              ? button(h, {
+                  label: txt(locale, "shareCreate"),
+                  onClick: Message.ClickedCreateShare(),
+                  variant: "primary",
+                  busy: model.busy,
+                })
+              : undefined,
           })
         : h.div.class(ui.stack).children([
             h.div
@@ -2025,7 +2079,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
             shareViews.length === 0
               ? h.p.class(cn(ui.small, ui.muted)).children([txt(locale, "shareEventsEmpty")])
               : h.ul.class(auditListClass).children(
-                  shareViews.map((ev) =>
+                  Arr.map(shareViews, (ev) =>
                     h.li
                       .key(ev.id)
                       .class(auditItemClass)
@@ -2034,7 +2088,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           .class(ui.spread)
                           .children([
                             h.span.children([
-                              `${textOf(t, I18n.enumText("shareEvent", ev.kind))} · ${textOf(t, I18n.enumText("device", ev.device))}`,
+                              `${textOf(t, I18n.enumText({ name: "shareEvent", value: ev.kind }))} · ${textOf(t, I18n.enumText({ name: "device", value: ev.device }))}`,
                             ]),
                             h.span
                               .class(cn(ui.small, ui.muted, ui.num))
@@ -2051,7 +2105,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
     history.length === 0
       ? emptyState(h, { title: txt(locale, "historyEmpty") })
       : h.ul.class(auditListClass).children(
-          history.map((entry) =>
+          Arr.map(history, (entry) =>
             h.li
               .key(entry.id)
               .class(auditItemClass)
@@ -2087,7 +2141,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         .class(ui.row)
         .children([kindBadge(h, locale, doc.kind), ...documentBadges(h, locale, doc)]),
       title: doc.number ?? txt(locale, "draftTitle"),
-      ...(contact?.name === undefined ? {} : { subtitle: contact.name }),
+      subtitle: contact?.name,
       actions,
     }),
     tabBar,
@@ -2097,3 +2151,10 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       : []),
   ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);
+
+const editedFieldTag = /^(Changed|Toggled)/;

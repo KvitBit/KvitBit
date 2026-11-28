@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import type { AuditEntry, AuditEntryId, RequestKey, UserId } from "@kvitbit/domain/contract";
-import { Effect, Exit, Ref } from "effect";
-import { SqlClient } from "effect/sql";
+import {
+  type AuditEntry,
+  AuditEntryId,
+  ExportId,
+  RequestKey,
+  UserId,
+} from "@kvitbit/domain/contract";
+import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Ref from "effect/Ref";
+import * as SqlClient from "effect/sql/SqlClient";
 import { CoreStore, runStore, seedWorkspace } from "./support";
 
 const countNotes = Effect.gen(function* () {
@@ -14,7 +23,7 @@ const insertContact = (workspaceId: string, name: string) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
     yield* sql`insert into contacts (id, workspace_id, name, country)
-      values (${crypto.randomUUID()}, ${workspaceId}, ${name}, 'CZ')`;
+      values (${SecureRandom.uuidV7Unsafe()}, ${workspaceId}, ${name}, 'CZ')`;
   }).pipe(Effect.orDie);
 
 describe("SQL CoreStore: transactions", () => {
@@ -78,7 +87,7 @@ describe("SQL CoreStore: transactions", () => {
         return yield* Effect.exit(store.afterCommit(Effect.void));
       }),
     );
-    expect(Exit.hasDies(exit)).toBe(true);
+    expect(exit.pipe(Exit.hasDies)).toBe(true);
   });
 });
 
@@ -119,7 +128,7 @@ describe("SQL CoreStore: request log (C3)", () => {
         const store = yield* CoreStore;
         const { workspaceId } = yield* seedWorkspace;
         const scope = { _tag: "Workspace" as const, workspaceId };
-        const key = "key-1" as RequestKey;
+        const key = RequestKey.make("key-1");
         const now = "2026-11-24T10:00:00.000Z";
         const rolledBack = yield* Effect.exit(
           store.transaction(
@@ -128,7 +137,7 @@ describe("SQL CoreStore: request log (C3)", () => {
         );
         const claim = yield* store.transaction(
           Effect.gen(function* () {
-            const claim = yield* store.requestLog.claim(scope, key, now);
+            const claimed = yield* store.requestLog.claim(scope, key, now);
             yield* store.requestLog.complete({
               scope,
               key,
@@ -138,7 +147,7 @@ describe("SQL CoreStore: request log (C3)", () => {
               createdAt: now,
               expiresAt: "2026-11-25T10:00:00.000Z",
             });
-            return claim;
+            return claimed;
           }),
         );
         const replay = yield* store.transaction(
@@ -152,13 +161,16 @@ describe("SQL CoreStore: request log (C3)", () => {
     );
     expect(result.rolledBack).toBe(true);
     expect(result.claim).toEqual({ _tag: "Claimed" });
-    expect(result.replay._tag).toBe("Existing");
-    if (result.replay._tag === "Existing") {
-      expect(result.replay.entry.method).toBe("Contacts.save");
-      expect(result.replay.entry.fingerprint).toBe("abc");
-      expect(result.replay.entry.result).toEqual({ id: "x" });
-      expect(result.replay.entry.expiresAt).toBe("2026-11-25T10:00:00.000Z");
-    }
+    expect(result.replay).toMatchObject({
+      _tag: "Existing",
+      entry: {
+        method: "Contacts.save",
+        fingerprint: "abc",
+        expiresAt: "2026-11-25T10:00:00.000Z",
+      },
+    });
+    const replayed = result.replay._tag === "Existing" ? result.replay.entry : undefined;
+    expect(replayed?.result).toEqual({ id: "x" });
     expect(result.expired).toEqual({ _tag: "Claimed" });
   });
 });
@@ -169,34 +181,38 @@ describe("SQL CoreStore: audit", () => {
       Effect.gen(function* () {
         const store = yield* CoreStore;
         const { workspaceId } = yield* seedWorkspace;
-        const subject = { entity: "Contact" as const, id: crypto.randomUUID() };
+        const subject = { entity: "Contact" as const, id: SecureRandom.uuidV7Unsafe() };
         const member: AuditEntry = {
-          id: crypto.randomUUID() as AuditEntryId,
+          id: AuditEntryId.make(SecureRandom.uuidV7Unsafe()),
           at: "2026-11-24T10:00:01.000Z",
           actor: {
             _tag: "Member",
-            userId: "user-1" as UserId,
+            userId: UserId.make(SecureRandom.uuidV7Unsafe()),
             channel: "api",
             client: { kind: "api_key", id: "k1", name: "CI key" },
           },
           subject,
           action: "contact.edit",
           revision: 2,
-          changes: [{ path: "name", before: "A", after: "B" }],
+          changes: [
+            { path: "name", before: "A", after: "B" },
+            { path: "note", before: undefined, after: null },
+            { path: "phone", before: null, after: undefined },
+          ],
           reason: null,
         };
-        const system = {
+        const system: AuditEntry = {
           ...member,
-          id: crypto.randomUUID() as AuditEntryId,
+          id: AuditEntryId.make("01900000-0000-4000-8000-0000000000dd", { disableChecks: true }),
           at: "2026-11-24T10:00:00.000Z",
           actor: {
             _tag: "System",
-            job: { _tag: "DataExport", exportId: crypto.randomUUID() },
+            job: { _tag: "DataExport", exportId: ExportId.make(SecureRandom.uuidV7Unsafe()) },
           },
           revision: null,
           changes: [],
           reason: "nightly",
-        } as unknown as AuditEntry;
+        };
         yield* store.transaction(
           Effect.andThen(
             store.audit.append(workspaceId, member),
@@ -206,6 +222,6 @@ describe("SQL CoreStore: audit", () => {
         return { member, system, history: yield* store.audit.history(workspaceId, subject) };
       }),
     );
-    expect(result.history).toEqual([result.system, result.member]);
+    expect(result.history).toStrictEqual([result.system, result.member]);
   });
 });

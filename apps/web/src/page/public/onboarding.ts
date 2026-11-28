@@ -9,22 +9,37 @@ import type { Html } from "@effect/ui/html";
  * Step 5: Live Miniature Invoice Preview + Create Workspace API -> ReloadSession + Navigate
  */
 import {
+  BankAccountInput,
   CurrencyCode,
   DocumentKind,
   Locale as DomainLocale,
+  IssuingEntityPatch,
   RegistryResult,
   TaxRegime,
   WorkspaceId,
   WorkspaceSlug,
   WorkspaceView,
 } from "@kvitbit/domain";
-import { Api, Format, I18n, ViewModels } from "@kvitbit/ui-port";
-import { Effect, Result, Schema } from "effect";
-import { Failure } from "../../app/api";
+import { Api, Format, I18n } from "@kvitbit/ui-port";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as EffectRecord from "effect/Record";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { type Client, Failure } from "../../app/api";
+import { readSessionStorage, writeSessionStorage } from "../../app/browser";
 import { browserCommand, defineApiCommand } from "../../app/commands";
 import { copy, translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import {
+  type MessageHandlers,
+  type PageContext,
+  type PageReturn,
+  RouteCases,
+} from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { withAttributes } from "../../ui/html";
@@ -46,7 +61,8 @@ import {
 import { cn, controlVariants, ui } from "../../ui/styles";
 import { callApi, failureMessage, slugifyName } from "./_shared";
 
-export type Route = RouteOf<"Onboarding">;
+export const Route = RouteCases.Onboarding;
+export type Route = typeof Route.Type;
 
 const AresRemote = Remote.remoteSchema(RegistryResult);
 
@@ -72,7 +88,7 @@ const SeriesRequestKeys = Schema.Struct({
 type SeriesRequestKeys = typeof SeriesRequestKeys.Type;
 
 export const Model = Schema.Struct({
-  route: ViewModels.Route,
+  route: Route,
   step: Schema.Int,
   // Step 1: Issuing Entity
   ico: Schema.String,
@@ -175,7 +191,7 @@ export const Message = UiSchema.TaggedEnum({
   },
   CompletedCreate: { seq: Remote.Seq, workspace: WorkspaceView },
   FailedCreate: { seq: Remote.Seq, failure: Failure },
-  CompletedSetup: { seq: Remote.Seq, slug: Schema.String },
+  CompletedSetup: { seq: Remote.Seq, slug: WorkspaceSlug },
   FailedSetup: { seq: Remote.Seq, setupDone: SetupProgress, failure: Failure },
 });
 export type Message = typeof Message.Type;
@@ -184,42 +200,37 @@ const onboardingDraftKey = (userId: string) => `kb.onboarding.v1.${userId}`;
 const draftKey = (ctx: PageContext) =>
   ctx.session._tag === "SignedIn" ? onboardingDraftKey(ctx.session.user.id) : null;
 
+const DraftJson = Schema.fromJsonString(Model);
+const decodeDraft = Schema.decodeUnknownOption(DraftJson);
+const encodeDraft = Schema.encodeEffect(DraftJson);
+
 const readDraft = (key: string) =>
   browserCommand(
     "OnboardingReadDraft",
-    Effect.sync(() => {
-      try {
-        const stored = sessionStorage.getItem(key);
-        return Message.RestoredDraft({
-          draft: stored === null ? null : Schema.decodeUnknownSync(Model)(JSON.parse(stored)),
-        });
-      } catch {
-        return Message.RestoredDraft({ draft: null });
-      }
-    }),
+    readSessionStorage(key).pipe(
+      Effect.map((stored) => Option.getOrNull(decodeDraft(stored))),
+      Effect.orElseSucceed(() => null),
+      Effect.map((draft) => Message.RestoredDraft({ draft })),
+    ),
   );
 
-const storeDraft = (key: string | null, model: Model) =>
-  Effect.sync(() => {
+const storeDraft = Effect.fn("storeOnboardingDraft")(
+  function* (key: string | null, model: Model) {
     if (key === null) return;
-    try {
-      if (model.setupDone.series) {
-        sessionStorage.removeItem(key);
-      } else {
-        sessionStorage.setItem(
-          key,
-          JSON.stringify({
-            ...model,
-            ares: Remote.idle,
-            stepError: null,
-            submitFailure: null,
-          }),
-        );
-      }
-    } catch {
-      // The wizard also supports retry in memory when storage is unavailable.
+    if (model.setupDone.series) {
+      yield* writeSessionStorage({ key, value: null });
+      return;
     }
-  });
+    const json = yield* encodeDraft({
+      ...model,
+      ares: Remote.idle,
+      stepError: null,
+      submitFailure: null,
+    });
+    yield* writeSessionStorage({ key, value: json });
+  },
+  (write) => Effect.ignore(write),
+);
 
 const local = copy({
   cs: {
@@ -294,13 +305,15 @@ const CreateWorkspaceArgs = Schema.Struct({
   seq: Remote.Seq,
   idempotencyKey: Schema.String,
   name: Schema.String,
-  slug: Schema.optionalKey(Schema.String),
+  slug: Schema.optional(WorkspaceSlug),
   taxRegime: TaxRegime,
   currency: CurrencyCode,
   language: DomainLocale,
 });
 
-const LookupAresCmd = defineApiCommand("OnboardingLookupAres", {
+const LookupAresCmd = defineApiCommand({
+  message: Message,
+  name: "OnboardingLookupAres",
   args: { ico: Schema.String, seq: Remote.Seq },
   execute: ({ ico, seq }) =>
     callApi(
@@ -310,27 +323,34 @@ const LookupAresCmd = defineApiCommand("OnboardingLookupAres", {
     ),
 });
 
-const CreateWorkspaceCmd = defineApiCommand("OnboardingCreateWorkspace", {
+const CreateWorkspaceCmd = defineApiCommand({
+  message: Message,
+  name: "OnboardingCreateWorkspace",
   args: CreateWorkspaceArgs.fields,
-  execute: ({ draftKey, draft, seq, idempotencyKey, name, slug, taxRegime, currency, language }) =>
-    storeDraft(draftKey, draft).pipe(
-      Effect.andThen(
-        callApi(
-          (client) =>
-            client.myWorkspaces.create({
-              headers: { "idempotency-key": idempotencyKey },
-              payload: {
-                name,
-                ...(slug !== undefined ? { slug } : {}),
-                taxRegime,
-                defaults: { currency, language },
-              } as never,
-            }),
-          (workspace) => Message.CompletedCreate({ seq, workspace }),
-          (failure) => Message.FailedCreate({ seq, failure }),
-        ),
-      ),
-    ),
+  execute: Effect.fn("create workspace")(function* ({
+    draftKey: currentDraftKey,
+    draft,
+    seq,
+    idempotencyKey,
+    name,
+    slug,
+    taxRegime,
+    currency,
+    language,
+  }: typeof CreateWorkspaceArgs.Type) {
+    const details = { name, taxRegime, defaults: { currency, language } };
+    const payload = slug === undefined ? details : { ...details, slug };
+    yield* storeDraft(currentDraftKey, draft);
+    return yield* callApi(
+      (client) =>
+        client.myWorkspaces.create({
+          headers: { "idempotency-key": idempotencyKey },
+          payload,
+        }),
+      (workspace) => Message.CompletedCreate({ seq, workspace }),
+      (failure) => Message.FailedCreate({ seq, failure }),
+    );
+  }),
 });
 
 const setupSeries = [
@@ -361,7 +381,27 @@ const setupSeries = [
 ] as const;
 
 const eligibleSeries = (taxRegime: TaxRegime) =>
-  setupSeries.filter(({ kind }) => kind !== "payment_tax_document" || taxRegime === "vat_payer");
+  Arr.filter(
+    setupSeries,
+    ({ kind }) => kind !== "payment_tax_document" || taxRegime === "vat_payer",
+  );
+
+const nullableText = Schema.NullOr(Schema.String);
+const readIssuingEntity = Schema.decodeUnknownOption(
+  Schema.Struct({
+    name: Schema.String,
+    ico: nullableText,
+    dic: nullableText,
+    legalForm: nullableText,
+    registerEntry: nullableText,
+    address: Schema.Struct({
+      street: Schema.String,
+      city: Schema.String,
+      postalCode: Schema.String,
+      country: Schema.String,
+    }),
+  }),
+);
 
 const ApplySetupArgs = Schema.Struct({
   draftKey: Schema.NullOr(Schema.String),
@@ -393,110 +433,110 @@ const ApplySetupArgs = Schema.Struct({
   ),
 });
 
-const ApplyOnboardingSetupCmd = defineApiCommand("OnboardingApplySetup", {
+const ApplyOnboardingSetupCmd = defineApiCommand({
+  message: Message,
+  name: "OnboardingApplySetup",
   args: ApplySetupArgs.fields,
   execute: (args) => {
-    const progress: { issuingEntity: boolean; bankAccount: boolean; series: boolean } = {
-      ...args.setupDone,
-    };
+    const progress = { ...args.setupDone };
     return callApi(
-      (client) =>
-        Effect.gen(function* () {
-          yield* storeDraft(args.draftKey, args.draft);
-          const workspaceId = yield* Schema.decodeUnknownEffect(WorkspaceId)(args.workspace.id);
-          if (!progress.issuingEntity) {
-            const current = yield* client.workspace.current({ params: { workspaceId } });
-            const address = {
-              street: args.street.trim(),
-              city: args.city.trim(),
-              postalCode: args.postalCode.trim(),
-              country: args.country.trim().toUpperCase() || "CZ",
-            };
-            const issuer = {
-              name: args.legalName.trim(),
-              ico: args.ico.trim() || null,
-              dic: args.dic.trim() || null,
-              legalForm: args.legalForm.trim() || null,
-              registerEntry: args.registerEntry.trim() || null,
-            };
-            const stored = current.issuingEntity as
-              | (Record<string, unknown> & {
-                  address?: Record<string, unknown>;
-                })
-              | undefined;
-            const matches =
-              stored != null &&
-              Object.entries(issuer).every(([key, value]) => stored[key] === value) &&
-              Object.entries(address).every(([key, value]) => stored.address?.[key] === value);
-            if (!matches) {
-              yield* client.workspace.updateIssuingEntity({
-                params: { workspaceId },
-                headers: Api.ifMatchHeaders(current.revision),
-                payload: { ...issuer, address } as never,
-              });
-            }
-            progress.issuingEntity = true;
+      Effect.fn("apply workspace setup")(function* (client: Client) {
+        yield* storeDraft(args.draftKey, args.draft);
+        const workspaceId = yield* Schema.decodeUnknownEffect(WorkspaceId)(args.workspace["id"]);
+        if (!progress.issuingEntity) {
+          const current = yield* client.workspace.current({ params: { workspaceId } });
+          const address = {
+            street: Str.trim(args.street),
+            city: Str.trim(args.city),
+            postalCode: Str.trim(args.postalCode),
+            country: Str.toUpperCase(Str.trim(args.country)) || "CZ",
+          };
+          const issuer = {
+            name: Str.trim(args.legalName),
+            ico: Str.trim(args.ico) || null,
+            dic: Str.trim(args.dic) || null,
+            legalForm: Str.trim(args.legalForm) || null,
+            registerEntry: Str.trim(args.registerEntry) || null,
+          };
+          const stored = Option.getOrUndefined(readIssuingEntity(current["issuingEntity"]));
+          const matches =
+            stored !== undefined &&
+            Arr.every(EffectRecord.toEntries(issuer), ([key, value]) => stored[key] === value) &&
+            Arr.every(
+              EffectRecord.toEntries(address),
+              ([key, value]) => stored.address[key] === value,
+            );
+          if (!matches) {
+            yield* client.workspace.updateIssuingEntity({
+              params: { workspaceId },
+              headers: Api.ifMatchHeaders(current.revision),
+              payload: IssuingEntityPatch.make({ ...issuer, address }),
+            });
           }
+          progress.issuingEntity = true;
+        }
 
-          // 2. Persist bank account if IBAN was entered
-          if (!progress.bankAccount) {
-            const rawIban = args.iban.replace(/\s+/g, "").toUpperCase();
-            if (rawIban !== "") {
-              yield* client.workspace.createBankAccount({
-                params: { workspaceId },
-                headers: Api.idempotencyHeaders(args.bankRequestKey),
-                payload: {
-                  iban: rawIban,
-                  bic: args.bic.trim().toUpperCase() || null,
-                  currency: args.bankCurrency,
+        // 2. Persist bank account if IBAN was entered
+        if (!progress.bankAccount) {
+          const rawIban = Str.toUpperCase(Str.replace(/\s+/g, "")(args.iban));
+          if (rawIban !== "") {
+            yield* client.workspace.createBankAccount({
+              params: { workspaceId },
+              headers: Api.idempotencyHeaders(args.bankRequestKey),
+              payload: BankAccountInput.make({
+                iban: rawIban,
+                bic: Str.toUpperCase(Str.trim(args.bic)) || null,
+                currency: args.bankCurrency,
+                isDefault: true,
+              }),
+            });
+          }
+          progress.bankAccount = true;
+        }
+
+        if (!progress.series) {
+          const existing = yield* client.workspace.listSeries({ params: { workspaceId } });
+          for (const entry of args.series) {
+            const match =
+              Arr.findFirst(existing, (s) => s.kind === entry.kind && s.isDefault).pipe(
+                Option.getOrUndefined,
+              ) ??
+              Arr.findFirst(existing, (s) => s.kind === entry.kind).pipe(Option.getOrUndefined);
+            if (match !== undefined) {
+              const changedPattern = match.pattern !== entry.pattern;
+              const setCounter = entry.nextNumber > (changedPattern ? 1 : match.nextCounter);
+              if (!match.isDefault || changedPattern || setCounter) {
+                const series = {
+                  kind: entry.kind,
+                  name: match.name,
+                  pattern: entry.pattern,
                   isDefault: true,
-                } as never,
-              });
-            }
-            progress.bankAccount = true;
-          }
-
-          if (!progress.series) {
-            const existing = yield* client.workspace.listSeries({ params: { workspaceId } });
-            for (const entry of args.series) {
-              const match =
-                existing.find((s) => s.kind === entry.kind && s.isDefault) ??
-                existing.find((s) => s.kind === entry.kind);
-              if (match !== undefined) {
-                const changedPattern = match.pattern !== entry.pattern;
-                const setCounter = entry.nextNumber > (changedPattern ? 1 : match.nextCounter);
-                if (!match.isDefault || changedPattern || setCounter) {
-                  yield* client.workspace.updateSeries({
-                    params: { workspaceId, seriesId: match.id },
-                    payload: {
-                      kind: entry.kind,
-                      name: match.name,
-                      pattern: entry.pattern,
-                      ...(setCounter ? { nextNumber: entry.nextNumber } : {}),
-                      isDefault: true,
-                    },
-                  });
-                }
-              } else {
-                yield* client.workspace.createSeries({
-                  params: { workspaceId },
-                  headers: Api.idempotencyHeaders(entry.requestKey),
-                  payload: {
-                    kind: entry.kind,
-                    name: entry.name,
-                    pattern: entry.pattern,
-                    nextNumber: entry.nextNumber,
-                    isDefault: true,
-                  },
+                };
+                yield* client.workspace.updateSeries({
+                  params: { workspaceId, seriesId: match.id },
+                  payload: setCounter ? { ...series, nextNumber: entry.nextNumber } : series,
                 });
               }
+            } else {
+              yield* client.workspace.createSeries({
+                params: { workspaceId },
+                headers: Api.idempotencyHeaders(entry.requestKey),
+                payload: {
+                  kind: entry.kind,
+                  name: entry.name,
+                  pattern: entry.pattern,
+                  nextNumber: entry.nextNumber,
+                  isDefault: true,
+                },
+              });
             }
-            progress.series = true;
           }
+          progress.series = true;
+        }
 
-          yield* storeDraft(args.draftKey, { ...args.draft, setupDone: progress });
-          return args.workspace.slug;
-        }),
+        yield* storeDraft(args.draftKey, { ...args.draft, setupDone: progress });
+        return args.workspace.slug;
+      }),
       (slug) => Message.CompletedSetup({ seq: args.seq, slug }),
       (failure) => Message.FailedSetup({ seq: args.seq, setupDone: { ...progress }, failure }),
     );
@@ -530,11 +570,11 @@ const buildSetupCmd = (
     iban: model.iban,
     bic: model.bic,
     bankCurrency: model.bankCurrency,
-    series: eligibleSeries(model.taxRegime).map((series) => ({
+    series: Arr.map(eligibleSeries(model.taxRegime), (series) => ({
       kind: series.kind,
       requestKey: seriesKeys[series.kind],
       name: series.name,
-      pattern: model[series.pattern].trim(),
+      pattern: Str.trim(model[series.pattern]),
       nextNumber: Number(model[series.start]),
     })),
   });
@@ -544,22 +584,37 @@ const clampStep = (n: number | undefined): number => {
   return Math.max(1, Math.min(5, Math.trunc(n)));
 };
 
+const alphaRuns = /([A-Za-z]+)/;
+const numberingRun = /^[YMN]+$/;
+const numberingTokens = /(YYYY|YY|MM|N+)/;
+const numericCounter = /^N+$/;
+const wholeNumberText = /^\d+$/;
+const alphaWords = /[A-Za-z]+/g;
+const numberingChunks = /Y+|M+|N+/g;
+const containsAsciiControl = (value: string): boolean => {
+  for (const character of value) {
+    if (character < " " || character === "\u007f") return true;
+  }
+  return false;
+};
 const formatPatternSample = (pattern: string, counter: number, date: string): string => {
-  const yyyy = date.slice(0, 4);
-  const yy = yyyy.slice(-2);
-  const mm = date.slice(5, 7);
-  return pattern.replace(/[A-Za-z]+/g, (word) =>
-    /^[YMN]+$/.test(word)
-      ? word.replace(/YYYY|YY|MM|N+/g, (token) =>
-          token === "YYYY"
-            ? yyyy
-            : token === "YY"
-              ? yy
-              : token === "MM"
-                ? mm
-                : String(counter).padStart(token.length, "0"),
-        )
-      : word,
+  const year = Str.slice(0, 4)(date);
+  const month = Str.slice(5, 7)(date);
+  return Arr.join(
+    Arr.map(Str.split(pattern, alphaRuns), (word, index) =>
+      index % 2 === 0 || !numberingRun.test(word)
+        ? word
+        : Arr.join(
+            Arr.map(Str.split(word, numberingTokens), (token, tokenIndex) => {
+              if (tokenIndex % 2 === 0) return token;
+              if (token === "YYYY") return year;
+              if (token === "YY") return Str.slice(-2)(year);
+              return token === "MM" ? month : Str.padStart(token.length, "0")(String(counter));
+            }),
+            "",
+          ),
+    ),
+    "",
   );
 };
 
@@ -568,25 +623,33 @@ type SeriesValidationIssue = "start" | "pattern" | "tooLong" | null;
 const validStartNumber = (start: string): boolean => {
   const counter = Number(start);
   return (
-    /^\d+$/.test(start) && Number.isSafeInteger(counter) && counter >= 1 && counter <= 2_147_483_646
+    wholeNumberText.test(start) &&
+    Number.isSafeInteger(counter) &&
+    counter >= 1 &&
+    counter <= 2_147_483_646
   );
 };
 
 const validPatternSyntax = (pattern: string): boolean => {
-  const runs = (pattern.match(/[A-Za-z]+/g) ?? [])
-    .filter((word) => /^[YMN]+$/.test(word))
-    .flatMap((word) => word.match(/Y+|M+|N+/g) ?? []);
-  if (runs.filter((run) => run.startsWith("N")).length !== 1) return false;
-  if (runs.some((run) => run.startsWith("Y") && run !== "YY" && run !== "YYYY")) return false;
+  const words: ReadonlyArray<string> = Option.getOrNull(Str.match(alphaWords)(pattern)) ?? [];
+  const matchingWords = Arr.filter(words, (word) => numberingRun.test(word));
+  const runs = Arr.flatMap(
+    matchingWords,
+    (word) => Option.getOrNull(Str.match(numberingChunks)(word)) ?? [],
+  );
+  if (Arr.filter(runs, (run) => numericCounter.test(run)).length !== 1) return false;
+  if (Arr.some(runs, (run) => Str.startsWith("Y")(run) && run !== "YY" && run !== "YYYY"))
+    return false;
   if (
-    runs.some(
+    Arr.some(
+      runs,
       (run) =>
-        run.startsWith("M") && (run !== "MM" || !runs.some((other) => other.startsWith("Y"))),
+        Str.startsWith("M")(run) &&
+        (run !== "MM" || !Arr.some(runs, (other) => Str.startsWith("Y")(other))),
     )
   )
     return false;
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: the numbering grammar disallows control characters.
-  return !/[\u0000-\u001f\u007f]/.test(pattern);
+  return !containsAsciiControl(pattern);
 };
 
 const seriesValidationIssue = (pattern: string, start: string): SeriesValidationIssue => {
@@ -599,7 +662,7 @@ const seriesValidationIssue = (pattern: string, start: string): SeriesValidation
 const validSeries = (pattern: string, start: string): boolean =>
   seriesValidationIssue(pattern, start) === null;
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => ({
+const initImpl = (route: Route, ctx: PageContext): PageReturn<Model, Message> => ({
   model: {
     route,
     step: clampStep(route.step),
@@ -620,7 +683,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     czechAccount: "",
     iban: "",
     bic: "",
-    bankCurrency: "CZK" as CurrencyCode,
+    bankCurrency: CurrencyCode.make("CZK"),
     invoicePattern: "YYYY-NNNN",
     proformaPattern: "ZF-YYYY-NNNN",
     ptdPattern: "DD-YYYY-NNNN",
@@ -629,7 +692,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     proformaStart: "1",
     ptdStart: "1",
     creditNoteStart: "1",
-    defaultCurrency: "CZK" as CurrencyCode,
+    defaultCurrency: CurrencyCode.make("CZK"),
     defaultLanguage: ctx.locale,
     stepError: null,
     submitSeq: 0,
@@ -646,24 +709,30 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     ctx.session._tag === "SignedIn" ? [readDraft(onboardingDraftKey(ctx.session.user.id))] : [],
 });
 
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, initImpl);
+
 const validateStep = (model: Model, ctx: PageContext): string | null => {
   if (model.step === 1) {
-    if (model.legalName.trim() === "") return local(ctx.locale, "nameRequired");
-    if (model.ico.trim() !== "" && !Result.isSuccess(Format.validateIco(model.ico)))
+    if (Str.trim(model.legalName) === "") return local(ctx.locale, "nameRequired");
+    if (Str.trim(model.ico) !== "" && !Result.isSuccess(Format.validateIco(model.ico)))
       return local(ctx.locale, "icoInvalid");
     if (model.slugEdited && !Schema.is(WorkspaceSlug)(model.slug))
       return local(ctx.locale, "slugInvalid");
   }
   if (model.step === 3) {
-    if (model.iban.trim() !== "" && !Result.isSuccess(Format.validateIban(model.iban)))
+    if (Str.trim(model.iban) !== "" && !Result.isSuccess(Format.validateIban(model.iban)))
       return local(ctx.locale, "ibanInvalid");
-    if (model.bic.trim() !== "" && !Result.isSuccess(Format.validateBic(model.bic)))
+    if (Str.trim(model.bic) !== "" && !Result.isSuccess(Format.validateBic(model.bic)))
       return local(ctx.locale, "bicInvalid");
   }
   if (
     model.step === 4 &&
-    eligibleSeries(model.taxRegime).some(
-      ({ pattern, start }) => !validSeries(model[pattern].trim(), model[start]),
+    Arr.some(
+      eligibleSeries(model.taxRegime),
+      ({ pattern, start }) => !validSeries(Str.trim(model[pattern]), model[start]),
     )
   ) {
     return local(ctx.locale, "seriesInvalid");
@@ -681,7 +750,9 @@ const bankLocked = (model: Model) =>
   model.setupDone.bankAccount || (model.setupDone.issuingEntity && model.bankRequestKey !== null);
 
 const bankFields = new Set(["czechAccount", "iban", "bic"]);
-const seriesFields = new Set<string>(setupSeries.flatMap(({ pattern, start }) => [pattern, start]));
+const seriesFields = new Set<string>(
+  Arr.flatMap(setupSeries, ({ pattern, start }) => [pattern, start]),
+);
 
 const updateWizard = (
   model: Model,
@@ -723,15 +794,14 @@ const updateWizard = (
     }),
     ChangedField: ({ field, value }) => {
       if (editingLocked(model)) return { model };
-      if (model.createdWorkspace !== null) {
-        if (
-          bankFields.has(field)
-            ? bankLocked(model)
-            : !seriesFields.has(field) &&
-              (model.setupDone.issuingEntity || field === "workspaceName" || field === "slug")
-        ) {
-          return { model };
-        }
+      if (
+        model.createdWorkspace !== null &&
+        (bankFields.has(field)
+          ? bankLocked(model)
+          : !seriesFields.has(field) &&
+            (model.setupDone.issuingEntity || field === "workspaceName" || field === "slug"))
+      ) {
+        return { model };
       }
       const next: Model = { ...model, [field]: value, stepError: null, submitFailure: null };
       if (field === "legalName") {
@@ -863,12 +933,15 @@ const updateWizard = (
               const bankKey = model.bankRequestKey ?? (yield* Api.uuidV7);
               const seriesKeys =
                 model.seriesRequestKeys ??
-                (yield* Effect.all({
-                  invoice: Api.uuidV7,
-                  proforma: Api.uuidV7,
-                  payment_tax_document: Api.uuidV7,
-                  credit_note: Api.uuidV7,
-                }));
+                (yield* Effect.all(
+                  {
+                    invoice: Api.uuidV7,
+                    proforma: Api.uuidV7,
+                    payment_tax_document: Api.uuidV7,
+                    credit_note: Api.uuidV7,
+                  },
+                  { concurrency: 1 },
+                ));
               return Message.GotRequestKeys({ seq, createKey, bankKey, seriesKeys });
             }),
           ),
@@ -897,7 +970,7 @@ const updateWizard = (
         };
       }
       if (createKey === null) return { model };
-      const slug = model.slugEdited ? model.slug.trim() : "";
+      const slug = model.slugEdited ? Str.trim(model.slug) : "";
       return {
         model: draft,
         commands: [
@@ -906,8 +979,8 @@ const updateWizard = (
             draft,
             seq,
             idempotencyKey: createKey,
-            name: model.workspaceName.trim() || model.legalName.trim(),
-            ...(slug !== "" ? { slug } : {}),
+            name: Str.trim(model.workspaceName) || Str.trim(model.legalName),
+            slug: slug === "" ? undefined : WorkspaceSlug.make(slug),
             taxRegime: model.taxRegime,
             currency: model.defaultCurrency,
             language: model.defaultLanguage,
@@ -965,7 +1038,7 @@ const updateWizard = (
         },
         outMessage: Intent_.reloadSession({
           _tag: "Path",
-          path: href({ _tag: "Dashboard", ws: slug as WorkspaceView["slug"] }),
+          path: href({ _tag: "Dashboard", ws: slug }),
           replace: true,
         }),
       };
@@ -997,7 +1070,7 @@ const updateWizard = (
     },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
 
-export const update = (
+const updateImpl = (
   model: Model,
   message: Message,
   ctx: PageContext,
@@ -1024,10 +1097,20 @@ export const update = (
   };
 };
 
-export const title = (_model: Model, ctx: PageContext): string =>
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, updateImpl);
+
+const titleImpl = (_model: Model, ctx: PageContext): string =>
   translator(ctx.locale).t("onboarding.wizard.title");
 
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
+export const title: {
+  (ctx: PageContext): (_model: Model) => string;
+  (_model: Model, ctx: PageContext): string;
+} = Fn.dual(2, titleImpl);
+
+const viewImpl = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
   const t = translator(ctx.locale);
   const steps = [
     { num: 1, label: t.t("onboarding.wizard.step.entity") },
@@ -1104,7 +1187,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
               ? [
                   banner(h, {
                     text: local(ctx.locale, "dissolvedWarning", {
-                      date: Format.formatDate(ctx.locale, aresData.terminatedOn),
+                      date: Format.formatDate({ locale: ctx.locale, date: aresData.terminatedOn }),
                     }),
                     tone: "error",
                   }),
@@ -1196,7 +1279,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           h.div.class(ui.stack).children([
             h.p.class(ui.muted).children([t.t("onboarding.wizard.tax.intro")]),
             h.div.class("grid grid-cols-[repeat(auto-fit,minmax(210px,1fr))] gap-3").children(
-              (["non_vat_payer", "vat_payer", "identified_person"] as const).map((regime) =>
+              Arr.map(["non_vat_payer", "vat_payer", "identified_person"] as const, (regime) =>
                 h.button
                   .attr("type", "button")
                   .class(
@@ -1205,7 +1288,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                   .attr("aria-pressed", String(model.taxRegime === regime ? "true" : "false"))
                   .on("click", Message.SelectedTaxRegime({ regime }))
                   .children([
-                    h.strong.children([t.translate(I18n.enumText("taxRegime", regime))]),
+                    h.strong.children([
+                      t.translate(I18n.enumText({ name: "taxRegime", value: regime })),
+                    ]),
                     h.span.class(ui.small).children([t.t(`enum.taxRegimeHint.${regime}`)]),
                   ]),
               ),
@@ -1232,7 +1317,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
           cardTitle(h, t.t("onboarding.wizard.step.bank")),
           h.div.class(ui.stack).children([
             h.p.class(ui.muted).children([t.t("onboarding.wizard.bank.intro")]),
-            ...(model.iban.trim() === ""
+            ...(Str.trim(model.iban) === ""
               ? [banner(h, { text: t.t("onboarding.wizard.bank.noQrWarning"), tone: "info" })]
               : []),
             h.div.class(ui.grid).children([
@@ -1270,7 +1355,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                 ],
                 onChange: (v) =>
                   Message.SelectedBankCurrency({
-                    currency: (v === "EUR" ? "EUR" : "CZK") as CurrencyCode,
+                    currency: CurrencyCode.make(v === "EUR" ? "EUR" : "CZK"),
                   }),
               }),
             ]),
@@ -1319,11 +1404,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           h.span.children([local(ctx.locale, "startNumber")]),
                           h.span.class("text-right").children([local(ctx.locale, "firstNumbers")]),
                         ]),
-                      ...series.map(({ kind, pattern, start }) => {
-                        const titleText = t.translate(I18n.enumText("documentKindPlural", kind));
+                      ...Arr.map(series, ({ kind, pattern, start }) => {
+                        const titleText = t.translate(
+                          I18n.enumText({ name: "documentKindPlural", value: kind }),
+                        );
                         const patternValue = model[pattern];
                         const startValue = model[start];
-                        const trimmedPattern = patternValue.trim();
+                        const trimmedPattern = Str.trim(patternValue);
                         const issue = seriesValidationIssue(trimmedPattern, startValue);
                         const startInvalid = !validStartNumber(startValue);
                         const patternInvalid =
@@ -1510,7 +1597,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                         ],
                         onChange: (v) =>
                           Message.SelectedDefaultCurrency({
-                            currency: (v === "EUR" ? "EUR" : "CZK") as CurrencyCode,
+                            currency: CurrencyCode.make(v === "EUR" ? "EUR" : "CZK"),
                           }),
                       }),
                       selectField(h, {
@@ -1582,9 +1669,13 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                                 h.span
                                   .class(cn(ui.small, ui.muted))
                                   .children([
-                                    [model.street, model.postalCode, model.city]
-                                      .filter(Boolean)
-                                      .join(", "),
+                                    Arr.join(
+                                      Arr.filter(
+                                        [model.street, model.postalCode, model.city],
+                                        Boolean,
+                                      ),
+                                      ", ",
+                                    ),
                                   ]),
                               ]
                             : []),
@@ -1595,7 +1686,9 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
                           mono(h, sampleNumber),
                           badge(
                             h,
-                            t.translate(I18n.enumText("taxRegime", model.taxRegime)),
+                            t.translate(
+                              I18n.enumText({ name: "taxRegime", value: model.taxRegime }),
+                            ),
                             isVat ? "proforma" : "outline",
                           ),
                         ]),
@@ -1644,7 +1737,7 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
         .class("grid grid-cols-2 gap-2 min-[761px]:grid-cols-5")
         .attr("aria-label", t.t("onboarding.wizard.title"))
         .children(
-          steps.map((s) =>
+          Arr.map(steps, (s) =>
             withAttributes(h.button.class(), [
               (element) => element.attr("type", "button"),
               (element) =>
@@ -1713,3 +1806,8 @@ export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) => {
       ]),
     ]);
 };
+
+export const view: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => ReturnType<typeof viewImpl>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): ReturnType<typeof viewImpl>;
+} = Fn.dual(3, viewImpl);

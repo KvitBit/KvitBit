@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { Invalid, type Locale } from "@kvitbit/domain/contract";
-import { BigDecimal, Option, Result, Schema } from "effect";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import type * as StandardSchema from "effect/StandardSchema";
+import * as Str from "effect/String";
+
 import { toUiError } from "../../src/api";
 import {
   DecimalText,
@@ -25,16 +33,29 @@ type Ctx = FormContext & { readonly maxLines: number };
 const schema = (locale: Locale): Schema.Codec<Input, Draft> =>
   Schema.Struct({
     name: Schema.String.check(
-      Schema.makeFilter((s: string) => s.trim() !== "", { message: "form.required" }),
+      Schema.makeFilter((s: string) => Str.trim(s) !== "", { message: "form.required" }),
     ),
     lines: Schema.Array(Schema.Struct({ qty: DecimalText(locale, 4) })),
   });
 
 const spec: FormSpec<Draft, Input, Ctx> = FormSpec.make({
   schema,
-  refine: (input, ctx) =>
-    input.lines.length > ctx.maxLines ? [{ path: "lines", code: "document.lines_required" }] : [],
+  refine: (input, context) =>
+    input.lines.length > context.maxLines
+      ? [{ path: "lines", code: "document.lines_required" }]
+      : [],
 });
+const validationIssues = (result: StandardSchema.StandardSchemaV1.Result<unknown>) => {
+  if (result.issues === undefined) throw new Error("expected validation failure");
+  return result.issues;
+};
+
+const issueRows = (result: StandardSchema.StandardSchemaV1.Result<unknown>) =>
+  Arr.map(validationIssues(result), ({ path, message }) => [
+    path === undefined ? undefined : Arr.join(Arr.map(path, String), "."),
+    message,
+  ]);
+
 const ctx: Ctx = { locale: "cs", maxLines: 2 };
 const empty: Draft = { name: "", lines: [{ qty: "1" }] };
 
@@ -46,28 +67,50 @@ describe("Form", () => {
     expect(Form.issuesAt(f, "name")).toEqual([]);
     expect(Form.issuesAt(f, "name", { showUntouched: true })).toHaveLength(1);
     f = Form.blur(f, "name", spec, ctx);
-    expect(Form.issuesAt(f, "name").map((i) => i.code)).toEqual(["form.required"]);
+    expect(Arr.map(Form.issuesAt(f, "name"), (i) => i.code)).toEqual(["form.required"]);
   });
 
   test("failed submit marks everything visible; success returns the input (F3)", () => {
-    const f = Form.change(Form.init<Draft>(empty), "lines.0.qty", "1,5x");
+    const f = Form.change(Form.init<Draft>(empty), "lines.0.qty", (draft) => ({
+      ...draft,
+      lines: [{ qty: "1,5x" }],
+    }));
     const failed = Form.validate(f, spec, ctx);
     if (Result.isSuccess(failed)) throw new Error("expected failure");
-    expect(Form.issuesAt(failed.failure, "lines").map((i) => i.path)).toEqual(["lines.0.qty"]);
+    expect(Arr.map(Form.issuesAt(failed.failure, "lines"), (i) => i.path)).toEqual(["lines.0.qty"]);
     expect(Form.firstErrorPath(failed.failure, ["name", "lines"])).toEqual(Option.some("name"));
     const ok = Form.validate(
-      Form.change(Form.change(f, "name", "Acme"), "lines.0.qty", "1 234,5"),
+      Form.change(
+        Form.change(f, "name", (draft) => ({ ...draft, name: "Acme" })),
+        "lines.0.qty",
+        (draft) => ({ ...draft, lines: [{ qty: "1 234,5" }] }),
+      ),
       spec,
       ctx,
     );
-    expect(Result.map(ok, (i) => i.lines.map((l) => BigDecimal.format(l.qty)))).toEqual(
+    expect(Result.map(ok, (i) => Arr.map(i.lines, (l) => BigDecimal.format(l.qty)))).toEqual(
       Result.succeed(["1234.5"]),
     );
   });
 
   test("refine runs after decode", () => {
     const f = Form.init<Draft>({ name: "x", lines: [{ qty: "1" }, { qty: "1" }, { qty: "1" }] });
-    expect(Result.isFailure(Form.validate(f, spec, ctx))).toBe(true);
+    const failed = Form.validate(f, spec, ctx).pipe(Result.isFailure);
+    expect(failed).toBe(true);
+  });
+
+  test("a broken validator blocks submit with a form-level issue", () => {
+    const broken = FormSpec.make({
+      schema: () =>
+        Schema.String.check(
+          Schema.makeFilter(() => {
+            throw new Error("validator defect");
+          }),
+        ),
+    });
+    expect(FormSpec.decode(broken, "draft", "en")).toEqual(
+      Result.fail([{ path: "", code: "form.validation_unavailable" }]),
+    );
   });
 
   test("server issues clear per path on change; submit state transitions", () => {
@@ -80,8 +123,8 @@ describe("Form", () => {
       { path: "lines.0.qty", code: "document.lines_required" },
       { path: "name", code: "ico.checksum" },
     ]);
-    f = Form.change(f, "lines.0", { qty: "2" });
-    expect(f.serverIssues.map((i) => i.path)).toEqual(["name"]);
+    f = Form.change(f, "lines.0", (draft) => ({ ...draft, lines: [{ qty: "2" }] }));
+    expect(Arr.map(f.serverIssues, (i) => i.path)).toEqual(["name"]);
     expect(f.draft.lines[0]?.qty).toBe("2");
     f = Form.failed(Form.submitting(f), "offline");
     expect(f.submit._tag).toBe("Failed");
@@ -97,13 +140,16 @@ describe("Form: review round 1 regressions", () => {
     const failed = Form.failed(sent, "offline");
     expect(failed.submit).toMatchObject({ _tag: "Failed", requestKey: Option.some("rk-1") });
     // unchanged retry: same value set again, key kept
-    const same = Form.change(failed, "name", "a");
+    const same = Form.change(failed, "name", (draft) => ({ ...draft, name: "a" }));
     expect(same.submit).toMatchObject({ requestKey: Option.some("rk-1") });
     // a real edit: the next submit is a new intent
-    const edited = Form.change(failed, "name", "b");
+    const edited = Form.change(failed, "name", (draft) => ({ ...draft, name: "b" }));
     expect(edited.submit).toMatchObject({ _tag: "Failed", requestKey: Option.none() });
     // an edit while the request is in flight also keeps the old key off the retry
-    const midFlight = Form.failed(Form.change(sent, "name", "c"), "offline");
+    const midFlight = Form.failed(
+      Form.change(sent, "name", (draft) => ({ ...draft, name: "c" })),
+      "offline",
+    );
     expect(midFlight.submit).toMatchObject({ _tag: "Failed", requestKey: Option.none() });
   });
 
@@ -115,7 +161,7 @@ describe("Form: review round 1 regressions", () => {
         { path: ["dueOn"], code: "document.due_before_issue", params: { issuedOn: "2026-11-01" } },
       ],
     };
-    const error = toUiError(Schema.decodeUnknownSync(Invalid)(body));
+    const error = Schema.decodeUnknownEffect(Invalid)(body).pipe(Effect.runSync, toUiError);
     const base = Form.init<Draft>({ name: "a", lines: [] });
     if (error._tag !== "Invalid") throw new Error("expected Invalid");
     const expected = [
@@ -140,7 +186,7 @@ describe("Form: review round 1 regressions", () => {
     const draft: Draft = { name: "", lines: [{ qty: "1,5x" }] };
     const result = spec.standard("cs")["~standard"].validate(draft);
     if (result instanceof Promise) throw new Error("expected sync validation");
-    expect(result.issues?.map((i) => [i.path?.map(String).join("."), i.message])).toEqual([
+    expect(issueRows(result)).toEqual([
       ["name", "form.required"],
       ["lines.0.qty", "form.decimal_invalid"],
     ]);
@@ -148,15 +194,17 @@ describe("Form: review round 1 regressions", () => {
       .standard("en")
       ["~standard"].validate({ name: "x", lines: [{ qty: "1 234,5" }] });
     if (ok instanceof Promise || ok.issues !== undefined) throw new Error("expected success");
-    expect(BigDecimal.format(ok.value.lines[0]?.qty ?? BigDecimal.fromBigInt(0n))).toBe("1234.5");
+    (ok.value.lines[0]?.qty ?? BigDecimal.fromBigInt(0n))
+      .pipe(BigDecimal.format, expect)
+      .toBe("1234.5");
     // encoding back to draft text uses the locale's separator
     const input: Input = { name: "x", lines: [{ qty: BigDecimal.fromStringUnsafe("1.5") }] };
-    expect(Schema.encodeSync(spec.schema("cs"))(input).lines[0]?.qty).toBe("1,5");
-    expect(Schema.encodeSync(spec.schema("en"))(input).lines[0]?.qty).toBe("1.5");
+    expect(Effect.runSync(Schema.encodeEffect(spec.schema("cs"))(input)).lines[0]?.qty).toBe("1,5");
+    expect(Effect.runSync(Schema.encodeEffect(spec.schema("en"))(input)).lines[0]?.qty).toBe("1.5");
     // a missing key is form.required
     const missing = spec.standard("cs")["~standard"].validate({ lines: [] });
     if (missing instanceof Promise) throw new Error("expected sync validation");
-    expect(missing.issues?.map((i) => i.message)).toEqual(["form.required"]);
+    expect(Arr.map(validationIssues(missing), (issue) => issue.message)).toEqual(["form.required"]);
   });
 });
 
@@ -168,10 +216,10 @@ describe("mapServerIssues (F4)", () => {
       { path: "contact", code: "c" },
     ];
     const { byField, summary } = mapServerIssues(issues, ["lines", "lines.2", "lines.2.unitPrice"]);
-    expect(byField.get("lines.2.unitPrice")?.map((i) => i.code)).toEqual(["a"]);
-    expect(byField.get("lines.2")?.map((i) => i.code)).toEqual(["b"]);
+    expect(Arr.map(byField.get("lines.2.unitPrice") ?? [], (issue) => issue.code)).toEqual(["a"]);
+    expect(Arr.map(byField.get("lines.2") ?? [], (issue) => issue.code)).toEqual(["b"]);
     expect(byField.has("lines")).toBe(false);
-    expect(summary.map((i) => i.code)).toEqual(["c"]);
+    expect(Arr.map(summary, (i) => i.code)).toEqual(["c"]);
   });
 });
 
@@ -198,7 +246,7 @@ describe("Form: review round 2 regressions", () => {
       "offline",
     );
     // a fresh array with the same lines is the same intent
-    const same = Form.change(failed, "lines", [{ qty: "1" }]);
+    const same = Form.change(failed, "lines", (draft) => ({ ...draft, lines: [{ qty: "1" }] }));
     expect(same.submit).toMatchObject({ _tag: "Failed", requestKey: Option.some("rk-1") });
     // nested plain data, BigDecimal included, compares by value
     const withAmount = Form.failed(
@@ -211,38 +259,48 @@ describe("Form: review round 2 regressions", () => {
       "offline",
     );
     expect(
-      Form.change(withAmount, "amount", { value: BigDecimal.fromStringUnsafe("1.5") }).submit,
+      Form.change(withAmount, "amount", (draft) => ({
+        ...draft,
+        amount: { value: BigDecimal.fromStringUnsafe("1.5") },
+      })).submit,
     ).toMatchObject({ requestKey: Option.some("rk-2") });
     // a different nested value is a new intent
-    const edited = Form.change(failed, "lines", [{ qty: "2" }]);
+    const edited = Form.change(failed, "lines", (draft) => ({ ...draft, lines: [{ qty: "2" }] }));
     expect(edited.submit).toMatchObject({ _tag: "Failed", requestKey: Option.none() });
     expect(edited.draft.lines).toEqual([{ qty: "2" }]);
   });
 
   test("an unannotated filter and an invalid literal report form.invalid, annotated codes stay", () => {
-    const cases = [
-      [
-        Schema.Struct({
-          name: Schema.String.check(Schema.makeFilter((s: string) => s.length > 0)),
-        }),
-        { name: "" },
-      ],
-      [Schema.Struct({ name: Schema.Literals(["red", "blue"]) }), { name: "green" }],
-    ] as const;
-    for (const [schema, value] of cases) {
-      const literalSpec = FormSpec.make<{ readonly name: string }, unknown>({
-        schema: () => schema as unknown as Schema.Codec<unknown, { readonly name: string }>,
-      });
-      const standard = literalSpec.standard("cs")["~standard"].validate(value);
+    const expectInvalidName = <CandidateInput>(
+      candidate: Schema.Codec<CandidateInput, { readonly name: string }>,
+      initial: { readonly name: string },
+      invalidName: string,
+    ) => {
+      const literalSpec = FormSpec.make({ schema: () => candidate });
+      const form = Form.change(Form.init(initial), "name", (draft) => ({
+        ...draft,
+        name: invalidName,
+      }));
+      const standard = literalSpec.standard("cs")["~standard"].validate(form.draft);
       if (standard instanceof Promise) throw new Error("expected sync validation");
-      expect(standard.issues?.map((i) => [i.path?.map(String).join("."), i.message])).toEqual([
-        ["name", "form.invalid"],
-      ]);
-      const validated = Form.validate(Form.init(value), literalSpec, { locale: "cs" });
+      expect(issueRows(standard)).toEqual([["name", "form.invalid"]]);
+      const validated = Form.validate(form, literalSpec, { locale: "cs" });
       expect(Result.isFailure(validated) && validated.failure.clientIssues).toEqual([
         { path: "name", code: "form.invalid" },
       ]);
-    }
+    };
+    expectInvalidName(
+      Schema.Struct({ name: Schema.String.check(Schema.makeFilter((value) => value.length > 0)) }),
+      { name: "valid" },
+      "",
+    );
+    expectInvalidName(
+      Schema.Struct({
+        name: Schema.String.pipe(Schema.decodeTo(Schema.Literals(["red", "blue"]))),
+      }),
+      { name: "red" },
+      "green",
+    );
     // annotated codes and their paths pass through unchanged
     expect(Form.validate(Form.init(empty), spec, ctx)).toMatchObject({
       failure: { clientIssues: [{ path: "name", code: "form.required" }] },

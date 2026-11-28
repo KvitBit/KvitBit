@@ -3,7 +3,10 @@
  * docs/research/czech-invoicing-specs.md section 1). Czech strings marked statutory are the
  * exact legal wording; English strings are product translations, not official ones.
  */
+
 import type { DocumentKind, Locale, TaxRegime, VatTreatment } from "@kvitbit/domain";
+import * as Arr from "effect/Array";
+import * as Str from "effect/String";
 
 export type StatutoryNoteCode =
   | "not_tax_document"
@@ -41,8 +44,8 @@ export const statutoryTitle = (input: {
 }): string => {
   const base = input.kind === "invoice" && input.final ? "final" : input.kind;
   const key = input.kind !== "proforma" && input.taxDocument ? `${base}_tax` : base;
-  const texts = TITLES[key] ?? TITLES[base] ?? TITLES.invoice;
-  return texts ? texts[input.language] : "";
+  const texts = TITLES[key] ?? TITLES[base] ?? TITLES["invoice"];
+  return texts !== undefined ? texts[input.language] : "";
 };
 
 const NOTES: Readonly<Record<Exclude<StatutoryNoteCode, "register_entry">, Texts>> = {
@@ -80,11 +83,11 @@ export const statutoryNotes = (input: {
   if (input.regime === "identified_person") codes.push("regime.identified_person");
   if (input.treatments.has("reverse_charge")) codes.push("reverse_charge");
   if (input.treatments.has("exempt_intra_eu_goods")) codes.push("exempt_intra_eu_goods");
-  const notes: Array<PrintedNote> = codes.map((code) => ({
+  const notes: Array<PrintedNote> = Arr.map(codes, (code) => ({
     code,
     text: NOTES[code][input.language],
   }));
-  if (input.issuerRegisterEntry !== null && input.issuerRegisterEntry.trim() !== "") {
+  if (input.issuerRegisterEntry !== null && Str.trim(input.issuerRegisterEntry) !== "") {
     notes.push({ code: "register_entry", text: input.issuerRegisterEntry });
   }
   return notes;

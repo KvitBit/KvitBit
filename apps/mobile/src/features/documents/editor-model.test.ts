@@ -1,23 +1,28 @@
 import { describe, expect, test } from "bun:test";
-import type {
+import {
   BankAccountId,
   ContactId,
+  ContactSnapshot,
   CurrencyCode,
   DocumentId,
   DocumentSummary,
-  DocumentView,
-  FxRateView,
+  type DocumentView,
+  type FxRateView,
   IsoDate,
+  IssuerSnapshot,
   LineId,
+  LineView,
+  MoneyMath,
   NumberingSeriesId,
-  NumberingSeriesView,
+  type NumberingSeriesView,
   PaymentId,
   PaymentView,
   PriceListItemId,
+  WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { MoneyMath } from "@kvitbit/domain/contract";
 import { translator } from "@kvitbit/ui-port/i18n";
-import { BigDecimal, Option } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Option from "effect/Option";
 import { documentActions, documentStatusBadge, settlementBadge } from "./badges";
 import {
   addDaysIso,
@@ -41,40 +46,40 @@ import {
 
 const WS_DEFAULTS: WorkspaceDefaultsView = {
   taxRegime: "vat_payer",
-  currency: "CZK" as CurrencyCode,
+  currency: CurrencyCode.make("CZK"),
   language: "cs",
   dueDays: 14,
   paymentMethod: "bank_transfer",
   paymentRounding: "none",
   note: "Děkujeme za spolupráci.",
   preferredSeriesByKind: {
-    invoice: "ser-inv" as NumberingSeriesId,
-    proforma: "ser-pro" as NumberingSeriesId,
+    invoice: NumberingSeriesId.make("01937c7a-0000-7000-8000-000000000101"),
+    proforma: NumberingSeriesId.make("01937c7a-0000-7000-8000-000000000102"),
   },
 };
 
 const BANK_ACCOUNTS: ReadonlyArray<BankAccountOption> = [
   {
-    id: "ba-czk" as BankAccountId,
+    id: BankAccountId.make("01937c7a-0000-7000-8000-000000000103"),
     name: "CZK hlavní",
     iban: "CZ6508000000192000145399",
     bic: "GIBACZPX",
-    currency: "CZK" as CurrencyCode,
+    currency: CurrencyCode.make("CZK"),
     isDefault: true,
   },
   {
-    id: "ba-eur" as BankAccountId,
+    id: BankAccountId.make("01937c7a-0000-7000-8000-000000000104"),
     name: "EUR účet",
     iban: "CZ6508000000192000145400",
     bic: "GIBACZPX",
-    currency: "EUR" as CurrencyCode,
+    currency: CurrencyCode.make("EUR"),
     isDefault: true,
   },
 ];
 
 const SERIES: ReadonlyArray<NumberingSeriesView> = [
   {
-    id: "ser-inv" as NumberingSeriesId,
+    id: NumberingSeriesId.make("01937c7a-0000-7000-8000-000000000101"),
     kind: "invoice",
     name: "Faktury",
     pattern: "YYYY-NNNN",
@@ -84,7 +89,7 @@ const SERIES: ReadonlyArray<NumberingSeriesView> = [
     nextNumber: "2026-0001",
   },
   {
-    id: "ser-pro" as NumberingSeriesId,
+    id: NumberingSeriesId.make("01937c7a-0000-7000-8000-000000000102"),
     kind: "proforma",
     name: "Zálohy",
     pattern: "ZF-YYYY-NNN",
@@ -96,14 +101,14 @@ const SERIES: ReadonlyArray<NumberingSeriesView> = [
 ];
 
 const CONTACT: ContactOption = {
-  id: "con-1" as ContactId,
+  id: ContactId.make("01937c7a-0000-7000-8000-000000000105"),
   name: "Acme s.r.o.",
   ico: "12345678",
   dic: "CZ12345678",
   billingEmails: ["billing@acme.cz"],
   archived: false,
   defaults: {
-    currency: "EUR" as CurrencyCode,
+    currency: CurrencyCode.make("EUR"),
     dueDays: 30,
     language: "en",
     paymentMethod: "card",
@@ -111,7 +116,7 @@ const CONTACT: ContactOption = {
 };
 
 const makeDoc = (overrides: Partial<DocumentView> = {}): DocumentView => ({
-  id: "doc-1" as DocumentId,
+  id: DocumentId.make("01937c7a-0000-7000-8000-000000000106"),
   kind: "invoice",
   number: "2026-0001",
   status: "issued",
@@ -120,17 +125,17 @@ const makeDoc = (overrides: Partial<DocumentView> = {}): DocumentView => ({
   overdue: false,
   revision: 2,
   taxDocument: true,
-  contact: {
-    contactId: "con-1",
+  contact: ContactSnapshot.make({
+    contactId: "01937c7a-0000-7000-8000-000000000105",
     name: "Acme s.r.o.",
     ico: "12345678",
     dic: "CZ12345678",
     legalForm: "s.r.o.",
     address: { street: "Ulice 1", city: "Praha", postalCode: "11000", country: "CZ" },
     billingEmails: ["billing@acme.cz"],
-  } as unknown as DocumentView["contact"],
-  issuer: {
-    workspaceId: "ws-1",
+  }),
+  issuer: IssuerSnapshot.make({
+    workspaceId: WorkspaceId.make("01937c7a-0000-7000-8000-000000000109"),
     name: "Kvitbit s.r.o.",
     ico: "87654321",
     dic: "CZ87654321",
@@ -141,23 +146,23 @@ const makeDoc = (overrides: Partial<DocumentView> = {}): DocumentView => ({
     web: null,
     regime: "vat_payer",
     bankAccount: {
-      id: "ba-czk",
+      id: "01937c7a-0000-7000-8000-000000000103",
       name: "CZK hlavní",
       currency: "CZK",
       accountNumber: null,
       iban: "CZ6508000000192000145399",
       bic: "GIBACZPX",
     },
-  } as unknown as DocumentView["issuer"],
+  }),
   dates: {
-    issuedOn: "2026-11-24" as IsoDate,
-    taxableSupplyOn: "2026-11-24" as IsoDate,
-    dueOn: "2026-12-08" as IsoDate,
+    issuedOn: IsoDate.make("2026-11-24"),
+    taxableSupplyOn: IsoDate.make("2026-11-24"),
+    dueOn: IsoDate.make("2026-12-08"),
   },
   paymentMethod: "bank_transfer",
   lines: [
-    {
-      id: "line-1" as LineId,
+    LineView.make({
+      id: LineId.make("01937c7a-0000-7000-8000-000000000107"),
       item: null,
       description: "Consulting",
       quantity: "2",
@@ -167,14 +172,14 @@ const makeDoc = (overrides: Partial<DocumentView> = {}): DocumentView => ({
       ratePercent: "21",
       amount: "2000",
       deducts: null,
-    } as unknown as DocumentView["lines"][number],
+    }),
   ],
   totals: {
     buckets: [],
-    net: MoneyMath.make(BigDecimal.fromBigInt(2000n), "CZK" as CurrencyCode),
-    vat: MoneyMath.make(BigDecimal.fromBigInt(420n), "CZK" as CurrencyCode),
-    roundingAdjustment: MoneyMath.zero("CZK" as CurrencyCode),
-    gross: MoneyMath.make(BigDecimal.fromBigInt(2420n), "CZK" as CurrencyCode),
+    net: MoneyMath.make(BigDecimal.fromBigInt(2000n), CurrencyCode.make("CZK")),
+    vat: MoneyMath.make(BigDecimal.fromBigInt(420n), CurrencyCode.make("CZK")),
+    roundingAdjustment: MoneyMath.zero(CurrencyCode.make("CZK")),
+    gross: MoneyMath.make(BigDecimal.fromBigInt(2420n), CurrencyCode.make("CZK")),
     vatCzk: null,
   },
   fx: null,
@@ -190,10 +195,8 @@ describe("documents codecs & badges", () => {
   test("parseDecimalInput handles dot, comma, spaces and rejects invalid input", () => {
     const a = parseDecimalInput("1 234,50");
     const b = parseDecimalInput("42.25");
-    expect(a).not.toBeNull();
-    expect(b).not.toBeNull();
-    if (a !== null) expect(BigDecimal.format(a)).toBe("1234.5");
-    if (b !== null) expect(BigDecimal.format(b)).toBe("42.25");
+    expect(a?.pipe(BigDecimal.format)).toBe("1234.5");
+    expect(b?.pipe(BigDecimal.format)).toBe("42.25");
     expect(parseDecimalInput("")).toBeNull();
     expect(parseDecimalInput("abc")).toBeNull();
   });
@@ -203,36 +206,40 @@ describe("documents codecs & badges", () => {
   });
 
   test("parseDocumentSummary and parsePaymentView decode opaque wire shapes", () => {
-    const summary = parseDocumentSummary({
-      id: "doc-1",
-      kind: "proforma",
-      number: "ZF-2026-001",
-      status: "issued",
-      locked: false,
-      settlement: "partially_paid",
-      overdue: true,
-      revision: 3,
-      contact: { id: "con-1", name: "Acme s.r.o." },
-      issuedOn: "2026-11-01",
-      dueOn: "2026-11-15",
-      total: { amount: "12100.00", currency: "CZK" },
-    } as unknown as DocumentSummary);
+    const summary = parseDocumentSummary(
+      DocumentSummary.make({
+        id: "01937c7a-0000-7000-8000-000000000001",
+        kind: "proforma",
+        number: "ZF-2026-001",
+        status: "issued",
+        locked: false,
+        settlement: "partially_paid",
+        overdue: true,
+        revision: 3,
+        contact: { id: "01937c7a-0000-7000-8000-000000000002", name: "Acme s.r.o." },
+        issuedOn: "2026-11-01",
+        dueOn: "2026-11-15",
+        total: { amount: "12100.00", currency: "CZK" },
+      }),
+    );
     expect(summary.number).toBe("ZF-2026-001");
     expect(summary.contact.name).toBe("Acme s.r.o.");
-    expect(BigDecimal.format(summary.total.amount)).toBe("12100");
+    expect(summary.total.amount.pipe(BigDecimal.format)).toBe("12100");
 
-    const payment = parsePaymentView({
-      id: "pay-1" as PaymentId,
-      revision: 1,
-      amount: { amount: "5000", currency: "CZK" },
-      paidOn: "2026-11-10",
-      method: "bank_transfer",
-      note: "Deposit",
-      taxDocument: "doc-ptd-1",
-      createdAt: "2026-11-10T10:00:00Z",
-    } as unknown as PaymentView);
-    expect(payment.taxDocument).toBe("doc-ptd-1" as DocumentId);
-    expect(BigDecimal.format(payment.amount.amount)).toBe("5000");
+    const payment = parsePaymentView(
+      PaymentView.make({
+        id: PaymentId.make("01937c7a-0000-7000-8000-000000000003"),
+        revision: 1,
+        amount: { amount: "5000", currency: "CZK" },
+        paidOn: "2026-11-10",
+        method: "bank_transfer",
+        note: "Deposit",
+        taxDocument: "01937c7a-0000-7000-8000-000000000004",
+        createdAt: "2026-11-10T10:00:00Z",
+      }),
+    );
+    expect(String(payment.taxDocument)).toBe("01937c7a-0000-7000-8000-000000000004");
+    expect(payment.amount.amount.pipe(BigDecimal.format)).toBe("5000");
   });
 
   test("badges map status, settlement and overdue accurately", () => {
@@ -291,18 +298,20 @@ describe("document editor model", () => {
       workspaceDefaults: WS_DEFAULTS,
       bankAccounts: BANK_ACCOUNTS,
       seriesList: SERIES,
-      today: "2026-11-24" as IsoDate,
+      today: IsoDate.make("2026-11-24"),
     });
-    expect(base.currency).toBe("CZK" as CurrencyCode);
+    expect(base.currency).toBe(CurrencyCode.make("CZK"));
     expect(base.dueOn).toBe("2026-12-08");
-    expect(base.bankAccountId).toBe("ba-czk" as BankAccountId);
-    expect(base.seriesId).toBe("ser-inv" as NumberingSeriesId);
+    expect(base.bankAccountId).toBe(BankAccountId.make("01937c7a-0000-7000-8000-000000000103"));
+    expect(base.seriesId).toBe(NumberingSeriesId.make("01937c7a-0000-7000-8000-000000000101"));
 
     const withContact = applyContactDefaults(base, CONTACT, WS_DEFAULTS, BANK_ACCOUNTS, SERIES);
-    expect(withContact.contactId).toBe("con-1" as ContactId);
-    expect(withContact.currency).toBe("EUR" as CurrencyCode);
+    expect(withContact.contactId).toBe(ContactId.make("01937c7a-0000-7000-8000-000000000105"));
+    expect(withContact.currency).toBe(CurrencyCode.make("EUR"));
     expect(withContact.dueOn).toBe("2026-12-24");
-    expect(withContact.bankAccountId).toBe("ba-eur" as BankAccountId);
+    expect(withContact.bankAccountId).toBe(
+      BankAccountId.make("01937c7a-0000-7000-8000-000000000104"),
+    );
     expect(withContact.paymentMethod).toBe("card");
   });
 
@@ -312,22 +321,22 @@ describe("document editor model", () => {
       workspaceDefaults: WS_DEFAULTS,
       bankAccounts: BANK_ACCOUNTS,
       seriesList: SERIES,
-      today: "2026-11-24" as IsoDate,
+      today: IsoDate.make("2026-11-24"),
     });
     const item: PriceListOption = {
-      id: "pl-1" as PriceListItemId,
+      id: PriceListItemId.make("01937c7a-0000-7000-8000-000000000108"),
       name: "Retainer",
       description: "Monthly",
       unit: "month",
       unitPrice: BigDecimal.fromBigInt(500n),
-      currency: "EUR" as CurrencyCode,
+      currency: CurrencyCode.make("EUR"),
       vat: "standard",
       archived: false,
     };
     const firstLine = base.lines[0];
     if (firstLine === undefined) throw new Error("expected initial line");
     const { draft, currencyMismatch } = applyPriceListItem(base, firstLine.key, item, "vat_payer");
-    expect(currencyMismatch).toBe("EUR" as CurrencyCode);
+    expect(currencyMismatch).toBe(CurrencyCode.make("EUR"));
     expect(draft.lines[0]?.description).toBe("Retainer — Monthly");
     expect(draft.lines[0]?.unitPrice).toBe("500");
     expect(draft.lines[0]?.unit).toBe("month");
@@ -340,7 +349,7 @@ describe("document editor model", () => {
       contact: CONTACT,
       bankAccounts: BANK_ACCOUNTS,
       seriesList: SERIES,
-      today: "2026-11-24" as IsoDate,
+      today: IsoDate.make("2026-11-24"),
     });
     const firstLine = base.lines[0];
     if (firstLine === undefined) throw new Error("expected initial line");
@@ -357,23 +366,17 @@ describe("document editor model", () => {
       ],
     };
     const cnbFx: FxRateView = {
-      currency: "EUR" as CurrencyCode,
+      currency: CurrencyCode.make("EUR"),
       rate: Option.getOrThrow(BigDecimal.fromString("25.20")),
       quantity: 1,
-      fixingDate: "2026-11-24" as IsoDate,
+      fixingDate: IsoDate.make("2026-11-24"),
       source: "cnb",
     };
     const preview = computeLivePreview(draft, "vat_payer", "none", cnbFx);
-    expect(preview).not.toBeNull();
-    if (preview !== null) {
-      expect(BigDecimal.format(preview.breakdown.net.amount)).toBe("1000");
-      expect(BigDecimal.format(preview.breakdown.vat.amount)).toBe("210");
-      expect(BigDecimal.format(preview.breakdown.gross.amount)).toBe("1210");
-      expect(preview.breakdown.vatCzk).not.toBeNull();
-      if (preview.breakdown.vatCzk !== null) {
-        expect(BigDecimal.format(preview.breakdown.vatCzk.amount)).toBe("5292");
-      }
-    }
+    expect(preview?.breakdown.net.amount.pipe(BigDecimal.format)).toBe("1000");
+    expect(preview?.breakdown.vat.amount.pipe(BigDecimal.format)).toBe("210");
+    expect(preview?.breakdown.gross.amount.pipe(BigDecimal.format)).toBe("1210");
+    expect(preview?.breakdown.vatCzk?.amount.pipe(BigDecimal.format)).toBe("5292");
   });
 
   test("validateEditorDraft catches missing contact, bad dates and empty lines", () => {
@@ -382,7 +385,7 @@ describe("document editor model", () => {
       workspaceDefaults: WS_DEFAULTS,
       bankAccounts: BANK_ACCOUNTS,
       seriesList: SERIES,
-      today: "2026-11-24" as IsoDate,
+      today: IsoDate.make("2026-11-24"),
     });
     const firstLine = base.lines[0];
     if (firstLine === undefined) throw new Error("expected initial line");
@@ -407,7 +410,7 @@ describe("document editor model", () => {
       contact: CONTACT,
       bankAccounts: BANK_ACCOUNTS,
       seriesList: SERIES,
-      today: "2026-11-24" as IsoDate,
+      today: IsoDate.make("2026-11-24"),
     });
     const firstLine = base.lines[0];
     if (firstLine === undefined) throw new Error("expected initial line");
@@ -422,7 +425,7 @@ describe("document editor model", () => {
     };
     const input = buildDocumentInput(filled);
     expect(input.kind).toBe("invoice");
-    expect(input.contact).toBe("con-1" as ContactId);
+    expect(input.contact).toBe(ContactId.make("01937c7a-0000-7000-8000-000000000105"));
     expect(input.lines.length).toBe(1);
     expect(input.fx?.manual.quantity).toBe(1);
 

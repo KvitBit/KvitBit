@@ -1,6 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
+import * as Effect from "effect/Effect";
 import type { ReactElement } from "react";
 import { expoUpdatesStandIn } from "./expo-updates-stand-in";
+import type { ReadyUpdate } from "./ota-update";
 
 mock.module("expo-updates", () => expoUpdatesStandIn);
 
@@ -31,7 +33,7 @@ describe("UpdateBannerView", () => {
     );
     expect(allText(tree)).toContain("A new version is available.");
     expect(allText(tree)).toContain("Reload");
-    find<{ onPress: () => void }>(tree as ReactElement, "Pressable")?.props.onPress();
+    find<{ onPress: () => void }>(tree, "Pressable")?.props.onPress();
     expect(reloads).toBe(1);
   });
 
@@ -52,37 +54,40 @@ describe("UpdateBanner", () => {
 });
 
 type Updates = Parameters<typeof startUpdateChecks>[0]["updates"];
-type CheckResult = Awaited<ReturnType<Updates["checkForUpdateAsync"]>>;
-type FetchResult = Awaited<ReturnType<Updates["fetchUpdateAsync"]>>;
-
 const availableUpdates = (calls: { check: number }): Updates => ({
   isEnabled: true,
-  checkForUpdateAsync: async () => {
+  checkForUpdateAsync: () => {
     calls.check += 1;
-    return {
+    return Promise.resolve({
       isAvailable: true,
       isRollBackToEmbedded: false,
-      manifest: { id: "a" },
-    } as unknown as CheckResult;
+    });
   },
-  fetchUpdateAsync: async () =>
-    ({ isNew: true, isRollBackToEmbedded: false, manifest: { id: "a" } }) as unknown as FetchResult,
+  fetchUpdateAsync: () =>
+    Promise.resolve({ isNew: true, isRollBackToEmbedded: false, manifest: { id: "a" } }),
 });
 
 const inertAppState = { addEventListener: () => ({ remove: () => undefined }) };
 
 const start = (platform: string, updates: Updates, dev = false) =>
-  new Promise<unknown>((resolve) => {
-    startUpdateChecks({
-      platform,
-      updates,
-      dev,
-      appState: inertAppState,
-      now: () => 0,
-      onCheck: resolve,
-    });
-    setTimeout(() => resolve("no check"), 50);
-  });
+  Effect.runPromise(
+    Effect.callback<ReadyUpdate | undefined>((resolve) => {
+      const stop = startUpdateChecks({
+        platform,
+        updates,
+        dev,
+        appState: inertAppState,
+        now: () => 0,
+        onCheck: (found) => resolve(Effect.succeed(found)),
+      });
+      return Effect.sync(stop);
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: "50 millis",
+        orElse: () => Effect.succeed("no check" as const),
+      }),
+    ),
+  );
 
 describe("startUpdateChecks", () => {
   test("checks on launch and reports the downloaded update", async () => {

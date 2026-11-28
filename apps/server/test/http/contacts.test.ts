@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { captureAnalytics } from "../analytics-fixture";
 import { as, type Harness, json, makeHarness, type TestUser } from "./harness";
+
+const decodeRevisionedId = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String, revision: Schema.Finite })),
+  Effect.runSync,
+);
 
 let h: Harness;
 let owner: TestUser;
@@ -27,18 +36,18 @@ afterEach(async () => {
   await h.dispose();
 });
 
-const post = (body: unknown, headers: Record<string, string> = {}) => {
+const post = (body: typeof contact, headers: Record<string, string> = {}) => {
   const init = json(body);
   return h.fetch(base, {
     ...init,
     method: "POST",
-    headers: { ...(init.headers as Record<string, string>), ...as.mobile(owner), ...headers },
+    headers: { "content-type": "application/json", ...as.mobile(owner), ...headers },
   });
 };
 
 describe("contacts group", () => {
   test("oversized JSON without Content-Length returns 413", async () => {
-    const res = await post({ ...contact, name: "x".repeat(1024 * 1024) });
+    const res = await post({ ...contact, name: Str.repeat(1024 * 1024)("x") });
     expect(res.status).toBe(413);
     expect(await res.json()).toEqual({ _tag: "PayloadTooLarge", limitBytes: 1024 * 1024 });
   });
@@ -46,7 +55,7 @@ describe("contacts group", () => {
   test("create answers 201 with ETag and Location; get echoes the ETag", async () => {
     const res = await post(contact);
     expect(res.status).toBe(201);
-    const view = (await res.json()) as { id: string; revision: number };
+    const view = decodeRevisionedId(await res.json());
     expect(res.headers.get("etag")).toBe(`"${view.revision}"`);
     expect(res.headers.get("location")).toBe(`${base}/${view.id}`);
     const got = await h.fetch(`${base}/${view.id}`, { headers: as.mobile(owner) });
@@ -76,13 +85,13 @@ describe("contacts group", () => {
   });
 
   test("update needs If-Match: 428 without, 412 when stale, 200 when current", async () => {
-    const created = (await (await post(contact)).json()) as { id: string; revision: number };
+    const created = decodeRevisionedId(await (await post(contact)).json());
     const put = (headers: Record<string, string>) => {
       const init = json({ ...contact, name: "Přejmenováno" });
       return h.fetch(`${base}/${created.id}`, {
         ...init,
         method: "PUT",
-        headers: { ...(init.headers as Record<string, string>), ...as.mobile(owner), ...headers },
+        headers: { "content-type": "application/json", ...as.mobile(owner), ...headers },
       });
     };
     const missing = await put({});
@@ -119,18 +128,21 @@ describe("contacts group", () => {
   test("malformed query is 422 request.malformed", async () => {
     const res = await h.fetch(`${base}?limit=0`, { headers: as.mobile(owner) });
     expect(res.status).toBe(422);
-    const body = (await res.json()) as {
-      _tag: string;
-      issues: Array<{ code: string; path: unknown }>;
-    };
+    const body = Schema.decodeUnknownEffect(
+      Schema.Struct({ _tag: Schema.String, issues: Schema.Array(Schema.Unknown) }),
+    )(await res.json()).pipe(Effect.runSync);
     expect(body._tag).toBe("Invalid");
     expect(body.issues[0]).toEqual({ path: ["query", "limit"], code: "request.malformed" });
   });
 
-  test("another user's Workspace is 404 NotFound{Workspace}", async () => {
+  test("returns 404 for another user's workspace", async () => {
     const stranger = h.addUser("Petr");
     const res = await h.fetch(base, { headers: as.mobile(stranger) });
     expect(res.status).toBe(404);
-    expect(((await res.json()) as { entity: string }).entity).toBe("Workspace");
+    expect(
+      Schema.decodeUnknownEffect(Schema.Struct({ entity: Schema.String }))(await res.json()).pipe(
+        Effect.runSync,
+      ).entity,
+    ).toBe("Workspace");
   });
 });

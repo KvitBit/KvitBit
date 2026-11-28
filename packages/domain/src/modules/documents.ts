@@ -1,7 +1,9 @@
 /** Documents module (core-ports section 4.4). Interface only. */
-import type { BigDecimal, Effect } from "effect";
-import { Context, Schema } from "effect";
-import type { CurrentCaller } from "../caller";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import type { Caller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { LineId } from "../ids";
 import { BankAccountId, ContactId, DeliveryId, DocumentId, NumberingSeriesId } from "../ids";
@@ -55,7 +57,7 @@ export type DocumentInput = typeof DocumentInput.Type;
 /** Every DocumentInput field except kind, each optional, plus two edit-only fields. */
 export const DocumentPatch = Schema.Struct({
   contact: Schema.optional(ContactId),
-  lines: Schema.optional(Schema.NonEmptyArray(LineInput)),
+  lines: LineInput.pipe(Schema.NonEmptyArray, Schema.optional),
   currency: Schema.optional(CurrencyCode),
   issuedOn: Schema.optional(IsoDate),
   taxableSupplyOn: Schema.optional(IsoDate),
@@ -68,7 +70,7 @@ export const DocumentPatch = Schema.Struct({
   orderNumber: Schema.optional(Schema.String),
   note: Schema.optional(Schema.String),
   paymentMethod: Schema.optional(PaymentMethod),
-  fx: Schema.optional(Schema.NullOr(FxOverride)), // null returns to the CNB fixing (rule D11)
+  fx: FxOverride.pipe(Schema.NullOr, Schema.optional), // null returns to the CNB fixing (rule D11)
   number: Schema.optional(Schema.String), // issued only; owner/admin; unique (rule D4)
   refreshParties: Schema.optional(Schema.Boolean), // re-snapshot Contact and Issuing Entity (rule D10)
 });
@@ -208,120 +210,120 @@ export class Documents extends Context.Service<
   {
     /** Live totals for an editor. Same code path as issue; nothing is stored or numbered. */
     readonly preview: (
+      caller: Caller,
       input: DocumentInput,
-    ) => Effect.Effect<DocumentView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, Invalid | NotFound | Unavailable | Forbidden>;
     readonly createDraft: (
+      caller: Caller,
       input: DocumentInput,
       opts?: RequestOptions,
-    ) => Effect.Effect<
-      DocumentView,
-      Invalid | NotFound | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<DocumentView, Invalid | NotFound | Conflict | Unavailable | Forbidden>;
     /** Drafts only. Hard delete. */
     readonly discardDraft: (
+      caller: Caller,
       id: DocumentId,
       expectedRevision: number,
-    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden>;
     /** From an existing draft or straight from input. Assigns the number. */
     readonly issue: (
+      caller: Caller,
       from:
         | { readonly draft: DocumentId; readonly expectedRevision: number }
         | { readonly input: DocumentInput },
       opts?: RequestOptions & { readonly send?: SendOptions },
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
     /** Drafts and unlocked issued documents. Issued edits are audited field by field. */
     readonly edit: (
+      caller: Caller,
       id: DocumentId,
       patch: DocumentPatch,
       expectedRevision: number,
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
     readonly lock: (
+      caller: Caller,
       id: DocumentId,
-    ) => Effect.Effect<DocumentView, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, NotFound | Conflict | Unavailable | Forbidden>;
     readonly unlock: (
+      caller: Caller,
       id: DocumentId,
       reason: string,
-    ) => Effect.Effect<
-      DocumentView,
-      NotFound | Conflict | Invalid | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<DocumentView, NotFound | Conflict | Invalid | Unavailable | Forbidden>;
     /** Void an issued document without deleting it (rule D6). */
     readonly cancel: (
+      caller: Caller,
       id: DocumentId,
       input: { readonly reason: string; readonly on?: IsoDate },
       opts?: RequestOptions,
     ) => Effect.Effect<
       { readonly document: DocumentView; readonly creditNote: DocumentView | null },
-      CoreError,
-      CurrentCaller
+      CoreError
     >;
     /** Credit Note against an issued Invoice or Payment Tax Document. */
     readonly correct: (
+      caller: Caller,
       id: DocumentId,
       input: CorrectionInput,
       opts?: RequestOptions,
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
     /** The Final Invoice for a paid Proforma, deducting the advance (§37a). Explicit; once per Proforma. */
     readonly issueFinalInvoice: (
+      caller: Caller,
       proforma: DocumentId,
       input?: { readonly patch?: DocumentPatch },
       opts?: RequestOptions,
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
     /**
      * Queue email delivery. Never fails on provider outage. purpose "document" arms payment
      * reminders unless disabled; purpose "reminder" sends one manual reminder and never re-arms
      * the schedule (rule D14).
      */
     readonly send: (
+      caller: Caller,
       id: DocumentId,
       input?: SendOptions,
       opts?: RequestOptions,
     ) => Effect.Effect<
       { readonly deliveryId: DeliveryId; readonly status: "queued" },
-      NotFound | Conflict | Invalid | Unavailable | Forbidden,
-      CurrentCaller
+      NotFound | Conflict | Invalid | Unavailable | Forbidden
     >;
 
     // Dry runs for MCP two-step confirmation (rule D15). Nothing is stored.
     /** Recipients, language, subject and attachments that send(id, input) would use now. */
     readonly previewSend: (
+      caller: Caller,
       id: DocumentId,
       input?: SendOptions,
-    ) => Effect.Effect<
-      SendPreview,
-      NotFound | Conflict | Invalid | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<SendPreview, NotFound | Conflict | Invalid | Unavailable | Forbidden>;
     /** The Final Invoice issueFinalInvoice would produce, with deductions, unnumbered. */
     readonly previewFinalInvoice: (
+      caller: Caller,
       proforma: DocumentId,
       input?: { readonly patch?: DocumentPatch },
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
     /** The Credit Note correct(id, input) would produce, unnumbered. */
     readonly previewCorrection: (
+      caller: Caller,
       id: DocumentId,
       input: CorrectionInput,
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
 
     readonly pdf: (
+      caller: Caller,
       id: DocumentId,
       opts?: { readonly template?: PdfTemplate; readonly language?: Locale },
-    ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden>;
     readonly get: (
+      caller: Caller,
       id: DocumentId,
-    ) => Effect.Effect<DocumentView, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, NotFound | Unavailable | Forbidden>;
     /** Filter plus paging (cursor, limit 1 to 100, default 50). */
     readonly list: (
+      caller: Caller,
       q: DocumentQuery & PageRequest,
-    ) => Effect.Effect<Page<DocumentSummary>, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<Page<DocumentSummary>, Invalid | Unavailable | Forbidden>;
     readonly history: (
+      caller: Caller,
       id: DocumentId,
-    ) => Effect.Effect<
-      ReadonlyArray<AuditEntry>,
-      NotFound | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<ReadonlyArray<AuditEntry>, NotFound | Unavailable | Forbidden>;
   }
->()("kvitbit/Documents") {}
+>()("@kvitbit/domain/modules/documents") {}

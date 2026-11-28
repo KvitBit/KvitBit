@@ -1,29 +1,56 @@
 /**
- * Converts core views behind open/unknown contract schemas (`PriceListItemView`, `PaymentView`,
- * `TemplateView`, `ReportView`) into JSON-safe values before `HttpApiBuilder` encodes them with
- * `Schema.toCodecJson`. Core returns `BigDecimal` instances inside open fields where the wire
- * contract expects decimal strings (http-mcp-contracts section 3.2).
+ * Formats BigDecimal values inside open view fields before HttpApiBuilder encodes the response.
+ * Closed schema fields keep their decoded values for the schema's own JSON codec.
  */
-import { BigDecimal } from "effect";
+import {
+  PaymentView,
+  type PriceListItemView,
+  ReportView,
+  type TemplateView,
+} from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Predicate from "effect/Predicate";
+import * as Record from "effect/Record";
 
-const toJsonValue = (value: unknown): unknown => {
-  if (BigDecimal.isBigDecimal(value)) {
-    return BigDecimal.format(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map(toJsonValue);
-  }
-  if (value !== null && typeof value === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(value)) {
-      if (val !== undefined) {
-        out[key] = toJsonValue(val);
-      }
-    }
-    return out;
-  }
-  return value;
+const normalizer = (keepUndefined: boolean) => {
+  const fields = <A>(object: Readonly<Record<string, A>>) => {
+    const entries = Record.toEntries(object);
+    const present = keepUndefined
+      ? entries
+      : Arr.filter(entries, ([, field]) => field !== undefined);
+    return Record.fromEntries(Arr.map(present, ([key, field]) => [key, value(field)] as const));
+  };
+
+  const value = <A>(input: A): unknown => {
+    if (BigDecimal.isBigDecimal(input)) return BigDecimal.format(input);
+    if (Arr.isArray(input)) return Arr.map(input, value);
+    if (Predicate.isObject(input)) return fields(input);
+    return input;
+  };
+
+  return { fields, value };
 };
 
-/** Recursively formats `BigDecimal` values and drops `undefined` keys in open view objects. */
-export const jsonSafe = <T>(value: T): T => toJsonValue(value) as T;
+const records = normalizer(false);
+export const documentJsonValue = normalizer(true).value;
+
+export const jsonizePayment = (payment: PaymentView): PaymentView =>
+  PaymentView.make(records.value(payment));
+
+export const jsonizeReport = (report: ReportView): ReportView =>
+  ReportView.make(records.value(report));
+
+export const jsonizePriceListItem = (item: PriceListItemView): PriceListItemView => ({
+  ...records.fields(item),
+  revision: item.revision,
+});
+
+export const jsonizeTemplate = (template: TemplateView): TemplateView => ({
+  ...records.fields(template),
+  revision: template.revision,
+  schedule:
+    template.schedule === null
+      ? null
+      : { ...records.fields(template.schedule), pausedReason: template.schedule.pausedReason },
+});

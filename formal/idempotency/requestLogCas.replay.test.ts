@@ -9,28 +9,38 @@
  * only between transactions; the Postgres row-lock and claim-wait interleavings inside a
  * transaction are the model's (and the pg-contention job's) to cover.
  */
+
 import { describe, expect, test } from "bun:test";
-import { makeRequestOutcome } from "@kvitbit/core";
-import { ContactsTestLayer, FakeContactSeries, InMemoryPortsLive } from "@kvitbit/core/testing";
-import type {
+import { strictEqual } from "node:assert/strict";
+import * as EffectArray from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+import { makeRequestOutcome } from "../../packages/core/src/index";
+import {
+  ContactsTestLayer,
+  FakeContactSeries,
+  InMemoryPortsLive,
+} from "../../packages/core/src/testing/index";
+import type { ContactView, MemberCaller } from "../../packages/domain/src/contract";
+import {
   ContactId,
-  ContactInput,
-  ContactView,
-  MemberCaller,
+  Contacts,
   NumberingSeriesId,
   RequestKey,
   UserId,
   WorkspaceId,
-} from "@kvitbit/domain/contract";
-import { Contacts, CurrentCaller } from "@kvitbit/domain/contract";
-import { RequestOutcome } from "@kvitbit/domain/ports";
-import { Effect, Exit, Layer, Ref } from "effect";
-import { TestClock } from "effect/testing";
+} from "../../packages/domain/src/contract";
+import { RequestOutcome } from "../../packages/domain/src/ports";
 
-const WORKSPACE = "01900000-0000-7000-8000-00000000a001" as WorkspaceId;
+const WORKSPACE = WorkspaceId.make("01900000-0000-7000-8000-00000000a001");
 const owner: MemberCaller = {
   _tag: "Member",
-  userId: "01900000-0000-7000-8000-00000000c001" as UserId,
+  userId: UserId.make("01900000-0000-7000-8000-00000000c001"),
   workspaceId: WORKSPACE,
   role: "owner",
   scopes: "all",
@@ -38,33 +48,26 @@ const owner: MemberCaller = {
   channel: "web",
   client: null,
 };
-const SERIES = "01900000-0000-7000-8000-0000000005e1" as NumberingSeriesId;
-const k1 = "01900000-0000-7000-8000-0000000000a1" as RequestKey;
-const k2 = "01900000-0000-7000-8000-0000000000a2" as RequestKey;
-const k3 = "01900000-0000-7000-8000-0000000000a3" as RequestKey;
+const SERIES = NumberingSeriesId.make("01900000-0000-7000-8000-0000000005e1");
+const k1 = RequestKey.make("01900000-0000-7000-8000-0000000000a1");
+const k2 = RequestKey.make("01900000-0000-7000-8000-0000000000a2");
+const k3 = RequestKey.make("01900000-0000-7000-8000-0000000000a3");
 
-interface Contact {
-  readonly id: ContactId;
-  readonly revision: number;
-  readonly name: string;
-}
-const asContact = (v: ContactView) => v as unknown as Contact;
+const ReplayContact = Schema.Struct({ id: ContactId, revision: Schema.Int, name: Schema.String });
+type Contact = ContactView & typeof ReplayContact.Type;
+const asContact = (view: ContactView): Contact => {
+  if (!Schema.is(ReplayContact)(view)) throw new Error("invalid contact in replay");
+  return view;
+};
 
 /** One attempt: Contacts.save with its own RequestOutcome, so a replay is observable. */
-const attempt = (
-  input: Record<string, unknown>,
-  requestKey: RequestKey,
-): Effect.Effect<
-  { readonly exit: Exit.Exit<Contact, unknown>; readonly replayed: boolean },
-  never,
-  Contacts | CurrentCaller
-> =>
+const attempt = (input: Parameters<Contacts["Service"]["save"]>[1], requestKey: RequestKey) =>
   Effect.gen(function* () {
     const outcome = yield* makeRequestOutcome;
     const contacts = yield* Contacts;
     const exit = yield* Effect.exit(
       contacts
-        .save(input as unknown as ContactInput, { requestKey })
+        .save(owner, input, { requestKey })
         .pipe(Effect.map(asContact), Effect.provideService(RequestOutcome, outcome)),
     );
     return { exit, replayed: yield* outcome.replayed };
@@ -76,7 +79,9 @@ const ok = (e: { readonly exit: Exit.Exit<Contact, unknown> }): Contact => {
 };
 const failure = (e: { readonly exit: Exit.Exit<Contact, unknown> }): unknown => {
   if (Exit.isFailure(e.exit)) {
-    const err = e.exit.cause.reasons.find((r) => r._tag === "Fail");
+    const err = Option.getOrUndefined(
+      EffectArray.findFirst(e.exit.cause.reasons, (r) => r._tag === "Fail"),
+    );
     if (err !== undefined && "error" in err) return err.error;
   }
   throw new Error("expected a typed failure");
@@ -84,30 +89,31 @@ const failure = (e: { readonly exit: Exit.Exit<Contact, unknown> }): unknown => 
 
 /** The committed row: revision and name, read back through the service. */
 const current = (id: ContactId) =>
-  Effect.flatMap(Contacts, (c) => c.get(id)).pipe(Effect.map(asContact), Effect.orDie);
-const contactCount = Effect.flatMap(Contacts, (c) => c.search({})).pipe(
+  Effect.flatMap(Contacts, (c) => c.get(owner, id)).pipe(Effect.map(asContact), Effect.orDie);
+const contactCount = Effect.flatMap(Contacts, (c) => c.search(owner, {})).pipe(
   Effect.map((page) => page.items.length),
   Effect.orDie,
 );
 
 /** Fresh in-memory core with one Contact at revision 1 (the model's Init). */
 const run = <A, E>(
-  body: (seed: Contact) => Effect.Effect<A, E, Contacts | CurrentCaller | FakeContactSeries>,
+  body: (seed: Contact) => Effect.Effect<A, E, Contacts | FakeContactSeries>,
 ): Promise<A> =>
   Effect.runPromise(
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.UTC(2026, 10, 23, 9, 0, 0));
-      const seed = asContact(
-        yield* Effect.flatMap(Contacts, (c) =>
-          c.save({ name: "Acme s.r.o." } as unknown as ContactInput),
-        ).pipe(Effect.orDie),
-      );
-      expect(seed.revision).toBe(1);
+      const view = yield* Effect.flatMap(Contacts, (contacts) =>
+        contacts.save(owner, { name: "Acme s.r.o." }),
+      ).pipe(Effect.orDie);
+      const seed = asContact(view);
+      strictEqual(seed.revision, 1);
       return yield* body(seed);
     }).pipe(
-      Effect.provide(ContactsTestLayer),
-      Effect.provideService(CurrentCaller, owner),
-      Effect.provide(Layer.merge(InMemoryPortsLive(), TestClock.layer())),
+      Effect.provide(
+        ContactsTestLayer.pipe(
+          Layer.provideMerge(Layer.merge(InMemoryPortsLive(), TestClock.layer())),
+        ),
+      ),
     ),
   );
 
@@ -122,9 +128,9 @@ describe("RequestLogCas traces on Contacts.save", () => {
   test("r1: Claim, Lock, Commit; r1 retry: Claim, Existing -> the stored result, replayed", async () => {
     const { first, retry, row } = await run((seed) =>
       Effect.gen(function* () {
-        const first = yield* attempt(r1(seed), k1);
-        const retry = yield* attempt(r1(seed), k1);
-        return { first, retry, row: yield* current(seed.id) };
+        const originalAttempt = yield* attempt(r1(seed), k1);
+        const retriedAttempt = yield* attempt(r1(seed), k1);
+        return { first: originalAttempt, retry: retriedAttempt, row: yield* current(seed.id) };
       }),
     );
     expect(first.replayed).toBe(false);
@@ -138,9 +144,10 @@ describe("RequestLogCas traces on Contacts.save", () => {
   test("r1 commits; r2 (same key, other payload): Claim, Existing -> idempotency_mismatch", async () => {
     const { mismatch, row } = await run((seed) =>
       Effect.gen(function* () {
-        ok(yield* attempt(r1(seed), k1));
-        const mismatch = yield* attempt(r2(seed), k1);
-        return { mismatch, row: yield* current(seed.id) };
+        const firstAttempt = yield* attempt(r1(seed), k1);
+        ok(firstAttempt);
+        const mismatchedAttempt = yield* attempt(r2(seed), k1);
+        return { mismatch: mismatchedAttempt, row: yield* current(seed.id) };
       }),
     );
     // MismatchNeverReplayed
@@ -152,15 +159,22 @@ describe("RequestLogCas traces on Contacts.save", () => {
   test("r1 commits; r3: Lock (stale) twice; r5 on k2 commits; r1 retry: Existing -> its own result", async () => {
     const { first, stale, again, fresh, retry, row } = await run((seed) =>
       Effect.gen(function* () {
-        const first = yield* attempt(r1(seed), k1);
-        const stale = yield* attempt(r3(seed), k2);
+        const originalAttempt = yield* attempt(r1(seed), k1);
+        const staleAttempt = yield* attempt(r3(seed), k2);
         // A failed attempt stores nothing: the retry runs the body again (no replay).
-        const again = yield* attempt(r3(seed), k2);
+        const secondStaleAttempt = yield* attempt(r3(seed), k2);
         // r5 (the fresh revision) is a new payload on k2, which nothing holds: it claims.
-        const fresh = yield* attempt(r5(seed), k2);
+        const updatedAttempt = yield* attempt(r5(seed), k2);
         // r1's retry after a later edit gets r1's stored result, not the live row.
-        const retry = yield* attempt(r1(seed), k1);
-        return { first, stale, again, fresh, retry, row: yield* current(seed.id) };
+        const retriedAttempt = yield* attempt(r1(seed), k1);
+        return {
+          first: originalAttempt,
+          stale: staleAttempt,
+          again: secondStaleAttempt,
+          fresh: updatedAttempt,
+          retry: retriedAttempt,
+          row: yield* current(seed.id),
+        };
       }),
     );
     for (const s of [stale, again]) {
@@ -186,11 +200,11 @@ describe("RequestLogCas traces on Contacts.save", () => {
       Effect.gen(function* () {
         // The body fails after getForUpdate: the preferred series does not exist yet.
         const input = { ...r1(seed), defaults: { preferredSeriesByKind: { invoice: SERIES } } };
-        const aborted = yield* attempt(input, k1);
+        const rolledBackAttempt = yield* attempt(input, k1);
         const fake = yield* FakeContactSeries;
         yield* Ref.set(fake.series, [{ workspaceId: WORKSPACE, id: SERIES, kind: "invoice" }]);
-        const retry = yield* attempt(input, k1);
-        return { aborted, retry, row: yield* current(seed.id) };
+        const retriedAttempt = yield* attempt(input, k1);
+        return { aborted: rolledBackAttempt, retry: retriedAttempt, row: yield* current(seed.id) };
       }),
     );
     expect(failure(aborted)).toMatchObject({ _tag: "NotFound" });
@@ -203,13 +217,16 @@ describe("RequestLogCas traces on Contacts.save", () => {
   test("r1 attempt 1 || r1 attempt 2 overlap: one Commit, one Existing with the same result", async () => {
     const { attempts, row } = await run((seed) =>
       Effect.gen(function* () {
-        const attempts = yield* Effect.all([attempt(r1(seed), k1), attempt(r1(seed), k1)], {
-          concurrency: "unbounded",
-        });
-        return { attempts, row: yield* current(seed.id) };
+        const concurrentAttempts = yield* Effect.all(
+          [attempt(r1(seed), k1), attempt(r1(seed), k1)],
+          {
+            concurrency: "unbounded",
+          },
+        );
+        return { attempts: concurrentAttempts, row: yield* current(seed.id) };
       }),
     );
-    expect(attempts.map((a) => a.replayed).sort()).toEqual([false, true]);
+    expect(EffectArray.map(attempts, (a) => a.replayed).sort()).toEqual([false, true]);
     expect(ok(attempts[0])).toEqual(ok(attempts[1]));
     expect(row).toMatchObject({ revision: 2, name: "A" });
   });
@@ -217,37 +234,44 @@ describe("RequestLogCas traces on Contacts.save", () => {
   test("r4 attempt 1 || r4 attempt 2 overlap (create): one Contact, both get it", async () => {
     const { attempts, count } = await run(() =>
       Effect.gen(function* () {
-        const attempts = yield* Effect.all([attempt(r4, k3), attempt(r4, k3)], {
+        const concurrentAttempts = yield* Effect.all([attempt(r4, k3), attempt(r4, k3)], {
           concurrency: "unbounded",
         });
-        return { attempts, count: yield* contactCount };
+        return { attempts: concurrentAttempts, count: yield* contactCount };
       }),
     );
     // AtMostOnceEffect: the seed plus exactly one created Contact
     expect(count).toBe(2);
-    expect(attempts.map((a) => a.replayed).sort()).toEqual([false, true]);
+    expect(EffectArray.map(attempts, (a) => a.replayed).sort()).toEqual([false, true]);
     expect(ok(attempts[0])).toEqual(ok(attempts[1]));
   });
 
   test("r1 || r3 overlap from revision 1: one Commit, the other Lock is stale", async () => {
     const { attempts, row } = await run((seed) =>
       Effect.gen(function* () {
-        const attempts = yield* Effect.all([attempt(r1(seed), k1), attempt(r3(seed), k2)], {
-          concurrency: "unbounded",
-        });
-        return { attempts, row: yield* current(seed.id) };
+        const concurrentAttempts = yield* Effect.all(
+          [attempt(r1(seed), k1), attempt(r3(seed), k2)],
+          {
+            concurrency: "unbounded",
+          },
+        );
+        return { attempts: concurrentAttempts, row: yield* current(seed.id) };
       }),
     );
-    const wins = attempts.filter((a) => Exit.isSuccess(a.exit));
-    const losses = attempts.filter((a) => Exit.isFailure(a.exit));
+    const wins = EffectArray.filter(attempts, (a) => Exit.isSuccess(a.exit));
+    const losses = EffectArray.filter(attempts, (a) => Exit.isFailure(a.exit));
     expect(wins).toHaveLength(1);
     expect(losses).toHaveLength(1);
-    expect(failure(losses[0] as (typeof attempts)[number])).toMatchObject({
+    const [loss] = losses;
+    const [win] = wins;
+    if (loss === undefined || win === undefined)
+      throw new Error("expected one winner and one loser");
+    expect(failure(loss)).toMatchObject({
       reason: "revision_changed",
       currentRevision: 2,
     });
     // NoLostUpdate: the row holds the winner's edit at revision 2
-    const winner = ok(wins[0] as (typeof attempts)[number]);
+    const winner = ok(win);
     expect(row).toEqual(expect.objectContaining({ revision: 2, name: winner.name }));
   });
 });

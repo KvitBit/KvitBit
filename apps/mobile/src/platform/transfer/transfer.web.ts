@@ -1,10 +1,18 @@
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
 /**
  * Web/PWA Transfer (ui-port-contracts 5.3): XHR multipart upload (progress through
  * `xhr.upload`), fetch to a Blob for downloads, a new tab to open and Web Share with files, else
  * an `<a download>`, to share. The session cookie authenticates, so no header is added.
  */
+
 import { UiError } from "@kvitbit/ui-port/api";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as EffectRecord from "effect/Record";
+import * as EffectString from "effect/String";
+import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
 import { blobOf } from "../capture/blob-store";
+import { tryPlatform } from "../platform-effect";
 import {
   apiUrl,
   authHeaders,
@@ -14,11 +22,12 @@ import {
   isSuccess,
   parseJson,
   type SavedFile,
+  type TransferResult,
   type TransferTarget,
 } from "./http";
-import type { Transfer } from "./port";
+import type { DownloadRequest, Transfer, UploadRequest } from "./port";
 
-const download = (file: SavedFile, url: string): void => {
+const downloadLink = (file: SavedFile, url: string): void => {
   const a = document.createElement("a");
   a.href = url;
   a.download = file.name;
@@ -28,85 +37,131 @@ const download = (file: SavedFile, url: string): void => {
   a.remove();
 };
 
-export const makeTransfer = (target: TransferTarget): Transfer => ({
-  upload: async (req) => {
-    const blob = await blobOf(req.file.ref);
+export const makeTransfer = (target: TransferTarget): Transfer => {
+  const upload = Effect.fn("WebTransfer.upload")(function* (req: UploadRequest) {
+    const blob = yield* fromMobilePromise(() => blobOf(req.file.ref));
     if (blob === null) return failed(UiError.unexpected());
-    return new Promise((resolve) => {
+    const result = yield* Deferred.make<TransferResult<unknown>>();
+    const complete = (outcome: TransferResult<unknown>) => {
+      Deferred.doneUnsafe(result, Effect.succeed(outcome));
+    };
+    yield* tryPlatform(() => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", apiUrl(target.origin, req.path));
       xhr.withCredentials = true;
       xhr.setRequestHeader("accept", "application/json");
-      for (const [k, v] of Object.entries({ ...authHeaders(target.credentials), ...req.headers }))
-        xhr.setRequestHeader(k, v);
+      for (const [name, value] of EffectRecord.toEntries({
+        ...authHeaders(target.credentials),
+        ...req.headers,
+      })) {
+        xhr.setRequestHeader(name, value);
+      }
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable && event.total > 0) req.onProgress?.(event.loaded / event.total);
       };
       xhr.onload = () => {
         const body = parseJson(xhr.responseText);
-        resolve(
+        complete(
           isSuccess(xhr.status)
             ? done(body)
-            : failed(errorFromResponse(xhr.status, body, xhr.getResponseHeader("x-request-id"))),
+            : failed(
+                errorFromResponse({
+                  status: xhr.status,
+                  body,
+                  requestId: xhr.getResponseHeader("x-request-id"),
+                }),
+              ),
         );
       };
-      xhr.onerror = () => resolve(failed(UiError.offline));
-      xhr.ontimeout = () => resolve(failed(UiError.timeout));
-      xhr.onabort = () => resolve(failed(UiError.cancelled));
+      xhr.onerror = () => complete(failed(UiError.offline));
+      xhr.ontimeout = () => complete(failed(UiError.timeout));
+      xhr.onabort = () => complete(failed(UiError.cancelled));
       const form = new FormData();
       form.append("file", blob, req.file.name);
       xhr.send(form);
     });
-  },
-  download: async (req) => {
-    try {
-      const response = await fetch(apiUrl(target.origin, req.path, req.query), {
+    return yield* Deferred.await(result);
+  });
+
+  const download = Effect.fn("WebTransfer.download")(function* (req: DownloadRequest) {
+    const fetch = yield* FetchHttpClient.Fetch;
+    const response = yield* fromMobilePromise(() =>
+      fetch(apiUrl(target.origin, req.path, req.query), {
         credentials: "include",
         headers: authHeaders(target.credentials),
-      });
-      if (!isSuccess(response.status)) {
-        const text = await response.text().catch(() => "");
-        return failed(
-          errorFromResponse(response.status, parseJson(text), response.headers.get("x-request-id")),
-        );
-      }
-      const blob = await response.blob();
-      return done({
-        ref: URL.createObjectURL(blob),
-        name: req.filename,
-        contentType: blob.type || req.contentType || "application/octet-stream",
-        size: blob.size,
-      });
-    } catch {
-      return failed(UiError.offline);
+      }),
+    );
+    if (!isSuccess(response.status)) {
+      const text = yield* fromMobilePromise(() => response.text()).pipe(
+        Effect.orElseSucceed(() => ""),
+      );
+      return failed(
+        errorFromResponse({
+          status: response.status,
+          body: parseJson(text),
+          requestId: response.headers.get("x-request-id"),
+        }),
+      );
     }
-  },
-  open: async (file) => {
-    const url = file.ref.startsWith("idb:") ? await objectUrlOf(file.ref) : file.ref;
-    if (url === null) return failed(UiError.unexpected());
-    window.open(url, "_blank", "noopener");
-    return done(undefined);
-  },
-  share: async (file) => {
-    const blob = await blobOf(file.ref);
+    const blob = yield* fromMobilePromise(() => response.blob());
+    const ref = yield* tryPlatform(() => URL.createObjectURL(blob));
+    const contentType = blob.type === "" ? req.contentType : blob.type;
+    return done({
+      ref,
+      name: req.filename,
+      contentType:
+        contentType === undefined || contentType === "" ? "application/octet-stream" : contentType,
+      size: blob.size,
+    });
+  });
+
+  return {
+    upload: (req) =>
+      runMobileEffect(upload(req).pipe(Effect.orElseSucceed(() => failed(UiError.offline)))),
+    download: (req) =>
+      runMobileEffect(download(req).pipe(Effect.orElseSucceed(() => failed(UiError.offline)))),
+    open: (file) =>
+      runMobileEffect(open(file).pipe(Effect.orElseSucceed(() => failed(UiError.unexpected())))),
+    share: (file) =>
+      runMobileEffect(share(file).pipe(Effect.orElseSucceed(() => failed(UiError.unexpected())))),
+  };
+};
+
+const open = Effect.fn("WebTransfer.open")(function* (file: SavedFile) {
+  let url = file.ref;
+  if (EffectString.startsWith("idb:")(url)) {
+    const blob = yield* fromMobilePromise(() => blobOf(url));
     if (blob === null) return failed(UiError.unexpected());
-    const asFile = new File([blob], file.name, { type: file.contentType });
-    try {
-      if (typeof navigator.canShare === "function" && navigator.canShare({ files: [asFile] })) {
-        await navigator.share({ files: [asFile], title: file.name });
-        return done(undefined);
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return done(undefined);
-    }
-    const url = URL.createObjectURL(blob);
-    download(file, url);
-    setTimeout(() => URL.revokeObjectURL(url), 60_000);
-    return done(undefined);
-  },
+    url = yield* tryPlatform(() => URL.createObjectURL(blob));
+  }
+  yield* tryPlatform(() => window.open(url, "_blank", "noopener"));
+  return done(undefined);
 });
 
-const objectUrlOf = async (ref: string): Promise<string | null> => {
-  const blob = await blobOf(ref);
-  return blob === null ? null : URL.createObjectURL(blob);
-};
+const share = Effect.fn("WebTransfer.share")(function* (file: SavedFile) {
+  const blob = yield* fromMobilePromise(() => blobOf(file.ref));
+  if (blob === null) return failed(UiError.unexpected());
+  const asFile = yield* tryPlatform(() => new File([blob], file.name, { type: file.contentType }));
+  const files = [asFile];
+  const shared = yield* tryPlatform(() => navigator.canShare?.({ files }) === true).pipe(
+    Effect.flatMap((supported) =>
+      supported
+        ? fromMobilePromise(() => navigator.share({ files, title: file.name })).pipe(
+            Effect.as(true),
+          )
+        : Effect.succeed(false),
+    ),
+    Effect.catch(({ cause }) =>
+      Effect.succeed(cause instanceof DOMException && cause.name === "AbortError"),
+    ),
+  );
+  if (shared) return done(undefined);
+  const url = yield* tryPlatform(() => URL.createObjectURL(blob));
+  yield* tryPlatform(() => downloadLink(file, url));
+  yield* Effect.forkDetach(
+    Effect.sleep("60 seconds").pipe(
+      Effect.andThen(Effect.ignore(tryPlatform(() => URL.revokeObjectURL(url)))),
+    ),
+  );
+  return done(undefined);
+});

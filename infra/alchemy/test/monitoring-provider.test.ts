@@ -6,11 +6,21 @@ import * as Plan from "alchemy/Plan";
 import * as Stack from "alchemy/Stack";
 import { Stage } from "alchemy/Stage";
 import * as State from "alchemy/State";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import * as Fn from "effect/Function";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
 import * as Redacted from "effect/Redacted";
-import { MinimumLogLevel } from "effect/References";
+import * as References from "effect/References";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import {
   AlertPolicy,
   AlertPolicyProvider,
@@ -21,7 +31,17 @@ import {
   UptimeCheckProvider,
 } from "../src/resources/monitoring-provider";
 
-type Body = Record<string, unknown>;
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const pathPattern = /^\/v3\//;
+
+type Body = Record<string, Schema.Json>;
+const parseBody = Fn.flow(
+  Schema.decodeResult(Schema.fromJsonString(Schema.JsonObject)),
+  Result.getOrThrow,
+);
+const parseJson = Schema.decodeResult(Schema.fromJsonString(Schema.Json));
 const project = "example-project";
 const checkName = "example-staging HTTPS readiness";
 const emailName = "example-staging operations email";
@@ -34,55 +54,60 @@ function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead
   const faults = { invalidPolicyPatch: false, loseNextCreate: options.loseFirstCreate === true };
   const client = HttpClient.make((request, url) =>
     Effect.sync(() => {
-      expect(url.origin).toBe("https://monitoring.googleapis.com");
-      expect(request.headers.authorization).toBe("Bearer test-token");
-      const path = url.pathname.replace(/^\/v3\//, "");
-      const [projectSegment, projectId, collection, id] = path.split("/");
-      expect(projectSegment).toBe("projects");
-      expect(projectId).toBe(project);
+      if (
+        url.origin !== "https://monitoring.googleapis.com" ||
+        request.headers["authorization"] !== "Bearer test-token"
+      ) {
+        throw new Error("Monitoring sent a request to the wrong origin or without authentication");
+      }
+      const path = Str.replace(pathPattern, "")(url.pathname);
+      const [projectSegment, projectId, collection, id] = Str.split(path, "/");
+      if (projectSegment !== "projects" || projectId !== project) {
+        throw new Error(`Unexpected Monitoring project path: ${path}`);
+      }
       const body: Body =
-        request.body._tag === "Uint8Array" ? JSON.parse(request.body.text ?? "") : {};
+        request.body._tag === "Uint8Array" ? parseBody(request.body.text ?? "") : {};
       const mask = url.searchParams.get("updateMask");
       requests.push({ method: request.method, path, mask, body });
-      const reply = (response: unknown = {}, status = 200) =>
+      const reply = (response: Schema.Json = {}, status = 200) =>
         HttpClientResponse.fromWeb(request, Response.json(response, { status }));
       const current = resources.get(path);
 
-      if (request.method === "GET" && collection) {
-        if (disabled) {
+      if (request.method === "GET" && collection !== undefined && collection !== "") {
+        if (disabled === true) {
           disabled = false;
           return reply({ error: { details: [{ reason: "SERVICE_DISABLED" }] } }, 403);
         }
-        if (id) return current ? reply(current) : reply({}, 404);
-        const candidates = [...resources.entries()]
-          .filter(([name]) => name.startsWith(`${path}/`))
-          .map(([, value]) => value);
+        if (id !== undefined && id !== "")
+          return current !== undefined ? reply(current) : reply({}, 404);
+        const candidates = Arr.map(
+          Arr.filter([...resources.entries()], ([name]) => Str.startsWith(`${path}/`)(name)),
+          ([, value]) => value,
+        );
         // One item per page to exercise interrupted-create recovery across pages.
         const index = Number(url.searchParams.get("pageToken") ?? 0);
+        const nextPageTokenFields =
+          index + 1 < candidates.length ? { nextPageToken: String(index + 1) } : {};
         return reply({
           [collection]: candidates.slice(index, index + 1),
-          ...(index + 1 < candidates.length ? { nextPageToken: String(index + 1) } : {}),
+          ...nextPageTokenFields,
         });
       }
       const validateUptimeContentMatchers = (candidate: Body) => {
-        if (collection !== "uptimeCheckConfigs" || !Array.isArray(candidate.contentMatchers)) {
+        if (collection !== "uptimeCheckConfigs" || !Arr.isArray(candidate["contentMatchers"])) {
           return null;
         }
-        for (const matcher of candidate.contentMatchers) {
+        for (const matcher of candidate["contentMatchers"]) {
           if (
-            typeof matcher === "object" &&
-            matcher !== null &&
+            Schema.is(Schema.JsonObject)(matcher) &&
             "matcher" in matcher &&
-            matcher.matcher === "MATCHES_JSON_PATH" &&
+            matcher["matcher"] === "MATCHES_JSON_PATH" &&
             "jsonPathMatcher" in matcher &&
-            typeof matcher.jsonPathMatcher === "object" &&
-            matcher.jsonPathMatcher !== null &&
-            "jsonMatcher" in matcher.jsonPathMatcher &&
-            matcher.jsonPathMatcher.jsonMatcher === "EXACT_MATCH"
+            Schema.is(Schema.JsonObject)(matcher["jsonPathMatcher"]) &&
+            "jsonMatcher" in matcher["jsonPathMatcher"] &&
+            matcher["jsonPathMatcher"]["jsonMatcher"] === "EXACT_MATCH"
           ) {
-            try {
-              JSON.parse(String("content" in matcher ? matcher.content : ""));
-            } catch {
+            if (Result.isFailure(parseJson(String(matcher["content"] ?? "")))) {
               return reply(
                 {
                   error: {
@@ -100,16 +125,16 @@ function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead
       };
 
       if (request.method === "POST") {
-        expect(body.name).toBeUndefined();
+        if (body["name"] !== undefined) throw new Error("Unexpected name on Monitoring create");
         const invalid = validateUptimeContentMatchers(body);
-        if (invalid) return invalid;
+        if (invalid !== null) return invalid;
         const name = `${path}/${++nextId}`;
         const created: Body = { ...body, name };
-        if (Array.isArray(created.conditions)) {
-          created.conditions = created.conditions.map((condition) => ({
-            ...condition,
-            name: `${name}/conditions/1`,
-          }));
+        if (Arr.isArray(created["conditions"])) {
+          created["conditions"] = Arr.map(created["conditions"], (condition) => {
+            const fields = Schema.is(Schema.JsonObject)(condition) ? condition : {};
+            return { ...fields, name: `${name}/conditions/1` };
+          });
         }
         resources.set(name, created);
         if (faults.loseNextCreate) {
@@ -118,22 +143,24 @@ function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead
         }
         return reply(created);
       }
-      if (request.method === "PATCH" && current) {
-        expect(body.name).toBe(path);
+      if (request.method === "PATCH" && current !== undefined) {
+        if (body["name"] !== path) throw new Error("Monitoring patch names the wrong resource");
         const invalid = validateUptimeContentMatchers(body);
-        if (invalid) return invalid;
-        expect(mask?.split(",").sort()).toEqual(
-          Object.keys(body)
-            .filter((key) => key !== "name")
-            .sort(),
+        if (invalid !== null) return invalid;
+        const expectedMask = Arr.filter(EffectRecord.keys(body), (key) => key !== "name").sort(
+          Order.String,
         );
-        if (collection === "uptimeCheckConfigs") {
-          expect(
-            Object.keys(body).every((key) =>
-              ["name", "displayName", "httpCheck", "timeout", "contentMatchers"].includes(key),
-            ),
-          ).toBe(true);
+        const actualMask = mask === null ? [] : Arr.sort(Str.split(mask, ","), Order.String);
+        if (Arr.join(actualMask, ",") !== Arr.join(expectedMask, ",")) {
+          throw new Error("Monitoring patch update mask differs from its body");
         }
+        if (
+          collection === "uptimeCheckConfigs" &&
+          !Arr.every(EffectRecord.keys(body), (key) =>
+            ["name", "displayName", "httpCheck", "timeout", "contentMatchers"].includes(key),
+          )
+        )
+          throw new Error("Monitoring patch includes an immutable uptime field");
         const patched = { ...current, ...body };
         if (collection === "alertPolicies" && faults.invalidPolicyPatch) {
           faults.invalidPolicyPatch = false;
@@ -143,15 +170,25 @@ function monitoringApi(options: { loseFirstCreate?: boolean; disabledOnFirstRead
         return reply(patched);
       }
       if (request.method === "DELETE") {
-        expect(url.searchParams.get("force")).toBeNull();
+        if (url.searchParams.has("force"))
+          throw new Error("Monitoring delete must preserve its dependency checks");
         for (const policy of resources.values()) {
-          if (collection === "uptimeCheckConfigs" && id && Array.isArray(policy.conditions)) {
-            if (JSON.stringify(policy.conditions).includes(`check_id=\\"${id}\\"`))
-              return reply({}, 400);
-          }
-          if (collection === "notificationChannels" && Array.isArray(policy.notificationChannels)) {
-            if (policy.notificationChannels.includes(path)) return reply({}, 400);
-          }
+          if (
+            collection === "uptimeCheckConfigs" &&
+            id !== undefined &&
+            id !== "" &&
+            Arr.isArray(policy["conditions"]) &&
+            Str.includes(`check_id=\\"${id}\\"`)(encodeJson(policy["conditions"]))
+          )
+            return reply({}, 400);
+          const channels = Schema.decodeUnknownOption(Schema.Array(Schema.String))(
+            policy["notificationChannels"],
+          ).pipe(Option.getOrElse(() => []));
+          if (
+            collection === "notificationChannels" &&
+            Arr.some(channels, (channel) => channel === path)
+          )
+            return reply({}, 400);
         }
         return resources.delete(path) ? reply() : reply({}, 404);
       }
@@ -235,12 +272,11 @@ function deployWithMonitoringApi(api: ReturnType<typeof monitoringApi>) {
       );
       return yield* Effect.gen(function* () {
         const plan = yield* Plan.make(compiled);
-        yield* Apply.apply(plan);
-        return plan.resources;
+        return yield* Apply.apply(plan).pipe(Effect.as(plan.resources));
       }).pipe(Effect.provideContext(compiled.services), Effect.provide(state));
     }).pipe(
       Effect.provideService(Stage, "test"),
-      Effect.provideService(MinimumLogLevel, "Warn"),
+      Effect.provideService(References.MinimumLogLevel, "Warn"),
       Effect.scoped,
     );
 }
@@ -248,14 +284,18 @@ function deployWithMonitoringApi(api: ReturnType<typeof monitoringApi>) {
 test("Alchemy updates allowed fields, swaps check generations, detaches email, and deletes in dependency order", async () => {
   const api = monitoringApi();
   const deploy = (props: Parameters<typeof declare>[0]) =>
-    deployWithState(declare(props)).pipe(Effect.map((resources) => resources.Readiness?.action));
+    deployWithState(declare(props)).pipe(Effect.map((resources) => resources["Readiness"]?.action));
   const deployWithState = deployWithMonitoringApi(api);
 
   await Effect.runPromise(
     Effect.gen(function* () {
-      expect(yield* deploy({ host: "first.example.com", email: "ops@example.com" })).toBe("create");
-      const created = api.requests.find(
-        ({ method, path }) => method === "POST" && path.endsWith("uptimeCheckConfigs"),
+      const initialDeploy = yield* deploy({ host: "first.example.com", email: "ops@example.com" });
+      expect(initialDeploy).toBe("create");
+      const created = Option.getOrUndefined(
+        Arr.findFirst(
+          api.requests,
+          ({ method, path }) => method === "POST" && Str.endsWith("uptimeCheckConfigs")(path),
+        ),
       );
       expect(created?.body).toMatchObject({
         userLabels: {
@@ -279,59 +319,96 @@ test("Alchemy updates allowed fields, swaps check generations, detaches email, a
         contentMatchers: [
           {
             matcher: "MATCHES_JSON_PATH",
-            content: JSON.stringify("ok"),
+            content: encodeJson("ok"),
             jsonPathMatcher: { jsonPath: "$.status", jsonMatcher: "EXACT_MATCH" },
           },
         ],
       });
-      const alert = [...api.resources.values()].find((body) => Array.isArray(body.conditions));
-      if (!Array.isArray(alert?.conditions)) throw new Error("Expected an alert condition");
-      const firstCondition = alert.conditions[0];
-      expect(
-        yield* deploy({ host: "first.example.com", email: "alerts@example.com", port: 8443 }),
-      ).toBe("update");
-      expect(
-        api.requests.find(
-          ({ method, path }) => method === "PATCH" && path.includes("/uptimeCheckConfigs/"),
-        ),
-      ).toMatchObject({ mask: "httpCheck", body: { httpCheck: { port: 8443 } } });
-      expect(
-        api.requests.find(
-          ({ method, path }) => method === "PATCH" && path.includes("/notificationChannels/"),
-        ),
-      ).toMatchObject({
-        mask: "labels",
-        body: { labels: { email_address: "alerts@example.com" } },
+      const alert = Option.getOrUndefined(
+        Arr.findFirst([...api.resources.values()], (body) => Arr.isArray(body["conditions"])),
+      );
+      if (!Arr.isArray(alert?.["conditions"])) throw new Error("Expected an alert condition");
+      const firstCondition = alert["conditions"][0];
+      const updatedPolicy = yield* deploy({
+        host: "first.example.com",
+        email: "alerts@example.com",
+        port: 8443,
       });
+      expect(updatedPolicy).toBe("update");
+      Arr.findFirst(
+        api.requests,
+        ({ method, path }) => method === "PATCH" && Str.includes("/uptimeCheckConfigs/")(path),
+      )
+        .pipe(Option.getOrUndefined, expect)
+        .toMatchObject({ mask: "httpCheck", body: { httpCheck: { port: 8443 } } });
+      Arr.findFirst(
+        api.requests,
+        ({ method, path }) => method === "PATCH" && Str.includes("/notificationChannels/")(path),
+      )
+        .pipe(Option.getOrUndefined, expect)
+        .toMatchObject({
+          mask: "labels",
+          body: { labels: { email_address: "alerts@example.com" } },
+        });
 
       const beforeReplace = api.requests.length;
-      expect(yield* deploy({ host: "second.example.com" })).toBe("replace");
-      const writes = api.requests.slice(beforeReplace).filter(({ method }) => method !== "GET");
-      const newCheck = writes.findIndex(
-        ({ method, path }) => method === "POST" && path.endsWith("uptimeCheckConfigs"),
+      const replacedPolicy = yield* deploy({ host: "second.example.com" });
+      expect(replacedPolicy).toBe("replace");
+      const writes = Arr.filter(
+        api.requests.slice(beforeReplace),
+        ({ method }) => method !== "GET",
       );
-      const repoint = writes.findIndex(
-        ({ method, path }) => method === "PATCH" && path.includes("/alertPolicies/"),
+      const newCheck = Option.getOrElse(
+        Arr.findFirstIndex(
+          writes,
+          ({ method, path }) => method === "POST" && Str.endsWith("uptimeCheckConfigs")(path),
+        ),
+        () => -1,
       );
-      const oldCheck = writes.findIndex(
-        ({ method, path }) => method === "DELETE" && path.includes("/uptimeCheckConfigs/"),
+      const repoint = Option.getOrElse(
+        Arr.findFirstIndex(
+          writes,
+          ({ method, path }) => method === "PATCH" && Str.includes("/alertPolicies/")(path),
+        ),
+        () => -1,
       );
-      const oldChannel = writes.findIndex(
-        ({ method, path }) => method === "DELETE" && path.includes("/notificationChannels/"),
+      const oldCheck = Option.getOrElse(
+        Arr.findFirstIndex(
+          writes,
+          ({ method, path }) => method === "DELETE" && Str.includes("/uptimeCheckConfigs/")(path),
+        ),
+        () => -1,
+      );
+      const oldChannel = Option.getOrElse(
+        Arr.findFirstIndex(
+          writes,
+          ({ method, path }) => method === "DELETE" && Str.includes("/notificationChannels/")(path),
+        ),
+        () => -1,
       );
       expect(newCheck).toBeGreaterThanOrEqual(0);
       expect(repoint).toBeGreaterThan(newCheck);
       expect(oldCheck).toBeGreaterThan(repoint);
       expect(oldChannel).toBeGreaterThan(repoint);
       expect(writes[repoint]?.body).toMatchObject({
-        conditions: [{ name: firstCondition?.name }],
+        conditions: [
+          {
+            name: Predicate.isObject(firstCondition)
+              ? Reflect.get(firstCondition, "name")
+              : undefined,
+          },
+        ],
         notificationChannels: [],
       });
 
       const beforeNoop = api.requests.length;
-      expect(yield* deploy({ host: "second.example.com" })).toBe("noop");
-      expect(api.requests.slice(beforeNoop).every(({ method }) => method === "GET")).toBe(true);
-      expect(yield* deploy({ host: "second.example.com", period: "300s" })).toBe("replace");
+      const unchangedPolicy = yield* deploy({ host: "second.example.com" });
+      expect(unchangedPolicy).toBe("noop");
+      expect(Arr.every(api.requests.slice(beforeNoop), ({ method }) => method === "GET")).toBe(
+        true,
+      );
+      const replacedPeriod = yield* deploy({ host: "second.example.com", period: "300s" });
+      expect(replacedPeriod).toBe("replace");
       yield* deployWithState(Effect.void);
       expect([...api.resources.keys()]).toEqual([]);
     }),
@@ -349,39 +426,40 @@ test("Alchemy adopts a matching generated ID across list pages after a lost crea
   const unrelated = `projects/${project}/notificationChannels/existing`;
   api.resources.set(unrelated, { displayName: "unrelated email", name: unrelated, type: "email" });
 
-  await expect(Effect.runPromise(deploy(declareEmail))).rejects.toBeDefined();
-  await Effect.runPromise(deploy(declareEmail));
-  expect(api.requests.filter(({ method }) => method === "POST")).toHaveLength(1);
+  await declareEmail.pipe(deploy, Effect.runPromise, expect).rejects.toBeDefined();
+  await Fn.pipe(deploy(declareEmail), Effect.runPromise);
+  expect(Arr.filter(api.requests, ({ method }) => method === "POST")).toHaveLength(1);
   expect(api.resources.size).toBe(2);
 
-  await Effect.runPromise(deploy(Effect.void));
+  await Fn.pipe(deploy(Effect.void), Effect.runPromise);
   expect([...api.resources.keys()]).toEqual([unrelated]);
 });
 
 test("Alchemy recovers a lost successor create and retains the predecessor until the alert is valid", async () => {
   const api = monitoringApi();
   const deploy = deployWithMonitoringApi(api);
-  await Effect.runPromise(deploy(declare({ host: "first.example.com" })));
+  await Fn.pipe(deploy(declare({ host: "first.example.com" })), Effect.runPromise);
   const next = declare({ host: "second.example.com" });
   const attemptsBeforeCutover = api.requests.length;
   api.faults.loseNextCreate = true;
-  await expect(Effect.runPromise(deploy(next))).rejects.toThrow("HTTP 503");
+  await next.pipe(deploy, Effect.runPromise, expect).rejects.toThrow("HTTP 503");
   api.faults.invalidPolicyPatch = true;
-  await expect(Effect.runPromise(deploy(next))).rejects.toThrow("alert policy is invalid");
+  await next.pipe(deploy, Effect.runPromise, expect).rejects.toThrow("alert policy is invalid");
   const failedAttempt = api.requests.slice(attemptsBeforeCutover);
-  expect(failedAttempt.some(({ method }) => method === "DELETE")).toBe(false);
+  expect(Arr.some(failedAttempt, ({ method }) => method === "DELETE")).toBe(false);
   expect(
-    [...api.resources.keys()].filter((name) => name.includes("/uptimeCheckConfigs/")),
+    Arr.filter([...api.resources.keys()], (name) => Str.includes("/uptimeCheckConfigs/")(name)),
   ).toHaveLength(2);
 
-  await Effect.runPromise(deploy(next));
-  const checkCreates = api.requests.filter(
-    ({ method, path }) => method === "POST" && path.endsWith("uptimeCheckConfigs"),
+  await Fn.pipe(deploy(next), Effect.runPromise);
+  const checkCreates = Arr.filter(
+    api.requests,
+    ({ method, path }) => method === "POST" && Str.endsWith("uptimeCheckConfigs")(path),
   );
   expect(checkCreates).toHaveLength(2);
-  expect(checkCreates[0]?.body.userLabels).not.toEqual(checkCreates[1]?.body.userLabels);
+  expect(checkCreates[0]?.body["userLabels"]).not.toEqual(checkCreates[1]?.body["userLabels"]);
   expect(
-    [...api.resources.keys()].filter((name) => name.includes("/uptimeCheckConfigs/")),
+    Arr.filter([...api.resources.keys()], (name) => Str.includes("/uptimeCheckConfigs/")(name)),
   ).toHaveLength(1);
 }, 60_000);
 
@@ -397,29 +475,44 @@ test("Alchemy refuses ambiguous display-name matches without issuing a POST", as
     displayName: emailName,
     email: "ops@example.com",
   });
-  await expect(Effect.runPromise(deploy(email.pipe(Effect.asVoid)))).rejects.toThrow(
-    "multiple resources match",
-  );
-  expect(api.requests.every(({ method }) => method === "GET")).toBe(true);
+  await email
+    .pipe(Effect.asVoid, deploy, Effect.runPromise, expect)
+    .rejects.toThrow("multiple resources match");
+  expect(Arr.every(api.requests, ({ method }) => method === "GET")).toBe(true);
 });
 
 test("fresh state adopts the readiness policy and clears per-location grouping without changing its condition ID", async () => {
   const api = monitoringApi();
   const resources = declare({ host: "first.example.com" });
-  await Effect.runPromise(deployWithMonitoringApi(api)(resources));
-  const policy = [...api.resources.values()].find((body) => Array.isArray(body.conditions));
-  if (!Array.isArray(policy?.conditions)) throw new Error("Expected a readiness alert policy");
-  const [condition] = policy.conditions;
-  condition.conditionThreshold.aggregations[0].groupByFields = ["metric.label.checker_location"];
+  await Fn.pipe(deployWithMonitoringApi(api)(resources), Effect.runPromise);
+  const policy = Option.getOrUndefined(
+    Arr.findFirst([...api.resources.values()], (body) => Arr.isArray(body["conditions"])),
+  );
+  if (!Arr.isArray(policy?.["conditions"])) throw new Error("Expected a readiness alert policy");
+  const [condition] = policy["conditions"];
+  const aggregation = Schema.decodeUnknownResult(
+    Schema.Struct({
+      conditionThreshold: Schema.Struct({
+        aggregations: Schema.NonEmptyArray(Schema.ObjectKeyword),
+      }),
+    }),
+  )(condition).pipe(Result.getOrThrow).conditionThreshold.aggregations[0];
+  Reflect.set(aggregation, "groupByFields", ["metric.label.checker_location"]);
   const beforeAdoption = api.requests.length;
 
-  await Effect.runPromise(deployWithMonitoringApi(api)(resources));
-  const writes = api.requests.slice(beforeAdoption).filter(({ method }) => method !== "GET");
+  await Fn.pipe(deployWithMonitoringApi(api)(resources), Effect.runPromise);
+  const writes = Arr.filter(api.requests.slice(beforeAdoption), ({ method }) => method !== "GET");
   expect(writes).toHaveLength(1);
   expect(writes[0]).toMatchObject({
     method: "PATCH",
     mask: "conditions",
-    body: { conditions: [{ name: condition.name }] },
+    body: {
+      conditions: [
+        {
+          name: Predicate.isObject(condition) ? Reflect.get(condition, "name") : undefined,
+        },
+      ],
+    },
   });
-  expect(JSON.stringify(writes[0]?.body)).not.toContain("groupByFields");
+  expect(encodeJson(writes[0]?.body)).not.toContain("groupByFields");
 }, 60_000);

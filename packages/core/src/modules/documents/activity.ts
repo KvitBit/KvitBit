@@ -9,7 +9,9 @@
  * rendered and visitor views never carry it (`viewOf`).
  */
 import type { DocumentId, DocumentView, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable } from "../../store/CoreStore";
 
 export class DocumentActivity extends Context.Service<
@@ -26,13 +28,13 @@ export class DocumentActivity extends Context.Service<
       id: DocumentId,
     ) => Effect.Effect<DocumentView["deliveries"], StoreUnavailable>;
   }
->()("kvitbit/core/documents/DocumentActivity") {}
+>()("@kvitbit/core/modules/documents/activity/DocumentActivity") {}
 
 /** No share link, no deliveries: the same views as leaving the port out. */
 export const DocumentActivityNone: Layer.Layer<DocumentActivity> = Layer.succeed(
   DocumentActivity,
   DocumentActivity.of({
-    share: () => Effect.succeed(null),
-    deliveries: () => Effect.succeed([]),
+    share: Effect.fn("DocumentActivity.share")(() => Effect.succeed(null)),
+    deliveries: Effect.fn("DocumentActivity.deliveries")(() => Effect.succeed([])),
   }),
 );

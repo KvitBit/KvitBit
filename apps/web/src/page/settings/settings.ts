@@ -1,5 +1,3 @@
-import { UiSchema } from "@effect/ui";
-import type { Html } from "@effect/ui/html";
 /**
  * Workspace Settings & Mobile More Hub (Screens 18–21, routes `Settings` | `More`).
  * Covers all 11 settings sections: issuingEntity, taxRegime, bankAccounts, branding, numbering,
@@ -7,440 +5,75 @@ import type { Html } from "@effect/ui/html";
  * Contract: src/app/page.ts.
  */
 import {
-  ALL_SCOPES,
-  ApiKeyCreated,
-  ApiKeyId,
-  ApiKeyView,
-  BrandingView,
-  ConnectedAppView,
+  type ApiKeyId,
+  type ApiKeyView,
+  type BrandingView,
+  type ConnectedAppView,
   READ_SCOPES,
-  type Scope,
-  type ThemePresetId,
+  ThemePresetId,
   type ThemeSource,
 } from "@kvitbit/api-contract";
 import {
   BankAccountId,
+  BankAccountInput,
   CurrencyCode,
   type DocumentKind,
-  type ImageRef,
-  InvitationId,
-  InvitationView,
+  ImageRef,
+  type InvitationId,
+  type InvitationView,
+  IsoDate,
+  IssuingEntityPatch,
   type Locale,
-  MemberView,
-  NumberingSeriesId,
-  NumberingSeriesView,
-  type PaymentMethod,
+  type MemberView,
+  type NumberingSeriesId,
+  type NumberingSeriesView,
   type PdfTemplate,
-  RegistryResult,
   type Role,
-  type TaxRegime,
   UserId,
   WorkspaceId,
+  type WorkspaceSettingsPatch,
 } from "@kvitbit/domain";
 import { Api, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Effect, Option, Schema } from "effect";
-import { type Client, Failure, failureFromUnknown, request, type WebServices } from "../../app/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import {
+  type Client,
+  type Failure,
+  failureFromUnknown,
+  request,
+  type WebServices,
+} from "../../app/api";
+import { browserOrigin, fetchBrowserOk, writeClipboard } from "../../app/browser";
 import type { PageCommand } from "../../app/commands";
+import { apiCommand as cmd } from "../../app/commands";
 import { translator } from "../../app/i18n";
 import { Intent_ } from "../../app/intent";
-import type { MessageHandlers, PageContext, PageReturn, RouteOf } from "../../app/page";
+import type { MessageHandlers, PageContext, PageReturn } from "../../app/page";
 import * as Remote from "../../app/remote";
 import { href } from "../../app/routing";
 import { sCopy } from "./copy";
-import {
-  BankAccount,
-  cmd,
-  type PaymentRounding,
-  parseBankAccount,
-  parseBankAccounts,
-  parseWorkspaceDetail,
-  WorkspaceDetail,
-} from "./models";
-import { viewSettingsPage } from "./views";
+import { BankAccount, WorkspaceDetail } from "./models";
 
-export type Route = RouteOf<"Settings" | "More">;
-export type SettingsSection = ViewModels.SettingsSection;
+import { canEditSettings, Message, type Model, type Route, scopePickerFromModel } from "./state";
 
-export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSection> = [
-  "issuingEntity",
-  "taxRegime",
-  "bankAccounts",
-  "branding",
-  "numbering",
-  "documentDefaults",
-  "reminders",
-  "team",
-  "apiKeys",
-  "connectedApps",
-  "dangerZone",
-];
+export { Message, Model, Route, SETTINGS_SECTIONS, scopePickerFromModel } from "./state";
+export { viewSettingsPage as view } from "./views";
 
-// --- Form Sub-Schemas ---------------------------------------------------------------------------
-
-const EntityForm = Schema.Struct({
-  name: Schema.String,
-  ico: Schema.String,
-  dic: Schema.String,
-  legalForm: Schema.String,
-  registerEntry: Schema.String,
-  street: Schema.String,
-  city: Schema.String,
-  postalCode: Schema.String,
-  country: Schema.String,
-  email: Schema.String,
-  phone: Schema.String,
-  web: Schema.String,
-  slug: Schema.String,
-  lookingUpAres: Schema.Boolean,
-  saving: Schema.Boolean,
-});
-
-const TaxRegimeForm = Schema.Struct({
-  nextRegime: Schema.Literals(["vat_payer", "non_vat_payer", "identified_person"]),
-  effectiveFrom: Schema.String,
-  confirmOpen: Schema.Boolean,
-  saving: Schema.Boolean,
-});
-
-const BankForm = Schema.Struct({
-  editingId: Schema.NullOr(BankAccountId),
-  name: Schema.String,
-  iban: Schema.String,
-  bic: Schema.String,
-  currency: CurrencyCode,
-  isDefault: Schema.Boolean,
-  saving: Schema.Boolean,
-  removingId: Schema.NullOr(BankAccountId),
-  replacementId: Schema.String,
-});
-
-const BrandingForm = Schema.Struct({
-  pdfTemplate: Schema.Literals(["classic", "modern_minimal"]),
-  accentColor: Schema.String,
-  footerText: Schema.String,
-  themeChoice: Schema.String, // "" | ThemePresetId | "seed"
-  themeSeed: Schema.String,
-  previewLocale: Schema.Literals(["cs", "en"]),
-  saving: Schema.Boolean,
-  uploading: Schema.NullOr(Schema.Literals(["logo", "stamp"])),
-  previewingPdf: Schema.Boolean,
-});
-
-const NumberingForm = Schema.Struct({
-  editingId: Schema.NullOr(NumberingSeriesId),
-  kind: Schema.Literals(["invoice", "proforma", "payment_tax_document", "credit_note"]),
-  name: Schema.String,
-  pattern: Schema.String,
-  nextNumber: Schema.String,
-  isDefault: Schema.Boolean,
-  saving: Schema.Boolean,
-});
-
-const DefaultsForm = Schema.Struct({
-  currency: CurrencyCode,
-  language: Schema.Literals(["cs", "en"]),
-  dueDays: Schema.String,
-  paymentMethod: Schema.Literals(["bank_transfer", "cash", "card", "other"]),
-  paymentRounding: Schema.Literals(["none", "whole_unit"]),
-  defaultNote: Schema.String,
-  paymentTaxDocumentAutoSend: Schema.Boolean,
-  saving: Schema.Boolean,
-});
-
-const RemindersForm = Schema.Struct({
-  enabled: Schema.Boolean,
-  proformas: Schema.Boolean,
-  offsetsDays: Schema.Array(Schema.Int),
-  newOffset: Schema.String,
-  paymentTaxDocumentAutoSend: Schema.Boolean,
-  saving: Schema.Boolean,
-});
-
-const TeamForm = Schema.Struct({
-  inviteEmail: Schema.String,
-  inviteRole: Schema.Literals(["admin", "member", "accountant"]),
-  inviting: Schema.Boolean,
-  removingUserId: Schema.NullOr(UserId),
-  confirmLeave: Schema.Boolean,
-});
-
-const ApiKeysForm = Schema.Struct({
-  creating: Schema.Boolean,
-  name: Schema.String,
-  expiresOn: Schema.String,
-  accessMode: Schema.Literals(["read", "read_write", "custom"]),
-  selectedScopes: Schema.Array(Schema.Literals(ALL_SCOPES)),
-  saving: Schema.Boolean,
-  createdSecret: Schema.NullOr(Schema.String),
-  createdKeyName: Schema.NullOr(Schema.String),
-  revokingId: Schema.NullOr(ApiKeyId),
-});
-
-const ConnectedAppsForm = Schema.Struct({
-  revokingGrantId: Schema.NullOr(Schema.String),
-});
-
-const DangerForm = Schema.Struct({
-  exporting: Schema.Boolean,
-  transferToUserId: Schema.String,
-  confirmTransfer: Schema.Boolean,
-  transferring: Schema.Boolean,
-  closeConfirmName: Schema.String,
-  closing: Schema.Boolean,
-});
-
-export const Model = Schema.Struct({
-  route: ViewModels.Route,
-  workspace: Remote.remoteSchema(WorkspaceDetail),
-  bankAccounts: Remote.remoteSchema(Schema.Array(BankAccount)),
-  branding: Remote.remoteSchema(BrandingView),
-  series: Remote.remoteSchema(Schema.Array(NumberingSeriesView)),
-  members: Remote.remoteSchema(Schema.Array(MemberView)),
-  invitations: Remote.remoteSchema(Schema.Array(InvitationView)),
-  apiKeys: Remote.remoteSchema(Schema.Array(ApiKeyView)),
-  connectedApps: Remote.remoteSchema(Schema.Array(ConnectedAppView)),
-  entityForm: EntityForm,
-  taxForm: TaxRegimeForm,
-  bankForm: BankForm,
-  brandingForm: BrandingForm,
-  numberingForm: NumberingForm,
-  defaultsForm: DefaultsForm,
-  remindersForm: RemindersForm,
-  teamForm: TeamForm,
-  apiKeysForm: ApiKeysForm,
-  connectedAppsForm: ConnectedAppsForm,
-  dangerForm: DangerForm,
-  actionFailure: Schema.NullOr(Failure),
-});
-export type Model = typeof Model.Type;
-
-// --- Messages -----------------------------------------------------------------------------------
-
-export const Message = UiSchema.TaggedEnum({
-  // Data loads
-  GotWorkspace: { seq: Remote.Seq, data: WorkspaceDetail },
-  FailedWorkspace: { seq: Remote.Seq, failure: Failure },
-  GotBankAccounts: { seq: Remote.Seq, items: Schema.Array(BankAccount) },
-  FailedBankAccounts: { seq: Remote.Seq, failure: Failure },
-  GotBranding: { seq: Remote.Seq, data: BrandingView },
-  FailedBranding: { seq: Remote.Seq, failure: Failure },
-  GotSeries: { seq: Remote.Seq, items: Schema.Array(NumberingSeriesView) },
-  FailedSeries: { seq: Remote.Seq, failure: Failure },
-  GotMembers: { seq: Remote.Seq, items: Schema.Array(MemberView) },
-  FailedMembers: { seq: Remote.Seq, failure: Failure },
-  GotInvitations: { seq: Remote.Seq, items: Schema.Array(InvitationView) },
-  FailedInvitations: { seq: Remote.Seq, failure: Failure },
-  GotApiKeys: { seq: Remote.Seq, items: Schema.Array(ApiKeyView) },
-  FailedApiKeys: { seq: Remote.Seq, failure: Failure },
-  GotConnectedApps: { seq: Remote.Seq, items: Schema.Array(ConnectedAppView) },
-  FailedConnectedApps: { seq: Remote.Seq, failure: Failure },
-
-  // Issuing Entity
-  ChangedEntityField: {
-    field: Schema.Literals([
-      "name",
-      "ico",
-      "dic",
-      "legalForm",
-      "registerEntry",
-      "street",
-      "city",
-      "postalCode",
-      "country",
-      "email",
-      "phone",
-      "web",
-      "slug",
-    ]),
-    value: Schema.String,
-  },
-  PastedEntityAddress: {
-    street: Schema.String,
-    city: Schema.String,
-    postalCode: Schema.String,
-    country: Schema.String,
-  },
-  ClickedAresLookup: {},
-  GotAresResult: { result: RegistryResult },
-  ClickedSaveEntity: {},
-  SavedWorkspace: { data: WorkspaceDetail },
-
-  // Tax Regime
-  ChangedTaxRegime: {
-    regime: Schema.Literals(["vat_payer", "non_vat_payer", "identified_person"]),
-  },
-  ChangedTaxEffectiveFrom: { value: Schema.String },
-  ClickedAskChangeTaxRegime: {},
-  ClickedCancelTaxRegime: {},
-  ClickedConfirmTaxRegime: {},
-
-  // Bank Accounts
-  ChangedBankField: {
-    field: Schema.Literals(["name", "iban", "bic"]),
-    value: Schema.String,
-  },
-  ChangedBankCurrency: { currency: CurrencyCode },
-  ToggledBankDefault: { checked: Schema.Boolean },
-  ClickedEditBank: { id: BankAccountId },
-  ClickedResetBankForm: {},
-  ClickedSaveBank: {},
-  SavedBank: { item: BankAccount },
-  ClickedMakeBankDefault: { id: BankAccountId },
-  ClickedAskRemoveBank: { id: BankAccountId },
-  ChangedBankReplacement: { value: Schema.String },
-  ClickedCancelRemoveBank: {},
-  ClickedConfirmRemoveBank: {},
-  RemovedBank: { id: BankAccountId },
-
-  // Branding
-  SelectedPdfTemplate: { template: Schema.Literals(["classic", "modern_minimal"]) },
-  ChangedAccentColor: { value: Schema.String },
-  ChangedFooterText: { value: Schema.String },
-  SelectedWorkspaceTheme: { choice: Schema.String },
-  ChangedWorkspaceThemeSeed: { value: Schema.String },
-  SelectedPreviewLocale: { locale: Schema.Literals(["cs", "en"]) },
-  SelectedBrandingImage: {
-    kind: Schema.Literals(["logo", "stamp"]),
-    file: Schema.Unknown,
-  },
-  UploadedBrandingImage: {
-    kind: Schema.Literals(["logo", "stamp"]),
-    ref: Schema.Unknown,
-  },
-  ClickedRemoveBrandingImage: { kind: Schema.Literals(["logo", "stamp"]) },
-  RemovedBrandingImage: { kind: Schema.Literals(["logo", "stamp"]) },
-  ClickedSaveBranding: {},
-  SavedBranding: { data: BrandingView },
-  ClickedPreviewPdf: {},
-  FinishedPreviewPdf: {},
-
-  // Numbering Series
-  ChangedSeriesKind: {
-    kind: Schema.Literals(["invoice", "proforma", "payment_tax_document", "credit_note"]),
-  },
-  ChangedSeriesField: {
-    field: Schema.Literals(["name", "pattern", "nextNumber"]),
-    value: Schema.String,
-  },
-  ClickedInsertToken: { token: Schema.String },
-  ToggledSeriesDefault: { checked: Schema.Boolean },
-  ClickedEditSeries: { id: NumberingSeriesId },
-  ClickedResetSeriesForm: {},
-  ClickedSaveSeries: {},
-  SavedSeries: { item: NumberingSeriesView },
-  ClickedMakeSeriesDefault: { id: NumberingSeriesId },
-
-  // Document Defaults
-  ChangedDefaultCurrency: { currency: CurrencyCode },
-  ChangedDefaultLanguage: { language: Schema.Literals(["cs", "en"]) },
-  ChangedDefaultDueDays: { value: Schema.String },
-  ChangedDefaultPaymentMethod: {
-    method: Schema.Literals(["bank_transfer", "cash", "card", "other"]),
-  },
-  ChangedDefaultRounding: { rounding: Schema.Literals(["none", "whole_unit"]) },
-  ChangedDefaultNote: { value: Schema.String },
-  ToggledDefaultAutoSendPtd: { checked: Schema.Boolean },
-  ClickedSaveDefaults: {},
-
-  // Reminders
-  ToggledRemindersEnabled: { checked: Schema.Boolean },
-  ToggledRemindersProformas: { checked: Schema.Boolean },
-  ChangedNewReminderOffset: { value: Schema.String },
-  ClickedAddReminderOffset: {},
-  ClickedRemoveReminderOffset: { day: Schema.Int },
-  ToggledRemindersAutoSendPtd: { checked: Schema.Boolean },
-  ClickedSaveReminders: {},
-
-  // Team
-  ChangedInviteEmail: { value: Schema.String },
-  ChangedInviteRole: { role: Schema.Literals(["admin", "member", "accountant"]) },
-  ClickedSendInvite: {},
-  SentInvite: { item: InvitationView },
-  ClickedResendInvite: { id: InvitationId },
-  ResentInvite: {},
-  ClickedRevokeInvite: { id: InvitationId },
-  RevokedInvite: { id: InvitationId },
-  ChangedMemberRole: {
-    userId: UserId,
-    role: Schema.Literals(["admin", "member", "accountant"]),
-  },
-  UpdatedMemberRole: {
-    userId: UserId,
-    role: Schema.Literals(["admin", "member", "accountant"]),
-  },
-  ClickedAskRemoveMember: { userId: UserId },
-  ClickedCancelRemoveMember: {},
-  ClickedConfirmRemoveMember: {},
-  RemovedMember: { userId: UserId },
-  ClickedAskLeave: {},
-  ClickedCancelLeave: {},
-  ClickedConfirmLeave: {},
-  LeftWorkspace: {},
-
-  // API Keys
-  ClickedToggleCreateApiKey: {},
-  ChangedApiKeyName: { value: Schema.String },
-  ChangedApiKeyExpires: { value: Schema.String },
-  SelectedApiKeyPreset: { preset: Schema.Literals(["read", "read_write"]) },
-  SelectedApiKeyCustom: {},
-  ToggledApiKeyScope: { scope: Schema.Literals(ALL_SCOPES) },
-  ClickedCreateApiKey: {},
-  CreatedApiKey: { created: ApiKeyCreated },
-  ClickedCopyApiKeySecret: {},
-  CopiedApiKeySecret: {},
-  ClickedDismissApiKeySecret: {},
-  ClickedAskRevokeApiKey: { id: ApiKeyId },
-  ClickedCancelRevokeApiKey: {},
-  ClickedConfirmRevokeApiKey: {},
-  RevokedApiKey: { id: ApiKeyId },
-
-  // Connected Apps
-  ClickedAskRevokeApp: { grantId: Schema.String },
-  ClickedCancelRevokeApp: {},
-  ClickedConfirmRevokeApp: {},
-  RevokedApp: { grantId: Schema.String },
-
-  // Danger Zone
-  ClickedStartExport: {},
-  StartedExport: {},
-  ChangedTransferTarget: { userId: Schema.String },
-  ClickedAskTransfer: {},
-  ClickedCancelTransfer: {},
-  ClickedConfirmTransfer: {},
-  TransferredOwnership: {},
-  ChangedCloseConfirm: { value: Schema.String },
-  ClickedCloseWorkspace: {},
-  ClosedWorkspace: {},
-
-  // Shared
-  FailedAction: { failure: Failure },
-  ClickedRetry: {},
-});
-export type Message = typeof Message.Type;
-
-// --- Helpers ------------------------------------------------------------------------------------
+const parseWorkspaceDetail = Schema.decodeUnknownOption(WorkspaceDetail);
+const parseBankAccount = Schema.decodeUnknownOption(BankAccount);
+const parseBankAccounts = Fn.compose(
+  BankAccount.pipe(Schema.Array, Schema.decodeUnknownOption),
+  Option.getOrElse(() => []),
+);
 
 const workspaceIdOf = (ctx: PageContext): WorkspaceId | undefined =>
   ctx.workspace !== null ? WorkspaceId.make(ctx.workspace.id) : undefined;
-
-const viewerRoleOf = (ctx: PageContext): Role => ctx.workspace?.role ?? "member";
-
-export const canEditSettings = (ctx: PageContext): boolean => {
-  if (ctx.workspace === null || ctx.workspace.closed) return false;
-  return ctx.workspace.role === "owner" || ctx.workspace.role === "admin";
-};
-
-export const scopePickerFromModel = (
-  model: Model,
-  ctx: PageContext,
-): ViewModels.ScopePickerState => {
-  const grantable = ViewModels.roleScopeCeiling(viewerRoleOf(ctx));
-  return {
-    mode: model.apiKeysForm.accessMode,
-    selected: new Set(model.apiKeysForm.selectedScopes),
-    grantable,
-  };
-};
 
 const syncFormsFromWorkspace = (model: Model, ws: WorkspaceDetail): Model => {
   const themeChoice =
@@ -518,6 +151,7 @@ const req = <A, E>(
 
 const cmdLoadWorkspace = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadWorkspace",
     req(
       (c) => c.workspace.current({ params: { workspaceId } }),
@@ -536,6 +170,7 @@ const cmdLoadWorkspace = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadBankAccounts = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadBankAccounts",
     req(
       (c) => c.workspace.listBankAccounts({ params: { workspaceId } }),
@@ -546,6 +181,7 @@ const cmdLoadBankAccounts = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadBranding = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadBranding",
     req(
       (c) => c.branding.getBranding({ params: { workspaceId } }),
@@ -556,6 +192,7 @@ const cmdLoadBranding = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadSeries = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadSeries",
     req(
       (c) => c.workspace.listSeries({ params: { workspaceId } }),
@@ -566,6 +203,7 @@ const cmdLoadSeries = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadMembers = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadMembers",
     req(
       (c) => c.team.listMembers({ params: { workspaceId } }),
@@ -576,6 +214,7 @@ const cmdLoadMembers = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadInvitations = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadInvitations",
     req(
       (c) => c.team.listInvitations({ params: { workspaceId } }),
@@ -586,6 +225,7 @@ const cmdLoadInvitations = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadApiKeys = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadApiKeys",
     req(
       (c) => c.apiKeys.listApiKeys({ params: { workspaceId } }),
@@ -596,6 +236,7 @@ const cmdLoadApiKeys = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLoadConnectedApps = (workspaceId: WorkspaceId, seq: number) =>
   cmd(
+    Message,
     "Settings.LoadConnectedApps",
     req(
       (c) => c.connectedApps.listConnectedApps({ params: { workspaceId } }),
@@ -606,6 +247,7 @@ const cmdLoadConnectedApps = (workspaceId: WorkspaceId, seq: number) =>
 
 const cmdLookupAres = (ico: string) =>
   cmd(
+    Message,
     "Settings.LookupAres",
     req(
       (c) => c.registry.lookupCompany({ params: { ico } }),
@@ -617,16 +259,17 @@ const cmdLookupAres = (ico: string) =>
 const cmdUpdateIssuingEntity = (
   workspaceId: WorkspaceId,
   revision: number,
-  payload: Record<string, unknown>,
+  payload: Schema.JsonObject,
 ) =>
   cmd(
+    Message,
     "Settings.UpdateIssuingEntity",
     req(
       (c) =>
         c.workspace.updateIssuingEntity({
           params: { workspaceId },
           headers: Api.ifMatchHeaders(revision),
-          payload: payload as never,
+          payload: IssuingEntityPatch.make(payload),
         }),
       (raw) =>
         Option.match(parseWorkspaceDetail(raw), {
@@ -643,16 +286,17 @@ const cmdUpdateIssuingEntity = (
 const cmdUpdateSettings = (
   workspaceId: WorkspaceId,
   revision: number,
-  payload: Record<string, unknown>,
+  payload: WorkspaceSettingsPatch,
 ) =>
   cmd(
+    Message,
     "Settings.UpdateSettings",
     req(
       (c) =>
         c.workspace.updateSettings({
           params: { workspaceId },
           headers: Api.ifMatchHeaders(revision),
-          payload: payload as never,
+          payload,
         }),
       (raw) =>
         Option.match(parseWorkspaceDetail(raw), {
@@ -669,21 +313,24 @@ const cmdUpdateSettings = (
 const cmdSaveBankAccount = (
   workspaceId: WorkspaceId,
   editingId: BankAccountId | null,
-  payload: Record<string, unknown>,
+  payload: Schema.JsonObject,
 ) =>
   cmd(
+    Message,
     "Settings.SaveBankAccount",
     req(
       (c) =>
         editingId === null
-          ? c.workspace.createBankAccount({
-              params: { workspaceId },
-              headers: Api.idempotencyHeaders(`bank-${Date.now()}`),
-              payload: payload as never,
-            })
+          ? Effect.flatMap(Api.uuidV7, (key) =>
+              c.workspace.createBankAccount({
+                params: { workspaceId },
+                headers: Api.idempotencyHeaders(key),
+                payload: BankAccountInput.make(payload),
+              }),
+            )
           : c.workspace.updateBankAccount({
               params: { workspaceId, bankAccountId: editingId },
-              payload: payload as never,
+              payload: BankAccountInput.make(payload),
             }),
       (raw) =>
         Option.match(parseBankAccount(raw), {
@@ -703,6 +350,7 @@ const cmdRemoveBankAccount = (
   replacement: BankAccountId | undefined,
 ) =>
   cmd(
+    Message,
     "Settings.RemoveBankAccount",
     req(
       (c) =>
@@ -726,43 +374,45 @@ const cmdUpdateBranding = (
   },
 ) =>
   cmd(
+    Message,
     "Settings.UpdateBranding",
     req(
       (c) =>
         c.branding.updateBranding({
           params: { workspaceId },
           headers: Api.ifMatchHeaders(revision),
-          payload: payload as never,
+          payload,
         }),
       (data) => Message.SavedBranding({ data }),
       (failure) => Message.FailedAction({ failure }),
     ),
   );
 
-const cmdUploadBrandingImage = (workspaceId: WorkspaceId, kind: "logo" | "stamp", file: unknown) =>
-  cmd<Message>(
+const decodeImage = HttpClientResponse.schemaBodyJson(ImageRef);
+
+const cmdUploadBrandingImage = (workspaceId: WorkspaceId, kind: "logo" | "stamp", file: File) =>
+  cmd(
+    Message,
     "Settings.UploadBrandingImage",
-    Effect.tryPromise({
-      try: async () => {
-        const fd = new FormData();
-        if (file instanceof Blob) fd.append("file", file);
-        const res = await fetch(`/api/v1/workspaces/${workspaceId}/branding/${kind}`, {
-          method: "PUT",
-          credentials: "same-origin",
-          body: fd,
-        });
-        if (!res.ok) throw Object.assign(new Error(`upload ${res.status}`), { status: res.status });
-        return (await res.json()) as ImageRef;
-      },
-      catch: (e) => e,
-    }).pipe(
-      Effect.map((ref): Message => Message.UploadedBrandingImage({ kind, ref })),
-      Effect.catch((e) => Effect.succeed(Message.FailedAction({ failure: failureFromUnknown(e) }))),
-    ),
+    Effect.suspend(() => {
+      const form = new FormData();
+      form.append("file", file);
+      const url = `${browserOrigin()}/api/v1/workspaces/${workspaceId}/branding/${kind}`;
+      return fetchBrowserOk(
+        HttpClientRequest.put(url).pipe(HttpClientRequest.bodyFormData(form)),
+      ).pipe(
+        Effect.flatMap(decodeImage),
+        Effect.match({
+          onSuccess: (ref) => Message.UploadedBrandingImage({ kind, ref }),
+          onFailure: (error) => Message.FailedAction({ failure: failureFromUnknown(error) }),
+        }),
+      );
+    }),
   );
 
 const cmdRemoveBrandingImage = (workspaceId: WorkspaceId, kind: "logo" | "stamp") =>
   cmd(
+    Message,
     "Settings.RemoveBrandingImage",
     req(
       (c) => c.branding.removeImage({ params: { workspaceId, image: kind } }),
@@ -779,13 +429,14 @@ const cmdPreviewPdf = (
   language: Locale,
 ) =>
   cmd(
+    Message,
     "Settings.PreviewPdf",
     req(
       (c) =>
         c.branding.previewPdf({
           params: { workspaceId },
           payload: {
-            branding: { pdfTemplate, accentColor: accentColor as never, footerText },
+            branding: { pdfTemplate, accentColor, footerText },
             kind: "invoice",
             language,
           },
@@ -807,18 +458,21 @@ const cmdSaveSeries = (
   },
 ) =>
   cmd(
+    Message,
     "Settings.SaveSeries",
     req(
       (c) =>
         editingId === null
-          ? c.workspace.createSeries({
-              params: { workspaceId },
-              headers: Api.idempotencyHeaders(`series-${Date.now()}`),
-              payload: payload as never,
-            })
+          ? Effect.flatMap(Api.uuidV7, (key) =>
+              c.workspace.createSeries({
+                params: { workspaceId },
+                headers: Api.idempotencyHeaders(key),
+                payload,
+              }),
+            )
           : c.workspace.updateSeries({
               params: { workspaceId, seriesId: editingId },
-              payload: payload as never,
+              payload,
             }),
       (item) => Message.SavedSeries({ item }),
       (failure) => Message.FailedAction({ failure }),
@@ -827,14 +481,17 @@ const cmdSaveSeries = (
 
 const cmdInviteMember = (workspaceId: WorkspaceId, email: string, role: Exclude<Role, "owner">) =>
   cmd(
+    Message,
     "Settings.InviteMember",
     req(
       (c) =>
-        c.team.invite({
-          params: { workspaceId },
-          headers: Api.idempotencyHeaders(`invite-${Date.now()}`),
-          payload: { email: email as never, role },
-        }),
+        Effect.flatMap(Api.uuidV7, (key) =>
+          c.team.invite({
+            params: { workspaceId },
+            headers: Api.idempotencyHeaders(key),
+            payload: { email, role },
+          }),
+        ),
       (item) => Message.SentInvite({ item }),
       (failure) => Message.FailedAction({ failure }),
     ),
@@ -842,6 +499,7 @@ const cmdInviteMember = (workspaceId: WorkspaceId, email: string, role: Exclude<
 
 const cmdResendInvite = (workspaceId: WorkspaceId, invitationId: InvitationId) =>
   cmd(
+    Message,
     "Settings.ResendInvite",
     req(
       (c) => c.team.resendInvitation({ params: { workspaceId, invitationId } }),
@@ -852,6 +510,7 @@ const cmdResendInvite = (workspaceId: WorkspaceId, invitationId: InvitationId) =
 
 const cmdRevokeInvite = (workspaceId: WorkspaceId, invitationId: InvitationId) =>
   cmd(
+    Message,
     "Settings.RevokeInvite",
     req(
       (c) => c.team.revokeInvitation({ params: { workspaceId, invitationId } }),
@@ -862,6 +521,7 @@ const cmdRevokeInvite = (workspaceId: WorkspaceId, invitationId: InvitationId) =
 
 const cmdSetMemberRole = (workspaceId: WorkspaceId, userId: UserId, role: Exclude<Role, "owner">) =>
   cmd(
+    Message,
     "Settings.SetMemberRole",
     req(
       (c) => c.team.setRole({ params: { workspaceId, userId }, payload: { role } }),
@@ -872,6 +532,7 @@ const cmdSetMemberRole = (workspaceId: WorkspaceId, userId: UserId, role: Exclud
 
 const cmdRemoveMember = (workspaceId: WorkspaceId, userId: UserId) =>
   cmd(
+    Message,
     "Settings.RemoveMember",
     req(
       (c) => c.team.removeMember({ params: { workspaceId, userId } }),
@@ -882,6 +543,7 @@ const cmdRemoveMember = (workspaceId: WorkspaceId, userId: UserId) =>
 
 const cmdLeaveWorkspace = (workspaceId: WorkspaceId) =>
   cmd(
+    Message,
     "Settings.LeaveWorkspace",
     req(
       (c) => c.team.leave({ params: { workspaceId } }),
@@ -898,7 +560,8 @@ const cmdCreateApiKey = (
 ) => {
   const reqOpt = ViewModels.toAccessRequest(access);
   if (Option.isNone(reqOpt)) {
-    return cmd<Message>(
+    return cmd(
+      Message,
       "Settings.CreateApiKey",
       Effect.succeed(
         Message.FailedAction({
@@ -910,17 +573,18 @@ const cmdCreateApiKey = (
   const payload =
     reqOpt.value.access === "custom"
       ? {
-          name: name as never,
-          ...(expiresOn !== undefined ? { expiresOn: expiresOn as never } : {}),
+          name,
+          expiresOn: expiresOn === undefined ? undefined : IsoDate.make(expiresOn),
           access: "custom" as const,
           scopes: reqOpt.value.scopes,
         }
       : {
-          name: name as never,
-          ...(expiresOn !== undefined ? { expiresOn: expiresOn as never } : {}),
+          name,
+          expiresOn: expiresOn === undefined ? undefined : IsoDate.make(expiresOn),
           access: reqOpt.value.access,
         };
   return cmd(
+    Message,
     "Settings.CreateApiKey",
     req(
       (c) => c.apiKeys.createApiKey({ params: { workspaceId }, payload }),
@@ -931,23 +595,15 @@ const cmdCreateApiKey = (
 };
 
 const cmdCopySecret = (secret: string) =>
-  cmd<Message>(
-    "Settings.CopyApiKeySecret",
-    Effect.tryPromise({
-      try: async () => {
-        if (typeof navigator !== "undefined" && navigator.clipboard !== undefined) {
-          await navigator.clipboard.writeText(secret);
-        }
-      },
-      catch: () => undefined,
-    }).pipe(
-      Effect.map((): Message => Message.CopiedApiKeySecret()),
-      Effect.catch(() => Effect.succeed(Message.CopiedApiKeySecret())),
-    ),
+  cmd(
+    Message,
+    "Settings.CopyCredential",
+    writeClipboard(secret).pipe(Effect.as(Message.CopiedApiKeySecret())),
   );
 
 const cmdRevokeApiKey = (workspaceId: WorkspaceId, keyId: ApiKeyId) =>
   cmd(
+    Message,
     "Settings.RevokeApiKey",
     req(
       (c) => c.apiKeys.revokeApiKey({ params: { workspaceId, keyId } }),
@@ -958,6 +614,7 @@ const cmdRevokeApiKey = (workspaceId: WorkspaceId, keyId: ApiKeyId) =>
 
 const cmdRevokeConnectedApp = (workspaceId: WorkspaceId, grantId: string) =>
   cmd(
+    Message,
     "Settings.RevokeConnectedApp",
     req(
       (c) => c.connectedApps.revokeConnectedApp({ params: { workspaceId, grantId } }),
@@ -968,13 +625,16 @@ const cmdRevokeConnectedApp = (workspaceId: WorkspaceId, grantId: string) =>
 
 const cmdStartExport = (workspaceId: WorkspaceId) =>
   cmd(
+    Message,
     "Settings.StartExport",
     req(
       (c) =>
-        c.reports.startExport({
-          params: { workspaceId },
-          headers: Api.idempotencyHeaders(`export-${Date.now()}`),
-        }),
+        Effect.flatMap(Api.uuidV7, (key) =>
+          c.reports.startExport({
+            params: { workspaceId },
+            headers: Api.idempotencyHeaders(key),
+          }),
+        ),
       () => Message.StartedExport(),
       (failure) => Message.FailedAction({ failure }),
     ),
@@ -982,6 +642,7 @@ const cmdStartExport = (workspaceId: WorkspaceId) =>
 
 const cmdTransferOwnership = (workspaceId: WorkspaceId, to: UserId) =>
   cmd(
+    Message,
     "Settings.TransferOwnership",
     req(
       (c) => c.team.transferOwnership({ params: { workspaceId }, payload: { to } }),
@@ -992,6 +653,7 @@ const cmdTransferOwnership = (workspaceId: WorkspaceId, to: UserId) =>
 
 const cmdCloseWorkspace = (workspaceId: WorkspaceId, confirmName: string) =>
   cmd(
+    Message,
     "Settings.CloseWorkspace",
     req(
       (c) => c.workspace.close({ params: { workspaceId }, payload: { confirmName } }),
@@ -1002,7 +664,10 @@ const cmdCloseWorkspace = (workspaceId: WorkspaceId, confirmName: string) =>
 
 // --- Init ---------------------------------------------------------------------------------------
 
-export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
+export const init: {
+  (ctx: PageContext): (route: Route) => PageReturn<Model, Message>;
+  (route: Route, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(2, (route: Route, ctx: PageContext): PageReturn<Model, Message> => {
   const wsId = workspaceIdOf(ctx);
   const commands: Array<PageCommand<Message>> = [];
 
@@ -1097,7 +762,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
         name: "",
         iban: "",
         bic: "",
-        currency: "CZK" as CurrencyCode,
+        currency: CurrencyCode.make("CZK"),
         isDefault: false,
         saving: false,
         removingId: null,
@@ -1124,7 +789,7 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
         saving: false,
       },
       defaultsForm: {
-        currency: "CZK" as CurrencyCode,
+        currency: CurrencyCode.make("CZK"),
         language: "cs",
         dueDays: "14",
         paymentMethod: "bank_transfer",
@@ -1174,18 +839,17 @@ export const init = (route: Route, ctx: PageContext): PageReturn<Model, Message>
     },
     commands,
   };
-};
+});
 
 // --- Update -------------------------------------------------------------------------------------
 
 const currentRevision = (model: Model): number =>
   Remote.dataOf(model.workspace)?.revision ?? Remote.dataOf(model.branding)?.revision ?? 1;
 
-export const update = (
-  model: Model,
-  message: Message,
-  ctx: PageContext,
-): PageReturn<Model, Message> => {
+export const update: {
+  (message: Message, ctx: PageContext): (model: Model) => PageReturn<Model, Message>;
+  (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message>;
+} = Fn.dual(3, (model: Model, message: Message, ctx: PageContext): PageReturn<Model, Message> => {
   const t = translator(ctx.locale);
   const wsId = workspaceIdOf(ctx);
 
@@ -1274,7 +938,7 @@ export const update = (
           }
         : { model },
     ClickedAresLookup: () => {
-      const ico = model.entityForm.ico.replace(/\s+/g, "");
+      const ico = Str.replace(/\s+/g, "")(model.entityForm.ico);
       if (ico === "") return { model };
       return {
         model: {
@@ -1315,20 +979,20 @@ export const update = (
         },
         commands: [
           cmdUpdateIssuingEntity(wsId, currentRevision(model), {
-            name: f.name.trim(),
-            ico: f.ico.trim() || null,
-            dic: f.dic.trim() || null,
-            legalForm: f.legalForm.trim() || null,
-            registerEntry: f.registerEntry.trim() || null,
+            name: Str.trim(f.name),
+            ico: Str.trim(f.ico) || null,
+            dic: Str.trim(f.dic) || null,
+            legalForm: Str.trim(f.legalForm) || null,
+            registerEntry: Str.trim(f.registerEntry) || null,
             address: {
-              street: f.street.trim(),
-              city: f.city.trim(),
-              postalCode: f.postalCode.trim(),
-              country: f.country.trim() || "CZ",
+              street: Str.trim(f.street),
+              city: Str.trim(f.city),
+              postalCode: Str.trim(f.postalCode),
+              country: Str.trim(f.country) || "CZ",
             },
-            email: f.email.trim() || null,
-            phone: f.phone.trim() || null,
-            web: f.web.trim() || null,
+            email: Str.trim(f.email) || null,
+            phone: Str.trim(f.phone) || null,
+            web: Str.trim(f.web) || null,
           }),
         ],
       };
@@ -1346,7 +1010,7 @@ export const update = (
 
     // Tax Regime
     ChangedTaxRegime: ({ regime }) => ({
-      model: { ...model, taxForm: { ...model.taxForm, nextRegime: regime as TaxRegime } },
+      model: { ...model, taxForm: { ...model.taxForm, nextRegime: regime } },
     }),
     ChangedTaxEffectiveFrom: ({ value }) => ({
       model: { ...model, taxForm: { ...model.taxForm, effectiveFrom: value } },
@@ -1381,13 +1045,15 @@ export const update = (
       model: { ...model, bankForm: { ...model.bankForm, [field]: value } },
     }),
     ChangedBankCurrency: ({ currency }) => ({
-      model: { ...model, bankForm: { ...model.bankForm, currency: currency as CurrencyCode } },
+      model: { ...model, bankForm: { ...model.bankForm, currency } },
     }),
     ToggledBankDefault: ({ checked }) => ({
       model: { ...model, bankForm: { ...model.bankForm, isDefault: checked } },
     }),
     ClickedEditBank: ({ id }) => {
-      const found = Remote.dataOf(model.bankAccounts)?.find((b) => b.id === id);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(Remote.dataOf(model.bankAccounts) ?? [], (b) => b.id === id),
+      );
       if (found === undefined) return { model };
       return {
         model: {
@@ -1413,21 +1079,21 @@ export const update = (
           name: "",
           iban: "",
           bic: "",
-          currency: "CZK" as CurrencyCode,
+          currency: CurrencyCode.make("CZK"),
           isDefault: false,
         },
       },
     }),
     ClickedSaveBank: () => {
-      if (wsId === undefined || model.bankForm.iban.trim() === "") return { model };
+      if (wsId === undefined || Str.trim(model.bankForm.iban) === "") return { model };
       const f = model.bankForm;
       return {
         model: { ...model, bankForm: { ...f, saving: true }, actionFailure: null },
         commands: [
           cmdSaveBankAccount(wsId, f.editingId, {
-            name: f.name.trim() || null,
-            iban: f.iban.replace(/\s+/g, "").toUpperCase(),
-            bic: f.bic.trim() || null,
+            name: Str.trim(f.name) || null,
+            iban: Str.toUpperCase(Str.replace(/\s+/g, "")(f.iban)),
+            bic: Str.trim(f.bic) || null,
             currency: f.currency,
             isDefault: f.isDefault,
           }),
@@ -1436,9 +1102,9 @@ export const update = (
     },
     SavedBank: ({ item }) => {
       const existing = Remote.dataOf(model.bankAccounts) ?? [];
-      const exists = existing.some((b) => b.id === item.id);
+      const exists = Arr.some(existing, (b) => b.id === item.id);
       const next = exists
-        ? existing.map((b) =>
+        ? Arr.map(existing, (b) =>
             b.id === item.id
               ? item
               : item.isDefault && b.currency === item.currency
@@ -1447,7 +1113,9 @@ export const update = (
           )
         : [
             ...(item.isDefault
-              ? existing.map((b) => (b.currency === item.currency ? { ...b, isDefault: false } : b))
+              ? Arr.map(existing, (b) =>
+                  b.currency === item.currency ? { ...b, isDefault: false } : b,
+                )
               : existing),
             item,
           ];
@@ -1470,7 +1138,9 @@ export const update = (
     },
     ClickedMakeBankDefault: ({ id }) => {
       if (wsId === undefined) return { model };
-      const found = Remote.dataOf(model.bankAccounts)?.find((b) => b.id === id);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(Remote.dataOf(model.bankAccounts) ?? [], (b) => b.id === id),
+      );
       if (found === undefined) return { model };
       return {
         model: { ...model, actionFailure: null },
@@ -1513,7 +1183,7 @@ export const update = (
           bankAccounts: {
             _tag: "Loaded",
             seq: Remote.seqOf(model.bankAccounts) + 1,
-            data: existing.filter((b) => b.id !== id),
+            data: Arr.filter(existing, (b) => b.id !== id),
           },
           bankForm: { ...model.bankForm, removingId: null, replacementId: "" },
         },
@@ -1560,15 +1230,14 @@ export const update = (
         model: {
           ...model,
           brandingForm: { ...model.brandingForm, uploading: null },
-          ...(current !== undefined
-            ? {
-                branding: {
-                  _tag: "Loaded" as const,
+          branding:
+            current === undefined
+              ? model.branding
+              : {
+                  _tag: "Loaded",
                   seq: Remote.seqOf(model.branding) + 1,
-                  data: { ...current, [kind]: ref as ImageRef },
+                  data: { ...current, [kind]: ref },
                 },
-              }
-            : {}),
         },
         outMessage: Intent_.toast(
           sCopy(ctx.locale, kind === "logo" ? "branding.logoUploaded" : "branding.stampUploaded"),
@@ -1587,15 +1256,14 @@ export const update = (
       return {
         model: {
           ...model,
-          ...(current !== undefined
-            ? {
-                branding: {
-                  _tag: "Loaded" as const,
+          branding:
+            current === undefined
+              ? model.branding
+              : {
+                  _tag: "Loaded",
                   seq: Remote.seqOf(model.branding) + 1,
                   data: { ...current, [kind]: null },
                 },
-              }
-            : {}),
         },
         outMessage: Intent_.toast(t.t("common.toast.deleted")),
       };
@@ -1605,19 +1273,19 @@ export const update = (
       const f = model.brandingForm;
       let theme: ThemeSource | null = null;
       if (f.themeChoice === "seed") {
-        const hex = f.themeSeed.trim().toUpperCase();
+        const hex = Str.toUpperCase(Str.trim(f.themeSeed));
         if (Theme.isHex(hex)) theme = { _tag: "Seed", seed: hex };
-      } else if (Theme.PRESET_IDS.includes(f.themeChoice as ThemePresetId)) {
-        theme = { _tag: "Preset", id: f.themeChoice as ThemePresetId };
+      } else if (Schema.is(ThemePresetId)(f.themeChoice)) {
+        theme = { _tag: "Preset", id: f.themeChoice };
       }
-      const accent = Theme.isHex(f.accentColor.trim()) ? f.accentColor.trim() : "#111111";
+      const accent = Theme.isHex(Str.trim(f.accentColor)) ? Str.trim(f.accentColor) : "#111111";
       return {
         model: { ...model, brandingForm: { ...f, saving: true }, actionFailure: null },
         commands: [
           cmdUpdateBranding(wsId, currentRevision(model), {
             pdfTemplate: f.pdfTemplate,
             accentColor: accent,
-            footerText: f.footerText.trim() || null,
+            footerText: Str.trim(f.footerText) || null,
             theme,
           }),
         ],
@@ -1640,8 +1308,8 @@ export const update = (
           cmdPreviewPdf(
             wsId,
             f.pdfTemplate,
-            Theme.isHex(f.accentColor.trim()) ? f.accentColor.trim() : "#111111",
-            f.footerText.trim() || null,
+            Theme.isHex(Str.trim(f.accentColor)) ? Str.trim(f.accentColor) : "#111111",
+            Str.trim(f.footerText) || null,
             f.previewLocale,
           ),
         ],
@@ -1654,7 +1322,7 @@ export const update = (
 
     // Numbering Series
     ChangedSeriesKind: ({ kind }) => ({
-      model: { ...model, numberingForm: { ...model.numberingForm, kind: kind as DocumentKind } },
+      model: { ...model, numberingForm: { ...model.numberingForm, kind } },
     }),
     ChangedSeriesField: ({ field, value }) => ({
       model: { ...model, numberingForm: { ...model.numberingForm, [field]: value } },
@@ -1672,7 +1340,9 @@ export const update = (
       model: { ...model, numberingForm: { ...model.numberingForm, isDefault: checked } },
     }),
     ClickedEditSeries: ({ id }) => {
-      const found = Remote.dataOf(model.series)?.find((s) => s.id === id);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(Remote.dataOf(model.series) ?? [], (s) => s.id === id),
+      );
       if (found === undefined) return { model };
       return {
         model: {
@@ -1705,16 +1375,18 @@ export const update = (
     ClickedSaveSeries: () => {
       if (wsId === undefined) return { model };
       const f = model.numberingForm;
-      if (f.name.trim() === "" || f.pattern.trim() === "") return { model };
+      if (Str.trim(f.name) === "" || Str.trim(f.pattern) === "") return { model };
       const parsedNext = Number.parseInt(f.nextNumber, 10);
+      const nextNumber =
+        Number.isInteger(parsedNext) && parsedNext >= 1 ? { nextNumber: parsedNext } : undefined;
       return {
         model: { ...model, numberingForm: { ...f, saving: true }, actionFailure: null },
         commands: [
           cmdSaveSeries(wsId, f.editingId, {
             kind: f.kind,
-            name: f.name.trim(),
-            pattern: f.pattern.trim(),
-            ...(Number.isInteger(parsedNext) && parsedNext >= 1 ? { nextNumber: parsedNext } : {}),
+            name: Str.trim(f.name),
+            pattern: Str.trim(f.pattern),
+            ...nextNumber,
             isDefault: f.isDefault,
           }),
         ],
@@ -1722,9 +1394,9 @@ export const update = (
     },
     SavedSeries: ({ item }) => {
       const existing = Remote.dataOf(model.series) ?? [];
-      const exists = existing.some((s) => s.id === item.id);
+      const exists = Arr.some(existing, (s) => s.id === item.id);
       const next = exists
-        ? existing.map((s) =>
+        ? Arr.map(existing, (s) =>
             s.id === item.id
               ? item
               : item.isDefault && s.kind === item.kind
@@ -1733,7 +1405,7 @@ export const update = (
           )
         : [
             ...(item.isDefault
-              ? existing.map((s) => (s.kind === item.kind ? { ...s, isDefault: false } : s))
+              ? Arr.map(existing, (s) => (s.kind === item.kind ? { ...s, isDefault: false } : s))
               : existing),
             item,
           ];
@@ -1756,7 +1428,9 @@ export const update = (
     },
     ClickedMakeSeriesDefault: ({ id }) => {
       if (wsId === undefined) return { model };
-      const found = Remote.dataOf(model.series)?.find((s) => s.id === id);
+      const found = Option.getOrUndefined(
+        Arr.findFirst(Remote.dataOf(model.series) ?? [], (s) => s.id === id),
+      );
       if (found === undefined) return { model };
       return {
         model: { ...model, actionFailure: null },
@@ -1775,7 +1449,7 @@ export const update = (
     ChangedDefaultCurrency: ({ currency }) => ({
       model: {
         ...model,
-        defaultsForm: { ...model.defaultsForm, currency: currency as CurrencyCode },
+        defaultsForm: { ...model.defaultsForm, currency },
       },
     }),
     ChangedDefaultLanguage: ({ language }) => ({
@@ -1787,13 +1461,13 @@ export const update = (
     ChangedDefaultPaymentMethod: ({ method }) => ({
       model: {
         ...model,
-        defaultsForm: { ...model.defaultsForm, paymentMethod: method as PaymentMethod },
+        defaultsForm: { ...model.defaultsForm, paymentMethod: method },
       },
     }),
     ChangedDefaultRounding: ({ rounding }) => ({
       model: {
         ...model,
-        defaultsForm: { ...model.defaultsForm, paymentRounding: rounding as PaymentRounding },
+        defaultsForm: { ...model.defaultsForm, paymentRounding: rounding },
       },
     }),
     ChangedDefaultNote: ({ value }) => ({
@@ -1819,7 +1493,7 @@ export const update = (
               dueDays,
               paymentMethod: f.paymentMethod,
               paymentRounding: f.paymentRounding,
-              defaultNote: f.defaultNote.trim() || null,
+              defaultNote: Str.trim(f.defaultNote) || null,
               paymentTaxDocumentAutoSend: f.paymentTaxDocumentAutoSend,
             },
           }),
@@ -1857,7 +1531,7 @@ export const update = (
         ...model,
         remindersForm: {
           ...model.remindersForm,
-          offsetsDays: model.remindersForm.offsetsDays.filter((d) => d !== day),
+          offsetsDays: Arr.filter(model.remindersForm.offsetsDays, (d) => d !== day),
         },
       },
     }),
@@ -1895,7 +1569,7 @@ export const update = (
       model: { ...model, teamForm: { ...model.teamForm, inviteRole: role } },
     }),
     ClickedSendInvite: () => {
-      if (wsId === undefined || !model.teamForm.inviteEmail.includes("@")) return { model };
+      if (wsId === undefined || !Str.includes("@")(model.teamForm.inviteEmail)) return { model };
       return {
         model: {
           ...model,
@@ -1903,7 +1577,7 @@ export const update = (
           actionFailure: null,
         },
         commands: [
-          cmdInviteMember(wsId, model.teamForm.inviteEmail.trim(), model.teamForm.inviteRole),
+          cmdInviteMember(wsId, Str.trim(model.teamForm.inviteEmail), model.teamForm.inviteRole),
         ],
       };
     },
@@ -1942,7 +1616,7 @@ export const update = (
           invitations: {
             _tag: "Loaded",
             seq: Remote.seqOf(model.invitations) + 1,
-            data: existing.filter((i) => i.id !== id),
+            data: Arr.filter(existing, (i) => i.id !== id),
           },
         },
         outMessage: Intent_.toast(sCopy(ctx.locale, "team.invitationRevoked")),
@@ -1963,7 +1637,7 @@ export const update = (
           members: {
             _tag: "Loaded",
             seq: Remote.seqOf(model.members) + 1,
-            data: existing.map((m) => (m.userId === userId ? { ...m, role } : m)),
+            data: Arr.map(existing, (m) => (m.userId === userId ? { ...m, role } : m)),
           },
         },
         outMessage: Intent_.toast(sCopy(ctx.locale, "team.roleChanged")),
@@ -1990,7 +1664,7 @@ export const update = (
           members: {
             _tag: "Loaded",
             seq: Remote.seqOf(model.members) + 1,
-            data: existing.filter((m) => m.userId !== userId),
+            data: Arr.filter(existing, (m) => m.userId !== userId),
           },
           teamForm: { ...model.teamForm, removingUserId: null },
         },
@@ -2064,7 +1738,7 @@ export const update = (
       };
     },
     ToggledApiKeyScope: ({ scope }) => {
-      const next = ViewModels.ScopePicker.toggle(scopePickerFromModel(model, ctx), scope as Scope);
+      const next = ViewModels.ScopePicker.toggle(scopePickerFromModel(model, ctx), scope);
       return {
         model: {
           ...model,
@@ -2077,17 +1751,17 @@ export const update = (
       };
     },
     ClickedCreateApiKey: () => {
-      if (wsId === undefined || model.apiKeysForm.name.trim() === "") return { model };
+      if (wsId === undefined || Str.trim(model.apiKeysForm.name) === "") return { model };
       const picker = scopePickerFromModel(model, ctx);
       if (Option.isNone(ViewModels.toAccessRequest(picker))) return { model };
-      const expiresOn = model.apiKeysForm.expiresOn.trim() || undefined;
+      const expiresOn = Str.trim(model.apiKeysForm.expiresOn) || undefined;
       return {
         model: {
           ...model,
           apiKeysForm: { ...model.apiKeysForm, saving: true },
           actionFailure: null,
         },
-        commands: [cmdCreateApiKey(wsId, model.apiKeysForm.name.trim(), expiresOn, picker)],
+        commands: [cmdCreateApiKey(wsId, Str.trim(model.apiKeysForm.name), expiresOn, picker)],
       };
     },
     CreatedApiKey: ({ created }) => {
@@ -2148,7 +1822,7 @@ export const update = (
           apiKeys: {
             _tag: "Loaded",
             seq: Remote.seqOf(model.apiKeys) + 1,
-            data: existing.filter((k) => k.id !== id),
+            data: Arr.filter(existing, (k) => k.id !== id),
           },
           apiKeysForm: { ...model.apiKeysForm, revokingId: null },
         },
@@ -2178,7 +1852,7 @@ export const update = (
           connectedApps: {
             _tag: "Loaded",
             seq: Remote.seqOf(model.connectedApps) + 1,
-            data: existing.filter((g) => g.grantId !== grantId),
+            data: Arr.filter(existing, (g) => g.grantId !== grantId),
           },
           connectedAppsForm: { revokingGrantId: null },
         },
@@ -2234,14 +1908,14 @@ export const update = (
     }),
     ClickedCloseWorkspace: () => {
       if (wsId === undefined || ctx.workspace === null) return { model };
-      if (model.dangerForm.closeConfirmName.trim() !== ctx.workspace.name) return { model };
+      if (Str.trim(model.dangerForm.closeConfirmName) !== ctx.workspace.name) return { model };
       return {
         model: {
           ...model,
           dangerForm: { ...model.dangerForm, closing: true },
           actionFailure: null,
         },
-        commands: [cmdCloseWorkspace(wsId, model.dangerForm.closeConfirmName.trim())],
+        commands: [cmdCloseWorkspace(wsId, Str.trim(model.dangerForm.closeConfirmName))],
       };
     },
     ClosedWorkspace: () => ({
@@ -2280,18 +1954,18 @@ export const update = (
         ? init(model.route, ctx)
         : { model },
   } satisfies MessageHandlers<Message, PageReturn<Model, Message>>);
-};
+});
 
 // --- Title & View -------------------------------------------------------------------------------
 
-export const title = (model: Model, ctx: PageContext): string => {
+export const title: {
+  (ctx: PageContext): (model: Model) => string;
+  (model: Model, ctx: PageContext): string;
+} = Fn.dual(2, (model: Model, ctx: PageContext): string => {
   const t = translator(ctx.locale);
   if (model.route._tag === "More") return sCopy(ctx.locale, "more.title");
   if (model.route._tag === "Settings") {
     return `${t.t("settings.title")} · ${t.t(`settings.nav.${model.route.section}`)}`;
   }
   return t.t("settings.title");
-};
-
-export const view = (model: Model, ctx: PageContext, h: Html.H<Message>) =>
-  viewSettingsPage(model, ctx, h);
+});

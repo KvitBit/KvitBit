@@ -1,48 +1,90 @@
 /**
- * Promise-returning Drizzle PG database backed by Effect's `SqlClient.SqlClient`, so Better Auth's
- * `drizzleAdapter` runs over whichever SQL client the process provides (`PgClient` in production,
- * `PgliteClient` in tests) with full transaction support via `sql.withTransaction`.
+ * Better Auth's Drizzle adapter uses either production PostgreSQL or test PGlite
+ * through the Effect SQL client.
  */
 import { AsyncLocalStorage } from "node:async_hooks";
-import { drizzle } from "drizzle-orm/pg-proxy";
-import { type Context, Effect } from "effect";
-import type { SqlClient } from "effect/sql";
-import { currentAuthLogContext } from "./logging";
+import { PgAsyncTransaction, PgDialect } from "drizzle-orm/pg-core";
+import {
+  PgRemoteDatabase,
+  type PgRemoteQueryResultHKT,
+  PgRemoteSession,
+  type RemoteCallback,
+} from "drizzle-orm/pg-proxy";
+import * as Arr from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import type * as SqlClient from "effect/sql/SqlClient";
+
+const DrizzleRow = Schema.Record(Schema.String, Schema.Unknown);
+
+import { currentAuthLogContext, pickAuthLogContext } from "./logging";
 
 const sqlContext = new AsyncLocalStorage<Context.Context<never>>();
 
-/** Keep the current Effect SQL transaction when Better Auth crosses into promises. */
-export const withDrizzleSqlContext = <A>(callback: () => Promise<A>) =>
-  Effect.flatMap(Effect.context(), (context) =>
-    Effect.tryPromise({
-      try: () => sqlContext.run(context, callback),
-      catch: (error) => error,
-    }),
-  );
+export class AuthCallbackError extends Schema.TaggedError<
+  AuthCallbackError,
+  { readonly brand: unique symbol }
+>()("AuthCallbackError", {
+  cause: Schema.Unknown,
+}) {}
 
-export const runDrizzleEffect = <A, E>(effect: Effect.Effect<A, E>): Promise<A> => {
-  const context = sqlContext.getStore() ?? currentAuthLogContext();
-  return context === undefined ? Effect.runPromise(effect) : Effect.runPromiseWith(context)(effect);
-};
+const isAuthCallbackError = Schema.is(AuthCallbackError);
 
-/** Builds a Drizzle PG database backed by `sql` for Better Auth's `drizzleAdapter`. */
-export const makeDrizzleOverSqlClient = (
-  sql: SqlClient.SqlClient,
-  runPromise: <A, E>(effect: Effect.Effect<A, E>) => Promise<A> = runDrizzleEffect,
-) => {
-  const db = drizzle(async (query, params, method) => {
-    const rows = await runPromise(sql.unsafe<Record<string, unknown>>(query, params));
-    return {
-      rows: method === "all" ? rows.map((row) => Object.values(row)) : [...rows],
-    };
+export const fromAuthPromise = <A>(callback: () => PromiseLike<A>) =>
+  Effect.tryPromise({
+    try: callback,
+    catch: (cause) => AuthCallbackError.make({ cause }),
   });
 
-  // Enable transactions via Effect's SqlClient.withTransaction (pg-proxy throws by default).
-  const session = db._.session as unknown as {
-    transaction: <T>(fn: (tx: unknown) => Promise<T>) => Promise<T>;
-  };
-  session.transaction = <T>(fn: (tx: unknown) => Promise<T>) =>
-    runPromise(sql.withTransaction(withDrizzleSqlContext(() => fn(db))));
+/** Keep the current Effect SQL transaction when Better Auth calls its Promise API. */
+export const withDrizzleSqlContext = <A>(callback: () => PromiseLike<A>) =>
+  Effect.flatMap(Effect.context<never>(), (context) =>
+    fromAuthPromise(() => sqlContext.run(context, callback)),
+  );
 
-  return db;
+const authEffectRunner =
+  (fallback: Context.Context<never>) =>
+  <A, E>(effect: Effect.Effect<A, E>) => {
+    const context = sqlContext.getStore() ?? currentAuthLogContext() ?? fallback;
+    // Better Auth and Drizzle require promises and recognize their original rejection values.
+    return Effect.runPromiseWith(context)(
+      effect.pipe(Effect.catchIf(isAuthCallbackError, (error) => Effect.die(error.cause))),
+    );
+  };
+
+export const runAuthEffect = authEffectRunner(Context.empty());
+
+export const makeAuthEffectRunner = Effect.withFiberSucceed((fiber) =>
+  authEffectRunner(pickAuthLogContext(fiber.context)),
+);
+
+export const makeDrizzleOverSqlClient = (sql: SqlClient.SqlClient) => {
+  const execute: RemoteCallback = (query, params, method) =>
+    runAuthEffect(
+      sql.unsafe<typeof DrizzleRow.Type>(query, params).pipe(
+        Effect.map((rows) => ({
+          rows: method === "all" ? Arr.map(rows, Rec.values) : [...rows],
+        })),
+      ),
+    );
+  const dialect = new PgDialect();
+  const relations = {};
+
+  class SqlTransaction extends PgAsyncTransaction<PgRemoteQueryResultHKT> {
+    override transaction<A>(callback: (transaction: SqlTransaction) => Promise<A>) {
+      return runAuthEffect(sql.withTransaction(withDrizzleSqlContext(() => callback(this))));
+    }
+  }
+
+  class SqlSession extends PgRemoteSession<typeof relations> {
+    override transaction<A>(callback: (transaction: SqlTransaction) => Promise<A>) {
+      const transaction = new SqlTransaction(dialect, this, relations, undefined, undefined);
+      return runAuthEffect(sql.withTransaction(withDrizzleSqlContext(() => callback(transaction))));
+    }
+  }
+
+  const session = new SqlSession(execute, dialect, relations);
+  return new PgRemoteDatabase(dialect, session, relations);
 };

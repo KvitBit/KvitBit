@@ -1,5 +1,6 @@
 import { useLocalSearchParams } from "expo-router";
-import { ErrorScreen, parseErrorKind } from "../../src/features/auth/error-screen";
+import { parseErrorKind } from "../../src/features/auth/auth-links";
+import { ErrorScreen } from "../../src/features/auth/error-screen";
 import { param } from "../../src/navigation/routes";
 
 export default function ErrorRoute() {

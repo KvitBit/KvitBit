@@ -1,6 +1,6 @@
 import {
   DEFAULT_THEME_PRESET,
-  type Hex,
+  Hex,
   type ThemeContrast,
   type ThemeMode,
   type ThemePresetId,
@@ -8,6 +8,7 @@ import {
   type ThemeStyle,
 } from "@kvitbit/api-contract";
 import type { BrandingImage, Locale, PdfTemplate } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { ifMatchHeaders, inWorkspace } from "@kvitbit/ui-port/api";
 import {
   contrastNameText,
@@ -17,8 +18,11 @@ import {
   presetNameText,
   styleNameText,
 } from "@kvitbit/ui-port/theme";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Str from "effect/String";
 import { Check, Trash2, Upload } from "lucide-react-native";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Pressable, View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -38,6 +42,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import { canEditWorkspaceSettings } from "./permissions";
 import { pickBrandingImage, uploadBrandingImage } from "./platform-helpers";
 import {
@@ -78,10 +83,15 @@ export function BrandingSection() {
 
   const editable = canEditWorkspaceSettings(workspace.role, workspace.closed);
   const remote = useRemote(
-    (client) => client.branding.getBranding({ params: inWorkspace(workspace.id) }),
-    [workspace.id],
+    useCallback(
+      (client: KvitbitApiClient) =>
+        client.branding.getBranding({ params: inWorkspace(workspace.id) }),
+      [workspace.id],
+    ),
   );
-  const prefsRemote = useRemote((client) => client.me.getPreferences({}), []);
+  const prefsRemote = useRemote(
+    useCallback((client: KvitbitApiClient) => client.me.getPreferences({}), []),
+  );
 
   const [pdfTemplate, setPdfTemplate] = useState<PdfTemplate>("classic");
   const [accentColor, setAccentColor] = useState("#1F5FAF");
@@ -105,69 +115,75 @@ export function BrandingSection() {
     setErrorState(noFormError);
   }, [remote.state]);
 
-  const syncAccountPreferences = async (patch: {
-    readonly locale?: Locale;
-    readonly mode?: ThemeMode;
-    readonly style?: ThemeStyle;
-    readonly contrast?: ThemeContrast;
-    readonly dynamicColor?: boolean;
-  }) => {
-    const nextPref = {
-      ...appTheme.preference,
-      ...(patch.mode === undefined ? {} : { mode: patch.mode }),
-      ...(patch.style === undefined ? {} : { style: patch.style }),
-      ...(patch.contrast === undefined ? {} : { contrast: patch.contrast }),
-      ...(patch.dynamicColor === undefined ? {} : { dynamicColor: patch.dynamicColor }),
-    };
-    if (
-      patch.mode !== undefined ||
-      patch.style !== undefined ||
-      patch.contrast !== undefined ||
-      patch.dynamicColor !== undefined
-    ) {
-      appTheme.setPreference(nextPref);
-    }
-    if (patch.locale !== undefined) {
-      setLocale(patch.locale);
-    }
-    if (prefsRemote.state._tag !== "Ready") return;
-    const current = prefsRemote.state.value;
-    const result = await api.run((client) =>
-      client.me.updatePreferences({
-        headers: ifMatchHeaders(current.revision),
-        payload: {
-          ...(patch.locale === undefined ? {} : { locale: patch.locale }),
-          theme: {
-            ...current.theme,
-            mode: nextPref.mode,
-            style: nextPref.style,
-            contrast: nextPref.contrast,
-            dynamicColor: nextPref.dynamicColor,
-          },
-        },
-      }),
-    );
-    if (result._tag === "Ok") {
-      prefsRemote.set(result.value);
-    }
-  };
+  const syncAccountPreferences = Effect.fn("branding-section.syncAccountPreferences")(
+    function* (patch: {
+      readonly locale?: Locale;
+      readonly mode?: ThemeMode;
+      readonly style?: ThemeStyle;
+      readonly contrast?: ThemeContrast;
+      readonly dynamicColor?: boolean;
+    }) {
+      const nextPref = {
+        ...appTheme.preference,
+        mode: patch.mode ?? appTheme.preference.mode,
+        style: patch.style ?? appTheme.preference.style,
+        contrast: patch.contrast ?? appTheme.preference.contrast,
+        dynamicColor: patch.dynamicColor ?? appTheme.preference.dynamicColor,
+      };
+      if (
+        patch.mode !== undefined ||
+        patch.style !== undefined ||
+        patch.contrast !== undefined ||
+        patch.dynamicColor !== undefined
+      ) {
+        appTheme.setPreference(nextPref);
+      }
+      if (patch.locale !== undefined) {
+        setLocale(patch.locale);
+      }
+      if (prefsRemote.state._tag !== "Ready") return;
+      const current = prefsRemote.state.value;
+      const result = yield* Effect.promise(() =>
+        api.run((client) =>
+          client.me.updatePreferences({
+            headers: ifMatchHeaders(current.revision),
+            payload: {
+              locale: patch.locale,
+              theme: {
+                ...current.theme,
+                mode: nextPref.mode,
+                style: nextPref.style,
+                contrast: nextPref.contrast,
+                dynamicColor: nextPref.dynamicColor,
+              },
+            },
+          }),
+        ),
+      );
+      if (result._tag === "Ok") {
+        prefsRemote.set(result.value);
+      }
+    },
+  );
 
-  const handleSaveBranding = async () => {
+  const handleSaveBranding = Effect.fn("branding-section.handleSaveBranding")(function* () {
     if (!editable) return;
     setSaving(true);
     setErrorState(noFormError);
-    const trimmedAccent = accentColor.trim();
-    const result = await api.run((client) =>
-      client.branding.updateBranding({
-        params: inWorkspace(workspace.id),
-        headers: ifMatchHeaders(revision),
-        payload: {
-          pdfTemplate,
-          ...(HEX_RE.test(trimmedAccent) ? { accentColor: trimmedAccent as Hex } : {}),
-          footerText: footerText.trim() || null,
-          theme: themeSource,
-        },
-      }),
+    const trimmedAccent = Str.trim(accentColor);
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.branding.updateBranding({
+          params: inWorkspace(workspace.id),
+          headers: ifMatchHeaders(revision),
+          payload: {
+            pdfTemplate,
+            accentColor: HEX_RE.test(trimmedAccent) ? Hex.make(trimmedAccent) : undefined,
+            footerText: Str.trim(footerText) || null,
+            theme: themeSource,
+          },
+        }),
+      ),
     );
     setSaving(false);
     if (result._tag === "Ok") {
@@ -177,11 +193,13 @@ export function BrandingSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleUploadImage = async (kind: BrandingImage) => {
+  const handleUploadImage = Effect.fn("branding-section.handleUploadImage")(function* (
+    kind: BrandingImage,
+  ) {
     if (!editable) return;
-    const picked = await pickBrandingImage();
+    const picked = yield* pickBrandingImage();
     if (picked._tag === "Cancelled") return;
     if (picked._tag === "Invalid") {
       overlay.toast(
@@ -198,7 +216,7 @@ export function BrandingSection() {
     }
     setUploadingImage(kind);
     setErrorState(noFormError);
-    const result = await uploadBrandingImage({
+    const result = yield* uploadBrandingImage({
       origin: api.origin,
       credentials: api.credentials,
       workspaceId: workspace.id,
@@ -212,14 +230,18 @@ export function BrandingSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleRemoveImage = async (kind: BrandingImage) => {
+  const handleRemoveImage = Effect.fn("branding-section.handleRemoveImage")(function* (
+    kind: BrandingImage,
+  ) {
     if (!editable) return;
     setUploadingImage(kind);
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.branding.removeImage({ params: inWorkspace(workspace.id, { image: kind }) }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.branding.removeImage({ params: inWorkspace(workspace.id, { image: kind }) }),
+      ),
     );
     setUploadingImage(null);
     if (result._tag === "Ok") {
@@ -228,7 +250,7 @@ export function BrandingSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   const selectedPreset = activePresetId(themeSource);
 
@@ -239,11 +261,11 @@ export function BrandingSection() {
           <SegmentedChoice<ThemeStyle>
             label={t("account.appearance.style")}
             value={appTheme.preference.style}
-            choices={THEME_STYLES.map((s) => ({
+            choices={Arr.map(THEME_STYLES, (s) => ({
               value: s,
               label: text(styleNameText(s)),
             }))}
-            onChange={(style) => void syncAccountPreferences({ style })}
+            onChange={(style) => forkFeatureEffect(syncAccountPreferences({ style }))}
           />
           <Text variant="meta" color="onSurfaceVariant">
             {t(`enum.themeStyleHint.${appTheme.preference.style}`)}
@@ -252,21 +274,21 @@ export function BrandingSection() {
           <SegmentedChoice<ThemeMode>
             label={t("account.appearance.mode")}
             value={appTheme.preference.mode}
-            choices={THEME_MODES.map((m) => ({
+            choices={Arr.map(THEME_MODES, (m) => ({
               value: m,
               label: text(modeNameText(m)),
             }))}
-            onChange={(mode) => void syncAccountPreferences({ mode })}
+            onChange={(mode) => forkFeatureEffect(syncAccountPreferences({ mode }))}
           />
 
           <SegmentedChoice<ThemeContrast>
             label={t("account.appearance.contrast")}
             value={appTheme.preference.contrast}
-            choices={THEME_CONTRASTS.map((c) => ({
+            choices={Arr.map(THEME_CONTRASTS, (c) => ({
               value: c,
               label: text(contrastNameText(c)),
             }))}
-            onChange={(contrast) => void syncAccountPreferences({ contrast })}
+            onChange={(contrast) => forkFeatureEffect(syncAccountPreferences({ contrast }))}
           />
 
           <SwitchRow
@@ -278,17 +300,19 @@ export function BrandingSection() {
             }
             value={appTheme.preference.dynamicColor}
             disabled={!appTheme.dynamicAvailable}
-            onChange={(dynamicColor) => void syncAccountPreferences({ dynamicColor })}
+            onChange={(dynamicColor) => forkFeatureEffect(syncAccountPreferences({ dynamicColor }))}
           />
 
           <SegmentedChoice<Locale>
             label={t("account.profile.language")}
             value={locale}
-            choices={LOCALES.map((l) => ({
+            choices={Arr.map(LOCALES, (l) => ({
               value: l,
               label: t(`enum.locale.${l}`),
             }))}
-            onChange={(nextLocale) => void syncAccountPreferences({ locale: nextLocale })}
+            onChange={(nextLocale) =>
+              forkFeatureEffect(syncAccountPreferences({ locale: nextLocale }))
+            }
           />
         </Card>
 
@@ -327,7 +351,7 @@ export function BrandingSection() {
                   {t("settings.branding.workspaceThemeHint")}
                 </Text>
                 <View accessibilityRole="radiogroup" className="flex-row flex-wrap gap-2">
-                  {PRESET_IDS.map((presetId) => {
+                  {Arr.map(PRESET_IDS, (presetId) => {
                     const def = PresetDefinitions[presetId];
                     const selected = selectedPreset === presetId;
                     return (
@@ -380,9 +404,9 @@ export function BrandingSection() {
                   autoCapitalize="characters"
                   onChangeText={(value) => {
                     setCustomSeed(value);
-                    const trimmed = value.trim();
+                    const trimmed = Str.trim(value);
                     if (HEX_RE.test(trimmed)) {
-                      setThemeSource({ _tag: "Seed", seed: trimmed as Hex });
+                      setThemeSource({ _tag: "Seed", seed: Hex.make(trimmed) });
                     }
                   }}
                 />
@@ -408,7 +432,7 @@ export function BrandingSection() {
                         icon={Upload}
                         label={t("common.action.upload")}
                         busy={uploadingImage === "logo"}
-                        onPress={() => void handleUploadImage("logo")}
+                        onPress={() => forkFeatureEffect(handleUploadImage("logo"))}
                       />
                       {branding.logo === null ? null : (
                         <Button
@@ -416,7 +440,7 @@ export function BrandingSection() {
                           icon={Trash2}
                           label={t("common.action.remove")}
                           busy={uploadingImage === "logo"}
-                          onPress={() => void handleRemoveImage("logo")}
+                          onPress={() => forkFeatureEffect(handleRemoveImage("logo"))}
                         />
                       )}
                     </View>
@@ -440,7 +464,7 @@ export function BrandingSection() {
                         icon={Upload}
                         label={t("common.action.upload")}
                         busy={uploadingImage === "stamp"}
-                        onPress={() => void handleUploadImage("stamp")}
+                        onPress={() => forkFeatureEffect(handleUploadImage("stamp"))}
                       />
                       {branding.stamp === null ? null : (
                         <Button
@@ -448,7 +472,7 @@ export function BrandingSection() {
                           icon={Trash2}
                           label={t("common.action.remove")}
                           busy={uploadingImage === "stamp"}
-                          onPress={() => void handleRemoveImage("stamp")}
+                          onPress={() => forkFeatureEffect(handleRemoveImage("stamp"))}
                         />
                       )}
                     </View>
@@ -458,7 +482,7 @@ export function BrandingSection() {
                 <SegmentedChoice<PdfTemplate>
                   label={t("settings.branding.defaultTemplate")}
                   value={pdfTemplate}
-                  choices={PDF_TEMPLATES.map((tpl) => ({
+                  choices={Arr.map(PDF_TEMPLATES, (tpl) => ({
                     value: tpl,
                     label: t(`enum.pdfTemplate.${tpl}`),
                   }))}
@@ -473,7 +497,7 @@ export function BrandingSection() {
                   disabled={!editable}
                   autoCapitalize="characters"
                   error={
-                    accentColor.trim() !== "" && !HEX_RE.test(accentColor.trim())
+                    Str.trim(accentColor) !== "" && !HEX_RE.test(Str.trim(accentColor))
                       ? local({
                           cs: "Zadejte hex barvu (#RRGGBB).",
                           en: "Enter a hex color (#RRGGBB).",
@@ -501,8 +525,8 @@ export function BrandingSection() {
                 kind="filled"
                 label={t("common.action.saveChanges")}
                 busy={saving}
-                disabled={accentColor.trim() !== "" && !HEX_RE.test(accentColor.trim())}
-                onPress={() => void handleSaveBranding()}
+                disabled={Str.trim(accentColor) !== "" && !HEX_RE.test(Str.trim(accentColor))}
+                onPress={() => forkFeatureEffect(handleSaveBranding())}
               />
             ) : null}
           </View>

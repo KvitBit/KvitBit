@@ -17,7 +17,7 @@ import type {
   VatBreakdown,
   VatTreatment,
 } from "@kvitbit/domain";
-import type { BigDecimal } from "effect";
+import type * as BigDecimal from "effect/BigDecimal";
 
 /** Image bytes for a logo or stamp. Only PNG, JPEG, WebP and SVG are embedded. */
 export interface RenderImage {

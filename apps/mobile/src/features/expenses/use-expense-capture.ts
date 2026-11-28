@@ -1,10 +1,15 @@
 import type { ExpenseId, WorkspaceSummary } from "@kvitbit/domain/contract";
 import { idempotencyHeaders, UiError } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTransfer } from "../../platform/transfer";
 import { useApi } from "../../runtime/api-runtime";
+import { fromMobilePromise } from "../../runtime/request-intent";
 import { useSession } from "../../session/session-provider";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { runFeatureEffect } from "../ui-effect";
 import {
   type CaptureAccess,
   type CaptureNetwork,
@@ -15,8 +20,6 @@ import {
 } from "./capture-queue";
 import { captureQueue } from "./capture-queue-instance";
 import { decodeExpenseDetail } from "./model";
-
-export { captureQueue };
 
 const EMPTY_SUMMARY: CaptureQueueSummary = { pendingCount: 0, blockedCount: 0, hasBlocked: false };
 
@@ -41,9 +44,11 @@ export function useCaptureAccess() {
         scope: { principalId, workspaceId: item.id, workspaceSlug: item.slug },
         canWrite: () => {
           const current = authorization.current;
-          const found = current.workspaces.find(({ id }) => id === item.id);
+          const found = Option.getOrUndefined(
+            Arr.findFirst(current.workspaces, ({ id }) => id === item.id),
+          );
           return (
-            mounted.current &&
+            mounted.current === true &&
             current.principalId === principalId &&
             found !== undefined &&
             mayCapture(current.principalId, found)
@@ -53,7 +58,7 @@ export function useCaptureAccess() {
     }
     return {
       current: accessFor(workspace),
-      all: workspaces.flatMap((item) => {
+      all: Arr.flatMap(workspaces, (item) => {
         const access = accessFor(item);
         return access === null ? [] : [access];
       }),
@@ -76,32 +81,31 @@ export function useCaptureQueueSummary(): CaptureQueueSummary {
     let active = true;
     let generation = 0;
 
-    async function refresh() {
-      const currentGeneration = ++generation;
-      if (principalId === null) return;
-      try {
-        const entries = await Promise.all(
-          workspaces.map(async (item) => ({
-            jobs: await captureQueue.load({
-              principalId,
-              workspaceId: item.id,
-              workspaceSlug: item.slug,
-            }),
-            canWrite: mayCapture(principalId, item),
-          })),
+    const refresh = Effect.fn("CaptureQueueSummary.refresh")(
+      function* () {
+        const currentGeneration = ++generation;
+        const entries = yield* Effect.forEach(
+          workspaces,
+          (item) =>
+            fromMobilePromise(() =>
+              captureQueue.load({
+                principalId,
+                workspaceId: item.id,
+                workspaceSlug: item.slug,
+              }),
+            ).pipe(Effect.map((jobs) => ({ jobs, canWrite: mayCapture(principalId, item) }))),
+          { concurrency: "unbounded" },
         );
-        if (active && currentGeneration === generation) {
-          setSummary(summarizeCaptureJobs(entries));
-        }
-      } catch {
-        // Keep the last known summary if a transient storage read fails.
-      }
-    }
+        if (active && currentGeneration === generation) setSummary(summarizeCaptureJobs(entries));
+      },
+      Effect.ignore,
+      runFeatureEffect,
+    );
 
     const unsubscribe = captureQueue.subscribe((scope) => {
-      if (scope.principalId === principalId) void refresh();
+      if (scope.principalId === principalId) refresh();
     });
-    void refresh();
+    refresh();
     return () => {
       active = false;
       unsubscribe();
@@ -127,23 +131,22 @@ export function useRejectedReceipts(expenseId: ExpenseId | null) {
     let generation = 0;
     const scope = { principalId, workspaceId: workspace.id, workspaceSlug: workspace.slug };
 
-    async function refresh() {
-      const currentGeneration = ++generation;
-      if (expenseId === null) return;
-      try {
-        const items = await captureQueue.loadRejected(scope, expenseId);
+    const refresh = Effect.fn("RejectedReceipts.refresh")(
+      function* () {
+        const currentGeneration = ++generation;
+        const items = yield* fromMobilePromise(() => captureQueue.loadRejected(scope, expenseId));
         if (active && currentGeneration === generation) setRejected(items);
-      } catch {
-        // Keep the last known rejected list if a transient storage read fails.
-      }
-    }
+      },
+      Effect.ignore,
+      runFeatureEffect,
+    );
 
     const unsubscribe = captureQueue.subscribe((changed) => {
       if (changed.principalId === principalId && changed.workspaceId === workspace.id) {
-        void refresh();
+        refresh();
       }
     });
-    void refresh();
+    refresh();
     return () => {
       active = false;
       unsubscribe();
@@ -152,14 +155,14 @@ export function useRejectedReceipts(expenseId: ExpenseId | null) {
 
   return {
     rejected,
-    dismiss: async (fileKey: string) => {
-      if (current === null || expenseId === null) return;
-      await captureQueue.dismissRejected(current, expenseId, fileKey);
-    },
-    clearAll: async () => {
-      if (current === null || expenseId === null) return;
-      await captureQueue.clearRejected(current, expenseId);
-    },
+    dismiss: (fileKey: string) =>
+      current === null || expenseId === null
+        ? runFeatureEffect(Effect.void)
+        : captureQueue.dismissRejected(current, expenseId, fileKey),
+    clearAll: () =>
+      current === null || expenseId === null
+        ? runFeatureEffect(Effect.void)
+        : captureQueue.clearRejected(current, expenseId),
   };
 }
 
@@ -168,29 +171,35 @@ export function useCaptureNetwork(): CaptureNetwork {
   const transfer = useTransfer();
   return useMemo(
     () => ({
-      isOnline: async () => {
-        try {
-          const { getNetworkStateAsync } = await import("expo-network");
-          const state = await getNetworkStateAsync();
+      isOnline: Effect.fn("CaptureNetwork.isOnline")(
+        function* () {
+          const { getNetworkStateAsync } = yield* fromMobilePromise(() => import("expo-network"));
+          const state = yield* fromMobilePromise(getNetworkStateAsync);
           return state.isConnected !== false && state.isInternetReachable !== false;
-        } catch {
-          return true;
-        }
-      },
-      record: async (scope, key, payload) => {
-        const response = await api.run((client) =>
-          client.expenses.record({
-            params: { workspaceId: scope.workspaceId },
-            headers: idempotencyHeaders(key),
-            payload,
-          }),
-        );
-        if (response._tag === "Err") return response;
-        const { id } = decodeExpenseDetail(response.value);
-        return id === ""
-          ? { _tag: "Err", error: UiError.unexpected(200) }
-          : { _tag: "Ok", value: id };
-      },
+        },
+        Effect.orElseSucceed(() => true),
+        runFeatureEffect,
+      ),
+      record: (scope, key, payload) =>
+        runFeatureEffect(
+          fromMobilePromise(() =>
+            api.run((client) =>
+              client.expenses.record({
+                params: { workspaceId: scope.workspaceId },
+                headers: idempotencyHeaders(key),
+                payload,
+              }),
+            ),
+          ).pipe(
+            Effect.map((response) => {
+              if (response._tag === "Err") return response;
+              const expense = decodeExpenseDetail(response.value);
+              return expense === null
+                ? ({ _tag: "Err", error: UiError.unexpected(200) } as const)
+                : ({ _tag: "Ok", value: expense.id } as const);
+            }),
+          ),
+        ),
       upload: transfer.upload,
     }),
     [api, transfer],

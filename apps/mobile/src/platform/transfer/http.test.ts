@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { PayloadTooLarge, Unauthorized } from "@kvitbit/api-contract";
 import { Invalid, NotFound } from "@kvitbit/domain/contract";
 import { bearer, describeError, sessionCookie } from "@kvitbit/ui-port/api";
-import { Redacted } from "effect";
+import * as Redacted from "effect/Redacted";
 import { apiUrl, authHeaders, errorFromResponse, parseJson, safeFileName } from "./http";
 
 describe("transfer http helpers", () => {
@@ -21,36 +21,39 @@ describe("transfer http helpers", () => {
 
   test("authHeaders sends the bearer on Android and nothing with the cookie", () => {
     expect(authHeaders(bearer("tok"))).toEqual({ authorization: "Bearer tok" });
-    expect(authHeaders(bearer(Redacted.make("sec")))).toEqual({ authorization: "Bearer sec" });
+    Redacted.make("sec").pipe(bearer, authHeaders, expect).toEqual({ authorization: "Bearer sec" });
     expect(authHeaders(sessionCookie)).toEqual({});
   });
 
   test("errorFromResponse decodes declared error bodies", () => {
-    const invalid = errorFromResponse(422, {
-      _tag: "Invalid",
-      issues: [{ path: ["file"], code: "attachment.type_rejected" }],
+    const invalid = errorFromResponse({
+      status: 422,
+      body: {
+        _tag: "Invalid",
+        issues: [{ path: ["file"], code: "attachment.type_rejected" }],
+      },
     });
     expect(invalid).toBeInstanceOf(Invalid);
-    expect(errorFromResponse(401, { _tag: "Unauthorized", reason: "expired" })).toBeInstanceOf(
-      Unauthorized,
-    );
-    expect(errorFromResponse(404, { _tag: "NotFound", entity: "Expense", id: "x" })).toBeInstanceOf(
-      NotFound,
-    );
-    expect(errorFromResponse(413, { _tag: "PayloadTooLarge", limitBytes: 10 })).toBeInstanceOf(
-      PayloadTooLarge,
-    );
+    expect(
+      errorFromResponse({ status: 401, body: { _tag: "Unauthorized", reason: "expired" } }),
+    ).toBeInstanceOf(Unauthorized);
+    expect(
+      errorFromResponse({ status: 404, body: { _tag: "NotFound", entity: "Expense", id: "x" } }),
+    ).toBeInstanceOf(NotFound);
+    expect(
+      errorFromResponse({ status: 413, body: { _tag: "PayloadTooLarge", limitBytes: 10 } }),
+    ).toBeInstanceOf(PayloadTooLarge);
   });
 
   test("errorFromResponse falls back by status", () => {
-    expect(errorFromResponse(0, null)._tag).toBe("Offline");
-    expect(errorFromResponse(413, "too big")).toBeInstanceOf(PayloadTooLarge);
-    expect(errorFromResponse(502, "<html>", "req-1")).toEqual({
+    expect(errorFromResponse({ status: 0, body: null })._tag).toBe("Offline");
+    expect(errorFromResponse({ status: 413, body: "too big" })).toBeInstanceOf(PayloadTooLarge);
+    expect(errorFromResponse({ status: 502, body: "<html>", requestId: "req-1" })).toEqual({
       _tag: "Unexpected",
       status: 502,
       requestId: "req-1",
     });
-    expect(describeError(errorFromResponse(500, null)).surface).toBe("banner");
+    expect(describeError(errorFromResponse({ status: 500, body: null })).surface).toBe("banner");
   });
 
   test("parseJson and safeFileName", () => {

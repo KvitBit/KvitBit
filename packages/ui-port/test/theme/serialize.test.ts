@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { M3_COLOR_ROLES } from "@kvitbit/api-contract";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Option from "effect/Option";
+import * as Rec from "effect/Record";
+import * as Str from "effect/String";
 import {
   cssVariables,
   effectiveTheme,
@@ -46,7 +49,7 @@ describe("style tokens", () => {
   });
 
   test("both use JetBrains Mono and the M3 type scale", () => {
-    for (const t of Object.values(StyleTokens)) {
+    for (const t of Rec.values(StyleTokens)) {
       expect(t.font.mono).toEqual({ family: "JetBrains Mono", weights: [400, 500] });
       expect(t.typeScale.bodyMedium).toEqual({
         font: "body",
@@ -70,7 +73,7 @@ describe("CSS variables", () => {
   const vars = cssVariables(effectiveTheme(withStyle("elegant")));
 
   test("one --md-sys-color-* per role, kebab-cased", () => {
-    const roleVars = Object.keys(vars).filter((k) => k.startsWith("--md-sys-color-"));
+    const roleVars = Arr.filter(Rec.keys(vars), Str.startsWith("--md-sys-color-"));
     expect(roleVars).toHaveLength(M3_COLOR_ROLES.length);
     expect(vars["--md-sys-color-surface-container-high"]).toBe("#DCDCE0");
     expect(vars["--md-sys-color-on-primary"]).toBe("#FAFAFA");
@@ -104,8 +107,8 @@ describe("CSS variables", () => {
     expect(elegant["--kb-type-body-medium-size"]).toBe("0.875rem");
     expect(elegant["--kb-operate-row-size"]).toBe("0.8125rem");
     const cozyVars = cssVariables(effectiveTheme(withStyle("cozy")));
-    const colourKeys = Object.keys(vars).filter((k) => k.includes("-color-"));
-    for (const k of colourKeys) expect(cozyVars[k as `--${string}`]).toBe(vars[k as `--${string}`]);
+    const colourKeys = Arr.filter(Rec.keys(vars), Str.includes("-color-"));
+    for (const k of colourKeys) expect(cozyVars[k]).toBe(vars[k]);
   });
 
   test("variables snapshot (default theme, elegant, light)", () => {
@@ -135,7 +138,7 @@ describe("themeStylesheet", () => {
     expect(css).toContain(
       `--md-sys-color-surface: ${KvitbitDefaultTheme.schemes.lightHigh.roles.surface};`,
     );
-    expect(css.split("{").length).toBe(css.split("}").length);
+    expect(Str.split(css, "{").length).toBe(Str.split(css, "}").length);
   });
 
   test("stylesheet snapshot", () => {

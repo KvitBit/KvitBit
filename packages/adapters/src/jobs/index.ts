@@ -12,7 +12,8 @@
  * - `testRunnerLayer`: the same engine over the in-memory TestRunner, for tests.
  */
 
-import type { ConfigError } from "effect/Config";
+import * as Arr from "effect/Array";
+import type * as Config from "effect/Config";
 import * as Cron from "effect/Cron";
 import * as ClusterCron from "effect/cluster/ClusterCron";
 import * as ClusterWorkflowEngine from "effect/cluster/ClusterWorkflowEngine";
@@ -27,8 +28,11 @@ import * as TestRunner from "effect/cluster/TestRunner";
 import * as Digest from "effect/crypto/Digest";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 import * as Layer from "effect/Layer";
-import type { Scope } from "effect/Scope";
+import * as Predicate from "effect/Predicate";
+import * as Rec from "effect/Record";
+import type * as Scope from "effect/Scope";
 import type * as SqlClient from "effect/sql/SqlClient";
 import type * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 
@@ -105,7 +109,7 @@ export const cronSpecs = {
 export type CronJob = keyof typeof cronSpecs;
 
 /** All cron keys in table order. */
-export const cronJobs = Object.keys(cronSpecs) as ReadonlyArray<CronJob>;
+export const cronJobs = Rec.keys(cronSpecs);
 
 /** Parses a spec's expression in its time zone. Throws `CronParseError` on an invalid row. */
 export const parseCron = (spec: CronSpec): Cron.Cron =>
@@ -123,7 +127,7 @@ export type CronHandlers<E = never, R = never> = { readonly [K in CronJob]: Cron
 /** What a set of cron layers needs from the composition root. */
 export type CronRequirements<R> =
   | Sharding.Sharding
-  | Exclude<Exclude<R, ClusterCron.CurrentScheduledTime>, Scope>;
+  | Exclude<Exclude<R, ClusterCron.CurrentScheduledTime>, Scope.Scope>;
 
 export interface CronLayerOptions {
   /** Cluster shard group for the cron entity and its singleton. Default "default". */
@@ -136,24 +140,37 @@ export interface CronLayerOptions {
  * the failure is not turned into an entity defect (which would restart the cron entity and
  * redeliver the same run). Sweeps are idempotent and the next tick retries.
  */
-export const cronLayer = <E, R>(
-  job: CronJob,
-  handler: CronHandler<E, R>,
-  options?: CronLayerOptions,
-): Layer.Layer<never, never, CronRequirements<R>> => {
-  const spec: CronSpec = cronSpecs[job];
-  return ClusterCron.make({
-    name: spec.name,
-    cron: parseCron(spec),
-    execute: Effect.catchCause(handler, (cause) =>
-      Effect.logWarning("Kvitbit cron handler failed", cause).pipe(
-        Effect.annotateLogs({ cron: spec.name }),
+export const cronLayer: {
+  <E, R>(
+    handler: CronHandler<E, R>,
+    options?: CronLayerOptions,
+  ): (job: CronJob) => Layer.Layer<never, never, CronRequirements<R>>;
+  <E, R>(
+    job: CronJob,
+    handler: CronHandler<E, R>,
+    options?: CronLayerOptions,
+  ): Layer.Layer<never, never, CronRequirements<R>>;
+} = Fn.dual(
+  (args) => Predicate.isString(args[0]),
+  <E, R>(
+    job: CronJob,
+    handler: CronHandler<E, R>,
+    options?: CronLayerOptions,
+  ): Layer.Layer<never, never, CronRequirements<R>> => {
+    const spec: CronSpec = cronSpecs[job];
+    return ClusterCron.make({
+      name: spec.name,
+      cron: parseCron(spec),
+      execute: Effect.catchCause(handler, (cause) =>
+        Effect.logWarning("Kvitbit cron handler failed", cause).pipe(
+          Effect.annotateLogs({ cron: spec.name }),
+        ),
       ),
-    ),
-    skipIfOlderThan: spec.skipIfOlderThan,
-    shardGroup: options?.shardGroup,
-  });
-};
+      skipIfOlderThan: spec.skipIfOlderThan,
+      shardGroup: options?.shardGroup,
+    });
+  },
+);
 
 /** Any complete handlers record; each handler may have its own error and service types. */
 export type AnyCronHandlers = { readonly [K in CronJob]: CronHandler<unknown, unknown> };
@@ -162,22 +179,35 @@ export type AnyCronHandlers = { readonly [K in CronJob]: CronHandler<unknown, un
  * Registers every cron in the table (core-ports.md 10, `CronsLive`). Error and service types are
  * the unions over the record's handlers.
  */
-export const cronsLayer = <H extends AnyCronHandlers>(
-  handlers: H,
-  options?: CronLayerOptions,
-): Layer.Layer<never, never, CronRequirements<Effect.Services<H[CronJob]>>> =>
-  cronJobs.reduce<Layer.Layer<never, never, CronRequirements<Effect.Services<H[CronJob]>>>>(
-    (layer, job) =>
-      Layer.merge(
-        layer,
-        cronLayer(
-          job,
-          handlers[job] as CronHandler<Effect.Error<H[CronJob]>, Effect.Services<H[CronJob]>>,
-          options,
-        ),
-      ),
-    Layer.empty,
-  );
+type HandlerServices<H extends AnyCronHandlers> = Effect.Services<H[CronJob]>;
+type CompatibleHandlers<H extends AnyCronHandlers> = H &
+  CronHandlers<Effect.Error<H[CronJob]>, HandlerServices<H>>;
+
+export const cronsLayer: {
+  (
+    options?: CronLayerOptions,
+  ): <H extends AnyCronHandlers>(
+    handlers: CompatibleHandlers<H>,
+  ) => Layer.Layer<never, never, CronRequirements<HandlerServices<H>>>;
+  <H extends AnyCronHandlers>(
+    handlers: CompatibleHandlers<H>,
+    options?: CronLayerOptions,
+  ): Layer.Layer<never, never, CronRequirements<HandlerServices<H>>>;
+} = Fn.dual(
+  (args) => Predicate.hasProperty(args[0], "recurringSweep"),
+  <H extends AnyCronHandlers>(
+    handlers: CompatibleHandlers<H>,
+    options?: CronLayerOptions,
+  ): Layer.Layer<never, never, CronRequirements<HandlerServices<H>>> => {
+    const typed: CronHandlers<Effect.Error<H[CronJob]>, HandlerServices<H>> = handlers;
+    return Arr.reduce(
+      cronJobs,
+      Layer.empty,
+      (layer: Layer.Layer<never, never, CronRequirements<HandlerServices<H>>>, job) =>
+        Layer.merge(layer, cronLayer(job, typed[job], options)),
+    );
+  },
+);
 
 /** Services the runner layers provide to workflows, crons and modules. */
 export type RunnerServices =
@@ -214,7 +244,7 @@ export const clusterStorageMigrationsLayer: Layer.Layer<never, never, SqlClient.
  */
 export const selfHostedRunnerLayer = (
   options?: SelfHostedRunnerOptions,
-): Layer.Layer<RunnerServices, ConfigError, SqlClient.SqlClient> => {
+): Layer.Layer<RunnerServices, Config.ConfigError, SqlClient.SqlClient> => {
   const storage = Layer.merge(
     SqlMessageStorage.layerStorage({}),
     SqlRunnerStorage.layerStorage({}),

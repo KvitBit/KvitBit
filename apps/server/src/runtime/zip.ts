@@ -3,8 +3,9 @@
  * implementations can misread the 64-bit descriptor for small entries.
  */
 import { crc32, createDeflateRaw } from "node:zlib";
-import { NodeStream } from "@effect/platform-node";
-import { Effect, Stream } from "effect";
+import * as NodeStream from "@effect/platform-node/NodeStream";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
 
 export interface ZipEntry<E, R> {
   readonly name: string;
@@ -75,7 +76,7 @@ export const streamZip = <E, R, SourceE = never, SourceR = never>(
           const filename = encoder.encode(entry.name);
           const centralExtra = CENTRAL_HEADER_LENGTH + filename.length;
           if (centralExtra > MAX_CENTRAL_RECORD_LENGTH)
-            throw new RangeError("ZIP filename is too long");
+            return Stream.die(new RangeError("ZIP filename is too long"));
           // The header arrives before the sizes are known. Its ZIP64 extra field
           // tells streaming readers to look for a descriptor with 64-bit sizes.
           const localExtra = 30 + filename.length;
@@ -99,10 +100,12 @@ export const streamZip = <E, R, SourceE = never, SourceR = never>(
           let compressedSize = 0;
           const compressed = entry.bytes.pipe(
             Stream.tap((chunk) =>
-              Effect.sync(() => {
+              Effect.suspend(() => {
                 size += chunk.byteLength;
-                if (size > MAX_ZIP_BYTES) throw new RangeError("ZIP entry is too large");
+                if (size > MAX_ZIP_BYTES)
+                  return Effect.die(new RangeError("ZIP entry is too large"));
                 crc = crc32(chunk, crc);
+                return Effect.void;
               }),
             ),
             NodeStream.pipeThroughDuplex({ evaluate: createDeflateRaw }),
@@ -129,7 +132,7 @@ export const streamZip = <E, R, SourceE = never, SourceR = never>(
             const extraLength = extraDataLength === 0 ? 0 : EXTRA_HEADER_SIZE + extraDataLength;
             const centralLength = centralExtra + extraLength;
             if (centralLength > MAX_CENTRAL_RECORD_LENGTH) {
-              throw new RangeError("ZIP filename is too long");
+              return Stream.die(new RangeError("ZIP filename is too long"));
             }
             const central = new Uint8Array(centralLength);
             const index = new DataView(central.buffer);

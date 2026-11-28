@@ -10,6 +10,7 @@
  * Every core step runs through `@kvitbit/core`'s sealed `CoreJobs` entry points — zero caller
  * forging.
  */
+
 import { renderEmail } from "@kvitbit/adapters/templates/email";
 import {
   deliveryJob,
@@ -32,9 +33,19 @@ import {
   ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { type BlobKey, BlobStorage, EmailSender } from "@kvitbit/domain/ports";
-import { Cause, Clock, Duration, Effect, Layer, Schedule, Schema, Stream } from "effect";
-import { SqlClient } from "effect/sql";
+import { BlobKey, BlobStorage, EmailSender } from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Schedule from "effect/Schedule";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Activity from "effect/workflow/Activity";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as Workflow from "effect/workflow/Workflow";
@@ -99,7 +110,7 @@ export const MemberInvitationWorkflow = Workflow.make("kvitbit/MemberInvitation"
 
 // 2. Options & retry policies -----------------------------------------------------------------
 
-export interface WorkflowHandlerOptions {
+interface WorkflowHandlerOptions {
   /** Public origin for invitation links, e.g. `https://kvitbit.cz`. */
   readonly appOrigin?: string | undefined;
   /** Retry policy for `DocumentDelivery` dispatch on `DeliveryRetry`. */
@@ -125,17 +136,21 @@ export const DEFAULT_DELIVERY_RETRY_SCHEDULE = Schedule.exponential(Duration.sec
 
 type CsvRow = Readonly<Record<string, string | null>>;
 
+const CSV_SPECIAL = /[",\r\n]/;
+const TRAILING_SLASHES = /\/+$/;
+const UNSAFE_DOCUMENT_NUMBER_CHARACTERS = /[^\p{L}\p{N}._-]+/gu;
+
 const csvEscape = (value: string | null | undefined): string => {
   if (value === null || value === undefined) return "";
-  if (/[",\r\n]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+  if (CSV_SPECIAL.test(value)) {
+    return `"${Str.replace(/"/g, '""')(value)}"`;
   }
   return value;
 };
 
 const csvEncoder = new TextEncoder();
 const csvLine = (fields: ReadonlyArray<string | null | undefined>) =>
-  csvEncoder.encode(`${fields.map(csvEscape).join(",")}\r\n`);
+  csvEncoder.encode(`${Arr.join(Arr.map(fields, csvEscape), ",")}\r\n`);
 
 // Workspace-owned data only. Auth secrets, request replays, and global cache rows are operational data.
 const EXPORT_TABLES = [
@@ -181,22 +196,24 @@ const isTerminalDelivery = (status: string): status is DeliveryOutcome =>
  */
 export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) => {
   const retrySchedule = options.deliveryRetrySchedule ?? DEFAULT_DELIVERY_RETRY_SCHEDULE;
-  const normalizedOrigin = (options.appOrigin ?? "http://localhost:8080").replace(/\/+$/, "");
+  const normalizedOrigin = Str.replace(
+    TRAILING_SLASHES,
+    "",
+  )(options.appOrigin ?? "http://localhost:8080");
 
-  const DeliveryRetryError = Schema.Struct({
-    _tag: Schema.Literal("DeliveryRetry"),
+  const DeliveryRetryError = Schema.TaggedStruct("DeliveryRetry", {
     deliveryId: DeliveryId,
     cause: Schema.Literals(["not_accepted", "outcome_unknown", "retry_window_closed"]),
   });
 
   // 1. DocumentDelivery
-  const documentDeliveryLayer = DocumentDeliveryWorkflow.toLayer(({ workspaceId, deliveryId }) =>
-    Effect.gen(function* () {
+  const documentDeliveryLayer = DocumentDeliveryWorkflow.toLayer(
+    Effect.fn("handleDocumentDelivery")(function* ({ workspaceId, deliveryId }) {
       const claimed = yield* Activity.make({
         name: "claim",
         success: Schema.Struct({
           status: Schema.Literals(["queued", "sending", "sent", "failed", "skipped"]),
-          deadline: Schema.Number,
+          deadline: Schema.Finite,
         }),
         execute: Effect.gen(function* () {
           const status = yield* deliveryJob.claim(workspaceId, deliveryId).pipe(Effect.orDie);
@@ -206,7 +223,7 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           const now = yield* Clock.currentTimeMillis;
           const [timing] = yield* sql<{ readonly started_ms: number }>`
             UPDATE deliveries
-            SET workflow_started_at = COALESCE(workflow_started_at, ${new Date(now)})
+            SET workflow_started_at = COALESCE(workflow_started_at, ${DateTime.toDateUtc(DateTime.makeUnsafe(now))})
             WHERE workspace_id = ${workspaceId} AND id = ${deliveryId}
             RETURNING EXTRACT(EPOCH FROM workflow_started_at)::double precision * 1000 AS started_ms
           `.pipe(Effect.orDie);
@@ -238,24 +255,23 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
         }),
       }).pipe(
         Activity.retry({
-          while: (failure) =>
-            Effect.gen(function* () {
-              if (failure.cause === "retry_window_closed") return false;
-              // Rebuild identical timer names and delays when the workflow resumes.
-              const retry = yield* nextRetry(scheduledElapsed, failure).pipe(
-                Effect.catchIf(Cause.isDone, () => Effect.succeed(null)),
-              );
-              if (retry === null) return false;
-              const [, duration] = retry;
-              scheduledElapsed += Duration.toMillis(duration);
-              retryNumber += 1;
-              yield* DurableClock.sleep({
-                name: `dispatch-retry-${retryNumber}`,
-                duration,
-                inMemoryThreshold: Duration.zero,
-              });
-              return true;
-            }),
+          while: Effect.fn("retryDelivery")(function* (failure) {
+            if (failure.cause === "retry_window_closed") return false;
+            // Rebuild identical timer names and delays when the workflow resumes.
+            const retry = yield* nextRetry(scheduledElapsed, failure).pipe(
+              Effect.catchIf(Cause.isDone, () => Effect.succeed(null)),
+            );
+            if (retry === null) return false;
+            const [, duration] = retry;
+            scheduledElapsed += Duration.toMillis(duration);
+            retryNumber += 1;
+            yield* DurableClock.sleep({
+              name: `dispatch-retry-${retryNumber}`,
+              duration,
+              inMemoryThreshold: Duration.zero,
+            });
+            return true;
+          }),
         }),
         Effect.result,
       );
@@ -300,8 +316,8 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
   );
 
   // 3. DataExport
-  const dataExportLayer = DataExportWorkflow.toLayer(({ workspaceId, exportId }) =>
-    Effect.gen(function* () {
+  const dataExportLayer = DataExportWorkflow.toLayer(
+    Effect.fn("handleDataExport")(function* ({ workspaceId, exportId }) {
       const buildOutcome = yield* Activity.make({
         name: "build",
         success: Schema.Struct({ sizeBytes: Schema.Int }),
@@ -319,11 +335,10 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
 
           const reportingFiles = yield* exportJob.reportingFiles(
             workspaceId,
-            exportId,
             locale,
             (table, read) =>
               archivePages(sql, workspaceId, table, sql`id`, (rows) =>
-                withReportArchivePage(read, { table, ids: rows.map(({ id }) => id) }),
+                withReportArchivePage(read, { table, ids: Arr.map(rows, ({ id }) => id) }),
               ),
           );
           for (const file of reportingFiles) {
@@ -341,7 +356,7 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
             GROUP BY table_name
           `;
           const headersByTable = new Map(
-            tableColumns.map(({ table_name, headers }) => [table_name, headers]),
+            Arr.map(tableColumns, ({ table_name, headers }) => [table_name, headers]),
           );
           for (const table of EXPORT_TABLES) {
             const workspaceColumn = table === "workspaces" ? "id" : "workspace_id";
@@ -361,7 +376,9 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
               name: `tables/${table}.csv`,
               bytes: Stream.concat(
                 Stream.succeed(csvLine(headers)),
-                rows.pipe(Stream.map(({ data }) => csvLine(headers.map((name) => data[name])))),
+                rows.pipe(
+                  Stream.map(({ data }) => csvLine(Arr.map(headers, (name) => data[name]))),
+                ),
               ),
             });
           }
@@ -383,10 +400,10 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           ).pipe(
             Stream.flattenIterable,
             Stream.map((att) => {
-              const safeName = (att.file_name || "attachment").replace(/[/\\]/g, "_");
+              const safeName = Str.replace(/[/\\]/g, "_")(att.file_name || "attachment");
               return {
                 name: `attachments/${att.id}-${safeName}`,
-                bytes: Stream.unwrap(blobs.get(att.blob_key as BlobKey)),
+                bytes: Stream.unwrap(blobs.get(BlobKey.make(att.blob_key))),
               };
             }),
           );
@@ -404,7 +421,10 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
           ).pipe(
             Stream.flattenIterable,
             Stream.map((doc) => {
-              const number = doc.number?.replace(/[^\p{L}\p{N}._-]+/gu, "-") ?? "draft";
+              const number =
+                doc.number === null
+                  ? "draft"
+                  : Str.replace(UNSAFE_DOCUMENT_NUMBER_CHARACTERS, "-")(doc.number);
               const pdf = exportJob.documentPdf(workspaceId, exportId, doc.id);
               return {
                 name: `pdfs/${number}-${doc.id}.pdf`,
@@ -458,95 +478,98 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
 
   // 4. MemberInvitation
   const memberInvitationLayer = MemberInvitationWorkflow.toLayer(
-    ({ workspaceId, invitationId, epoch }) =>
-      Effect.gen(function* () {
-        const sent = yield* Activity.make({
-          name: "send",
-          success: Schema.Struct({
-            sent: Schema.Boolean,
-            sleepMillis: Schema.Int,
-          }),
-          execute: Effect.gen(function* () {
-            const nowMs = yield* Clock.currentTimeMillis;
-            const nowIso = new Date(nowMs).toISOString();
-            const pending = yield* invitationJob.getPending(workspaceId, invitationId, nowIso);
-            if (pending === null) {
-              // An invitation can expire while a send is waiting for recovery.
-              yield* invitationJob.expirePending(workspaceId, invitationId, nowIso);
-              return { sent: false, sleepMillis: 0 };
-            }
-            if (pending.sendEpoch !== epoch) {
-              return { sent: false, sleepMillis: 0 };
-            }
+    Effect.fn("handleMemberInvitation")(function* ({ workspaceId, invitationId, epoch }) {
+      const sent = yield* Activity.make({
+        name: "send",
+        success: Schema.Struct({
+          sent: Schema.Boolean,
+          sleepMillis: Schema.Int,
+        }),
+        execute: Effect.gen(function* () {
+          const nowMs = yield* Clock.currentTimeMillis;
+          const nowIso = DateTime.formatIso(DateTime.makeUnsafe(nowMs));
+          const pending = yield* invitationJob.getPending(workspaceId, invitationId, nowIso);
+          if (pending === null) {
+            // An invitation can expire while a send is waiting for recovery.
+            yield* invitationJob.expirePending(workspaceId, invitationId, nowIso);
+            return { sent: false, sleepMillis: 0 };
+          }
+          if (pending.sendEpoch !== epoch) {
+            return { sent: false, sleepMillis: 0 };
+          }
 
-            const workspacesRepo = yield* WorkspacesRepo;
-            const users = yield* UserDirectory;
-            const tokens = yield* InvitationTokens;
-            const emailSender = yield* EmailSender;
+          const workspacesRepo = yield* WorkspacesRepo;
+          const users = yield* UserDirectory;
+          const tokens = yield* InvitationTokens;
+          const emailSender = yield* EmailSender;
 
-            const ws = yield* workspacesRepo.getWorkspace(workspaceId);
-            const inviterList = yield* users.lookup([pending.invitedBy]);
-            const inviterName = inviterList[0]?.name ?? ws.issuingEntity.name;
-            const rawToken = yield* tokens.token(invitationId, epoch);
-            const inviteUrl = `${normalizedOrigin}/invite/${rawToken}`;
+          const ws = yield* workspacesRepo.getWorkspace(workspaceId);
+          const inviterList = yield* users.lookup([pending.invitedBy]);
+          const inviterName = inviterList[0]?.name ?? ws.issuingEntity.name;
+          const rawToken = yield* tokens.token(invitationId, epoch);
+          const inviteUrl = `${normalizedOrigin}/invite/${rawToken}`;
 
-            const expiresMs = Date.parse(pending.expiresAt);
-            const remainingMs = Math.max(0, expiresMs - nowMs);
-            const validForDays = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
-            const expiresOn = pending.expiresAt.slice(0, 10) as IsoDate;
+          const expiresMs = Date.parse(pending.expiresAt);
+          const remainingMs = Math.max(0, expiresMs - nowMs);
+          const validForDays = Math.max(1, Math.ceil(remainingMs / (24 * 60 * 60 * 1000)));
+          const expiresOn = IsoDate.make(Str.slice(0, 10)(pending.expiresAt));
 
-            const rendered = renderEmail(
-              {
-                id: "E04",
-                workspace: { name: ws.issuingEntity.name },
-                inviterName,
-                inviteeEmail: pending.email,
-                role: pending.role,
-                url: inviteUrl,
-                validForDays,
-                expiresOn,
+          const rendered = renderEmail(
+            {
+              id: "E04",
+              workspace: { name: ws.issuingEntity.name },
+              inviterName,
+              inviteeEmail: pending.email,
+              role: pending.role,
+              url: inviteUrl,
+              validForDays,
+              expiresOn,
+            },
+            ws.defaults.language,
+          );
+
+          yield* emailSender.send(
+            {
+              to: [pending.email],
+              replyTo: ws.issuingEntity.email ?? "",
+              subject: rendered.subject,
+              html: rendered.html,
+              text: rendered.text,
+              attachments: [],
+              tags: {
+                template: "E04",
+                workspaceId,
+                invitationId,
+                epoch: String(epoch),
               },
-              ws.defaults.language,
-            );
+            },
+            { idempotencyKey: `${invitationId}:${epoch}` },
+          );
 
-            yield* emailSender.send(
-              {
-                to: [pending.email],
-                replyTo: ws.issuingEntity.email ?? "",
-                subject: rendered.subject,
-                html: rendered.html,
-                text: rendered.text,
-                attachments: [],
-                tags: {
-                  template: "E04",
-                  workspaceId,
-                  invitationId,
-                  epoch: String(epoch),
-                },
-              },
-              { idempotencyKey: `${invitationId}:${epoch}` },
-            );
+          return { sent: true, sleepMillis: Math.round(remainingMs) };
+        }).pipe(Effect.orDie),
+      });
 
-            return { sent: true, sleepMillis: Math.round(remainingMs) };
-          }).pipe(Effect.orDie),
-        });
+      if (!sent.sent) {
+        return "skipped" as const;
+      }
 
-        if (!sent.sent) {
-          return "skipped" as const;
-        }
+      const sleepDuration = options.invitationExpiryDuration ?? Duration.millis(sent.sleepMillis);
+      yield* DurableClock.sleep({ name: "expiry", duration: sleepDuration });
 
-        const sleepDuration = options.invitationExpiryDuration ?? Duration.millis(sent.sleepMillis);
-        yield* DurableClock.sleep({ name: "expiry", duration: sleepDuration });
+      yield* Activity.make({
+        name: "expire",
+        execute: Effect.flatMap(Clock.currentTimeMillis, (ms) =>
+          invitationJob.expirePending(
+            workspaceId,
+            invitationId,
+            DateTime.formatIso(DateTime.makeUnsafe(ms)),
+          ),
+        ).pipe(Effect.asVoid, Effect.orDie),
+      });
 
-        yield* Activity.make({
-          name: "expire",
-          execute: Effect.flatMap(Clock.currentTimeMillis, (ms) =>
-            invitationJob.expirePending(workspaceId, invitationId, new Date(ms).toISOString()),
-          ).pipe(Effect.asVoid, Effect.orDie),
-        });
-
-        return "sent_and_checked" as const;
-      }),
+      return "sent_and_checked" as const;
+    }),
   );
 
   return Layer.mergeAll(

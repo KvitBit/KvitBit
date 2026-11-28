@@ -1,114 +1,102 @@
-import {
-  Children,
-  cloneElement,
-  createElement,
-  isValidElement,
-  type JSXElementConstructor,
-  type ReactElement,
-  type ReactNode,
-} from "react";
+import * as Arr from "effect/Array";
+import * as Schema from "effect/Schema";
+import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { type StyleProp, StyleSheet, type ViewStyle } from "react-native";
 
-export type HostProps = Readonly<Record<string, unknown>> & {
-  readonly children?: ReactNode;
+export interface HostProps {
+  readonly children?: React.ReactNode;
+  readonly testID?: string;
+  readonly disabled?: boolean;
+  readonly editable?: boolean;
+  readonly value?: string;
+}
+
+type WrapElement = (component: React.ReactElement) => React.ReactElement;
+
+const keepElement: WrapElement = (node) => node;
+
+const Probe = ({ capture }: { readonly capture: () => void }) => {
+  capture();
+  return null;
 };
 
-/**
- * The element tree a component returns for `props`. The component runs
- * inside a throwaway server render, so its hooks work (effects don't run),
- * and the tree isn't rendered further: with the preload's host components
- * standing in as names, a test reads it as returned. `within` places the
- * component under providers, such as a context it reads.
- */
-export const elementTree = <Props>(
-  component: (props: Props) => ReactNode,
+/** Runs a single function component with its providers, without rendering its returned tree. */
+const elementTree = <Props>(
+  component: (props: Props) => React.ReactNode,
   props: Props,
-  within: (component: ReactElement) => ReactElement = (node) => node,
-): ReactNode => {
-  let tree: ReactNode = null;
-  // biome-ignore lint/correctness/noComponentHookFactories: a probe that captures one render
-  const Probe = () => {
+  within: WrapElement,
+): React.ReactNode => {
+  let tree: React.ReactNode = null;
+  const capture = () => {
     tree = component(props);
-    return null;
   };
-  renderToStaticMarkup(within(createElement(Probe)));
+  renderToStaticMarkup(within(React.createElement(Probe, { capture })));
   return tree;
 };
 
-/**
- * `node` with every function component replaced by the tree it returns, so
- * a test reads a composite's host elements down to its leaves. Each
- * component runs as in `elementTree`, a `forwardRef` component included. A
- * class component, such as a native player, stays a leaf: it can't be called
- * as a function. `within` places every component under providers, as in
- * `elementTree`.
- */
+const isForwardRef = Schema.is(Schema.Struct({ render: Schema.instanceOf(globalThis.Function) }));
+
+/** Resolves function components and forward refs to their host elements. */
 export const hostTree = (
-  node: ReactNode,
-  within: (component: ReactElement) => ReactElement = (inner) => inner,
-): ReactNode => {
-  if (!isValidElement<HostProps>(node)) return node;
-  const descend = (child: ReactNode) => hostTree(child, within);
-  if (typeof node.type === "function" && !isClassComponent(node.type)) {
-    return descend(elementTree(node.type as (props: HostProps) => ReactNode, node.props, within));
+  ...[node, within = keepElement]: [node: React.ReactNode, within?: WrapElement]
+): React.ReactNode => {
+  if (!React.isValidElement<HostProps>(node)) return node;
+  const descend = (child: React.ReactNode) => hostTree(child, within);
+  const type = node.type;
+  if (type instanceof globalThis.Function && !(type.prototype instanceof React.Component)) {
+    return descend(
+      elementTree(
+        (props: HostProps): React.ReactNode => Reflect.apply(type, undefined, [props]),
+        node.props,
+        within,
+      ),
+    );
   }
-  const forwarded = forwardRefRender(node.type);
-  if (forwarded) {
-    return descend(elementTree((props: HostProps) => forwarded(props, null), node.props, within));
+  if (isForwardRef(type)) {
+    const { render } = type;
+    return descend(
+      elementTree(
+        (props: HostProps): React.ReactNode => Reflect.apply(render, undefined, [props, null]),
+        node.props,
+        within,
+      ),
+    );
   }
   return node.props.children === undefined
     ? node
-    : cloneElement(node, undefined, ...(Children.map(node.props.children, descend) ?? []));
+    : React.cloneElement(
+        node,
+        undefined,
+        ...(React.Children.map(node.props.children, descend) ?? []),
+      );
 };
 
-// A `forwardRef` component, such as a Lucide icon, is an object holding its
-// render function.
-const forwardRefRender = (
-  type: unknown,
-): ((props: HostProps, ref: null) => ReactNode) | undefined =>
-  typeof type === "object" && type !== null && "render" in type && typeof type.render === "function"
-    ? (type.render as (props: HostProps, ref: null) => ReactNode)
-    : undefined;
-
-const isClassComponent = (type: JSXElementConstructor<never>): boolean =>
-  (type.prototype as { isReactComponent?: unknown } | undefined)?.isReactComponent !== undefined;
-
-/** A host element's text: its string and number children, joined. */
-export const textOf = (element: ReactElement<HostProps>): string =>
-  Children.toArray(element.props.children)
-    .filter((child) => typeof child === "string" || typeof child === "number")
-    .join("");
-
-/**
- * Every element of `type` in an element tree, in document order: a host
- * element by its name, or a component's element by the component.
- */
+/** Finds every matching host or component element in document order. */
 export const findAll = <Props = HostProps>(
-  node: ReactNode,
-  type: string | JSXElementConstructor<Props>,
-): ReadonlyArray<ReactElement<Props>> => {
-  if (!isValidElement<HostProps>(node)) return [];
-  const nested = Children.toArray(node.props.children).flatMap((child) => findAll(child, type));
-  return node.type === type ? [node as unknown as ReactElement<Props>, ...nested] : nested;
+  ...[node, type]: [node: React.ReactNode, type: string | React.JSXElementConstructor<Props>]
+): ReadonlyArray<React.ReactElement<Props>> => {
+  if (!React.isValidElement<HostProps>(node)) return [];
+  const nested = Arr.flatMap(React.Children.toArray(node.props.children), (child) =>
+    findAll(child, type),
+  );
+  return node.type === type && React.isValidElement<Props>(node) ? [node, ...nested] : nested;
 };
 
-/** The first element of `type` in an element tree. */
 export const find = <Props = HostProps>(
-  node: ReactNode,
-  type: string | JSXElementConstructor<Props>,
-): ReactElement<Props> | undefined => findAll(node, type)[0];
+  ...args: [node: React.ReactNode, type: string | React.JSXElementConstructor<Props>]
+): React.ReactElement<Props> | undefined => findAll(...args)[0];
 
-/** An element's `style` prop merged as React Native merges it, for asserting on. */
-export const flatStyle = (style: unknown): Readonly<Record<string, unknown>> =>
-  ({ ...StyleSheet.flatten(style as StyleProp<ViewStyle>) }) as Readonly<Record<string, unknown>>;
+const isText = Schema.is(Schema.Union([Schema.String, Schema.Finite]));
 
-/** Every string and number in a host tree, depth first, joined with spaces. */
-export const allText = (node: ReactNode): string => {
-  if (typeof node === "string" || typeof node === "number") return String(node);
-  if (!isValidElement<HostProps>(node)) return "";
-  return Children.toArray(node.props.children)
-    .map(allText)
-    .filter((t) => t !== "")
-    .join(" ");
+/** Joins string and number children from the host tree in document order. */
+export const allText = (node: React.ReactNode): string => {
+  if (isText(node)) return String(node);
+  if (!React.isValidElement<HostProps>(node)) return "";
+  return Arr.join(
+    Arr.filter(
+      Arr.map(React.Children.toArray(node.props.children), allText),
+      (text) => text !== "",
+    ),
+    " ",
+  );
 };

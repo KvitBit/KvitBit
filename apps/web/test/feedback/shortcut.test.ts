@@ -4,16 +4,15 @@ import { isFeedbackShortcut } from "../../src/runtime/feedback/shortcut";
 
 const fixture = () => {
   const window = new Window();
-  // Use the emulated DOM at the browser API boundary.
-  const document = window.document as unknown as Document;
-  const keydown = (init: IKeyboardEventInit = {}): KeyboardEvent =>
+  const { document } = window;
+  const keydown = (init: IKeyboardEventInit = {}) =>
     new window.KeyboardEvent("keydown", {
       key: "k",
       bubbles: true,
       composed: true,
       cancelable: true,
       ...init,
-    }) as unknown as KeyboardEvent;
+    });
   return { document, keydown };
 };
 

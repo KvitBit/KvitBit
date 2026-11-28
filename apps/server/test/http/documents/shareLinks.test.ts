@@ -1,18 +1,26 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { strictEqual } from "node:assert/strict";
 import { DocumentFixtures } from "@kvitbit/core/testing";
-import {
-  ContactId,
-  Contacts,
-  CurrentCaller,
-  type MemberCaller,
-  Workspaces,
-} from "@kvitbit/domain/contract";
-import { Effect, Ref, Stream } from "effect";
-import { TestClock } from "effect/testing";
+import { ContactId, Contacts, type MemberCaller, Workspaces } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import * as TestClock from "effect/testing/TestClock";
+
 import { deviceFromUserAgent } from "../../../src/http/groups/publicShare";
 import { captureAnalytics } from "../../analytics-fixture";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
+
+const distinctIdPattern = /^[a-f\d-]{36}$/;
+
+const decodeShareLink = Fn.flow(
+  Schema.decodeUnknownEffect(Schema.Struct({ url: Schema.String })),
+  Effect.runSync,
+);
 
 // Minimal valid 1x1 PNG (8-byte signature + IHDR + IDAT + IEND)
 const TINY_PNG = new Uint8Array([
@@ -41,17 +49,16 @@ const issueDoc = async () => {
   const res = await h.fetch(`${docsBase}/issue`, {
     ...init,
     method: "POST",
-    headers: { ...(init.headers as Record<string, string>), ...as.mobile(owner) },
+    headers: { "content-type": "application/json", ...as.mobile(owner) },
   });
-  expect(res.status).toBe(201);
-  return (await res.json()) as { id: string; number: string };
+  strictEqual(res.status, 201);
+  return Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String, number: Schema.String }))(
+    await res.json(),
+  ).pipe(Effect.runSync);
 };
 
-const tokenFromUrl = (url: string) => {
-  const token = url.split("/").pop();
-  expect(token).toBeTruthy();
-  return token as string;
-};
+const tokenFromUrl = (url: string) =>
+  Schema.decodeUnknownEffect(Schema.NonEmptyString)(Str.split(url, "/").pop()).pipe(Effect.runSync);
 
 describe("deviceFromUserAgent", () => {
   test("classifies tablet, mobile, desktop, and unknown user agents", () => {
@@ -101,15 +108,15 @@ describe("shareLinks and publicShare groups", () => {
     docsBase = `/api/v1/workspaces/${member.workspaceId}/documents`;
     const contact = await h.run(
       Effect.flatMap(Contacts, (c) =>
-        c.save({
+        c.save(member, {
           name: "Klient s.r.o.",
           ico: "25596641",
           address: { city: "Praha", country: "CZ" },
           roles: ["customer"],
         }),
-      ).pipe(Effect.provideService(CurrentCaller, member)),
+      ),
     );
-    contactId = ContactId.make(contact.id as string);
+    contactId = Schema.decodeUnknownEffect(ContactId)(contact["id"]).pipe(Effect.runSync);
   });
 
   afterEach(async () => {
@@ -121,7 +128,9 @@ describe("shareLinks and publicShare groups", () => {
       method: "POST",
       headers: { "content-type": "application/json", ...as.mobile(owner) },
     });
-    const draft = (await draftRes.json()) as { id: string };
+    const draft = Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String }))(
+      await draftRes.json(),
+    ).pipe(Effect.runSync);
 
     const draftLink = await h.fetch(`${docsBase}/${draft.id}/share-link`, {
       method: "PUT",
@@ -135,7 +144,8 @@ describe("shareLinks and publicShare groups", () => {
       headers: as.mobile(owner),
     });
     expect(first.status).toBe(200);
-    const created = (await first.json()) as { url: string };
+    const firstBody = await first.json();
+    const created = decodeShareLink(firstBody);
     expect(created.url).toContain("/s/");
 
     const second = await h.fetch(`${docsBase}/${doc.id}/share-link`, {
@@ -143,7 +153,7 @@ describe("shareLinks and publicShare groups", () => {
       headers: as.mobile(owner),
     });
     expect(second.status).toBe(200);
-    expect(await second.json()).toEqual(created);
+    expect(await second.json()).toEqual(firstBody);
   });
 
   test("publicShare open and pdf record device-classified events, respect viewerIsIssuer, and revoke invalidates", async () => {
@@ -152,7 +162,7 @@ describe("shareLinks and publicShare groups", () => {
       method: "PUT",
       headers: as.mobile(owner),
     });
-    const { url } = (await linkRes.json()) as { url: string };
+    const { url } = decodeShareLink(await linkRes.json());
     const token = tokenFromUrl(url);
 
     // Anonymous mobile visitor opens the share page
@@ -163,10 +173,9 @@ describe("shareLinks and publicShare groups", () => {
       },
     });
     expect(mobileOpen.status).toBe(200);
-    const shared = (await mobileOpen.json()) as {
-      number: string;
-      viewerIsIssuer: boolean;
-    };
+    const shared = Schema.decodeUnknownEffect(
+      Schema.Struct({ number: Schema.String, viewerIsIssuer: Schema.Boolean }),
+    )(await mobileOpen.json()).pipe(Effect.runSync);
     expect(shared.number).toBe(doc.number);
     expect(shared.viewerIsIssuer).toBe(false);
     expect(analytics.capture.mock.calls.slice(1)).toEqual([
@@ -180,7 +189,7 @@ describe("shareLinks and publicShare groups", () => {
       [
         {
           event: "share_link_opened",
-          distinctId: expect.stringMatching(/^[a-f\d-]{36}$/),
+          distinctId: expect.stringMatching(distinctIdPattern),
           options: { process_person_profile: false },
         },
       ],
@@ -210,18 +219,24 @@ describe("shareLinks and publicShare groups", () => {
       },
     });
     expect(issuerOpen.status).toBe(200);
-    expect(((await issuerOpen.json()) as { viewerIsIssuer: boolean }).viewerIsIssuer).toBe(true);
+    expect(
+      Schema.decodeUnknownEffect(Schema.Struct({ viewerIsIssuer: Schema.Boolean }))(
+        await issuerOpen.json(),
+      ).pipe(Effect.runSync).viewerIsIssuer,
+    ).toBe(true);
 
     // Member lists share views with paging
     const viewsRes = await h.fetch(`${docsBase}/${doc.id}/share-link/views?limit=10`, {
       headers: as.mobile(owner),
     });
     expect(viewsRes.status).toBe(200);
-    const page = (await viewsRes.json()) as {
-      items: Array<{ kind: string; device: string }>;
-    };
+    const page = Schema.decodeUnknownEffect(
+      Schema.Struct({
+        items: Schema.Array(Schema.Struct({ kind: Schema.String, device: Schema.String })),
+      }),
+    )(await viewsRes.json()).pipe(Effect.runSync);
     expect(page.items).toHaveLength(2);
-    expect(page.items.map((e) => ({ kind: e.kind, device: e.device }))).toEqual([
+    expect(Arr.map(page.items, (e) => ({ kind: e.kind, device: e.device }))).toEqual([
       { kind: "download", device: "desktop" },
       { kind: "view", device: "mobile" },
     ]);
@@ -242,12 +257,14 @@ describe("shareLinks and publicShare groups", () => {
 
   test("publicShare logo returns 404 when absent and serves image with ETag and cache headers when set", async () => {
     const doc = await issueDoc();
-    const { url } = (await (
-      await h.fetch(`${docsBase}/${doc.id}/share-link`, {
-        method: "PUT",
-        headers: as.mobile(owner),
-      })
-    ).json()) as { url: string };
+    const { url } = decodeShareLink(
+      await (
+        await h.fetch(`${docsBase}/${doc.id}/share-link`, {
+          method: "PUT",
+          headers: as.mobile(owner),
+        })
+      ).json(),
+    );
     const token = tokenFromUrl(url);
 
     const missing = await h.fetch(`/api/v1/share/${token}/logo`);
@@ -256,11 +273,11 @@ describe("shareLinks and publicShare groups", () => {
     // Upload a logo via Workspaces.setBrandingImage
     await h.run(
       Effect.flatMap(Workspaces, (w) =>
-        w.setBrandingImage("logo", {
+        w.setBrandingImage(member, "logo", {
           contentType: "image/png",
           bytes: Stream.make(TINY_PNG),
         }),
-      ).pipe(Effect.provideService(CurrentCaller, member)),
+      ),
     );
 
     const logoRes = await h.fetch(`/api/v1/share/${token}/logo`);
@@ -269,7 +286,7 @@ describe("shareLinks and publicShare groups", () => {
     expect(logoRes.headers.get("x-content-type-options")).toBe("nosniff");
     expect(logoRes.headers.get("cache-control")).toBe("private, max-age=300");
     expect(logoRes.headers.get("content-length")).toBe(String(TINY_PNG.byteLength));
-    const expectedEtag = `"${createHash("sha256").update(TINY_PNG).digest("hex")}"`;
+    const expectedEtag = `"${Bun.CryptoHasher.hash("sha256", TINY_PNG, "hex")}"`;
     expect(logoRes.headers.get("etag")).toBe(expectedEtag);
     expect(new Uint8Array(await logoRes.arrayBuffer())).toEqual(TINY_PNG);
   });

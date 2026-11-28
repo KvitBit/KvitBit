@@ -1,9 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { Html, HtmlServer } from "@effect/ui/html";
-import { type DocumentView, LineView, StatutoryNote } from "@kvitbit/domain";
+import { CurrencyCode, type DocumentView, IsoDate, LineView, StatutoryNote } from "@kvitbit/domain";
 import { ViewModels } from "@kvitbit/ui-port";
-import { BigDecimal, Effect, Fiber, Result, Schema } from "effect";
-import { TestClock } from "effect/testing";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
+
 import { RunApi } from "../../src/app/commands";
 import * as Editor from "../../src/page/documents/editor";
 import { ContactOptionData } from "../../src/page/documents/shared";
@@ -17,21 +23,26 @@ import {
   sessionWithRole,
 } from "./fixtures";
 
-const sampleContact = Schema.decodeUnknownSync(ContactOptionData)({
-  id: "0193a000-0000-7000-8000-000000000201",
-  roles: ["customer"],
-  name: "Alza.cz a.s.",
-  ico: "27082440",
-  dic: "CZ27082440",
-  legalForm: "a.s.",
-  address: { street: "Jankovcova 53", city: "Praha 7", postalCode: "170 00", country: "CZ" },
-  billingEmails: ["fakturace@alza.example.cz"],
-  phone: null,
-  note: null,
-  defaults: { dueDays: 21, currency: "EUR", language: "en", paymentMethod: "bank_transfer" },
-  archived: false,
-  revision: 1,
-});
+const requestKeyPattern = /^[0-9a-f-]{36}$/;
+const disabledIssueButtonPattern = /<button[^>]*disabled[^>]*>Issue document<\/button>/;
+
+const sampleContact = Effect.runSync(
+  Schema.decodeEffect(ContactOptionData)({
+    id: "0193a000-0000-7000-8000-000000000201",
+    roles: ["customer"],
+    name: "Alza.cz a.s.",
+    ico: "27082440",
+    dic: "CZ27082440",
+    legalForm: "a.s.",
+    address: { street: "Jankovcova 53", city: "Praha 7", postalCode: "170 00", country: "CZ" },
+    billingEmails: ["fakturace@alza.example.cz"],
+    phone: null,
+    note: null,
+    defaults: { dueDays: 21, currency: "EUR", language: "en", paymentMethod: "bank_transfer" },
+    archived: false,
+    revision: 1,
+  }),
+);
 
 const newInvoiceRoute: Editor.Route = { _tag: "DocumentNew", ws: WS, kind: "invoice" };
 const editRoute: Editor.Route = { _tag: "DocumentEdit", ws: WS, id: DOC_ID };
@@ -41,28 +52,30 @@ const draft: DocumentView = {
   number: null,
   status: "draft",
   lines: [
-    Schema.decodeUnknownSync(LineView)({
-      id: "0193a000-0000-7000-8000-000000000651",
-      item: null,
-      description: "Saved line",
-      quantity: "1",
-      unit: "ks",
-      unitPrice: "12000",
-      treatment: "standard",
-      ratePercent: "21",
-      amount: "12000",
-      deducts: null,
-    }),
+    Effect.runSync(
+      Schema.decodeEffect(LineView)({
+        id: "0193a000-0000-7000-8000-000000000651",
+        item: null,
+        description: "Saved line",
+        quantity: "1",
+        unit: "ks",
+        unitPrice: "12000",
+        treatment: "standard",
+        ratePercent: "21",
+        amount: "12000",
+        deducts: null,
+      }),
+    ),
   ],
 };
 
 const preparedEditor = (
   doc: DocumentView | null,
-  ctx = ctxFor(doc === null ? newInvoiceRoute : editRoute),
+  ctx = ctxFor({ route: doc === null ? newInvoiceRoute : editRoute }),
 ) => {
   const route = doc === null ? newInvoiceRoute : editRoute;
-  const update = (model: Editor.Model, message: Editor.Message) =>
-    Editor.update(model, message, ctx);
+  const update = (current: Editor.Model, message: Editor.Message) =>
+    Editor.update(current, message, ctx);
   const initial = Editor.init(route, ctx).model;
   const loaded = update(
     initial,
@@ -83,11 +96,11 @@ const preparedEditor = (
     doc === null
       ? update(loaded.model, Editor.Message.SelectedContact({ contactId: sampleContact.id })).model
       : loaded.model;
-  const describeLine = (model: Editor.Model, value: string) =>
+  const describeLine = (current: Editor.Model, value: string) =>
     update(
-      model,
+      current,
       Editor.Message.UpdatedLineField({
-        key: model.lines[0]?.key ?? "l1",
+        key: current.lines[0]?.key ?? "l1",
         field: "description",
         value,
       }),
@@ -103,15 +116,15 @@ const renderEditor = (model: Editor.Model, ctx: ReturnType<typeof ctxFor>) => {
   }).make({
     init: () => model,
     update: ($) => $.model,
-    view: (h, model) => Editor.view(model, ctx, h),
+    view: (h, current) => Editor.view(current, ctx, h),
   });
   return Effect.runPromise(HtmlServer.renderToHtml(component, {}));
 };
 
 describe("DocumentEditor page (Screen 10)", () => {
   test("init loads lookups and starts with one line", () => {
-    const ctxCs = ctxFor(newInvoiceRoute, { locale: "cs" });
-    const ctxEn = ctxFor(newInvoiceRoute, { locale: "en" });
+    const ctxCs = ctxFor({ route: newInvoiceRoute, locale: "cs" });
+    const ctxEn = ctxFor({ route: newInvoiceRoute, locale: "en" });
     const res = Editor.init(newInvoiceRoute, ctxCs);
     expect(res.model.lookups._tag).toBe("Loading");
     expect(res.model.lines.length).toBe(1);
@@ -120,7 +133,7 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("line items add, update, move, and remove cleanly", () => {
-    const ctx = ctxFor(newInvoiceRoute);
+    const ctx = ctxFor({ route: newInvoiceRoute });
     const { model } = Editor.init(newInvoiceRoute, ctx);
     const s1 = Editor.update(
       model,
@@ -148,7 +161,7 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("ARES quick-add selects returned contact and stale lookup seq is dropped", () => {
-    const ctx = ctxFor(newInvoiceRoute);
+    const ctx = ctxFor({ route: newInvoiceRoute });
     const { model } = Editor.init(newInvoiceRoute, ctx);
     const stale = Editor.update(
       model,
@@ -197,7 +210,7 @@ describe("DocumentEditor page (Screen 10)", () => {
   });
 
   test("validation rejects missing contact before submitting", () => {
-    const ctx = ctxFor(newInvoiceRoute, { locale: "en" });
+    const ctx = ctxFor({ route: newInvoiceRoute, locale: "en" });
     const { model } = Editor.init(newInvoiceRoute, ctx);
     const res = Editor.update(model, Editor.Message.ClickedSaveDraft(), ctx);
     expect(res.model.submitError).toContain("customer");
@@ -213,8 +226,8 @@ describe("DocumentEditor page (Screen 10)", () => {
           treatment: "standard",
         },
       ],
-      currency: "EUR" as never,
-      taxPoint: "2026-11-24" as never,
+      currency: CurrencyCode.make("EUR"),
+      taxPoint: IsoDate.make("2026-11-24"),
       pricesIncludeVat: false,
       fx: { rate: BigDecimal.fromBigInt(25n), quantity: 1 },
       paymentRounding: "none",
@@ -223,15 +236,13 @@ describe("DocumentEditor page (Screen 10)", () => {
       kind: "invoice",
     });
     expect(Result.isSuccess(calc)).toBe(true);
-    if (Result.isSuccess(calc)) {
-      expect(BigDecimal.format(calc.success.breakdown.net.amount)).toBe("2000");
-      expect(BigDecimal.format(calc.success.breakdown.vat.amount)).toBe("420");
-      expect(BigDecimal.format(calc.success.breakdown.gross.amount)).toBe("2420");
-      expect(calc.success.breakdown.vatCzk).not.toBeNull();
-      if (calc.success.breakdown.vatCzk !== null) {
-        expect(BigDecimal.format(calc.success.breakdown.vatCzk.amount)).toBe("10500");
-      }
-    }
+    if (Result.isFailure(calc)) throw new Error("Expected invoice totals");
+    expect(calc.success.breakdown.net.amount.pipe(BigDecimal.format)).toBe("2000");
+    expect(calc.success.breakdown.vat.amount.pipe(BigDecimal.format)).toBe("420");
+    expect(calc.success.breakdown.gross.amount.pipe(BigDecimal.format)).toBe("2420");
+    expect(calc.success.breakdown.vatCzk).not.toBeNull();
+    if (calc.success.breakdown.vatCzk === null) throw new Error("Expected VAT in CZK");
+    expect(calc.success.breakdown.vatCzk.amount.pipe(BigDecimal.format)).toBe("10500");
   });
 
   test("issues edited draft content at the revision returned by PATCH and replays only issue after a lost reply", async () => {
@@ -264,13 +275,13 @@ describe("DocumentEditor page (Screen 10)", () => {
     expect(
       update(save.model, Editor.Message.AutosaveDue({ seq: save.model.previewSeq })).commands,
     ).toBeUndefined();
-    const mint = update(save.model, await runCommand(save.commands, fetch));
-    const issue = update(mint.model, await runCommand(mint.commands));
-    const failed = update(issue.model, await runCommand(issue.commands, fetch));
+    const mint = update(save.model, await runCommand({ commands: save.commands, fetch }));
+    const issue = update(mint.model, await runCommand({ commands: mint.commands }));
+    const failed = update(issue.model, await runCommand({ commands: issue.commands, fetch }));
     const retry = update(failed.model, Editor.Message.ClickedIssue());
-    const done = update(retry.model, await runCommand(retry.commands, fetch));
+    const done = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
 
-    expect(requests.map(({ method, revision }) => [method, revision])).toEqual([
+    expect(Arr.map(requests, ({ method, revision }) => [method, revision])).toEqual([
       ["PATCH", '"3"'],
       ["POST", '"11"'],
       ["POST", '"11"'],
@@ -287,14 +298,17 @@ describe("DocumentEditor page (Screen 10)", () => {
       ],
     });
     expect(requests[1]?.path).toEndWith(`/${DOC_ID}/issue`);
-    expect(requests[1]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[1]?.key).toMatch(requestKeyPattern);
     expect(requests[2]).toEqual(requests[1]);
     expect(done.model.savedDoc?.status).toBe("issued");
     expect(done.outMessage?._tag).toBe("Navigate");
   });
 
   test("keeps the persisted symbol visible and blocks autosave and issue after it is cleared", async () => {
-    const { update, model, ctx } = preparedEditor(draft, ctxFor(editRoute, { locale: "en" }));
+    const { update, model, ctx } = preparedEditor(
+      draft,
+      ctxFor({ route: editRoute, locale: "en" }),
+    );
     const requests: Array<{ method: string; revision: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -309,7 +323,7 @@ describe("DocumentEditor page (Screen 10)", () => {
       edited.model,
       Editor.Message.AutosaveDue({ seq: edited.model.previewSeq }),
     );
-    const saved = update(saving.model, await runCommand(saving.commands, fetch));
+    const saved = update(saving.model, await runCommand({ commands: saving.commands, fetch }));
     expect(requests).toEqual([
       { method: "PATCH", revision: '"3"', body: { variableSymbol: "777" } },
     ]);
@@ -321,13 +335,16 @@ describe("DocumentEditor page (Screen 10)", () => {
     expect(update(cleared.model, Editor.Message.ClickedIssue()).commands).toBeUndefined();
     const rendered = await renderEditor(cleared.model, ctx);
     expect(rendered.html).toContain("777");
-    expect(rendered.html).toMatch(/<button[^>]*disabled[^>]*>Issue document<\/button>/);
+    expect(rendered.html).toMatch(disabledIssueButtonPattern);
 
     const replaced = update(cleared.model, Editor.Message.ChangedVariableSymbol({ value: "888" }));
     const savingForIssue = update(replaced.model, Editor.Message.ClickedIssue());
-    const minting = update(savingForIssue.model, await runCommand(savingForIssue.commands, fetch));
-    const issuing = update(minting.model, await runCommand(minting.commands));
-    await runCommand(issuing.commands, fetch);
+    const minting = update(
+      savingForIssue.model,
+      await runCommand({ commands: savingForIssue.commands, fetch }),
+    );
+    const issuing = update(minting.model, await runCommand({ commands: minting.commands }));
+    await runCommand({ commands: issuing.commands, fetch });
     expect(requests.slice(1)).toEqual([
       { method: "PATCH", revision: '"4"', body: { variableSymbol: "888" } },
       { method: "POST", revision: '"5"', body: {} },
@@ -338,7 +355,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const { model, update, describeLine } = preparedEditor(null);
     const edited = describeLine(model, "New invoice line");
     const mint = update(edited.model, Editor.Message.ClickedIssue());
-    const issue = update(mint.model, await runCommand(mint.commands));
+    const issue = update(mint.model, await runCommand({ commands: mint.commands }));
     const requests: Array<{ path: string; key: string | null; body: unknown }> = [];
     const fetch = async (request: Request) => {
       requests.push({
@@ -349,12 +366,12 @@ describe("DocumentEditor page (Screen 10)", () => {
       if (requests.length === 1) throw new TypeError("lost reply");
       return jsonDocument({ ...draft, status: "issued", revision: 7 }, 201);
     };
-    const failed = update(issue.model, await runCommand(issue.commands, fetch));
+    const failed = update(issue.model, await runCommand({ commands: issue.commands, fetch }));
     expect(update(failed.model, Editor.Message.ClickedSaveDraft()).commands).toBeUndefined();
     const retry = update(failed.model, Editor.Message.ClickedIssue());
-    const done = update(retry.model, await runCommand(retry.commands, fetch));
+    const done = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
     expect(requests[0]?.path).toEndWith("/documents/issue");
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toMatchObject({
       input: { lines: [{ description: "New invoice line" }] },
     });
@@ -381,7 +398,7 @@ describe("DocumentEditor page (Screen 10)", () => {
         expect(saveFiber.pollUnsafe()).toBeUndefined();
         yield* TestClock.adjust(1);
         return [preview, yield* Fiber.join(saveFiber)] as const;
-      }).pipe(Effect.provide(TestClock.layer()), Effect.provide(RunApi.layer)),
+      }).pipe(Effect.provide([TestClock.layer(), RunApi.layer])),
     );
     expect(
       update(edited.model, Editor.Message.DebouncedPreview({ seq: first.model.previewSeq }))
@@ -395,14 +412,19 @@ describe("DocumentEditor page (Screen 10)", () => {
     const canonical = {
       ...draft,
       statutoryNotes: [
-        Schema.decodeUnknownSync(StatutoryNote)({ code: "test", text: "Authoritative tax note" }),
+        Effect.runSync(
+          Schema.decodeEffect(StatutoryNote)({ code: "test", text: "Authoritative tax note" }),
+        ),
       ],
       paymentQr: { format: "spayd" as const, payload: "SPD*1.0*AM:14520*CC:CZK" },
     };
-    const reply = await runCommand(preview.commands, async (request) => {
-      expect(new URL(request.url).pathname).toEndWith("/documents/preview");
-      expect(await request.json()).toMatchObject({ lines: [{ description: "Latest" }] });
-      return jsonDocument(canonical);
+    const reply = await runCommand({
+      commands: preview.commands,
+      fetch: async (request) => {
+        expect(new URL(request.url).pathname).toEndWith("/documents/preview");
+        expect(await request.json()).toMatchObject({ lines: [{ description: "Latest" }] });
+        return jsonDocument(canonical);
+      },
     });
     const newer = describeLine(preview.model, "Newer");
     expect(update(newer.model, reply).model.serverPreview._tag).toBe("Idle");
@@ -418,7 +440,7 @@ describe("DocumentEditor page (Screen 10)", () => {
     const { update, model, describeLine } = preparedEditor(null);
     const first = describeLine(model, "First version");
     const mint = update(first.model, Editor.Message.AutosaveDue({ seq: first.model.previewSeq }));
-    const create = update(mint.model, await runCommand(mint.commands));
+    const create = update(mint.model, await runCommand({ commands: mint.commands }));
     const second = describeLine(create.model, "Second version");
     const ready = update(
       second.model,
@@ -444,12 +466,12 @@ describe("DocumentEditor page (Screen 10)", () => {
       if (request.method === "POST") return jsonDocument({ ...draft, revision: 19 }, 201);
       return jsonDocument({ ...draft, revision: 20 });
     };
-    const failed = update(ready.model, await runCommand(create.commands, fetch));
+    const failed = update(ready.model, await runCommand({ commands: create.commands, fetch }));
     const retry = update(failed.model, Editor.Message.ClickedRetryAutosave());
-    const patch = update(retry.model, await runCommand(retry.commands, fetch));
-    const saved = update(patch.model, await runCommand(patch.commands, fetch));
+    const patch = update(retry.model, await runCommand({ commands: retry.commands, fetch }));
+    const saved = update(patch.model, await runCommand({ commands: patch.commands, fetch }));
 
-    expect(requests[0]?.key).toMatch(/^[0-9a-f-]{36}$/);
+    expect(requests[0]?.key).toMatch(requestKeyPattern);
     expect(requests[0]?.body).toMatchObject({ lines: [{ description: "First version" }] });
     expect(requests[1]).toEqual(requests[0]);
     expect(requests[2]).toMatchObject({
@@ -468,9 +490,11 @@ describe("DocumentEditor page (Screen 10)", () => {
     const save = update(edited.model, Editor.Message.ClickedIssue());
     const conflict = update(
       save.model,
-      await runCommand(save.commands, () =>
-        Response.json({ _tag: "PreconditionFailed", currentRevision: 23 }, { status: 412 }),
-      ),
+      await runCommand({
+        commands: save.commands,
+        fetch: () =>
+          Response.json({ _tag: "PreconditionFailed", currentRevision: 23 }, { status: 412 }),
+      }),
     );
     expect(conflict.model.revisionState).toBe("stale");
     expect(conflict.commands).toBeUndefined();
@@ -479,9 +503,12 @@ describe("DocumentEditor page (Screen 10)", () => {
     const reload = update(conflict.model, Editor.Message.ClickedReloadRevision());
     const reviewed = update(
       reload.model,
-      await runCommand(reload.commands, (request) => {
-        expect(request.method).toBe("GET");
-        return jsonDocument({ ...draft, revision: 23, paymentMethod: "cash" });
+      await runCommand({
+        commands: reload.commands,
+        fetch: (request) => {
+          expect(request.method).toBe("GET");
+          return jsonDocument({ ...draft, revision: 23, paymentMethod: "cash" });
+        },
       }),
     );
     expect(reviewed.model.savedDoc?.revision).toBe(23);
@@ -507,13 +534,16 @@ describe("DocumentEditor page (Screen 10)", () => {
     const requests: Array<{ method: string; revision: string | null; body: unknown }> = [];
     const saved = update(
       explicitSave.model,
-      await runCommand(explicitSave.commands, async (request) => {
-        requests.push({
-          method: request.method,
-          revision: request.headers.get("if-match"),
-          body: await request.json(),
-        });
-        return jsonDocument({ ...issued, revision: 4 });
+      await runCommand({
+        commands: explicitSave.commands,
+        fetch: async (request) => {
+          requests.push({
+            method: request.method,
+            revision: request.headers.get("if-match"),
+            body: await request.json(),
+          });
+          return jsonDocument({ ...issued, revision: 4 });
+        },
       }),
     );
     expect(requests).toEqual([
@@ -537,7 +567,7 @@ describe("DocumentEditor page (Screen 10)", () => {
 
     const readOnly = preparedEditor(
       draft,
-      ctxFor(editRoute, { locale: "en", session: sessionWithRole("accountant") }),
+      ctxFor({ route: editRoute, locale: "en", session: sessionWithRole("accountant") }),
     );
     const rendered = await renderEditor(readOnly.model, readOnly.ctx);
     expect(rendered.html).toContain("This document cannot be edited here.");

@@ -8,26 +8,31 @@
  *      in `src/page/**` outside Command effects, zero raw hex literals in `src/styles/pages/**`).
  */
 import { describe, expect, test } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
 import { Router } from "@effect/ui";
-import type {
+import {
   AttachmentId,
   ContactId,
   DocumentId,
   ExpenseId,
-  Hex,
   IsoDate,
   ShareToken,
   TemplateId,
-  ThemeContrast,
-  ThemeMode,
-  ThemePresetId,
-  ThemeStyle,
+  type ThemeContrast,
+  type ThemeMode,
+  type ThemePresetId,
+  type ThemeStyle,
   WorkspaceSlug,
 } from "@kvitbit/domain";
 import { I18n, Style, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Effect, Layer, Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Path from "effect/Path";
+import * as Rec from "effect/Record";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import * as fc from "fast-check";
 import ts from "typescript";
 import type { Failure } from "../../src/app/api";
@@ -43,27 +48,34 @@ import {
   serializePrefs,
 } from "../../src/app/prefs";
 import * as Remote from "../../src/app/remote";
-import { BrowserRoutes, gate, href, NOT_FOUND, routeFromPath } from "../../src/app/routing";
+import {
+  BrowserRoutes,
+  type Gate,
+  gate,
+  href,
+  NOT_FOUND,
+  routeFromPath,
+} from "../../src/app/routing";
 import type { SessionState } from "../../src/app/session";
 import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES, demoId } from "../../src/demo/shell";
 import { init, Message, type Model, Navigate, update } from "../../src/main";
 
+const { join, relative, resolve } = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
 const WEB_SRC = resolve(import.meta.dirname, "../../src");
 
 const arbSlug = fc
   .stringMatching(/^[a-z][a-z0-9]{2,8}(-[a-z0-9]{1,6})?$/)
-  .map((s) => s as WorkspaceSlug);
+  .map((s) => WorkspaceSlug.make(s));
 
 const arbUuid = fc.integer({ min: 1, max: 10_000 }).map((n) => demoId(n));
-const arbDocId = arbUuid.map((s) => s as DocumentId);
-const arbContactId = arbUuid.map((s) => s as ContactId);
-const arbTemplateId = arbUuid.map((s) => s as TemplateId);
-const arbExpenseId = arbUuid.map((s) => s as ExpenseId);
-const arbAttachmentId = arbUuid.map((s) => s as AttachmentId);
+const arbDocId = arbUuid.map((s) => DocumentId.make(s));
+const arbContactId = arbUuid.map((s) => ContactId.make(s));
+const arbTemplateId = arbUuid.map((s) => TemplateId.make(s));
+const arbExpenseId = arbUuid.map((s) => ExpenseId.make(s));
+const arbAttachmentId = arbUuid.map((s) => AttachmentId.make(s));
 
 const arbSafeToken = fc.stringMatching(/^[a-zA-Z0-9._-]{1,24}$/);
-const arbSafeText = fc.stringMatching(/^[a-zA-Z0-9 _.-]{1,24}$/);
-const arbOptText = fc.option(arbSafeText, { nil: undefined });
+const arbSearchText = fc.stringMatching(/^[a-zA-Z0-9 _.-]{1,24}$/);
 
 const arbIsoDate = fc
   .tuple(
@@ -71,33 +83,19 @@ const arbIsoDate = fc
     fc.integer({ min: 1, max: 12 }),
     fc.integer({ min: 1, max: 28 }),
   )
-  .map(
-    ([y, m, d]) => `${y}-${String(m).padStart(2, "0")}-${String(d).padStart(2, "0")}` as IsoDate,
+  .map(([y, m, d]) =>
+    IsoDate.make(`${y}-${Str.padStart(2, "0")(String(m))}-${Str.padStart(2, "0")(String(d))}`),
   );
 
 const arbPeriod = fc.oneof(
-  fc.integer({ min: 2024, max: 2030 }).map((y) => String(y) as ViewModels.Period),
+  fc.integer({ min: 2024, max: 2030 }).map((y) => String(y)),
   fc
     .tuple(fc.integer({ min: 2024, max: 2030 }), fc.integer({ min: 1, max: 4 }))
-    .map(([y, q]) => `${y}-Q${q}` as ViewModels.Period),
+    .map(([y, q]) => `${y}-Q${q}`),
   fc
     .tuple(fc.integer({ min: 2024, max: 2030 }), fc.integer({ min: 1, max: 12 }))
-    .map(([y, m]) => `${y}-${String(m).padStart(2, "0")}` as ViewModels.Period),
+    .map(([y, m]) => `${y}-${Str.padStart(2, "0")(String(m))}`),
 );
-
-type Compact<T extends Record<string, unknown>> = {
-  readonly [K in keyof T as undefined extends T[K] ? never : K]: T[K];
-} & {
-  readonly [K in keyof T as undefined extends T[K] ? K : never]?: Exclude<T[K], undefined>;
-};
-
-const compact = <T extends Record<string, unknown>>(obj: T): Compact<T> => {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== undefined) out[k] = v;
-  }
-  return out as Compact<T>;
-};
 
 const arbRoute: fc.Arbitrary<Route> = fc.oneof(
   fc.constant<Route>({ _tag: "Landing" }),
@@ -106,10 +104,16 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .map((page): Route => ({ _tag: "Legal", page })),
   fc
     .option(arbSafeToken, { nil: undefined })
-    .map((invitation): Route => compact({ _tag: "SignUp" as const, invitation })),
+    .map(
+      (invitation): Route =>
+        invitation === undefined ? { _tag: "SignUp" } : { _tag: "SignUp", invitation },
+    ),
   fc
     .option(fc.constantFrom("/w/novak-design", "/account/profile", "/"), { nil: undefined })
-    .map((returnTo): Route => compact({ _tag: "SignIn" as const, returnTo })),
+    .map(
+      (returnTo): Route =>
+        returnTo === undefined ? { _tag: "SignIn" } : { _tag: "SignIn", returnTo },
+    ),
   fc
     .constantFrom("jana@example.cz", "user+1@test.org")
     .map((email): Route => ({ _tag: "CheckEmail", email })),
@@ -118,9 +122,12 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .map(([kind, token]): Route => ({ _tag: "AuthLink", kind, token })),
   fc
     .option(arbSafeToken, { nil: undefined })
-    .map((token): Route => compact({ _tag: "ResetPassword" as const, token })),
+    .map(
+      (token): Route =>
+        token === undefined ? { _tag: "ResetPassword" } : { _tag: "ResetPassword", token },
+    ),
   fc.constant<Route>({ _tag: "AndroidDownload" }),
-  arbSafeToken.map((t): Route => ({ _tag: "Share", token: `v1.${t}` as ShareToken })),
+  arbSafeToken.map((t): Route => ({ _tag: "Share", token: ShareToken.make(`v1.${t}`) })),
   arbSafeToken.map((consentId): Route => ({ _tag: "McpConsent", consentId })),
   arbSafeToken.map((token): Route => ({ _tag: "Invitation", token })),
   fc
@@ -128,7 +135,9 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .map((kind): Route => ({ _tag: "Error", kind })),
   fc
     .option(fc.integer({ min: 1, max: 4 }), { nil: undefined })
-    .map((step): Route => compact({ _tag: "Onboarding" as const, step })),
+    .map(
+      (step): Route => (step === undefined ? { _tag: "Onboarding" } : { _tag: "Onboarding", step }),
+    ),
   fc
     .constantFrom(
       "profile" as const,
@@ -140,74 +149,68 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     .map((tab): Route => ({ _tag: "Account", tab })),
   arbSlug.map((ws): Route => ({ _tag: "Dashboard", ws })),
   fc
-    .record({
-      ws: arbSlug,
-      text: arbOptText,
-      status: fc.option(
-        fc.constantFrom("draft" as const, "issued" as const, "cancelled" as const),
-        { nil: undefined },
-      ),
-      kind: fc.option(
-        fc.constantFrom(
+    .record(
+      {
+        ws: arbSlug,
+        text: arbSearchText,
+        status: fc.constantFrom("draft" as const, "issued" as const, "cancelled" as const),
+        kind: fc.constantFrom(
           "invoice" as const,
           "proforma" as const,
           "payment_tax_document" as const,
           "credit_note" as const,
         ),
-        { nil: undefined },
-      ),
-      settlement: fc.option(
-        fc.constantFrom(
+        settlement: fc.constantFrom(
           "unpaid" as const,
           "partially_paid" as const,
           "paid" as const,
           "overpaid" as const,
         ),
-        { nil: undefined },
-      ),
-      overdue: fc.option(fc.boolean(), { nil: undefined }),
-      contact: fc.option(arbContactId, { nil: undefined }),
-      from: fc.option(arbIsoDate, { nil: undefined }),
-      to: fc.option(arbIsoDate, { nil: undefined }),
-    })
-    .map(({ ws, ...query }): Route => ({ _tag: "Documents", ws, query: compact(query) })),
+        overdue: fc.boolean(),
+        contact: arbContactId,
+        from: arbIsoDate,
+        to: arbIsoDate,
+      },
+      { requiredKeys: ["ws"] },
+    )
+    .map(({ ws, ...query }): Route => ({ _tag: "Documents", ws, query })),
   fc
-    .record({
-      ws: arbSlug,
-      kind: fc.constantFrom("invoice" as const, "proforma" as const),
-      from: fc.option(
-        fc.oneof(
+    .record(
+      {
+        ws: arbSlug,
+        kind: fc.constantFrom("invoice" as const, "proforma" as const),
+        from: fc.oneof(
           arbContactId.map((id) => ({ _tag: "Contact" as const, id })),
           arbTemplateId.map((id) => ({ _tag: "Template" as const, id })),
           arbDocId.map((id) => ({ _tag: "Duplicate" as const, id })),
         ),
-        { nil: undefined },
-      ),
-    })
-    .map((r): Route => compact({ _tag: "DocumentNew" as const, ...r })),
+      },
+      { requiredKeys: ["ws", "kind"] },
+    )
+    .map((r): Route => ({ _tag: "DocumentNew", ...r })),
   fc.tuple(arbSlug, arbDocId).map(([ws, id]): Route => ({ _tag: "DocumentEdit", ws, id })),
   fc
-    .record({
-      ws: arbSlug,
-      id: arbDocId,
-      tab: fc.constantFrom(
-        "preview" as const,
-        "payments" as const,
-        "share" as const,
-        "history" as const,
-      ),
-      dialog: fc.option(
-        fc.constantFrom(
+    .record(
+      {
+        ws: arbSlug,
+        id: arbDocId,
+        tab: fc.constantFrom(
+          "preview" as const,
+          "payments" as const,
+          "share" as const,
+          "history" as const,
+        ),
+        dialog: fc.constantFrom(
           "issue" as const,
           "payment" as const,
           "send" as const,
           "cancel" as const,
           "correct" as const,
         ),
-        { nil: undefined },
-      ),
-    })
-    .map((r): Route => compact({ _tag: "Document" as const, ...r })),
+      },
+      { requiredKeys: ["ws", "id", "tab"] },
+    )
+    .map((r): Route => ({ _tag: "Document", ...r })),
   arbSlug.map((ws): Route => ({ _tag: "Templates", ws })),
   fc
     .record({
@@ -217,32 +220,39 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     })
     .map((r): Route => ({ _tag: "Template", ...r })),
   fc
-    .record({
-      ws: arbSlug,
-      text: arbOptText,
-      incomplete: fc.option(fc.boolean(), { nil: undefined }),
-    })
-    .map(({ ws, ...query }): Route => ({ _tag: "Expenses", ws, query: compact(query) })),
+    .record(
+      {
+        ws: arbSlug,
+        text: arbSearchText,
+        incomplete: fc.boolean(),
+      },
+      { requiredKeys: ["ws"] },
+    )
+    .map(({ ws, ...query }): Route => ({ _tag: "Expenses", ws, query })),
   arbSlug.map((ws): Route => ({ _tag: "ExpenseCapture", ws })),
   fc
-    .record({
-      ws: arbSlug,
-      id: fc.oneof(arbExpenseId, fc.constant("new" as const)),
-      mode: fc.constantFrom("view" as const, "edit" as const),
-      attachment: fc.option(arbAttachmentId, { nil: undefined }),
-      job: fc.option(arbSafeToken, { nil: undefined }),
-    })
-    .map((r): Route => compact({ _tag: "Expense" as const, ...r })),
+    .record(
+      {
+        ws: arbSlug,
+        id: fc.oneof(arbExpenseId, fc.constant("new" as const)),
+        mode: fc.constantFrom("view" as const, "edit" as const),
+        attachment: arbAttachmentId,
+        job: arbSafeToken,
+      },
+      { requiredKeys: ["ws", "id", "mode"] },
+    )
+    .map((r): Route => ({ _tag: "Expense", ...r })),
   fc
-    .record({
-      ws: arbSlug,
-      text: arbOptText,
-      role: fc.option(fc.constantFrom("customer" as const, "supplier" as const), {
-        nil: undefined,
-      }),
-      archived: fc.option(fc.boolean(), { nil: undefined }),
-    })
-    .map(({ ws, ...query }): Route => ({ _tag: "Contacts", ws, query: compact(query) })),
+    .record(
+      {
+        ws: arbSlug,
+        text: arbSearchText,
+        role: fc.constantFrom("customer" as const, "supplier" as const),
+        archived: fc.boolean(),
+      },
+      { requiredKeys: ["ws"] },
+    )
+    .map(({ ws, ...query }): Route => ({ _tag: "Contacts", ws, query })),
   fc
     .record({
       ws: arbSlug,
@@ -251,8 +261,8 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
     })
     .map((r): Route => ({ _tag: "Contact", ...r })),
   fc
-    .record({ ws: arbSlug, text: arbOptText })
-    .map((r): Route => compact({ _tag: "PriceList" as const, ...r })),
+    .record({ ws: arbSlug, text: arbSearchText }, { requiredKeys: ["ws"] })
+    .map((r): Route => ({ _tag: "PriceList", ...r })),
   fc
     .record({
       ws: arbSlug,
@@ -271,7 +281,7 @@ const arbRoute: fc.Arbitrary<Route> = fc.oneof(
 
 // Representative sample of every single one of the 30 Route tags for exhaustive gate verification.
 const WS_MEMBER = DEMO_WORKSPACE.slug;
-const WS_NON_MEMBER = "foreign-workspace" as WorkspaceSlug;
+const WS_NON_MEMBER = WorkspaceSlug.make("foreign-workspace");
 
 const sampleRoutesFor = (ws: WorkspaceSlug): ReadonlyArray<Route> => [
   { _tag: "Landing" },
@@ -282,7 +292,7 @@ const sampleRoutesFor = (ws: WorkspaceSlug): ReadonlyArray<Route> => [
   { _tag: "AuthLink", kind: "verify", token: "tok1" },
   { _tag: "ResetPassword" },
   { _tag: "AndroidDownload" },
-  { _tag: "Share", token: "v1.tok" as ShareToken },
+  { _tag: "Share", token: ShareToken.make("v1.tok") },
   { _tag: "McpConsent", consentId: "c1" },
   { _tag: "Invitation", token: "inv1" },
   { _tag: "Error", kind: "not_found" },
@@ -291,8 +301,8 @@ const sampleRoutesFor = (ws: WorkspaceSlug): ReadonlyArray<Route> => [
   { _tag: "Dashboard", ws },
   { _tag: "Documents", ws, query: {} },
   { _tag: "DocumentNew", ws, kind: "invoice" },
-  { _tag: "DocumentEdit", ws, id: demoId(10) as DocumentId },
-  { _tag: "Document", ws, id: demoId(10) as DocumentId, tab: "preview" },
+  { _tag: "DocumentEdit", ws, id: DocumentId.make(demoId(10)) },
+  { _tag: "Document", ws, id: DocumentId.make(demoId(10)), tab: "preview" },
   { _tag: "Templates", ws },
   { _tag: "Template", ws, id: "new", tab: "template" },
   { _tag: "Expenses", ws, query: {} },
@@ -301,7 +311,7 @@ const sampleRoutesFor = (ws: WorkspaceSlug): ReadonlyArray<Route> => [
   { _tag: "Contacts", ws, query: {} },
   { _tag: "Contact", ws, id: "new", mode: "view" },
   { _tag: "PriceList", ws },
-  { _tag: "Reports", ws, report: "revenue", period: "2026" as ViewModels.Period },
+  { _tag: "Reports", ws, report: "revenue", period: "2026" },
   { _tag: "Settings", ws, section: "issuingEntity" },
   { _tag: "More", ws },
 ];
@@ -356,11 +366,11 @@ const bootModel = (path: string, session: SessionState, prefs: Prefs = defaultPr
 // --- 1. Route round-trip & Shell gate invariants -------------------------------------------------
 
 describe("route round-trip & Shell access gate invariants", () => {
-  test("toPath -> fromPath round-trips across all 30 Route variants (fast-check)", () => {
-    fc.assert(
+  test("toPath -> fromPath round-trips across all 30 Route variants (fast-check)", async () => {
+    await fc.assert(
       fc.property(arbRoute, (route) => {
         const path = href(route);
-        expect(path.startsWith("/")).toBe(true);
+        expect(Str.startsWith("/")(path)).toBe(true);
         const parsed = routeFromPath(path);
         expect(parsed).toEqual(route);
       }),
@@ -389,7 +399,7 @@ describe("route round-trip & Shell access gate invariants", () => {
       "/download.pdf?language=en",
       "/legal/unknown.pdf",
     ]) {
-      expect(Option.isNone(BrowserRoutes.parse(url))).toBe(true);
+      expect(BrowserRoutes.parse(url).pipe(Option.isNone)).toBe(true);
     }
   });
 
@@ -418,8 +428,8 @@ describe("route round-trip & Shell access gate invariants", () => {
 
     const memberRoutes = sampleRoutesFor(WS_MEMBER);
     const nonMemberRoutes = sampleRoutesFor(WS_NON_MEMBER);
-    expect(new Set<string>(memberRoutes.map((route) => route._tag))).toEqual(
-      new Set(Object.keys(expectedScope)),
+    expect(new Set<string>(Arr.map(memberRoutes, (route) => route._tag))).toEqual(
+      new Set(Rec.keys(expectedScope)),
     );
 
     let checks = 0;
@@ -429,20 +439,15 @@ describe("route round-trip & Shell access gate invariants", () => {
       for (const session of sessions) {
         const result = gate(route, session, href(route));
         checks += 1;
-        if (scope === "public") {
-          expect(result).toEqual({ _tag: "Allow" });
-        } else if (session._tag === "Unknown") {
-          expect(result).toEqual({ _tag: "Wait" });
-        } else if (session._tag === "Unavailable") {
-          expect(result).toEqual({ _tag: "Retry" });
-        } else if (session._tag === "Anonymous") {
-          expect(result).toEqual({
-            _tag: "Redirect",
-            route: { _tag: "SignIn", returnTo: href(route) },
-          });
-        } else {
-          expect(result).toEqual({ _tag: "Allow" });
-        }
+        const expected: Gate =
+          scope === "public" || session._tag === "SignedIn"
+            ? { _tag: "Allow" }
+            : session._tag === "Unknown"
+              ? { _tag: "Wait" }
+              : session._tag === "Unavailable"
+                ? { _tag: "Retry" }
+                : { _tag: "Redirect", route: { _tag: "SignIn", returnTo: href(route) } };
+        expect(result).toEqual(expected);
       }
     }
 
@@ -451,14 +456,14 @@ describe("route round-trip & Shell access gate invariants", () => {
       const scope = expectedScope[route._tag];
       const result = gate(route, signedInSession, href(route));
       checks += 1;
-      if (scope === "workspace") {
-        expect(result).toEqual({ _tag: "Redirect", route: { _tag: "Error", kind: "no_access" } });
-      } else {
-        expect(result).toEqual({ _tag: "Allow" });
-      }
+      const expected: Gate =
+        scope === "workspace"
+          ? { _tag: "Redirect", route: { _tag: "Error", kind: "no_access" } }
+          : { _tag: "Allow" };
+      expect(result).toEqual(expected);
     }
 
-    expect(checks).toBe(Object.keys(expectedScope).length * 5);
+    expect(checks).toBe(Rec.keys(expectedScope).length * 5);
   });
 });
 
@@ -484,48 +489,54 @@ describe("Remote<A> sequence-guard invariants", () => {
     }),
   );
 
-  test("stale, future, and post-settlement replies never overwrite newer loads or data (fast-check)", () => {
-    fc.assert(
+  test("stale, future, and post-settlement replies never overwrite newer loads or data (fast-check)", async () => {
+    await fc.assert(
       fc.property(fc.array(arbOp, { minLength: 1, maxLength: 50 }), (ops) => {
         let state: Remote.Remote<number> = Remote.idle;
 
         for (const op of ops) {
           const prev = state;
           const prevSeq = Remote.seqOf(prev);
-          const prevData = Remote.dataOf(prev);
+          let expected: Remote.Remote<number>;
+          let ignoredReply = false;
 
-          if (op.kind === "load") {
-            const next = Remote.load(prev);
-            expect(Remote.seqOf(next)).toBe(prevSeq + 1);
-            expect(Remote.isPending(next)).toBe(true);
-            if (prev._tag === "Loaded" || prev._tag === "Refreshing") {
-              expect(next._tag).toBe("Refreshing");
-              expect(Remote.dataOf(next)).toBe(prevData);
-            } else {
-              expect(next._tag).toBe("Loading");
+          switch (op.kind) {
+            case "load": {
+              state = Remote.load(prev);
+              const seq = prevSeq + 1;
+              expected =
+                prev._tag === "Loaded" || prev._tag === "Refreshing"
+                  ? { _tag: "Refreshing", seq, data: prev.data }
+                  : { _tag: "Loading", seq };
+              break;
             }
-            state = next;
-          } else if (op.kind === "succeed") {
-            const targetSeq = Math.max(0, prevSeq + op.seqDelta);
-            const next = Remote.succeed(prev, targetSeq, op.value);
-            if (Remote.isPending(prev) && targetSeq === prevSeq) {
-              expect(next).toEqual({ _tag: "Loaded", seq: prevSeq, data: op.value });
-            } else {
-              expect(next).toBe(prev);
+            case "succeed": {
+              const targetSeq = Math.max(0, prevSeq + op.seqDelta);
+              state = Remote.succeed(prev, targetSeq, op.value);
+              ignoredReply = !Remote.isPending(prev) || targetSeq !== prevSeq;
+              expected = ignoredReply ? prev : { _tag: "Loaded", seq: prevSeq, data: op.value };
+              break;
             }
-            state = next;
-          } else {
-            const targetSeq = Math.max(0, prevSeq + op.seqDelta);
-            const failure: Failure = mkFailure(op.msg);
-            const next = Remote.fail(prev, targetSeq, failure);
-            if (Remote.isPending(prev) && targetSeq === prevSeq) {
-              expect(next).toEqual({ _tag: "Failed", seq: prevSeq, failure });
-            } else {
-              expect(next).toBe(prev);
+            case "fail": {
+              const targetSeq = Math.max(0, prevSeq + op.seqDelta);
+              const failure: Failure = mkFailure(op.msg);
+              state = Remote.fail(prev, targetSeq, failure);
+              ignoredReply = !Remote.isPending(prev) || targetSeq !== prevSeq;
+              expected = ignoredReply ? prev : { _tag: "Failed", seq: prevSeq, failure };
+              break;
             }
-            state = next;
           }
 
+          expect(state).toEqual(expected);
+          expect(Remote.isPending(state)).toBe(
+            expected._tag === "Loading" || expected._tag === "Refreshing",
+          );
+          expect(Remote.dataOf(state)).toBe(
+            expected._tag === "Loaded" || expected._tag === "Refreshing"
+              ? expected.data
+              : undefined,
+          );
+          expect(ignoredReply && state !== prev).toBe(false);
           expect(Remote.seqOf(state)).toBeGreaterThanOrEqual(prevSeq);
         }
       }),
@@ -701,10 +712,7 @@ describe("Shell update & prefs invariants", () => {
               };
               const serialized = serializePrefs(prefs);
               const parsed = parsePrefs(serialized);
-              expect(Option.isSome(parsed)).toBe(true);
-              if (Option.isSome(parsed)) {
-                expect(parsed.value).toEqual(prefs);
-              }
+              expect(parsed).toEqual(Option.some(prefs));
               // Cookie round-trip
               const header = `other=1; ${PREFS_COOKIE}=${encodeURIComponent(serialized)}; theme=x`;
               const fromCookie = parsePrefs(readCookie(header, PREFS_COOKIE));
@@ -719,10 +727,10 @@ describe("Shell update & prefs invariants", () => {
     expect(count).toBe(2 * 2 * 3 * 3 * 6);
   });
 
-  test("prefs serialize/parse round-trip across random custom hex seeds (fast-check)", () => {
+  test("prefs serialize/parse round-trip across random custom hex seeds (fast-check)", async () => {
     const arbHex = fc
       .integer({ min: 0, max: 0xffffff })
-      .map((n) => `#${n.toString(16).padStart(6, "0").toUpperCase()}` as Hex);
+      .map((n) => `#${Str.toUpperCase(Str.padStart(6, "0")(n.toString(16)))}`);
 
     const arbSeedPrefs: fc.Arbitrary<Prefs> = fc.record({
       locale: fc.constantFrom(...I18n.LOCALES),
@@ -732,7 +740,7 @@ describe("Shell update & prefs invariants", () => {
       theme: arbHex.map((hex) => ({ _tag: "Seed" as const, hex })),
     });
 
-    fc.assert(
+    await fc.assert(
       fc.property(arbSeedPrefs, (prefs) => {
         const parsed = parsePrefs(serializePrefs(prefs));
         expect(parsed).toEqual(Option.some(prefs));
@@ -742,27 +750,29 @@ describe("Shell update & prefs invariants", () => {
   });
 
   test("parsePrefs returns None for empty and malformed inputs", () => {
+    const jsonEncoder = Schema.encodeEffect(Schema.fromJsonString(Schema.Json));
+    const encodeJson = (value: Schema.Json) => jsonEncoder(value).pipe(Effect.runSync);
     const malformed = [
       null,
       undefined,
       "",
       "{}",
       "not-json",
-      JSON.stringify({
+      encodeJson({
         locale: "de",
         style: "elegant",
         mode: "dark",
         contrast: "standard",
         theme: { _tag: "Preset", id: "forest" },
       }),
-      JSON.stringify({
+      encodeJson({
         locale: "cs",
         style: "brutalist",
         mode: "dark",
         contrast: "standard",
         theme: { _tag: "Preset", id: "forest" },
       }),
-      JSON.stringify({
+      encodeJson({
         locale: "cs",
         style: "elegant",
         mode: "dark",
@@ -771,30 +781,26 @@ describe("Shell update & prefs invariants", () => {
       }),
     ];
     for (const raw of malformed) {
-      expect(Option.isNone(parsePrefs(raw))).toBe(true);
+      expect(parsePrefs(raw).pipe(Option.isNone)).toBe(true);
     }
   });
 });
 
 // --- 4. Static architecture checks ---------------------------------------------------------------
 
-const walkFiles = (dir: string, ext: string): ReadonlyArray<string> => {
-  const results: string[] = [];
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...walkFiles(full, ext));
-    } else if (entry.isFile() && entry.name.endsWith(ext)) {
-      results.push(full);
-    }
-  }
-  return results.sort();
-};
+const walkFiles = (dir: string, ext: string): ReadonlyArray<string> =>
+  [...new Bun.Glob(`**/*${ext}`).scanSync({ cwd: dir, absolute: true, dot: true })].sort(
+    Order.String,
+  );
 
-const stripCssComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, "");
+const stripCssComments = (src: string): string => Str.replace(/\/\*[\s\S]*?\*\//g, "")(src);
 
 const literal = (node: ts.Node | undefined): string | undefined =>
-  node !== undefined && ts.isStringLiteralLike(node) ? node.text : undefined;
+  Option.fromUndefinedOr(node).pipe(
+    Option.filter(ts.isStringLiteralLike),
+    Option.map((textNode) => textNode.text),
+    Option.getOrUndefined,
+  );
 
 const member = (
   node: ts.Node,
@@ -808,10 +814,12 @@ const member = (
   return undefined;
 };
 
-const retired = "fold" + "kit";
+const retired = "foldkit";
 const forbiddenPackage = (name: string) =>
-  ["react", "react-dom", retired].some((root) => name === root || name.startsWith(`${root}/`)) ||
-  name.startsWith(`@${retired}/`);
+  Arr.some(
+    ["react", "react-dom", retired],
+    (root) => name === root || Str.startsWith(`${root}/`)(name),
+  ) || Str.startsWith(`@${retired}/`)(name);
 
 const domMutators = new Set([
   "innerHTML",
@@ -853,14 +861,20 @@ const sourceViolations = (filename: string, code: string, page: boolean): Readon
         imported = literal(node.arguments[0]);
       }
       const call = member(node.expression);
-      if (page && call?.receiver.getText(file) === "Effect" && call.name?.startsWith("run")) {
+      if (
+        page &&
+        call?.receiver.getText(file) === "Effect" &&
+        call.name !== undefined &&
+        Str.startsWith("run")(call.name)
+      ) {
         record(node, "starts an Effect inside a page");
       }
     }
     if (imported !== undefined && forbiddenPackage(imported)) record(node, `imports ${imported}`);
 
     const access = member(node);
-    if (access?.name?.toLowerCase() === "innerhtml") record(node, "accesses raw HTML");
+    if (access?.name !== undefined && Str.toLowerCase(access.name) === "innerhtml")
+      record(node, "accesses raw HTML");
     if (page && !deferred && access !== undefined) {
       const receiver = access.receiver.getText(file);
       const globalMember = member(access.receiver);
@@ -902,46 +916,71 @@ const sourceViolations = (filename: string, code: string, page: boolean): Readon
 
 describe("static architecture invariants", () => {
   test("detects dynamic React imports and computed DOM mutations", () => {
-    const source = 'const view = () => { import("react/dom"); element["replaceChildren"](); };';
+    const source = Arr.join(
+      ['const view = () => { import("react/dom");', 'element["replaceChildren"](); };'],
+      " ",
+    );
     expect(sourceViolations("fixture.ts", source, true)).toEqual([
       "fixture.ts:1 imports react/dom",
       "fixture.ts:1 accesses browser state or mutates DOM outside an Effect",
     ]);
   });
 
-  test("web source and tests use the Effect UI runtime and page effects own DOM access", () => {
+  test("web source and tests use the Effect UI runtime and page effects own DOM access", async () => {
     const webRoot = resolve(WEB_SRC, "..");
-    const files = ["src", "test", "e2e"].flatMap((dir) =>
-      [".ts", ".tsx"].flatMap((ext) => walkFiles(join(webRoot, dir), ext)),
+    const files = Arr.flatMap(["src", "test", "e2e"], (dir) =>
+      Arr.flatMap([".ts", ".tsx"], (ext) => walkFiles(join(webRoot, dir), ext)),
     );
-    const violations = files.flatMap((file) => {
-      const path = relative(webRoot, file);
-      return sourceViolations(path, readFileSync(file, "utf8"), path.startsWith("src/page/"));
-    });
+    const violations = await Effect.forEach(
+      files,
+      (file) =>
+        Effect.promise(() => Bun.file(file).text()).pipe(
+          Effect.map((source) => {
+            const path = relative(webRoot, file);
+            return sourceViolations(path, source, Str.startsWith("src/page/")(path));
+          }),
+        ),
+      { concurrency: 4 },
+    ).pipe(Effect.map(Arr.flatten), Effect.runPromise);
     expect(violations).toEqual([]);
-    const manifest = JSON.parse(readFileSync(join(webRoot, "package.json"), "utf8"));
-    const dependencies = Object.keys({ ...manifest.dependencies, ...manifest.devDependencies });
-    expect(dependencies.filter(forbiddenPackage)).toEqual([]);
+    const dependenciesSchema = Schema.Record(Schema.String, Schema.String);
+    const manifestJson = Schema.fromJsonString(
+      Schema.Struct({
+        dependencies: Schema.optional(dependenciesSchema),
+        devDependencies: Schema.optional(dependenciesSchema),
+      }),
+    );
+    const manifest = Schema.decodeEffect(manifestJson)(
+      await Bun.file(join(webRoot, "package.json")).text(),
+    ).pipe(Effect.runSync);
+    const dependencies = Rec.keys({ ...manifest.dependencies, ...manifest.devDependencies });
+    expect(Arr.filter(dependencies, forbiddenPackage)).toEqual([]);
   });
 
-  test("zero raw hex color literals in apps/web/src/styles/** and full Tailwind @theme inline token parity", () => {
+  test("zero raw hex color literals in apps/web/src/styles/** and full Tailwind @theme inline token parity", async () => {
     const stylesDir = join(WEB_SRC, "styles");
     const cssFiles = walkFiles(stylesDir, ".css");
     expect(cssFiles.length).toBeGreaterThan(0);
 
     const hexValuePattern = /:\s*[^;{}]*#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})\b/g;
 
-    const violations: string[] = [];
-    for (const file of cssFiles) {
-      const clean = stripCssComments(readFileSync(file, "utf8"));
-      const matches = clean.match(hexValuePattern);
-      if (matches !== null) {
-        violations.push(`${relative(WEB_SRC, file)}: ${matches.join(", ")}`);
-      }
-    }
+    const violations = await Effect.forEach(
+      cssFiles,
+      (file) =>
+        Effect.promise(() => Bun.file(file).text()).pipe(
+          Effect.map((source) => {
+            const matches = Str.match(hexValuePattern)(stripCssComments(source));
+            return Option.map(
+              matches,
+              (values) => `${relative(WEB_SRC, file)}: ${Arr.join(values, ", ")}`,
+            );
+          }),
+        ),
+      { concurrency: 4 },
+    ).pipe(Effect.map(Arr.getSomes), Effect.runPromise);
     expect(violations).toEqual([]);
 
-    const entryCss = stripCssComments(readFileSync(join(stylesDir, "index.css"), "utf8"));
+    const entryCss = stripCssComments(await Bun.file(join(stylesDir, "index.css")).text());
     expect(entryCss).toContain('@import "tailwindcss";');
     expect(entryCss).toContain("@theme inline");
     expect(entryCss).toContain("--color-*: initial;");

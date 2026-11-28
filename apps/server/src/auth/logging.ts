@@ -1,9 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { Context, Effect, References } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as References from "effect/References";
 import { RequestLogContext } from "../logging/trace";
 
 const authLogContext = new AsyncLocalStorage<Context.Context<never>>();
-const pickLogContext = Context.pick(
+export const pickAuthLogContext = Context.pick(
   References.CurrentLoggers,
   References.CurrentLogAnnotations,
   References.CurrentLogSpans,
@@ -16,14 +18,6 @@ export const currentAuthLogContext = (): Context.Context<never> | undefined =>
 
 // Better Auth invokes callbacks in Promise code, outside the request's Effect fiber.
 export const bindAuthLogging = Effect.withFiberSucceed((fiber) => {
-  const context = pickLogContext(fiber.context);
+  const context = pickAuthLogContext(fiber.context);
   return <A>(callback: () => A): A => authLogContext.run(context, callback);
 });
-
-export const makeAuthEffectRunner = Effect.withFiberSucceed((fiber) => {
-  const fallback = pickLogContext(fiber.context);
-  return <A, E>(effect: Effect.Effect<A, E>) =>
-    Effect.runPromiseWith(currentAuthLogContext() ?? fallback)(effect);
-});
-
-export type AuthEffectRunner = Effect.Success<typeof makeAuthEffectRunner>;

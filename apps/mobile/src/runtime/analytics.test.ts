@@ -1,4 +1,7 @@
 import { expect, mock, test } from "bun:test";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
 import type { PostHogConfig, Properties } from "posthog-js/dist/module.slim.no-external.js";
 import { createPageviewTracker } from "./analytics";
 
@@ -6,14 +9,14 @@ const origin = "https://kvitbit.test";
 const apiKey = "phc_test";
 const host = "/_kvb";
 const resolvedHost = `${origin}${host}`;
-const nextTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const nextTurn = () => Effect.runPromise(Effect.sleep(1));
 
 test("initializes once and captures only sanitized pageviews", async () => {
   const init = mock((_key: string, _options: Partial<PostHogConfig>) => undefined);
   const capture = mock((_event: "$pageview", _properties: Properties) => undefined);
   const loadConfig = mock(async () => ({ posthog: { apiKey, host } }));
   const loadSdk = mock(async () => ({ init, capture }));
-  const track = createPageviewTracker(origin, loadConfig, loadSdk);
+  const track = createPageviewTracker({ origin, loadConfig, loadSdk });
 
   track("/app/i/short-secret?email=alice@example.test#fragment");
   track("/app/i/short-secret?different=query");
@@ -41,10 +44,10 @@ test("initializes once and captures only sanitized pageviews", async () => {
     }),
   );
   expect(capture.mock.calls).toEqual(
-    ["/app/i/[token]", "/app/w/[id]/documents/[id]/edit", "/app/reset-password"].map((path) => [
-      "$pageview",
-      { $current_url: origin + path, $pathname: path },
-    ]),
+    Arr.map(
+      ["/app/i/[token]", "/app/w/[id]/documents/[id]/edit", "/app/reset-password"],
+      (path) => ["$pageview", { $current_url: origin + path, $pathname: path }],
+    ),
   );
 
   const options = init.mock.calls[0]?.[1];
@@ -68,18 +71,17 @@ test("initializes once and captures only sanitized pageviews", async () => {
   };
   expect(options?.sanitize_properties?.(raw, "$pageview")).toEqual(sanitized);
   const beforeSend = options?.before_send;
-  expect(typeof beforeSend).toBe("function");
-  if (typeof beforeSend === "function") {
-    const uuid = "event-id";
-    expect(
-      beforeSend({ uuid, event: "$pageview", properties: raw, $set: { email: raw.email } }),
-    ).toEqual({
-      uuid,
-      event: "$pageview",
-      properties: sanitized,
-    });
-    expect(beforeSend({ uuid, event: "$autocapture", properties: raw })).toBeNull();
-  }
+  expect(Predicate.isFunction(beforeSend)).toBe(true);
+  if (!Predicate.isFunction(beforeSend)) throw new Error("Expected the asserted result");
+  const uuid = "event-id";
+  expect(
+    beforeSend({ uuid, event: "$pageview", properties: raw, $set: { email: raw.email } }),
+  ).toEqual({
+    uuid,
+    event: "$pageview",
+    properties: sanitized,
+  });
+  expect(beforeSend({ uuid, event: "$autocapture", properties: raw })).toBeNull();
 });
 
 test.each([undefined, { posthog: null }, {}])(
@@ -87,7 +89,7 @@ test.each([undefined, { posthog: null }, {}])(
   async (config) => {
     const loadSdk = mock(() => Promise.reject(new Error("SDK loaded unexpectedly")));
     const loadConfig = mock(async () => config);
-    const track = createPageviewTracker(origin, loadConfig, loadSdk);
+    const track = createPageviewTracker({ origin, loadConfig, loadSdk });
 
     track("/app/sign-in?returnTo=/w/private");
     await nextTurn();
@@ -112,11 +114,11 @@ test.each([
   ["/app/75ed480c81ef90f57173615fa724cfdd2f25ceea", "/app/[id]"],
 ])("turns %s into %s before calling PostHog", async (path, expected) => {
   const capture = mock((_event: "$pageview", _properties: Properties) => undefined);
-  const track = createPageviewTracker(
+  const track = createPageviewTracker({
     origin,
-    async () => ({ posthog: { apiKey, host } }),
-    async () => ({ init: () => undefined, capture }),
-  );
+    loadConfig: async () => ({ posthog: { apiKey, host } }),
+    loadSdk: async () => ({ init: () => undefined, capture }),
+  });
 
   track(`${path}?term=private#another-secret`);
   await nextTurn();

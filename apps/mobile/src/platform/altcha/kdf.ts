@@ -1,3 +1,4 @@
+import * as Fn from "effect/Function";
 /**
  * Pure-TS cryptographic primitives for ALTCHA PoW v2 (SHA-256, PBKDF2/SHA-256, BLAKE2b, Argon2id).
  * Zero native dependencies so the solver runs identically on Android (Hermes), Web, and Bun.
@@ -5,22 +6,27 @@
 
 // --- Hex & Base64 helpers -------------------------------------------------------------------
 
+import * as Effect from "effect/Effect";
+import * as EffectString from "effect/String";
+import { fromMobilePromise, runMobileEffect } from "../../runtime/request-intent";
+
 const HEX = "0123456789abcdef";
 
 export const bytesToHex = (bytes: Uint8Array): string => {
   let out = "";
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i] ?? 0;
+  for (const b of bytes) {
     out += (HEX[b >>> 4] ?? "") + (HEX[b & 0x0f] ?? "");
   }
   return out;
 };
 
+const hexBytes = /^[0-9a-fA-F]*$/;
+
 export const hexToBytes = (hex: string): Uint8Array | null => {
-  if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(hex)) return null;
+  if (hex.length % 2 !== 0 || !hexBytes.test(hex)) return null;
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) {
-    out[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+    out[i] = Number.parseInt(EffectString.slice(i * 2, i * 2 + 2)(hex), 16);
   }
   return out;
 };
@@ -148,28 +154,64 @@ const hmacSha256 = (key: Uint8Array, data: Uint8Array): Uint8Array => {
   return sha256(outer);
 };
 
-export const pbkdf2Sha256 = async (
+const pbkdf2Web = Effect.fn("BotProof.pbkdf2Web")(function* (
+  subtle: SubtleCrypto,
   password: Uint8Array,
   salt: Uint8Array,
   iterations: number,
   keyLength: number,
-): Promise<Uint8Array> => {
-  const subtle = globalThis.crypto?.subtle;
-  if (subtle !== undefined) {
-    try {
-      const baseKey = await subtle.importKey("raw", password as BufferSource, "PBKDF2", false, [
-        "deriveBits",
-      ]);
-      const bits = await subtle.deriveBits(
-        { name: "PBKDF2", hash: "SHA-256", salt: salt as BufferSource, iterations },
-        baseKey,
-        keyLength * 8,
-      );
-      return new Uint8Array(bits);
-    } catch {
-      // Fall back to pure-TS implementation.
-    }
-  }
+) {
+  const key = yield* fromMobilePromise(() =>
+    subtle.importKey("raw", new Uint8Array(password), "PBKDF2", false, ["deriveBits"]),
+  );
+  const bits = yield* fromMobilePromise(() =>
+    subtle.deriveBits(
+      { name: "PBKDF2", hash: "SHA-256", salt: new Uint8Array(salt), iterations },
+      key,
+      keyLength * 8,
+    ),
+  );
+  return new Uint8Array(bits);
+});
+
+export const pbkdf2Sha256: {
+  (
+    salt: Uint8Array,
+    iterations: number,
+    keyLength: number,
+  ): (password: Uint8Array) => Promise<Uint8Array>;
+  (
+    password: Uint8Array,
+    salt: Uint8Array,
+    iterations: number,
+    keyLength: number,
+  ): Promise<Uint8Array>;
+} = Fn.dual(
+  4,
+  (
+    password: Uint8Array,
+    salt: Uint8Array,
+    iterations: number,
+    keyLength: number,
+  ): Promise<Uint8Array> => {
+    const subtle = globalThis.crypto?.subtle;
+    const fallback = () => pbkdf2Portable(password, salt, iterations, keyLength);
+    return runMobileEffect(
+      subtle === undefined
+        ? Effect.sync(fallback)
+        : pbkdf2Web(subtle, password, salt, iterations, keyLength).pipe(
+            Effect.orElseSucceed(fallback),
+          ),
+    );
+  },
+);
+
+const pbkdf2Portable = (
+  password: Uint8Array,
+  salt: Uint8Array,
+  iterations: number,
+  keyLength: number,
+) => {
   const blocks = Math.ceil(keyLength / 32);
   const out = new Uint8Array(blocks * 32);
   const saltBlock = new Uint8Array(salt.length + 4);
@@ -251,12 +293,15 @@ const b2bG = (
   b2bAdd(v, c, d, 0, 0);
   // b = rotr64(b ^ c, 63) -> rotl64(x, 1)
   xLo = (v[b] ?? 0) ^ (v[c] ?? 0);
-  xHi = (v[b + 1] ?? 0) ^ (v[c + 1] ?? 0);
+  xHi = (v[b + 1] ?? 0) ^ Number(v[c + 1]);
   v[b] = ((xLo << 1) | (xHi >>> 31)) >>> 0;
   v[b + 1] = ((xHi << 1) | (xLo >>> 31)) >>> 0;
 };
 
-export const blake2b = (input: Uint8Array, outLen: number): Uint8Array => {
+export const blake2b: {
+  (outLen: number): (input: Uint8Array) => Uint8Array;
+  (input: Uint8Array, outLen: number): Uint8Array;
+} = Fn.dual(2, (input: Uint8Array, outLen: number): Uint8Array => {
   const h = new Uint32Array(BLAKE2B_IV);
   h[0] = (h[0] ?? 0) ^ (0x01010000 ^ outLen);
   const v = new Uint32Array(32);
@@ -302,7 +347,7 @@ export const blake2b = (input: Uint8Array, outLen: number): Uint8Array => {
   const outView = new DataView(out.buffer);
   for (let i = 0; i < 16; i++) outView.setUint32(i * 4, h[i] ?? 0, true);
   return out.subarray(0, outLen);
-};
+});
 
 // --- Argon2id (RFC 9106) --------------------------------------------------------------------
 
@@ -375,7 +420,7 @@ const argonGB = (w: Uint32Array, a: number, b: number, c: number, d: number): vo
 
   argonAddMul(w, c, d);
   xLo = (w[b] ?? 0) ^ (w[c] ?? 0);
-  xHi = (w[b + 1] ?? 0) ^ (w[c + 1] ?? 0);
+  xHi = (w[b + 1] ?? 0) ^ Number(w[c + 1]);
   w[b] = (xLo << 1) | (xHi >>> 31);
   w[b + 1] = (xHi << 1) | (xLo >>> 31);
 };

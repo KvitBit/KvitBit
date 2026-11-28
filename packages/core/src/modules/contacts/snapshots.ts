@@ -11,7 +11,9 @@ import type {
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { ContactAddress, ContactRow } from "./model";
 import { ContactsRepo } from "./repo";
@@ -64,7 +66,7 @@ export class ContactSnapshots extends Context.Service<
       id: ContactId,
     ) => Effect.Effect<ContactForDocument, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/ContactSnapshots") {}
+>()("@kvitbit/core/modules/contacts/snapshots/ContactSnapshots") {}
 
 export const ContactSnapshotsLive: Layer.Layer<ContactSnapshots, never, ContactsRepo> =
   Layer.effect(

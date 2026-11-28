@@ -1,7 +1,21 @@
 import { API_KEY_PREFIX } from "@kvitbit/api-contract";
-import { Cause, Redacted } from "effect";
-import { isHttpServerError } from "effect/http/HttpServerError";
-import { isSqlError, isSqlErrorReason } from "effect/sql/SqlError";
+import * as Arr from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as HttpServerError from "effect/http/HttpServerError";
+import * as Predicate from "effect/Predicate";
+import * as EffectRecord from "effect/Record";
+import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Str from "effect/String";
+import * as SqlError from "effect/sql/SqlError";
+
+const authorizationHeaderCookiesPattern =
+  /(?:authorization(?:header)?|cookies?|password(?:hash)?|passwd|(?:auth|smtp)pass|secret|token|apikey|databaseurl(?:unpooled)?|smtpurl|connectionstring|privatekey|verificationcode|resetcode|invitecode)$/;
+const credentialsPassParamsPattern =
+  /^(?:credentials?|pass|params|parameters|sql|query|sessionid|otp|magiclink|(?:smtp)?response(?:body|text)?|(?:magiclink|resetpassword|passwordreset|verification|verifyemail|invite|invitation|share|callback|redirect)(?:url|link))$/;
+const failedQueryParamsPattern = /\bFailed query:|(?:^|\n)\s*(?:params|parameters):/i;
+const urlsPattern = /^(?:[a-z][a-z\d+.-]*:)?\/\/[^/?#\s]*@/i;
+const sanitizeLogValuePattern = /^[\dA-Z]{5}$/;
 
 const REDACTED = "[REDACTED]";
 const UNAVAILABLE = "[Unserializable]";
@@ -11,16 +25,37 @@ const MAX_TEXT_LENGTH = 160_000;
 const PERCENT_ESCAPE = /%[\da-f]{2}/i;
 const MAX_DECODE_ROUNDS = 3;
 
+const percentSequence = /(?:%[\da-f]{2})+/gi;
+const percentByte = /%([\da-f]{2})/gi;
+
+const replaceMatches = (
+  text: string,
+  pattern: RegExp,
+  render: (match: RegExpMatchArray) => string,
+) => {
+  let output = "";
+  let last = 0;
+  for (const match of Str.matchAll(pattern)(text)) {
+    const offset = match.index ?? last;
+    output += Str.slice(last, offset)(text) + render(match);
+    last = offset + match[0].length;
+  }
+  return output + Str.slice(last)(text);
+};
+
 const decodePercentEscapes = (text: string): string =>
-  text.replace(/(?:%[\da-f]{2})+/gi, (part) => {
-    try {
-      return decodeURIComponent(part);
-    } catch {
-      return part.replace(/%([\da-f]{2})/gi, (_, hex: string) =>
-        String.fromCharCode(Number.parseInt(hex, 16)),
-      );
-    }
-  });
+  replaceMatches(text, percentSequence, ([part]) =>
+    Result.try({
+      try: () => decodeURIComponent(part ?? ""),
+      catch: () => "MalformedPercentSequence" as const,
+    }).pipe(
+      Result.getOrElse(() =>
+        replaceMatches(part ?? "", percentByte, ([, hex]) =>
+          String.fromCharCode(Number.parseInt(hex ?? "", 16)),
+        ),
+      ),
+    ),
+  );
 
 const sensitiveKey = (key: string): boolean => {
   let decoded = key;
@@ -28,14 +63,10 @@ const sensitiveKey = (key: string): boolean => {
     decoded = decodePercentEscapes(decoded);
   }
   if (PERCENT_ESCAPE.test(decoded)) return true;
-  const normalized = decoded.replace(/[^a-z0-9]/gi, "").toLowerCase();
+  const normalized = Str.toLowerCase(Str.replace(/[^a-z0-9]/gi, "")(decoded));
   return (
-    /(?:authorization(?:header)?|cookies?|password(?:hash)?|passwd|(?:auth|smtp)pass|secret|token|apikey|databaseurl(?:unpooled)?|smtpurl|connectionstring|privatekey|verificationcode|resetcode|invitecode)$/.test(
-      normalized,
-    ) ||
-    /^(?:credentials?|pass|params|parameters|sql|query|sessionid|otp|magiclink|(?:smtp)?response(?:body|text)?|(?:magiclink|resetpassword|passwordreset|verification|verifyemail|invite|invitation|share|callback|redirect)(?:url|link))$/.test(
-      normalized,
-    )
+    authorizationHeaderCookiesPattern.test(normalized) ||
+    credentialsPassParamsPattern.test(normalized)
   );
 };
 
@@ -54,24 +85,29 @@ const LINK_TOKEN = /(?<![\w-])(?:v\d{1,10}\.)?[\w-]{43}(?![\w-])/g;
 const JWT = /(?<![\w-])eyJ[\w-]+\.eyJ[\w-]+\.[\w-]+(?![\w-])/g;
 
 const redactText = (text: string): string => {
-  if (/\bFailed query:|(?:^|\n)\s*(?:params|parameters):/i.test(text)) return REDACTED;
-  const urls = text.replace(URL, (url) =>
-    PRIVATE_SCHEME.test(url) ||
-    /^(?:[a-z][a-z\d+.-]*:)?\/\/[^/?#\s]*@/i.test(url) ||
-    SECURE_PATH.test(url) ||
-    SENSITIVE_QUERY.test(url)
+  if (failedQueryParamsPattern.test(text)) return REDACTED;
+  const urls = replaceMatches(text, URL, ([found]) => {
+    const url = found ?? "";
+    return PRIVATE_SCHEME.test(url) ||
+      urlsPattern.test(url) ||
+      SECURE_PATH.test(url) ||
+      SENSITIVE_QUERY.test(url)
       ? REDACTED
-      : url,
+      : url;
+  });
+  const credentials = Str.replace(
+    LINK_TOKEN,
+    REDACTED,
+  )(
+    Str.replace(
+      JWT,
+      REDACTED,
+    )(Str.replace(API_KEY, REDACTED)(Str.replace(CREDENTIAL, REDACTED)(urls))),
   );
-  const credentials = urls
-    .replace(CREDENTIAL, REDACTED)
-    .replace(API_KEY, REDACTED)
-    .replace(JWT, REDACTED)
-    .replace(LINK_TOKEN, REDACTED);
-  for (const match of credentials.matchAll(ASSIGNMENT)) {
+  for (const match of Str.matchAll(ASSIGNMENT)(credentials)) {
     if (sensitiveKey(match[1] ?? "")) {
       // The rest can be an unquoted password, a cookie list, or escaped JSON.
-      return credentials.slice(0, match.index + match[0].length) + REDACTED;
+      return Str.slice(0, (match.index ?? 0) + match[0].length)(credentials) + REDACTED;
     }
   }
   return credentials;
@@ -88,75 +124,104 @@ export const redactLogText = (text: string): string => {
   return PERCENT_ESCAPE.test(decoded) ? REDACTED : redactText(text);
 };
 
-type LogValue = null | boolean | number | string | Array<LogValue> | { [key: string]: LogValue };
+export type LogValue =
+  | null
+  | boolean
+  | number
+  | string
+  | Array<LogValue>
+  | { [key: string]: LogValue };
 
-const ownValue = (object: object, key: string): unknown =>
-  Object.getOwnPropertyDescriptor(object, key)?.value;
+const ownValue = (value: Parameters<typeof Reflect.ownKeys>[0], key: string): unknown =>
+  Object.getOwnPropertyDescriptor(value, key)?.value;
 
-export const sanitizeLogValue = (
-  value: unknown,
-  ancestors = new WeakSet<object>(),
-  depth = 0,
-): LogValue => {
-  try {
-    if (value === null || typeof value === "boolean" || typeof value === "number") return value;
-    if (typeof value === "string") return redactLogText(value);
-    if (typeof value === "bigint") return value.toString();
-    if (typeof value !== "object") return `[${typeof value}]`;
-    if (Redacted.isRedacted(value)) return REDACTED;
-    if (depth >= MAX_DEPTH) return "[Maximum depth]";
-    if (ancestors.has(value)) return "[Circular]";
+const sanitizeValue = (value: unknown, ancestors = new WeakSet<object>(), depth = 0): LogValue => {
+  const checked = Result.try({
+    try: (): LogValue => {
+      if (value === null || Predicate.isBoolean(value) || Predicate.isNumber(value)) return value;
+      if (Predicate.isString(value)) return redactLogText(value);
+      if (Predicate.isBigInt(value)) return value.toString();
+      if (!Predicate.isObjectOrArray(value)) {
+        if (Predicate.isSymbol(value)) return "[symbol]";
+        if (Predicate.isFunction(value)) return "[function]";
+        return "[undefined]";
+      }
+      if (Redacted.isRedacted(value)) return REDACTED;
+      if (depth >= MAX_DEPTH) return "[Maximum depth]";
+      if (ancestors.has(value)) return "[Circular]";
 
-    ancestors.add(value);
-    try {
-      const sanitize = (item: unknown) => sanitizeLogValue(item, ancestors, depth + 1);
-      if (Cause.isCause(value)) {
-        return value.reasons.slice(0, MAX_FIELDS).map((reason) => {
-          if (Cause.isFailReason(reason)) return { type: "Fail", error: sanitize(reason.error) };
-          if (Cause.isDieReason(reason)) return { type: "Die", defect: sanitize(reason.defect) };
-          return { type: "Interrupt" };
-        });
-      }
-      // HTTP errors can carry the full request and include its raw path in the stack.
-      if (isHttpServerError(value)) return { type: value._tag, reason: value.reason._tag };
-      // SQL failure messages and stacks can contain unlabeled bound values.
-      if (isSqlError(value)) return { type: value._tag, reason: sanitize(value.reason) };
-      if (isSqlErrorReason(value)) return { type: value._tag };
-      if (Array.isArray(value)) {
-        return Array.from({ length: Math.min(value.length, MAX_FIELDS) }, (_, index) =>
-          sanitize(ownValue(value, String(index))),
-        );
-      }
-      if (value instanceof globalThis.URL)
-        return redactLogText(globalThis.URL.prototype.toString.call(value));
+      ancestors.add(value);
+      const sanitized = Result.try({
+        try: (): LogValue => {
+          const sanitize = (item: unknown) => sanitizeValue(item, ancestors, depth + 1);
+          if (Cause.isCause(value)) {
+            return Arr.map(Arr.take(value.reasons, MAX_FIELDS), (reason) => {
+              if (Cause.isFailReason(reason))
+                return { type: "Fail", error: sanitize(reason.error) };
+              if (Cause.isDieReason(reason))
+                return { type: "Die", defect: sanitize(reason.defect) };
+              return { type: "Interrupt" };
+            });
+          }
+          // HTTP errors can carry the full request and include its raw path in the stack.
+          if (HttpServerError.isHttpServerError(value))
+            return { type: value._tag, reason: value.reason._tag };
+          // SQL failure messages and stacks can contain unlabeled bound values.
+          if (SqlError.isSqlError(value))
+            return { type: value._tag, reason: sanitize(value.reason) };
+          if (SqlError.isSqlErrorReason(value)) return { type: value._tag };
+          if (Arr.isArray(value)) {
+            return Array.from({ length: Math.min(value.length, MAX_FIELDS) }, (_, index) =>
+              sanitize(ownValue(value, String(index))),
+            );
+          }
+          if (value instanceof globalThis.URL)
+            return redactLogText(globalThis.URL.prototype.toString.call(value));
 
-      const properties = new Set(Object.keys(value).slice(0, MAX_FIELDS));
-      const entries: Array<[string, LogValue]> = [];
-      if (value instanceof Error) {
-        const code = ownValue(value, "code");
-        if (
-          typeof code === "string" &&
-          /^[\dA-Z]{5}$/.test(code) &&
-          typeof ownValue(value, "severity") === "string"
-        ) {
-          return { type: "DatabaseError", code };
-        }
-        entries.push(["name", sanitize(value.name)]);
-        for (const field of ["message", "stack", "cause", "errors"]) {
-          if (Object.hasOwn(value, field)) properties.add(field);
-        }
-      }
-      for (const key of properties) {
-        entries.push([
-          redactLogText(key),
-          sensitiveKey(key) ? REDACTED : sanitize(ownValue(value, key)),
-        ]);
-      }
-      return Object.fromEntries(entries);
-    } finally {
+          const properties = new Set(
+            Arr.take(
+              Arr.filter(
+                Reflect.ownKeys(value),
+                (key) =>
+                  Predicate.isString(key) &&
+                  Object.getOwnPropertyDescriptor(value, key)?.enumerable === true,
+              ),
+              MAX_FIELDS,
+            ),
+          );
+          const entries: Array<[string, LogValue]> = [];
+          if (value instanceof Error) {
+            const code = ownValue(value, "code");
+            if (
+              Predicate.isString(code) &&
+              sanitizeLogValuePattern.test(code) &&
+              Predicate.isString(ownValue(value, "severity"))
+            ) {
+              return { type: "DatabaseError", code };
+            }
+            entries.push(["name", sanitize(value.name)]);
+            for (const field of ["message", "stack", "cause", "errors"]) {
+              if (Object.getOwnPropertyDescriptor(value, field) !== undefined)
+                properties.add(field);
+            }
+          }
+          for (const key of properties) {
+            if (!Predicate.isString(key)) continue;
+            entries.push([
+              redactLogText(key),
+              sensitiveKey(key) ? REDACTED : sanitize(ownValue(value, key)),
+            ]);
+          }
+          return EffectRecord.fromEntries(entries);
+        },
+        catch: () => "UnserializableLogValue" as const,
+      });
       ancestors.delete(value);
-    }
-  } catch {
-    return UNAVAILABLE;
-  }
+      return Result.getOrElse(sanitized, () => UNAVAILABLE);
+    },
+    catch: () => "UnserializableLogValue" as const,
+  });
+  return Result.getOrElse(checked, () => UNAVAILABLE);
 };
+
+export const sanitizeLogValue = (value: unknown): LogValue => sanitizeValue(value);

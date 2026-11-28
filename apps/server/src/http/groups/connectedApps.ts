@@ -2,12 +2,15 @@
  * `connectedApps` group handlers (http-mcp-contracts 3.5.3): list and revoke MCP OAuth grants
  * in `auth.oauth_consent` joined with `auth.oauth_client` and `auth.user`.
  */
+
 import { type AccessMode, Api, type ConnectedAppView } from "@kvitbit/api-contract";
 import { can } from "@kvitbit/core";
 import { Forbidden, NotFound, UserId, Workspaces } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
-import { HttpApiBuilder } from "effect/http-api";
-import { SqlClient } from "effect/sql";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
+import * as SqlClient from "effect/sql/SqlClient";
+import { compact } from "../conventions";
 import {
   dbUnavailable,
   normalizeStoredAccess,
@@ -31,7 +34,7 @@ interface ConnectedAppRow {
 }
 
 const toConnectedAppView = (row: ConnectedAppRow): ConnectedAppView => {
-  const granted = normalizeStoredAccess(row.access, row.granted_scopes);
+  const granted = normalizeStoredAccess({ access: row.access, scopes: row.granted_scopes });
   return {
     grantId: row.grant_id,
     client: {
@@ -45,23 +48,26 @@ const toConnectedAppView = (row: ConnectedAppRow): ConnectedAppView => {
     },
     access: granted.access,
     scopes: granted.scopes,
-    createdAt: row.created_at === null ? new Date(0).toISOString() : toIsoString(row.created_at),
+    createdAt: toIsoString(row.created_at ?? "1970-01-01T00:00:00.000Z"),
     lastUsedAt: toNullableIsoString(row.last_used_at),
   };
 };
 
-export const ConnectedAppsGroupLive = HttpApiBuilder.group(Api, "connectedApps", (handlers) =>
-  Effect.gen(function* () {
+export const ConnectedAppsGroupLive = HttpApiBuilder.group(
+  Api,
+  "connectedApps",
+  Effect.fnUntraced(function* (handlers) {
     const sql = yield* SqlClient.SqlClient;
     const workspaces = yield* Workspaces;
 
     return handlers
-      .handle("listConnectedApps", () =>
-        Effect.gen(function* () {
+      .handle(
+        "listConnectedApps",
+        Effect.fnUntraced(function* () {
           const caller = yield* requireMemberCaller;
           const canReadAll = can(caller, "grant.read.all");
-          if (!canReadAll && !can(caller, "grant.read.own")) {
-            return yield* new Forbidden({ action: "grant.read.own" });
+          if (!(canReadAll || can(caller, "grant.read.own"))) {
+            return yield* Forbidden.make({ action: "grant.read.own" });
           }
 
           const rows = yield* dbUnavailable(
@@ -109,14 +115,15 @@ export const ConnectedAppsGroupLive = HttpApiBuilder.group(Api, "connectedApps",
                   order by c.created_at desc nulls last, c.id desc
                 `,
           );
-          return rows.map(toConnectedAppView);
+          return Arr.map(rows, toConnectedAppView);
         }),
       )
-      .handle("revokeConnectedApp", ({ params }) =>
-        Effect.gen(function* () {
+      .handle(
+        "revokeConnectedApp",
+        Effect.fnUntraced(function* ({ params }) {
           const caller = yield* requireMemberCaller;
-          if (!can(caller, "grant.revoke.own") && !can(caller, "grant.revoke.all")) {
-            return yield* new Forbidden({ action: "grant.revoke.own" });
+          if (!(can(caller, "grant.revoke.own") || can(caller, "grant.revoke.all"))) {
+            return yield* Forbidden.make({ action: "grant.revoke.own" });
           }
 
           yield* dbUnavailable(
@@ -141,13 +148,13 @@ export const ConnectedAppsGroupLive = HttpApiBuilder.group(Api, "connectedApps",
                 `;
                 const row = found[0];
                 if (row === undefined) {
-                  return yield* new NotFound({ entity: "McpGrant", id: params.grantId });
+                  return yield* NotFound.make({ entity: "McpGrant", id: params.grantId });
                 }
 
                 const isOwn = row.user_id === caller.userId;
                 const requiredAction = isOwn ? "grant.revoke.own" : "grant.revoke.all";
                 if (!can(caller, requiredAction)) {
-                  return yield* new Forbidden({ action: requiredAction });
+                  return yield* Forbidden.make({ action: requiredAction });
                 }
 
                 yield* sql`
@@ -164,16 +171,17 @@ export const ConnectedAppsGroupLive = HttpApiBuilder.group(Api, "connectedApps",
                     and workspace_id = ${caller.workspaceId}
                 `;
 
-                yield* workspaces.recordAccessEvent({
+                yield* workspaces.recordAccessEvent(caller, {
                   action: "grant.revoke",
                   subject: {
                     entity: "McpGrant",
                     id: row.id,
                     name: row.client_name ?? row.client_id,
                   },
-                  ...(isOwn || row.user_id === null
-                    ? {}
-                    : { onBehalfOf: UserId.make(row.user_id) }),
+                  ...compact({
+                    onBehalfOf:
+                      isOwn || row.user_id === null ? undefined : UserId.make(row.user_id),
+                  }),
                 });
               }),
             ),

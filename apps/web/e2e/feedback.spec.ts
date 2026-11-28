@@ -1,9 +1,32 @@
-import { FEEDBACK_LIMITS, type FeedbackSubmission } from "@kvitbit/api-contract";
+import { FEEDBACK_LIMITS, FeedbackSubmission } from "@kvitbit/api-contract";
 import { expect, type Page, test } from "@playwright/test";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+
+const feedbackAssetPattern = /\/assets\/feedback-overlay-[^/]+\.js$/;
+const privateFeedbackPattern = /fixture-secret|private-fragment/;
+const privateSharePattern = /demo-unpaid-czk|fixture-secret|private-fragment/;
+const hiddenTextPattern = /fixture-hidden-text/i;
+const signInPathPattern = /\/sign-in$/;
+
+const submissionJson = Schema.fromJsonString(FeedbackSubmission);
+const jsonBody = Schema.fromJsonString(Schema.Json);
+const decodeSubmission = Schema.decodeEffect(submissionJson);
+const decodeBody = Schema.decodeEffect(jsonBody);
+const encodeBody = Schema.encodeEffect(jsonBody);
+
+const readSubmission = (payload: string | null) => {
+  if (payload === null) throw new Error("Missing feedback request body");
+  const submission = decodeSubmission(payload).pipe(Effect.runSync);
+  // Preserve every wire field when checking for private text.
+  const body = decodeBody(payload).pipe(Effect.flatMap(encodeBody), Effect.runSync);
+  return { submission, body };
+};
 
 const overlay = "[data-kb-visual-feedback]";
 const dashboard = "/w/novak-design";
-const isFeedbackAsset = (url: string) => /\/assets\/feedback-overlay-[^/]+\.js$/.test(url);
+const isFeedbackAsset = (url: string) => feedbackAssetPattern.test(url);
 
 const session = (page: Page, feedbackEnabled: boolean) =>
   page.route("**/api/auth/get-session", async (route) => {
@@ -11,7 +34,7 @@ const session = (page: Page, feedbackEnabled: boolean) =>
     await route.fulfill({ response, json: { ...(await response.json()), feedbackEnabled } });
   });
 
-const captureSubmission = async (page: Page, comment: string): Promise<FeedbackSubmission> => {
+const captureSubmission = async (page: Page, comment: string) => {
   const issueUrl = "https://github.com/example/kvitbit/issues/43";
   await page.route("**/api/feedback", (route) =>
     route.fulfill({ status: 201, json: { issueNumber: 43, issueUrl, title: "Visual feedback" } }),
@@ -22,10 +45,10 @@ const captureSubmission = async (page: Page, comment: string): Promise<FeedbackS
     (request) => new URL(request.url()).pathname === "/api/feedback",
   );
   await picker.getByRole("button", { name: "Send to GitHub" }).click();
-  return (await requested).postDataJSON();
+  return readSubmission((await requested).postData());
 };
 
-if (typeof Bun === "undefined") {
+if (!("Bun" in globalThis)) {
   test.use({ locale: "en-US" });
 
   test("does not request the picker chunk for a signed-in non-owner", async ({ page }) => {
@@ -50,8 +73,7 @@ if (typeof Bun === "undefined") {
     const hint = picker.locator("#pick kbd");
     await expect(launch).toHaveAttribute("aria-keyshortcuts", "k");
     await expect(hint).toHaveText("K");
-    if (info.project.name === "desktop") await expect(hint).toBeVisible();
-    else await expect(hint).toBeHidden();
+    await expect(hint).toBeVisible({ visible: info.project.name === "desktop" });
 
     await page.keyboard.press("k");
     await expect(stop).toHaveAttribute("aria-pressed", "true");
@@ -74,8 +96,8 @@ if (typeof Bun === "undefined") {
       const field = page.locator(`#${id}`);
       await field.focus();
       await page.keyboard.press("k");
-      if (id === "shortcut-editor") await expect(field).toHaveText("k");
-      else await expect(field).toHaveValue("k");
+      const contents = () => (id === "shortcut-editor" ? field.textContent() : field.inputValue());
+      await expect.poll(contents).toBe("k");
       await expect(launch).toHaveAttribute("aria-pressed", "false");
     }
 
@@ -94,8 +116,9 @@ if (typeof Bun === "undefined") {
     await expect(comment).toBeHidden();
   });
 
-  test("keeps Ctrl+K and Cmd+K for the workspace switcher", async ({ page }, info) => {
-    test.skip(info.project.name !== "desktop", "The workspace switcher is in the desktop sidebar.");
+  test("keeps Ctrl+K and Cmd+K for the workspace switcher", { tag: "@desktop" }, async ({
+    page,
+  }) => {
     await session(page, true);
     await page.goto(dashboard);
     const launch = page.locator(overlay).getByRole("button", { name: "Visual feedback" });
@@ -105,8 +128,11 @@ if (typeof Bun === "undefined") {
       ["Linux x86_64", "Control+k"],
       ["MacIntel", "Meta+k"],
     ] as const) {
-      await page.evaluate((platform) => {
-        Object.defineProperty(navigator, "platform", { value: platform, configurable: true });
+      await page.evaluate((navigatorPlatform) => {
+        Object.defineProperty(navigator, "platform", {
+          value: navigatorPlatform,
+          configurable: true,
+        });
       }, platform);
       await page.keyboard.press(key);
       await expect(switcher).toHaveAttribute("aria-expanded", "true");
@@ -125,7 +151,7 @@ if (typeof Bun === "undefined") {
     const unhandled = await page.evaluate((pinLimit) => {
       const originalUrl = location.href;
       history.replaceState(history.state, "", "/legal/terms");
-      const unhandled = document.body.dispatchEvent(
+      const unhandledKey = document.body.dispatchEvent(
         new KeyboardEvent("keydown", { key: "k", bubbles: true, cancelable: true }),
       );
       history.replaceState(history.state, "", originalUrl);
@@ -139,7 +165,7 @@ if (typeof Bun === "undefined") {
         targets.append(target);
       }
       document.querySelector("#main")?.append(targets);
-      return unhandled;
+      return unhandledKey;
     }, FEEDBACK_LIMITS.pins);
     expect(unhandled).toBe(true);
     await expect(launch).toHaveAttribute("aria-pressed", "false");
@@ -178,12 +204,12 @@ if (typeof Bun === "undefined") {
   test("lets an owner pick multiple elements and send feedback to GitHub", async ({
     page,
   }, info) => {
-    const submissions: FeedbackSubmission[] = [];
+    const submissions: ReturnType<typeof readSubmission>[] = [];
     const issueUrl = "https://github.com/example/kvitbit/issues/42";
     const firstResponse = Promise.withResolvers<void>();
     await session(page, true);
     await page.route("**/api/feedback", async (route) => {
-      submissions.push(route.request().postDataJSON());
+      submissions.push(readSubmission(route.request().postData()));
       if (submissions.length === 1) {
         await firstResponse.promise;
         await route.fulfill({ status: 502, json: {} });
@@ -211,7 +237,7 @@ if (typeof Bun === "undefined") {
     await launch.click();
     if (info.project.name === "desktop") {
       await heading.hover();
-      await expect(picker.locator("#highlight")).toBeVisible();
+      await picker.locator("#highlight").waitFor({ state: "visible" });
       await heading.click();
     } else {
       await heading.tap();
@@ -227,12 +253,14 @@ if (typeof Bun === "undefined") {
     await expect(comment).toHaveValue("Align the heading and the summary.");
 
     await page.evaluate(() => {
-      // biome-ignore lint/suspicious/noConsole: Emit browser diagnostics for the redaction test.
-      for (let i = 0; i < 23; i++) console.warn("fixture-secret", i);
-      // biome-ignore lint/suspicious/noConsole: Exercise the error channel as well as warnings.
-      console.error("fixture-secret");
-      window.dispatchEvent(new ErrorEvent("error", { message: "fixture-secret" }));
-      window.dispatchEvent(
+      const browserConsole = globalThis.console;
+      for (let i = 0; i < 23; i++) {
+        browserConsole.warn("fixture-secret", i);
+      }
+
+      browserConsole.error("fixture-secret");
+      globalThis.dispatchEvent(new ErrorEvent("error", { message: "fixture-secret" }));
+      globalThis.dispatchEvent(
         new PromiseRejectionEvent("unhandledrejection", {
           promise: Promise.resolve(),
           reason: "fixture-secret",
@@ -264,20 +292,23 @@ if (typeof Bun === "undefined") {
     );
     await expect(picker.getByRole("button", { name: "Pin 1", exact: true })).toHaveCount(0);
 
-    const [first, second] = submissions;
-    if (first === undefined || second === undefined) throw new Error("Missing feedback requests");
+    const [firstRequest, secondRequest] = submissions;
+    if (firstRequest === undefined || secondRequest === undefined)
+      throw new Error("Missing feedback requests");
+    const { submission: first } = firstRequest;
+    const { submission: second } = secondRequest;
     expect(first.comment).toBe("Align the heading and the summary.");
-    expect(first.pins.map((pin) => pin.tag)).toEqual(["h1", "h2"]);
+    expect(Arr.map(first.pins, (pin) => pin.tag)).toEqual(["h1", "h2"]);
     expect(second.pins).toEqual(first.pins);
     expect(first.page.url).toBe(new URL(dashboard, page.url()).href);
     expect(first.diagnostics).toHaveLength(20);
-    expect(first.diagnostics.slice(-4).map((event) => event.kind)).toEqual([
+    expect(Arr.map(first.diagnostics.slice(-4), (event) => event.kind)).toEqual([
       "warn",
       "error",
       "onerror",
       "unhandledrejection",
     ]);
-    expect(JSON.stringify(first)).not.toMatch(/fixture-secret|private-fragment/);
+    expect(firstRequest.body).not.toMatch(privateFeedbackPattern);
     const firstPin = first.pins[0];
     if (firstPin === undefined) throw new Error("Missing first pin");
     await expect(page.locator(firstPin.selector)).toHaveCount(1);
@@ -294,12 +325,10 @@ if (typeof Bun === "undefined") {
     const picker = page.locator(overlay);
     await picker.getByRole("button", { name: "Visual feedback" }).click();
     await page.locator("#main h1").click();
-    const submission = await captureSubmission(page, "Adjust the title.");
+    const { submission, body } = await captureSubmission(page, "Adjust the title.");
     expect(submission.page.url).toBe(`${new URL(page.url()).origin}/[redacted]`);
     expect(submission.pins[0]).toMatchObject({ tag: "h1", accessibleName: "", text: "" });
-    expect(JSON.stringify(submission)).not.toMatch(
-      /demo-unpaid-czk|fixture-secret|private-fragment/,
-    );
+    expect(body).not.toMatch(privateSharePattern);
   });
 
   test("omits an active private link and its enclosing text on the document Share tab", async ({
@@ -315,14 +344,14 @@ if (typeof Bun === "undefined") {
     await link.click();
     await picker.getByRole("button", { name: "Add a pin" }).click();
     await row.click({ position: { x: 2, y: 2 } });
-    const submission = await captureSubmission(page, "Adjust the share controls.");
+    const { submission, body } = await captureSubmission(page, "Adjust the share controls.");
     expect(
-      submission.pins.map(({ tag, accessibleName, text }) => ({ tag, accessibleName, text })),
+      Arr.map(submission.pins, ({ tag, accessibleName, text }) => ({ tag, accessibleName, text })),
     ).toEqual([
       { tag: "span", accessibleName: "", text: "" },
       { tag: "div", accessibleName: "", text: "" },
     ]);
-    expect(JSON.stringify(submission)).not.toContain("demo-share-token-0041");
+    expect(body).not.toContain("demo-share-token-0041");
   });
 
   test("omits typed values when pinning an ordinary form container", async ({ page }) => {
@@ -334,9 +363,31 @@ if (typeof Bun === "undefined") {
     await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
     await formGrid.scrollIntoViewIfNeeded();
     await formGrid.dispatchEvent("click");
-    const submission = await captureSubmission(page, "Adjust the form layout.");
+    const { submission, body } = await captureSubmission(page, "Adjust the form layout.");
     expect(submission.pins[0]).toMatchObject({ tag: "div", accessibleName: "", text: "" });
-    expect(JSON.stringify(submission)).not.toContain("fixture-private-form-value");
+    expect(body).not.toContain("fixture-private-form-value");
+  });
+
+  test("captures rendered text and omits hidden descendants", async ({ page }) => {
+    await session(page, true);
+    await page.goto(dashboard);
+    const heading = page.locator("#main h1");
+    await heading.evaluate((element) => {
+      const hidden = document.createElement("span");
+      hidden.style.display = "none";
+      hidden.textContent = "fixture-hidden-text";
+      element.style.textTransform = "uppercase";
+      element.replaceChildren("Visible title", hidden);
+    });
+    await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
+    await heading.dispatchEvent("click");
+    const { submission, body } = await captureSubmission(page, "Adjust the title.");
+    expect(submission.pins[0]).toMatchObject({
+      tag: "h1",
+      accessibleName: "VISIBLE TITLE",
+      text: "VISIBLE TITLE",
+    });
+    expect(body).not.toMatch(hiddenTextPattern);
   });
 
   test("disposes the picker when the app signs out", async ({ page }) => {
@@ -345,7 +396,7 @@ if (typeof Bun === "undefined") {
     const picker = page.locator(overlay);
     await expect(picker).toBeAttached();
     await page.getByRole("button", { name: "Sign out" }).click();
-    await expect(page).toHaveURL(/\/sign-in$/);
+    await expect(page).toHaveURL(signInPathPattern);
     await expect(picker).toHaveCount(0);
     expect(
       await page.evaluate(() => {
@@ -364,20 +415,22 @@ if (typeof Bun === "undefined") {
   test("restores diagnostic handlers if the picker fails to mount", async ({ page }) => {
     await session(page, true);
     await page.addInitScript(() => {
-      const browserConsole = window.console;
+      const browserConsole = globalThis.console;
       const { warn, error } = browserConsole;
       const append = Element.prototype.append;
       Element.prototype.append = function (this: Element, ...nodes: Array<Node | string>) {
-        if (
-          this === document.body &&
-          nodes.some(
-            (node) => node instanceof HTMLElement && node.hasAttribute("data-kb-visual-feedback"),
-          )
-        ) {
+        let containsOverlay = false;
+        for (const node of nodes) {
+          if (node instanceof HTMLElement && node.hasAttribute("data-kb-visual-feedback")) {
+            containsOverlay = true;
+            break;
+          }
+        }
+        if (this === document.body && containsOverlay) {
           const attached = browserConsole.warn !== warn && browserConsole.error !== error;
           Element.prototype.append = append;
           queueMicrotask(() => {
-            document.documentElement.dataset.feedbackMountCleaned = String(
+            document.documentElement.dataset["feedbackMountCleaned"] = String(
               attached && browserConsole.warn === warn && browserConsole.error === error,
             );
           });

@@ -1,3 +1,7 @@
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
 /**
  * Pure-Effect v4 programmatic monitor for `alerts@kvitbit.com` GCS archive objects.
  *
@@ -18,10 +22,19 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 import { parseArgs } from "node:util";
-import { Clock, Context, Data, Effect, Layer } from "effect";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 import { type DnsTxtResolver, DnsTxtResolverLive, verifyAlertDkim } from "./dkim";
 import {
   ALERT_ISSUE_LABEL,
@@ -37,18 +50,41 @@ import {
   type SchedulerQueue,
 } from "./store";
 
-export const DEFAULT_ALERT_BUCKET = "kvitbit-prod-mail-archive-prod";
-export const DEFAULT_ALERT_PREFIX = "inbound/alerts/";
-export const DEFAULT_ALERT_REPO = "KvitBit/KvitBit";
-export const DEFAULT_ALLOWED_DOMAINS = ["google.com", "posthog.com"] as const;
+const decodeParsed = Schema.decodeUnknownResult(
+  Schema.fromJsonString(
+    Schema.Struct({
+      number: Schema.optionalKey(Schema.Unknown),
+      html_url: Schema.optionalKey(Schema.Unknown),
+    }),
+  ),
+);
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
+const cleanPrefixPattern = /^\/+/;
+const lineBreakPattern = /\r?\n/;
+const oneOrMorePattern = /One or more URLs matched no objects/i;
+const alreadyExistsHttpPattern = /already_exists|HTTP 422/i;
+const byHashPattern = /(?:^|\/)by-hash\/([a-f0-9]{32})\//i;
+const mainPattern = /^[1-9][0-9]*$/;
+const trailingDotPattern = /\.$/;
+
+const DEFAULT_ALERT_BUCKET = "kvitbit-prod-mail-archive-prod";
+const DEFAULT_ALERT_PREFIX = "inbound/alerts/";
+const DEFAULT_ALERT_REPO = "KvitBit/KvitBit";
+const DEFAULT_ALLOWED_DOMAINS = ["google.com", "posthog.com"] as const;
 
 const BASE_RETRY_DELAY_MS = 5 * 60 * 1000;
 const MAX_RETRY_DELAY_MS = 60 * 60 * 1000;
 const CLAIM_LEASE_MS = 5 * 60 * 1000;
 
-export class AlertInboxError extends Data.TaggedError("AlertInboxError")<{
-  readonly reason: string;
-}> {}
+export class AlertInboxError extends Schema.TaggedError<
+  AlertInboxError,
+  { readonly brand: unique symbol }
+>()("AlertInboxError", {
+  reason: Schema.String,
+}) {}
 
 export interface AlertBucketService {
   readonly listObjects: (
@@ -62,7 +98,7 @@ export interface AlertBucketService {
 }
 
 export class AlertBucket extends Context.Service<AlertBucket, AlertBucketService>()(
-  "KvitbitAlertBucket",
+  "kvitbit/scripts/alert-inbox/service/AlertBucket",
 ) {}
 
 export interface AlertIssueTrackerService {
@@ -83,81 +119,90 @@ export interface AlertIssueTrackerService {
 export class AlertIssueTracker extends Context.Service<
   AlertIssueTracker,
   AlertIssueTrackerService
->()("KvitbitAlertIssueTracker") {}
+>()("kvitbit/scripts/alert-inbox/service/AlertIssueTracker") {}
 
 export type SubprocessRunner = (
   cmd: ReadonlyArray<string>,
   stdinBytes?: Uint8Array,
 ) => Effect.Effect<Uint8Array, AlertInboxError>;
 
-export const runSubprocessLive: SubprocessRunner = (cmd, stdinBytes) =>
-  Effect.tryPromise({
-    try: async () => {
-      const proc = Bun.spawn([...cmd], {
-        stdin: stdinBytes ? new Response(stdinBytes) : "ignore",
-        stdout: "pipe",
-        stderr: "pipe",
+const runSubprocessLive: SubprocessRunner = Effect.fn("AlertInbox.runSubprocess")(
+  function* (cmd, stdinBytes) {
+    const failed = (cause: unknown) =>
+      AlertInboxError.make({ reason: cause instanceof Error ? cause.message : String(cause) });
+    const proc = yield* Effect.try({
+      try: () =>
+        Bun.spawn([...cmd], {
+          stdin: stdinBytes !== undefined ? new Response(stdinBytes) : "ignore",
+          stdout: "pipe",
+          stderr: "pipe",
+        }),
+      catch: failed,
+    });
+    const [stdoutBuf, stderrBuf, exitCode] = yield* Effect.all(
+      [
+        Effect.tryPromise({ try: () => new Response(proc.stdout).arrayBuffer(), catch: failed }),
+        Effect.tryPromise({ try: () => new Response(proc.stderr).arrayBuffer(), catch: failed }),
+        Effect.tryPromise({ try: () => proc.exited, catch: failed }),
+      ],
+      { concurrency: "unbounded" },
+    );
+    if (exitCode !== 0) {
+      const stderrText = Str.trim(Buffer.from(stderrBuf).toString("utf8"));
+      return yield* AlertInboxError.make({
+        reason: `${cmd[0]} exited ${exitCode}: ${stderrText === "" ? "unknown error" : stderrText}`,
       });
-      const [stdoutBuf, stderrBuf, exitCode] = await Promise.all([
-        new Response(proc.stdout).arrayBuffer(),
-        new Response(proc.stderr).arrayBuffer(),
-        proc.exited,
-      ]);
-      if (exitCode !== 0) {
-        const stderrText = Buffer.from(stderrBuf).toString("utf8").trim();
-        throw new Error(`${cmd[0]} exited ${exitCode}: ${stderrText || "unknown error"}`);
-      }
-      return new Uint8Array(stdoutBuf);
-    },
-    catch: (error) =>
-      new AlertInboxError({
-        reason: error instanceof Error ? error.message : String(error),
-      }),
-  });
+    }
+    return new Uint8Array(stdoutBuf);
+  },
+);
 
-export const makeGcloudAlertBucket = (run: SubprocessRunner): AlertBucketService => ({
-  listObjects: (bucket, prefix) => {
-    const cleanPrefix = prefix.replace(/^\/+/, "");
-    const uri = `gs://${bucket}/${cleanPrefix}`;
-    return run(["gcloud", "storage", "ls", "--recursive", uri]).pipe(
-      Effect.map((buf) => {
-        const prefixUri = `gs://${bucket}/`;
-        return Buffer.from(buf)
-          .toString("utf8")
-          .split(/\r?\n/)
-          .map((line) => line.trim())
-          .filter((line) => line.startsWith(prefixUri) && line.endsWith(".eml"))
-          .map((line) => line.slice(prefixUri.length))
-          .sort();
-      }),
-      Effect.catchIf(
-        (err) => /One or more URLs matched no objects/i.test(err.reason),
-        (listErr) =>
-          // Confirm the bucket itself actually exists before treating no-match as an empty prefix.
-          run([
-            "gcloud",
-            "storage",
-            "buckets",
-            "describe",
-            `gs://${bucket}`,
-            "--format=value(name)",
-          ]).pipe(
-            Effect.as([] as ReadonlyArray<string>),
-            Effect.mapError(
-              (bucketErr) =>
-                new AlertInboxError({
+export function makeGcloudAlertBucket(run: SubprocessRunner): AlertBucketService {
+  return {
+    listObjects: Effect.fn("AlertInbox.listObjects")((bucket, prefix) => {
+      const cleanPrefix = Str.replace(cleanPrefixPattern, "")(prefix);
+      const uri = `gs://${bucket}/${cleanPrefix}`;
+      return run(["gcloud", "storage", "ls", "--recursive", uri]).pipe(
+        Effect.map((buf) => {
+          const prefixUri = `gs://${bucket}/`;
+          return Arr.map(
+            Arr.filter(
+              Arr.map(Str.split(Buffer.from(buf).toString("utf8"), lineBreakPattern), (line) =>
+                Str.trim(line),
+              ),
+              (line) => Str.startsWith(prefixUri)(line) && Str.endsWith(".eml")(line),
+            ),
+            (line) => Str.slice(prefixUri.length)(line),
+          ).sort(Order.String);
+        }),
+        Effect.catchIf(
+          (err) => oneOrMorePattern.test(err.reason),
+          (listErr) =>
+            // Confirm the bucket itself actually exists before treating no-match as an empty prefix.
+            run([
+              "gcloud",
+              "storage",
+              "buckets",
+              "describe",
+              `gs://${bucket}`,
+              "--format=value(name)",
+            ]).pipe(
+              Effect.as<ReadonlyArray<string>>([]),
+              Effect.mapError((bucketErr) =>
+                AlertInboxError.make({
                   reason: `Unable to verify bucket '${bucket}' after empty listing (${listErr.reason}): ${bucketErr.reason}`,
                 }),
+              ),
             ),
-          ),
-      ),
-    );
-  },
-  downloadObject: (bucket, objectKey) =>
-    run(["gcloud", "storage", "cat", `gs://${bucket}/${objectKey}`]),
-});
+        ),
+      );
+    }),
+    downloadObject: (bucket, objectKey) =>
+      run(["gcloud", "storage", "cat", `gs://${bucket}/${objectKey}`]),
+  };
+}
 
-export const GcloudAlertBucketLive: Layer.Layer<AlertBucket> = Layer.succeed(
+const GcloudAlertBucketLive: Layer.Layer<AlertBucket> = Layer.succeed(
   AlertBucket,
   makeGcloudAlertBucket(runSubprocessLive),
 );
@@ -181,7 +226,7 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
     ]).pipe(
       Effect.asVoid,
       Effect.catchIf(
-        (err) => /already_exists|HTTP 422/i.test(err.reason),
+        (err) => alreadyExistsHttpPattern.test(err.reason),
         () => Effect.void,
       ),
     ),
@@ -201,32 +246,33 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
       Effect.flatMap((buf) =>
         Effect.try({
           try: () => {
-            const pages = JSON.parse(Buffer.from(buf).toString("utf8")) as unknown;
-            if (!Array.isArray(pages)) {
+            const pages = Schema.decodeResult(Schema.fromJsonString(Schema.Unknown))(
+              Buffer.from(buf).toString("utf8"),
+            ).pipe(Result.getOrThrow);
+            if (!Arr.isArray(pages)) {
               throw new Error("Unexpected GitHub issues pagination response");
             }
             for (const page of pages) {
-              if (!Array.isArray(page)) continue;
+              if (!Arr.isArray(page)) continue;
               for (const item of page) {
-                if (typeof item !== "object" || item === null) continue;
-                const rec = item as {
-                  number?: unknown;
-                  html_url?: unknown;
-                  body?: unknown;
-                  pull_request?: unknown;
+                if (!Predicate.isObject(item)) continue;
+                const rec = {
+                  number: Reflect.get(item, "number"),
+                  html_url: Reflect.get(item, "html_url"),
+                  body: Reflect.get(item, "body"),
+                  pull_request: Reflect.get(item, "pull_request"),
                 };
                 if (rec.pull_request !== undefined) continue;
                 if (
-                  typeof rec.number === "number" &&
-                  typeof rec.body === "string" &&
-                  rec.body.includes(marker)
+                  Predicate.isNumber(rec.number) &&
+                  Predicate.isString(rec.body) &&
+                  Str.includes(marker)(rec.body)
                 ) {
                   return {
                     number: rec.number,
-                    url:
-                      typeof rec.html_url === "string"
-                        ? rec.html_url
-                        : `https://github.com/${repo}/issues/${rec.number}`,
+                    url: Predicate.isString(rec.html_url)
+                      ? rec.html_url
+                      : `https://github.com/${repo}/issues/${rec.number}`,
                   };
                 }
               }
@@ -234,7 +280,7 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
             return null;
           },
           catch: (error) =>
-            new AlertInboxError({
+            AlertInboxError.make({
               reason: error instanceof Error ? error.message : String(error),
             }),
         }),
@@ -255,7 +301,7 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
         "-",
       ],
       Buffer.from(
-        JSON.stringify({
+        encodeJson({
           title: issue.title,
           body: issue.body,
           labels: [ALERT_ISSUE_LABEL],
@@ -266,23 +312,19 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
       Effect.flatMap((buf) =>
         Effect.try({
           try: () => {
-            const parsed = JSON.parse(Buffer.from(buf).toString("utf8")) as {
-              number?: unknown;
-              html_url?: unknown;
-            };
-            if (typeof parsed.number !== "number" || !Number.isSafeInteger(parsed.number)) {
+            const parsed = decodeParsed(Buffer.from(buf).toString("utf8")).pipe(Result.getOrThrow);
+            if (!(Predicate.isNumber(parsed.number) && Number.isSafeInteger(parsed.number))) {
               throw new Error("GitHub issue creation response missing issue number");
             }
             return {
               number: parsed.number,
-              url:
-                typeof parsed.html_url === "string"
-                  ? parsed.html_url
-                  : `https://github.com/${repo}/issues/${parsed.number}`,
+              url: Predicate.isString(parsed.html_url)
+                ? parsed.html_url
+                : `https://github.com/${repo}/issues/${parsed.number}`,
             };
           },
           catch: (error) =>
-            new AlertInboxError({
+            AlertInboxError.make({
               reason: error instanceof Error ? error.message : String(error),
             }),
         }),
@@ -290,31 +332,41 @@ export const makeGhAlertIssueTracker = (run: SubprocessRunner): AlertIssueTracke
     ),
 });
 
-export const GhAlertIssueTrackerLive: Layer.Layer<AlertIssueTracker> = Layer.succeed(
+const GhAlertIssueTrackerLive: Layer.Layer<AlertIssueTracker> = Layer.succeed(
   AlertIssueTracker,
   makeGhAlertIssueTracker(runSubprocessLive),
 );
 
-export const extractDeliveryHash = (objectKey: string, rawBytes: Uint8Array): string => {
-  const match = objectKey.match(/(?:^|\/)by-hash\/([a-f0-9]{32})\//i);
-  if (match?.[1]) return match[1].toLowerCase();
-  return createHash("sha256").update(rawBytes).digest("hex").slice(0, 32);
+const extractDeliveryHashImpl = (objectKey: string, rawBytes: Uint8Array): string => {
+  const match = Option.getOrNull(Str.match(byHashPattern)(objectKey));
+  if (match?.[1] !== undefined && match?.[1] !== "") return Str.toLowerCase(match[1]);
+  return Str.slice(0, 32)(createHash("sha256").update(rawBytes).digest("hex"));
 };
 
-export const computeAuthenticatedDedupKey = (
+const extractDeliveryHash: {
+  (rawBytes: Uint8Array): (objectKey: string) => string;
+  (objectKey: string, rawBytes: Uint8Array): string;
+} = Fn.dual(2, extractDeliveryHashImpl);
+
+const computeAuthenticatedDedupKeyImpl = (
   deliveryHash: string,
   signedMessageId: string | undefined,
 ): string => {
   if (signedMessageId !== undefined && signedMessageId.length > 0) {
-    return createHash("sha256").update(signedMessageId).digest("hex").slice(0, 32);
+    return Str.slice(0, 32)(createHash("sha256").update(signedMessageId).digest("hex"));
   }
   return deliveryHash;
 };
 
+const computeAuthenticatedDedupKey: {
+  (signedMessageId: string | undefined): (deliveryHash: string) => string;
+  (deliveryHash: string, signedMessageId: string | undefined): string;
+} = Fn.dual(2, computeAuthenticatedDedupKeyImpl);
+
 const computeNextRetryIso = (nowMs: number, priorAttempts: number): string => {
   const exponent = Math.min(Math.max(priorAttempts, 0), 4);
   const delayMs = Math.min(BASE_RETRY_DELAY_MS * 2 ** exponent, MAX_RETRY_DELAY_MS);
-  return new Date(nowMs + delayMs).toISOString();
+  return DateTime.formatIso(DateTime.makeUnsafe(nowMs + delayMs));
 };
 
 interface QueuedCandidate {
@@ -419,7 +471,7 @@ const runAlertInboxPassUnlocked = (
     const bucketSvc = yield* AlertBucket;
     const tracker = yield* AlertIssueTracker;
     const nowMs = yield* Clock.currentTimeMillis;
-    const nowIso = new Date(nowMs).toISOString();
+    const nowIso = DateTime.formatIso(DateTime.makeUnsafe(nowMs));
     const allObjects = yield* bucketSvc.listObjects(options.bucket, options.prefix);
 
     const fresh: Array<QueuedCandidate> = [];
@@ -450,14 +502,14 @@ const runAlertInboxPassUnlocked = (
     dueRetries.sort((a, b) => {
       const retryA = a.prior?.nextRetryAt ?? "";
       const retryB = b.prior?.nextRetryAt ?? "";
-      if (retryA !== retryB) return retryA.localeCompare(retryB);
+      if (retryA !== retryB) return Str.localeCompare(retryB)(retryA);
       const attemptsA = a.prior?.attemptCount ?? 0;
       const attemptsB = b.prior?.attemptCount ?? 0;
       if (attemptsA !== attemptsB) return attemptsA - attemptsB;
-      return a.objectKey.localeCompare(b.objectKey);
+      return Str.localeCompare(b.objectKey)(a.objectKey);
     });
 
-    const lastScheduledQueue = yield* options.store.getLastScheduledQueue();
+    const lastScheduledQueue = yield* options.store.getLastScheduledQueue;
     const { batch, nextLastScheduledQueue } = selectFairBatch(
       fresh,
       dueRetries,
@@ -487,8 +539,8 @@ const runAlertInboxPassUnlocked = (
 
     for (const { objectKey, prior } of batch) {
       const itemNowMs = yield* Clock.currentTimeMillis;
-      const itemNowIso = new Date(itemNowMs).toISOString();
-      const leaseUntilIso = new Date(itemNowMs + CLAIM_LEASE_MS).toISOString();
+      const itemNowIso = DateTime.formatIso(DateTime.makeUnsafe(itemNowMs));
+      const leaseUntilIso = DateTime.formatIso(DateTime.makeUnsafe(itemNowMs + CLAIM_LEASE_MS));
       const priorAttempts = prior?.attemptCount ?? 0;
 
       // If this object already holds an authenticated `claiming` state (from a prior DKIM-verified
@@ -577,13 +629,16 @@ const runAlertInboxPassUnlocked = (
       if (rawResult._tag === "Failure") {
         failures.push({ objectKey, reason: rawResult.failure.reason });
         if (options.apply) {
+          const expectedClaimGenerationFields = claimAlreadyAcquired
+            ? { expectedClaimGeneration: acquiredClaimGeneration }
+            : {};
           yield* options.store.markRetry({
             objectKey: claimAlreadyAcquired ? acquiredHolderObjectKey : objectKey,
             deliveryHash: prior?.deliveryHash ?? extractDeliveryHash(objectKey, new Uint8Array(0)),
             dedupKey: prior?.dedupKey ?? null,
             messageId: prior?.messageId ?? null,
             keepClaiming: claimAlreadyAcquired || prior?.status === "claiming",
-            ...(claimAlreadyAcquired ? { expectedClaimGeneration: acquiredClaimGeneration } : {}),
+            ...expectedClaimGenerationFields,
             reason: rawResult.failure.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -625,13 +680,16 @@ const runAlertInboxPassUnlocked = (
       if (dkim._tag === "DkimTransientError") {
         failures.push({ objectKey, reason: dkim.reason });
         if (options.apply) {
+          const expectedClaimGenerationFields2 = claimAlreadyAcquired
+            ? { expectedClaimGeneration: acquiredClaimGeneration }
+            : {};
           yield* options.store.markRetry({
             objectKey: claimAlreadyAcquired ? acquiredHolderObjectKey : objectKey,
             deliveryHash,
             dedupKey: prior?.dedupKey ?? null,
             messageId: prior?.messageId ?? null,
             keepClaiming: claimAlreadyAcquired || prior?.status === "claiming",
-            ...(claimAlreadyAcquired ? { expectedClaimGeneration: acquiredClaimGeneration } : {}),
+            ...expectedClaimGenerationFields2,
             reason: dkim.reason,
             nextRetryAt: computeNextRetryIso(itemNowMs, priorAttempts),
             nowIso: itemNowIso,
@@ -825,8 +883,8 @@ const runAlertInboxPassUnlocked = (
       const stillOwned = yield* options.store.verifyAndRenewClaim({
         objectKey: holderObjectKey,
         claimGeneration,
-        nowIso: new Date(prePostNowMs).toISOString(),
-        leaseUntilIso: new Date(prePostNowMs + CLAIM_LEASE_MS).toISOString(),
+        nowIso: DateTime.formatIso(DateTime.makeUnsafe(prePostNowMs)),
+        leaseUntilIso: DateTime.formatIso(DateTime.makeUnsafe(prePostNowMs + CLAIM_LEASE_MS)),
       });
       if (!stillOwned) {
         continue;
@@ -920,54 +978,54 @@ const main = Effect.scoped(
             bucket: { type: "string", default: DEFAULT_ALERT_BUCKET },
             prefix: { type: "string", default: DEFAULT_ALERT_PREFIX },
             repo: { type: "string", default: DEFAULT_ALERT_REPO },
-            "allowed-domains": { type: "string", default: DEFAULT_ALLOWED_DOMAINS.join(",") },
+            "allowed-domains": { type: "string", default: Arr.join(DEFAULT_ALLOWED_DOMAINS, ",") },
             state: { type: "string" },
             "max-per-pass": { type: "string", default: "20" },
           },
         }),
       catch: (error) =>
-        new AlertInboxError({
+        AlertInboxError.make({
           reason: error instanceof Error ? error.message : String(error),
         }),
     });
 
     const statePath = values.state;
-    if (values.apply && !statePath) {
-      return yield* new AlertInboxError({ reason: "--apply requires --state" });
+    if (values.apply && !(statePath !== undefined && statePath !== "")) {
+      return yield* AlertInboxError.make({ reason: "--apply requires --state" });
     }
     if (!REPO_SLUG_PATTERN.test(values.repo)) {
-      return yield* new AlertInboxError({ reason: "--repo must be a GitHub owner/name" });
+      return yield* AlertInboxError.make({ reason: "--repo must be a GitHub owner/name" });
     }
     const maxPerPass = Number(values["max-per-pass"]);
-    if (!/^[1-9][0-9]*$/.test(values["max-per-pass"]) || !Number.isSafeInteger(maxPerPass)) {
-      return yield* new AlertInboxError({ reason: "--max-per-pass must be a positive integer" });
+    if (!(mainPattern.test(values["max-per-pass"]) && Number.isSafeInteger(maxPerPass))) {
+      return yield* AlertInboxError.make({ reason: "--max-per-pass must be a positive integer" });
     }
-    const allowedDomains = values["allowed-domains"]
-      .split(",")
-      .map((d) => d.trim().toLowerCase().replace(/\.$/, ""))
-      .filter((d) => d.length > 0);
+    const allowedDomains = Arr.filter(
+      Arr.map(Str.split(values["allowed-domains"], ","), (d) =>
+        Str.replace(trailingDotPattern, "")(Str.toLowerCase(Str.trim(d))),
+      ),
+      (d) => d.length > 0,
+    );
     if (allowedDomains.length === 0) {
-      return yield* new AlertInboxError({
+      return yield* AlertInboxError.make({
         reason: "--allowed-domains must contain at least one domain",
       });
     }
 
-    if (values.apply && statePath) {
+    if (values.apply === true && statePath !== undefined && statePath !== "") {
       process.umask(0o077);
-      yield* Effect.tryPromise({
-        try: () => mkdir(dirname(statePath), { recursive: true, mode: 0o700 }),
-        catch: (error) =>
-          new AlertInboxError({
-            reason: error instanceof Error ? error.message : String(error),
-          }),
-      });
+      const path = yield* Path.Path;
+      const fs = yield* FileSystem.FileSystem;
+      yield* fs
+        .makeDirectory(path.dirname(statePath), { recursive: true, mode: 0o700 })
+        .pipe(Effect.mapError((error) => AlertInboxError.make({ reason: error.message })));
     }
 
     const stateExists =
       statePath !== undefined
         ? yield* Effect.tryPromise({
             try: () => Bun.file(statePath).exists(),
-            catch: () => new AlertInboxError({ reason: "Failed to check state file existence" }),
+            catch: () => AlertInboxError.make({ reason: "Failed to check state file existence" }),
           })
         : false;
 
@@ -987,7 +1045,7 @@ const main = Effect.scoped(
     });
 
     process.stdout.write(
-      `${JSON.stringify({ apply: values.apply, repo: values.repo, bucket: values.bucket, prefix: values.prefix, label: ALERT_ISSUE_LABEL, ...result })}\n`,
+      `${encodeJson({ apply: values.apply, repo: values.repo, bucket: values.bucket, prefix: values.prefix, label: ALERT_ISSUE_LABEL, ...result })}\n`,
     );
     if (result.failures.length > 0) {
       process.exitCode = 1;
@@ -1000,6 +1058,7 @@ if (import.meta.main) {
     GcloudAlertBucketLive,
     GhAlertIssueTrackerLive,
     DnsTxtResolverLive,
+    BunServices.layer,
   );
   await Effect.runPromise(
     main.pipe(

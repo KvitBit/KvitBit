@@ -1,0 +1,17 @@
+engine biome(1.0)
+language js(typescript, jsx)
+
+file($name, $body) where {
+  $name <: r".*\.(?:ts|tsx|mts|cts)$",
+  $body <: r"(?s).*\bunknown\b.*",
+  $body <: contains bubble {
+    or {
+      JsFormalParameter() as $unknown_parameter,
+      JsRestParameter() as $unknown_parameter
+    } where {
+      $unknown_parameter <: r"(?s)^.*:\s*unknown(?:\s*=.*)?$",
+      $unknown_parameter <: not r"(?s)^cause\??\s*:\s*unknown(?:\s*=.*)?$",
+      register_diagnostic(span=$unknown_parameter, message="[anti-slop/no-unknown-parameters] Parse the input into its expected owner type at the I/O boundary.", severity="error")
+    }
+  }
+}

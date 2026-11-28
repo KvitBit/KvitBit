@@ -1,7 +1,23 @@
 import { describe, expect, test } from "bun:test";
-import type { DocumentId, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Conflict, NotFound } from "@kvitbit/domain/contract";
-import { Cause, Effect, Exit, Fiber, Option, Ref, Schema } from "effect";
+import {
+  type AuditEntry,
+  AuditEntryId,
+  Conflict,
+  DocumentId,
+  ExportId,
+  NotFound,
+  NumberingSeriesId,
+  WorkspaceId,
+} from "@kvitbit/domain/contract";
+import * as EffectArray from "effect/Array";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
+import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
+import * as EffectString from "effect/String";
 import { CoreStore, UniqueViolation } from "../src/store/CoreStore";
 import { allocateNumber, reserveNumber } from "../src/store/numbering";
 import type { Collection } from "../src/store/tables";
@@ -17,8 +33,8 @@ import {
 
 const Note = Schema.Struct({
   id: Schema.String,
-  workspaceId: Schema.String as unknown as Schema.Codec<WorkspaceId>,
-  revision: Schema.Number,
+  workspaceId: WorkspaceId,
+  revision: Schema.Finite,
   title: Schema.String,
   slug: Schema.String,
   email: Schema.NullOr(Schema.String),
@@ -30,14 +46,15 @@ type Note = typeof Note.Type;
 const Notes = defineCollection<Note>({
   name: "notes",
   entity: "Contact",
-  schema: Note as unknown as Schema.Codec<Note, unknown>,
+  schema: Note,
   unique: [
     { name: "notes_slug_unique", scope: "global", key: (n) => [n.slug] },
     // Partial expression index: lower(email) WHERE status = 'pending'.
     {
       name: "notes_pending_email_unique",
       scope: "workspace",
-      key: (n) => (n.status === "pending" && n.email !== null ? [n.email.toLowerCase()] : null),
+      key: (n) =>
+        n.status === "pending" && n.email !== null ? [EffectString.toLowerCase(n.email)] : null,
     },
   ],
 });
@@ -110,7 +127,7 @@ describe("in-memory tables: collections", () => {
         return [stale, staleUpdate, staleRemove];
       }),
     );
-    const conflict = new Conflict({ reason: "revision_changed", currentRevision: 2 });
+    const conflict = Conflict.make({ reason: "revision_changed", currentRevision: 2 });
     expect(exit).toEqual(Exit.succeed([conflict, conflict, conflict]));
   });
 
@@ -118,19 +135,24 @@ describe("in-memory tables: collections", () => {
     const exit = await run(({ store, notes }) =>
       Effect.gen(function* () {
         yield* store.transaction(notes.insert(note("1")));
-        const results = yield* Effect.all([
-          Effect.flip(notes.get(WORKSPACE_B, "1")),
-          Effect.flip(store.transaction(notes.getForUpdate(WORKSPACE_B, "1", 1))),
-          Effect.flip(store.transaction(notes.lock(WORKSPACE_B, "1"))),
-          Effect.flip(store.transaction(notes.update(note("1", { workspaceId: WORKSPACE_B }), 1))),
-          Effect.flip(store.transaction(notes.remove(WORKSPACE_B, "1", 1))),
-        ]);
+        const results = yield* Effect.all(
+          [
+            Effect.flip(notes.get(WORKSPACE_B, "1")),
+            Effect.flip(store.transaction(notes.getForUpdate(WORKSPACE_B, "1", 1))),
+            Effect.flip(store.transaction(notes.lock(WORKSPACE_B, "1"))),
+            Effect.flip(
+              store.transaction(notes.update(note("1", { workspaceId: WORKSPACE_B }), 1)),
+            ),
+            Effect.flip(store.transaction(notes.remove(WORKSPACE_B, "1", 1))),
+          ],
+          { concurrency: 1 },
+        );
         const found = yield* notes.find(WORKSPACE_B, "1");
         const listed = yield* notes.list(WORKSPACE_B);
         return { results, found: Option.isNone(found), listed: listed.length };
       }),
     );
-    const notFound = new NotFound({ entity: "Contact", id: "1" });
+    const notFound = NotFound.make({ entity: "Contact", id: "1" });
     expect(exit).toEqual(
       Exit.succeed({
         results: [notFound, notFound, notFound, notFound, notFound],
@@ -145,7 +167,8 @@ describe("in-memory tables: collections", () => {
       Effect.gen(function* () {
         yield* store.transaction(notes.insert(note("1")));
         yield* store.transaction(notes.remove(WORKSPACE_A, "1", 1));
-        return Option.isNone(yield* notes.find(WORKSPACE_A, "1"));
+        const findResult = yield* notes.find(WORKSPACE_A, "1");
+        return Option.isNone(findResult);
       }),
     );
     expect(exit).toEqual(Exit.succeed(true));
@@ -183,12 +206,12 @@ describe("in-memory tables: collections", () => {
     );
     expect(exit).toEqual(
       Exit.succeed({
-        slugTaken: new UniqueViolation({ collection: "notes", constraint: "notes_slug_unique" }),
-        emailTaken: new UniqueViolation({
+        slugTaken: UniqueViolation.make({ collection: "notes", constraint: "notes_slug_unique" }),
+        emailTaken: UniqueViolation.make({
           collection: "notes",
           constraint: "notes_pending_email_unique",
         }),
-        duplicateId: new UniqueViolation({ collection: "notes", constraint: "primary" }),
+        duplicateId: UniqueViolation.make({ collection: "notes", constraint: "primary" }),
         bySlug: Option.some("1"),
         byEmail: Option.some("5"),
       }),
@@ -209,9 +232,10 @@ describe("in-memory tables: collections", () => {
               note("f", { workspaceId: WORKSPACE_B }),
             ],
             notes.insert,
+            { concurrency: 1 },
           ),
         );
-        const ids = (rows: ReadonlyArray<Note>) => rows.map((r) => r.id);
+        const ids = (rows: ReadonlyArray<Note>) => EffectArray.map(rows, (r) => r.id);
         const query = {
           where: { title: "x" },
           range: { issuedOn: { gte: "2026-11-01" } },
@@ -219,7 +243,7 @@ describe("in-memory tables: collections", () => {
           direction: "desc" as const,
         };
         const page1 = yield* notes.list(WORKSPACE_A, { ...query, limit: 2 });
-        const last = page1[page1.length - 1];
+        const last = page1.at(-1);
         const page2 = yield* notes.list(WORKSPACE_A, {
           ...query,
           after: last === undefined ? [] : [last.issuedOn, last.id],
@@ -234,7 +258,11 @@ describe("in-memory tables: collections", () => {
 });
 
 describe("in-memory CoreStore: transactions", () => {
-  const counter = { workspaceId: WORKSPACE_A, seriesId: "s" as NumberingSeriesId, period: "2026" };
+  const counter = {
+    workspaceId: WORKSPACE_A,
+    seriesId: NumberingSeriesId.make("01900000-0000-7000-8000-000000005000"),
+    period: "2026",
+  };
 
   test("a failure or a defect rolls back every write", async () => {
     const exit = await run(({ store, notes }) =>
@@ -275,7 +303,8 @@ describe("in-memory CoreStore: transactions", () => {
             yield* store.transaction(notes.insert(note("kept")));
           }),
         );
-        return (yield* notes.list(WORKSPACE_A)).map((n) => n.id);
+        const rows = yield* notes.list(WORKSPACE_A);
+        return EffectArray.map(rows, (n) => n.id);
       }),
     );
     expect(exit).toEqual(Exit.succeed(["kept", "outer"]));
@@ -296,9 +325,12 @@ describe("in-memory CoreStore: transactions", () => {
   });
 
   test("writes outside a transaction are defects (rule C1)", async () => {
-    expect(isDefect(await run(({ notes }) => notes.insert(note("1"))))).toBe(true);
-    expect(isDefect(await run(({ store }) => store.counters.lock(counter)))).toBe(true);
-    expect(isDefect(await run(({ store }) => store.afterCommit(Effect.void)))).toBe(true);
+    const insert = (await run(({ notes }) => notes.insert(note("1")))).pipe(isDefect);
+    const lock = (await run(({ store }) => store.counters.lock(counter))).pipe(isDefect);
+    const afterCommit = (await run(({ store }) => store.afterCommit(Effect.void))).pipe(isDefect);
+    expect(insert).toBe(true);
+    expect(lock).toBe(true);
+    expect(afterCommit).toBe(true);
   });
 
   test("child fibers share the transaction", async () => {
@@ -414,7 +446,7 @@ describe("in-memory CoreStore: transactions", () => {
 });
 
 describe("in-memory CoreStore: number_reservations_document_fk", () => {
-  const doc = "01900000-0000-7000-8000-0000000df001" as DocumentId;
+  const doc = DocumentId.make("01900000-0000-7000-8000-0000000df001");
   const reservation = (workspaceId: WorkspaceId, number: string) => ({
     workspaceId,
     kind: "invoice" as const,
@@ -447,7 +479,7 @@ describe("in-memory CoreStore: number_reservations_document_fk", () => {
             store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1")),
           ),
         );
-        const other = "01900000-0000-7000-8000-0000000df002" as DocumentId;
+        const other = DocumentId.make("01900000-0000-7000-8000-0000000df002");
         return yield* store.transaction(
           store.reservations.tryReserve({ ...reservation(WORKSPACE_A, "FK-1"), documentId: other }),
         );
@@ -460,13 +492,16 @@ describe("in-memory CoreStore: number_reservations_document_fk", () => {
     const exit = await run(({ store }) =>
       Effect.gen(function* () {
         const documents = (yield* MemoryTables).collection(StubDocuments);
-        const free = "01900000-0000-7000-8000-0000000df003" as DocumentId;
+        const free = DocumentId.make("01900000-0000-7000-8000-0000000df003");
         yield* store.transaction(
-          Effect.all([
-            ensureDocumentRow(WORKSPACE_A, doc),
-            ensureDocumentRow(WORKSPACE_A, free),
-            store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1")),
-          ]),
+          Effect.all(
+            [
+              ensureDocumentRow(WORKSPACE_A, doc),
+              ensureDocumentRow(WORKSPACE_A, free),
+              store.reservations.tryReserve(reservation(WORKSPACE_A, "FK-1")),
+            ],
+            { concurrency: 1 },
+          ),
         );
         const removedFree = yield* Effect.exit(
           store.transaction(documents.remove(WORKSPACE_A, free, 1)),
@@ -482,9 +517,13 @@ describe("in-memory CoreStore: number_reservations_document_fk", () => {
 });
 
 describe("in-memory CoreStore: numbering (S3)", () => {
-  const key = { workspaceId: WORKSPACE_A, seriesId: "s1" as NumberingSeriesId, period: "2026" };
-  const doc = (n: number) => `01900000-0000-7000-8000-0000000d000${n}` as DocumentId;
-  const format = (n: number) => `2026-${String(n).padStart(4, "0")}`;
+  const key = {
+    workspaceId: WORKSPACE_A,
+    seriesId: NumberingSeriesId.make("01900000-0000-7000-8000-000000005001"),
+    period: "2026",
+  };
+  const doc = (n: number) => DocumentId.make(`01900000-0000-7000-8000-0000000d000${n}`);
+  const format = (n: number) => `2026-${EffectString.padStart(4, "0")(String(n))}`;
   const allocate = (n: number) =>
     Effect.andThen(
       ensureDocumentRow(WORKSPACE_A, doc(n)),
@@ -548,9 +587,11 @@ describe("in-memory CoreStore: numbering (S3)", () => {
         ),
       ),
     );
-    expect(isDefect(backwards)).toBe(true);
+    const wentBackwards = backwards.pipe(isDefect);
+    expect(wentBackwards).toBe(true);
     const unlocked = await run(({ store }) => store.transaction(store.counters.set(key, 5)));
-    expect(isDefect(unlocked)).toBe(true);
+    const setWithoutLock = unlocked.pipe(isDefect);
+    expect(setWithoutLock).toBe(true);
   });
 
   test("concurrent allocations get distinct consecutive numbers", async () => {
@@ -560,7 +601,7 @@ describe("in-memory CoreStore: numbering (S3)", () => {
           Array.from({ length: 5 }, (_, i) => store.transaction(allocate(i + 1))),
           { concurrency: "unbounded" },
         ),
-        (numbers) => numbers.map((n) => n.sequence).sort(),
+        (numbers) => EffectArray.map(numbers, (n) => n.sequence).sort(),
       ),
     );
     expect(exit).toEqual(Exit.succeed([1, 2, 3, 4, 5]));
@@ -568,7 +609,11 @@ describe("in-memory CoreStore: numbering (S3)", () => {
 });
 
 describe("in-memory CoreStore: council regressions", () => {
-  const key = { workspaceId: WORKSPACE_A, seriesId: "s9" as NumberingSeriesId, period: "all" };
+  const key = {
+    workspaceId: WORKSPACE_A,
+    seriesId: NumberingSeriesId.make("01900000-0000-7000-8000-000000005009"),
+    period: "all",
+  };
 
   test("an interrupted savepoint rolls back only its own writes", async () => {
     const exit = await run(({ store, notes }) =>
@@ -584,7 +629,8 @@ describe("in-memory CoreStore: council regressions", () => {
             yield* notes.insert(note("after"));
           }),
         );
-        return (yield* notes.list(WORKSPACE_A)).map((n) => n.id);
+        const rows = yield* notes.list(WORKSPACE_A);
+        return EffectArray.map(rows, (n) => n.id);
       }),
     );
     expect(exit).toEqual(Exit.succeed(["after", "outer"]));
@@ -617,7 +663,11 @@ describe("in-memory CoreStore: council regressions", () => {
         yield* Effect.yieldNow;
         // A later transaction is unaffected by the dead savepoint finishing.
         yield* store.transaction(notes.insert(note("next")));
-        return { outer: isDefect(outer), ids: (yield* notes.list(WORKSPACE_A)).map((n) => n.id) };
+        const rows = yield* notes.list(WORKSPACE_A);
+        return {
+          outer: isDefect(outer),
+          ids: EffectArray.map(rows, (n) => n.id),
+        };
       }),
     );
     expect(exit).toEqual(Exit.succeed({ outer: true, ids: ["next"] }));
@@ -630,11 +680,12 @@ describe("in-memory CoreStore: council regressions", () => {
         return yield* store.transaction(
           Effect.gen(function* () {
             const row = yield* notes.lock(WORKSPACE_A, "1");
-            const results = yield* Effect.all(
-              ["a", "b"].map((title) => Effect.exit(notes.update({ ...row, title }, row.revision))),
+            const results = yield* Effect.forEach(
+              ["a", "b"],
+              (title) => Effect.exit(notes.update({ ...row, title }, row.revision)),
               { concurrency: "unbounded" },
             );
-            return results.map((r) => (Exit.isSuccess(r) ? "ok" : "conflict"));
+            return EffectArray.map(results, (r) => (Exit.isSuccess(r) ? "ok" : "conflict"));
           }),
         );
       }),
@@ -649,11 +700,12 @@ describe("in-memory CoreStore: council regressions", () => {
         return yield* store.transaction(store.counters.set(key, 2));
       }),
     );
-    expect(isDefect(exit)).toBe(true);
+    const defect = exit.pipe(isDefect);
+    expect(defect).toBe(true);
   });
 
   test("allocateNumber skips long occupied runs but stops on a repeating format", async () => {
-    const doc = "01900000-0000-7000-8000-0000000d0001" as DocumentId;
+    const doc = DocumentId.make("01900000-0000-7000-8000-0000000d0001");
     const exit = await run(({ store }) =>
       Effect.gen(function* () {
         yield* store.transaction(ensureDocumentRow(WORKSPACE_A, doc));
@@ -668,6 +720,7 @@ describe("in-memory CoreStore: council regressions", () => {
                 seriesId: null,
                 documentId: doc,
               }),
+            { concurrency: 1 },
           ),
         );
         const allocated = yield* store.transaction(
@@ -684,36 +737,66 @@ describe("in-memory CoreStore: council regressions", () => {
     expect(exit).toEqual(Exit.succeed({ number: "N-51", repeating: true }));
   });
 
-  test("audit history returns detached copies", async () => {
+  test("audit history returns detached copies and excludes rolled-back appends", async () => {
     const exit = await run(({ store }) =>
       Effect.gen(function* () {
         const subject = { entity: "Document", id: "d" } as const;
-        const changes = [{ path: "note", before: { a: 1 }, after: null }];
+        const before = { a: 1 };
+        const changes = [
+          { path: "note", before, after: null },
+          { path: "newField", before: undefined, after: "set" },
+        ];
+        const entry = {
+          id: AuditEntryId.make("01900000-0000-7000-8000-000000000001"),
+          at: "2026-11-23T09:00:00.000Z",
+          actor: {
+            _tag: "System",
+            job: {
+              _tag: "DataExport",
+              exportId: ExportId.make("01900000-0000-7000-8000-00000000000e"),
+            },
+          },
+          subject,
+          action: "document.edit",
+          revision: 2,
+          changes,
+          reason: null,
+        } satisfies AuditEntry;
+        const append = store.audit.append(WORKSPACE_A, entry);
         yield* store.transaction(
-          store.audit.append(WORKSPACE_A, {
-            id: "01900000-0000-7000-8000-000000000001" as never,
-            at: "2026-11-23T09:00:00.000Z",
-            actor: { _tag: "System", job: { _tag: "DataExport", exportId: "e" as never } },
-            subject,
-            action: "document.edit",
-            revision: 2,
-            changes,
-            reason: null,
-          }),
+          Effect.andThen(
+            append,
+            Effect.ignore(store.transaction(Effect.andThen(append, Effect.fail("rollback")))),
+          ),
         );
-        (changes[0] as { before: { a: number } }).before.a = 99;
+        before.a = 99;
         const first = yield* store.audit.history(WORKSPACE_A, subject);
-        (first[0]?.changes[0]?.before as { a: number }).a = 7;
+        const returnedBefore = first[0]?.changes[0]?.before;
+        if (!Schema.is(Schema.Struct({ a: Schema.Finite }))(returnedBefore)) {
+          return yield* Effect.die("Expected the first audit entry to contain the copied change");
+        }
+        Object.assign(returnedBefore, { a: 7 });
         const second = yield* store.audit.history(WORKSPACE_A, subject);
-        return second[0]?.changes[0]?.before;
+        return EffectArray.map(second, (row) => row.changes);
       }),
     );
-    expect(exit).toEqual(Exit.succeed({ a: 1 }));
+    expect(exit).toEqual(
+      Exit.succeed([
+        [
+          { path: "note", before: { a: 1 }, after: null },
+          { path: "newField", before: undefined, after: "set" },
+        ],
+      ]),
+    );
   });
 });
 
 describe("in-memory CoreStore: review regressions", () => {
-  const key = { workspaceId: WORKSPACE_A, seriesId: "s7" as NumberingSeriesId, period: "all" };
+  const key = {
+    workspaceId: WORKSPACE_A,
+    seriesId: NumberingSeriesId.make("01900000-0000-7000-8000-000000005007"),
+    period: "all",
+  };
 
   test("a counter lock taken in a rolled-back savepoint does not authorize set", async () => {
     const exit = await run(({ store }) =>

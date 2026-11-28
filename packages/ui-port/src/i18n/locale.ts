@@ -1,4 +1,11 @@
-import type { Locale as DomainLocale } from "@kvitbit/domain/contract";
+import { Locale as DomainLocale } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
+const LANGUAGE_SUBTAG_SEPARATOR = /[-_]/;
 
 /** UI language. Same literals as the domain `Locale` (documents and emails use it too). */
 export type Locale = DomainLocale;
@@ -14,10 +21,10 @@ export const FALLBACK_LOCALE: Locale = "en";
 /** BCP 47 tag each locale formats with (en-GB: day-first dates, as on Czech invoices). */
 export const INTL_TAG: Readonly<Record<Locale, string>> = { cs: "cs-CZ", en: "en-GB" };
 
-export const isLocale = (value: unknown): value is Locale => value === "cs" || value === "en";
+export const isLocale = Schema.is(DomainLocale);
 
 const fromTag = (tag: string): Locale | undefined => {
-  const language = tag.trim().toLowerCase().split(/[-_]/)[0];
+  const language = Str.split(Str.toLowerCase(Str.trim(tag)), LANGUAGE_SUBTAG_SEPARATOR)[0];
   if (language === "cs" || language === "sk") return "cs"; // Slovak readers get Czech copy
   if (language === "en") return "en";
   return undefined;
@@ -28,30 +35,39 @@ const fromTag = (tag: string): Locale | undefined => {
  * preference, `Accept-Language` entries). Unknown languages are skipped; when none match,
  * `fallback` (default `DEFAULT_LOCALE`) is returned.
  */
-export const negotiateLocale = (
-  candidates: ReadonlyArray<string | null | undefined>,
-  fallback: Locale = DEFAULT_LOCALE,
-): Locale => {
-  for (const candidate of candidates) {
-    if (candidate === null || candidate === undefined) continue;
-    const locale = fromTag(candidate);
-    if (locale !== undefined) return locale;
-  }
-  return fallback;
-};
+export const negotiateLocale: {
+  (fallback?: Locale): (candidates: ReadonlyArray<string | null | undefined>) => Locale;
+  (candidates: ReadonlyArray<string | null | undefined>, fallback?: Locale): Locale;
+} = Fn.dual(
+  (args) => Arr.isArray(args[0]),
+  (
+    candidates: ReadonlyArray<string | null | undefined>,
+    fallback: Locale = DEFAULT_LOCALE,
+  ): Locale => {
+    for (const candidate of candidates) {
+      if (candidate === null || candidate === undefined) continue;
+      const locale = fromTag(candidate);
+      if (locale !== undefined) return locale;
+    }
+    return fallback;
+  },
+);
 
 /** Parses an `Accept-Language` header into tags ordered by quality (q=0 entries dropped). */
 export const parseAcceptLanguage = (header: string | null | undefined): ReadonlyArray<string> => {
   if (header === null || header === undefined) return [];
-  return header
-    .split(",")
-    .map((entry, order) => {
-      const [tag = "", ...params] = entry.trim().split(";");
-      const q = params.map((p) => p.trim()).find((p) => p.startsWith("q="));
-      const quality = q === undefined ? 1 : Number.parseFloat(q.slice(2));
-      return { tag: tag.trim(), quality, order };
-    })
-    .filter((e) => e.tag !== "" && e.tag !== "*" && Number.isFinite(e.quality) && e.quality > 0)
-    .sort((a, b) => b.quality - a.quality || a.order - b.order)
-    .map((e) => e.tag);
+  return Arr.map(
+    Arr.filter(
+      Arr.map(Str.split(header, ","), (entry, order) => {
+        const [tag = "", ...params] = Str.split(Str.trim(entry), ";");
+        const q = Option.getOrUndefined(
+          Arr.findFirst(Arr.map(params, Str.trim), Str.startsWith("q=")),
+        );
+        const quality = q === undefined ? 1 : Number.parseFloat(Fn.pipe(q, Str.slice(2)));
+        return { tag: Str.trim(tag), quality, order };
+      }),
+      (e) => e.tag !== "" && e.tag !== "*" && Number.isFinite(e.quality) && e.quality > 0,
+    ).sort((a, b) => b.quality - a.quality || a.order - b.order),
+    (e) => e.tag,
+  );
 };

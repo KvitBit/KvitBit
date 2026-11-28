@@ -1,15 +1,66 @@
 import { expect, test } from "bun:test";
+import { AltchaBotProtection, BotProtection } from "@kvitbit/adapters/altcha";
+import { layerMigrated } from "@kvitbit/adapters/testing";
 import { AltchaChallenge } from "@kvitbit/api-contract";
-import { createChallenge, type Payload, verifySolution } from "altcha-lib";
+import { createChallenge, verifySolution } from "altcha-lib";
 import { deriveKey as deriveSha } from "altcha-lib/algorithms/sha";
-import { Effect, Layer, Redacted, Schema } from "effect";
-import { AltchaBotProtection, BotProtection } from "../../../../packages/adapters/src/altcha";
-import { layerMigrated } from "../../../../packages/adapters/src/testing";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as Layer from "effect/Layer";
+import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import { WebServicesLive } from "../../src/app/api";
+import { fetchAndSolveBotProof } from "../../src/page/public/_altcha";
 import { solveAltchaChallenge } from "../../src/page/public/_altcha-solver";
+import { mockWire } from "./wire";
+
+test("an invalid worker reply falls back and interruption terminates a pending worker", async () => {
+  let started = Promise.withResolvers<WorkerFixture>();
+  class WorkerFixture {
+    onmessage?: (event: MessageEvent) => void;
+    terminated = false;
+
+    postMessage() {
+      started.resolve(this);
+    }
+
+    terminate() {
+      this.terminated = true;
+    }
+  }
+  const previousWorker = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+  Object.defineProperty(globalThis, "Worker", { configurable: true, value: WorkerFixture });
+  const fetch = mockWire(() =>
+    Response.json({ parameters: { algorithm: "SHA-256", nonce: "00112233" } }),
+  );
+  const solve = fetchAndSolveBotProof("sign_in", (result) => result).pipe(
+    Effect.provide(WebServicesLive),
+  );
+  try {
+    const badReply = Effect.runFork(solve);
+    const firstWorker = await started.promise;
+    firstWorker.onmessage?.(new MessageEvent("message", { data: { header: 42 } }));
+    expect(await badReply.pipe(Fiber.join, Effect.runPromise)).toMatchObject({
+      _tag: "Solved",
+      header: expect.any(String),
+    });
+    expect(firstWorker.terminated).toBe(true);
+
+    started = Promise.withResolvers<WorkerFixture>();
+    const interrupted = Effect.runFork(solve);
+    const secondWorker = await started.promise;
+    await interrupted.pipe(Fiber.interrupt, Effect.runPromise);
+    expect(secondWorker.terminated).toBe(true);
+  } finally {
+    fetch.mockRestore();
+    if (previousWorker === undefined) Reflect.deleteProperty(globalThis, "Worker");
+    else Object.defineProperty(globalThis, "Worker", previousWorker);
+  }
+});
 
 const hmacSignatureSecret = "web-altcha-test-only-signer";
 const hmacKey = Redacted.make(hmacSignatureSecret);
-const asChallenge = Schema.decodeUnknownSync(AltchaChallenge);
+const asChallenge = Schema.decodeUnknownEffect(AltchaChallenge);
 
 test.each(["ARGON2ID", "PBKDF2/SHA-256"] as const)(
   "the bot protection adapter verifies %s, enforces scope, and rejects replay",
@@ -18,7 +69,7 @@ test.each(["ARGON2ID", "PBKDF2/SHA-256"] as const)(
       const protection = yield* BotProtection;
       const challenge =
         algorithm === "ARGON2ID" ? defaultArgon2id : yield* protection.issue("sign_up");
-      const proof = yield* Effect.promise(() => solveAltchaChallenge(asChallenge(challenge)));
+      const proof = yield* asChallenge(challenge).pipe(Effect.flatMap(solveAltchaChallenge));
       const mismatch = yield* Effect.flip(protection.verify("sign_in", proof));
       expect(mismatch).toMatchObject({ _tag: "InvalidBotProof", reason: "wrong_scope" });
       yield* protection.verify("sign_up", proof);
@@ -42,10 +93,20 @@ test("altcha-lib verifies the SHA-256 proof from the browser solver", async () =
     deriveKey: deriveSha,
     hmacSignatureSecret,
   });
-  const header = await solveAltchaChallenge(asChallenge(challenge));
-  const payload: Payload = JSON.parse(Buffer.from(header, "base64").toString("utf8"));
+  const header = await asChallenge(challenge).pipe(
+    Effect.flatMap(solveAltchaChallenge),
+    Effect.runPromise,
+  );
+  const proof = Schema.fromJsonString(
+    Schema.Struct({
+      solution: Schema.Struct({ counter: Schema.Int, derivedKey: Schema.String, time: Schema.Int }),
+    }),
+  );
+  const { solution } = await Schema.decodeEffect(proof)(
+    Buffer.from(header, "base64").toString("utf8"),
+  ).pipe(Effect.runPromise);
   expect(
-    await verifySolution({ ...payload, deriveKey: deriveSha, hmacSignatureSecret }),
+    await verifySolution({ challenge, solution, deriveKey: deriveSha, hmacSignatureSecret }),
   ).toMatchObject({
     verified: true,
   });

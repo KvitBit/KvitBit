@@ -4,13 +4,24 @@
  * runs before any registry call, results (including "no record") are cached 24 hours per IČO in
  * process, and lookups are serialized, never fanned out in parallel. Nothing is persisted here.
  */
+
 import type { RegistryResult, Unavailable } from "@kvitbit/domain/contract";
 import { Invalid } from "@kvitbit/domain/contract";
 import { CompanyRegistry } from "@kvitbit/domain/ports";
-import { Clock, Context, Duration, Effect, Layer, Ref, Semaphore } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
+import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import { orUnavailable } from "../../shared/errors";
 
 /** Cache lifetime per IČO. */
+const ICO_FORMAT = /^\d{8}$/;
 export const REGISTRY_CACHE_TTL = Duration.hours(24);
 
 /**
@@ -18,24 +29,29 @@ export const REGISTRY_CACHE_TTL = Duration.hours(24);
  * digit `(11 − (weighted sum mod 11)) mod 10`, the first seven digits weighted 8 down to 2.
  */
 export const isValidIco = (ico: string): boolean => {
-  if (!/^\d{8}$/.test(ico)) return false;
-  const digits = [...ico].map(Number);
-  const weightedSum = digits
-    .slice(0, 7)
-    .reduce((sum, digit, index) => sum + digit * (8 - index), 0);
+  if (!ICO_FORMAT.test(ico)) return false;
+  const digits = EffectArray.map(EffectArray.fromIterable(ico), Number);
+  const weightedSum = EffectArray.reduce(
+    digits.slice(0, 7),
+    0,
+    (sum, digit, index) => sum + digit * (8 - index),
+  );
   return (11 - (weightedSum % 11)) % 10 === digits[7];
 };
 
 /** `Invalid{ico.checksum}` at `path` (default `["ico"]`). */
 export const icoChecksumInvalid = (path: ReadonlyArray<string | number> = ["ico"]): Invalid =>
-  new Invalid({ issues: [{ path: [...path], code: "ico.checksum" }] });
+  Invalid.make({ issues: [{ path: [...path], code: "ico.checksum" }] });
 
 /** Fails with `Invalid{ico.checksum}` unless `ico` passes the checksum. */
-export const validateIco = (
-  ico: string,
-  path?: ReadonlyArray<string | number>,
-): Effect.Effect<void, Invalid> =>
-  isValidIco(ico) ? Effect.void : Effect.fail(icoChecksumInvalid(path));
+export const validateIco: {
+  (path?: ReadonlyArray<string | number>): (ico: string) => Effect.Effect<void, Invalid>;
+  (ico: string, path?: ReadonlyArray<string | number>): Effect.Effect<void, Invalid>;
+} = Fn.dual(
+  (args) => Predicate.isString(args[0]),
+  (ico: string, path?: ReadonlyArray<string | number>): Effect.Effect<void, Invalid> =>
+    isValidIco(ico) ? Effect.void : Effect.fail(icoChecksumInvalid(path)),
+);
 
 interface CacheEntry {
   readonly at: number;
@@ -51,7 +67,7 @@ export class RegistryLookup extends Context.Service<
      */
     readonly lookup: (ico: string) => Effect.Effect<RegistryResult | null, Invalid | Unavailable>;
   }
->()("kvitbit/core/RegistryLookup") {
+>()("@kvitbit/core/modules/workspaces/registry/RegistryLookup") {
   /** One cache per layer instance; provide it once per process (requires `CompanyRegistry`). */
   static readonly layer: Layer.Layer<RegistryLookup, never, CompanyRegistry> = Layer.effect(
     RegistryLookup,
@@ -61,22 +77,21 @@ export class RegistryLookup extends Context.Service<
       const serial = yield* Semaphore.make(1);
       const ttl = Duration.toMillis(REGISTRY_CACHE_TTL);
       return {
-        lookup: (ico: string) =>
-          Effect.gen(function* () {
-            yield* validateIco(ico);
-            return yield* Semaphore.withPermit(
-              serial,
-              Effect.gen(function* () {
-                const now = yield* Clock.currentTimeMillis;
-                const hit = (yield* Ref.get(cache)).get(ico);
-                if (hit !== undefined && now - hit.at < ttl) return hit.result;
-                const record = yield* orUnavailable(registry.lookup(ico));
-                const result: RegistryResult | null = record === null ? null : { ico, ...record };
-                yield* Ref.update(cache, (all) => new Map(all).set(ico, { at: now, result }));
-                return result;
-              }),
-            );
-          }),
+        lookup: Effect.fn("RegistryLookup.lookup")(function* (ico: string) {
+          yield* validateIco(ico);
+          return yield* Semaphore.withPermit(
+            serial,
+            Effect.gen(function* () {
+              const now = yield* Clock.currentTimeMillis;
+              const hit = (yield* Ref.get(cache)).get(ico);
+              if (hit !== undefined && now - hit.at < ttl) return hit.result;
+              const record = yield* orUnavailable(registry.lookup(ico));
+              const result: RegistryResult | null = record === null ? null : { ico, ...record };
+              yield* Ref.update(cache, (all) => new Map(all).set(ico, { at: now, result }));
+              return result;
+            }),
+          );
+        }),
       };
     }),
   );

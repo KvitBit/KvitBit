@@ -18,8 +18,8 @@ const SAMPLE_ITEM: PriceListItemRecord = {
 describe("PriceList page TEA", () => {
   test("init loads items, shows shimmer skeleton while loading, and enforces stale-seq safety", () => {
     const route: PriceList.Route = { _tag: "PriceList", ws: WS };
-    const ctxCs = ctxFor(route, { locale: "cs" });
-    const ctxEn = ctxFor(route, { locale: "en" });
+    const ctxCs = ctxFor({ route, locale: "cs" });
+    const ctxEn = ctxFor({ route, locale: "en" });
     let { model, commands } = PriceList.init(route, ctxCs);
     expect(model.items._tag).toBe("Loading");
     expect(commands?.length).toBe(1);
@@ -48,14 +48,13 @@ describe("PriceList page TEA", () => {
       ctxCs,
     ).model;
     expect(model.items._tag).toBe("Loaded");
-    if (model.items._tag === "Loaded") {
-      expect(model.items.data).toHaveLength(1);
-    }
+    if (model.items._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(model.items.data).toHaveLength(1);
   });
 
   test("create/edit validation and save flow updates list optimistically on success", () => {
     const route: PriceList.Route = { _tag: "PriceList", ws: WS };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = PriceList.init(route, ctx);
     model = PriceList.update(
       model,
@@ -93,14 +92,13 @@ describe("PriceList page TEA", () => {
     );
     expect(saved.model.editor).toBeNull();
     expect(saved.outMessage?._tag).toBe("Toast");
-    if (saved.model.items._tag === "Loaded") {
-      expect(saved.model.items.data).toHaveLength(1);
-    }
+    if (saved.model.items._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(saved.model.items.data).toHaveLength(1);
   });
 
   test("archive flow removes item when includeArchived is false", () => {
     const route: PriceList.Route = { _tag: "PriceList", ws: WS };
-    const ctx = ctxFor(route);
+    const ctx = ctxFor({ route });
     let { model } = PriceList.init(route, ctx);
     model = PriceList.update(
       model,
@@ -120,9 +118,8 @@ describe("PriceList page TEA", () => {
       ctx,
     );
     expect(archived.model.confirmArchive).toBeNull();
-    if (archived.model.items._tag === "Loaded") {
-      expect(archived.model.items.data).toHaveLength(0);
-    }
+    if (archived.model.items._tag !== "Loaded") throw new Error("Expected Loaded");
+    expect(archived.model.items.data).toHaveLength(0);
   });
 
   test("SSR renders price list with zero-CLS shimmer skeleton in cs and en", async () => {

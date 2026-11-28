@@ -4,8 +4,13 @@
  * compare-and-set). Workspace scoped except the token lookup; `StoreUnavailable` for database
  * failures. Write operations run inside the caller's transaction.
  */
+
 import type { DocumentId, NotFound, VisitorHash, WorkspaceId } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer, Option } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { MemoryTables } from "../../store/tables";
 import type { ShareLink, ShareLinkId, ShareViewEventRow } from "./record";
@@ -77,7 +82,7 @@ export class ShareLinksRepo extends Context.Service<
       StoreUnavailable
     >;
   }
->()("kvitbit/core/sharelinks/ShareLinksRepo") {}
+>()("@kvitbit/core/modules/sharelinks/repo/ShareLinksRepo") {}
 
 const withoutRevision = <A extends { readonly revision: number }>({
   revision: _revision,
@@ -107,69 +112,81 @@ export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTabl
             ),
       );
     return ShareLinksRepo.of({
-      activeFor: (workspaceId, documentId) =>
+      activeFor: Effect.fn("ShareLinksRepo.activeFor")((workspaceId, documentId) =>
         Effect.map(
           links.findUnique(SHARE_ONE_ACTIVE_PER_DOCUMENT, [documentId], workspaceId),
           Option.map(withoutRevision),
         ),
-      lockByTokenHash: (tokenHash) =>
+      ),
+      lockByTokenHash: Effect.fn("shareLinks.lockHash")((tokenHash) =>
         Effect.flatMap(links.findUnique(SHARE_TOKEN_HASH_UNIQUE, [tokenHash]), (found) =>
           Option.isNone(found)
-            ? Effect.succeed(Option.none())
+            ? Effect.succeedNone
             : links.lock(found.value.workspaceId, found.value.id).pipe(
                 Effect.map((row) => Option.some(withoutRevision(row))),
                 Effect.catchTag("NotFound", () => Effect.succeed(Option.none<ShareLink>())),
               ),
         ),
-      insert: (link) => Effect.asVoid(links.insert({ ...link, revision: 1 })),
-      revoke: (workspaceId, id, at) =>
+      ),
+      insert: Effect.fn("ShareLinksRepo.insert")((link) =>
+        Effect.asVoid(links.insert({ ...link, revision: 1 })),
+      ),
+      revoke: Effect.fn("ShareLinksRepo.revoke")((workspaceId, id, at) =>
         conditional(
           workspaceId,
           id,
           (row) => row.revokedAt !== null,
           (row) => ({ ...row, revokedAt: at }),
         ),
-      markViewed: (workspaceId, id, at) =>
+      ),
+      markViewed: Effect.fn("ShareLinksRepo.markViewed")((workspaceId, id, at) =>
         conditional(
           workspaceId,
           id,
           (row) => row.viewedAt !== null,
           (row) => ({ ...row, viewedAt: at }),
         ),
-      recordEvent: (event) =>
+      ),
+      recordEvent: Effect.fn("ShareLinksRepo.recordEvent")((event) =>
         views.insert({ ...event, revision: 1 }).pipe(
           // No unique index on events.
           Effect.catchTag("UniqueViolation", Effect.die),
           Effect.asVoid,
         ),
-      hasEventSince: (workspaceId, link, visitor, kind, since) =>
-        Effect.map(
-          views.list(workspaceId, {
-            where: { shareLinkId: link, visitorHash: visitor, kind },
-            range: { at: { gt: since } },
-            limit: 1,
-          }),
-          (rows) => rows.length > 0,
-        ),
-      events: (workspaceId, documentId, page) =>
-        Effect.gen(function* () {
-          const ofDocument = yield* links.list(workspaceId, { where: { documentId } });
-          if (ofDocument.length === 0) return { rows: [], more: false };
-          const rows = yield* views.list(workspaceId, {
-            whereIn: { shareLinkId: ofDocument.map((l) => l.id) },
-            orderBy: ["at"],
-            direction: "desc",
-            ...(page.after === undefined ? {} : { after: page.after }),
-            limit: page.limit + 1,
-          });
-          return {
-            rows: rows.slice(0, page.limit).map(withoutRevision),
-            more: rows.length > page.limit,
-          };
-        }),
+      ),
+      hasEventSince: Effect.fn("ShareLinksRepo.hasEventSince")(
+        (workspaceId, link, visitor, kind, since) =>
+          Effect.map(
+            views.list(workspaceId, {
+              where: { shareLinkId: link, visitorHash: visitor, kind },
+              range: { at: { gt: since } },
+              limit: 1,
+            }),
+            (rows) => rows.length > 0,
+          ),
+      ),
+      events: Effect.fn("ShareLinksRepo.events")(function* (workspaceId, documentId, page) {
+        const ofDocument = yield* links.list(workspaceId, { where: { documentId } });
+        if (ofDocument.length === 0) return { rows: [], more: false };
+        const query = {
+          whereIn: { shareLinkId: EffectArray.map(ofDocument, (link) => link.id) },
+          orderBy: ["at"],
+          direction: "desc",
+          limit: page.limit + 1,
+        } as const;
+        const rows = yield* views.list(
+          workspaceId,
+          page.after === undefined ? query : { ...query, after: page.after },
+        );
+
+        return {
+          rows: EffectArray.map(rows.slice(0, page.limit), withoutRevision),
+          more: rows.length > page.limit,
+        };
+      }),
 
       // DocumentView.share ---------------------------------------------------------------------
-      viewStats: (workspaceId, link) =>
+      viewStats: Effect.fn("ShareLinksRepo.viewStats")((workspaceId, link) =>
         Effect.map(
           views.list(workspaceId, {
             where: { shareLinkId: link, kind: "view" },
@@ -178,6 +195,7 @@ export const ShareLinksRepoMemory: Layer.Layer<ShareLinksRepo, never, MemoryTabl
           }),
           (rows) => ({ views: rows.length, lastViewedAt: rows[0]?.at ?? null }),
         ),
+      ),
     });
   }),
 );

@@ -1,5 +1,6 @@
 import type { ProjectService } from "@alchemy.run/gcp/ServiceUsage";
 import * as Output from "alchemy/Output";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import { type KvitbitStackConfig, resourceNames } from "../config";
 import {
@@ -12,16 +13,19 @@ import {
 const uptimeTarget = ({ appOrigin, edge }: KvitbitStackConfig) => {
   const origin = appOrigin === undefined ? null : URL.parse(appOrigin);
   if (origin?.protocol === "https:") return origin;
-  const edgeDomain = edge?.enableHttps ? edge.domains[0] : undefined;
+  const edgeDomain = edge?.enableHttps !== undefined ? edge.domains[0] : undefined;
   return edgeDomain === undefined ? null : new URL(`https://${edgeDomain}`);
 };
 
 const errorRateCondition = (serviceName: string) => {
-  const denominatorFilter = [
-    'metric.type="run.googleapis.com/request_count"',
-    'resource.type="cloud_run_revision"',
-    `resource.label.service_name="${serviceName}"`,
-  ].join(" AND ");
+  const denominatorFilter = Arr.join(
+    [
+      'metric.type="run.googleapis.com/request_count"',
+      'resource.type="cloud_run_revision"',
+      `resource.label.service_name="${serviceName}"`,
+    ],
+    " AND ",
+  );
   // Sum the same five-minute request window across revisions and response codes on both sides.
   const aggregations = [
     {
@@ -50,11 +54,14 @@ const uptimeFailureCondition = (checkId: string) =>
   ({
     displayName: "Readiness check fails from multiple locations",
     conditionThreshold: {
-      filter: [
-        'metric.type="monitoring.googleapis.com/uptime_check/check_passed"',
-        'resource.type="uptime_url"',
-        `metric.label.check_id="${checkId}"`,
-      ].join(" AND "),
+      filter: Arr.join(
+        [
+          'metric.type="monitoring.googleapis.com/uptime_check/check_passed"',
+          'resource.type="uptime_url"',
+          `metric.label.check_id="${checkId}"`,
+        ],
+        " AND ",
+      ),
       aggregations: [
         {
           alignmentPeriod: "300s",

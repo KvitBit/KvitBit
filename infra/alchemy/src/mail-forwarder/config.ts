@@ -1,4 +1,12 @@
-import { Config, Data, Effect, Option, type Redacted } from "effect";
+import * as Arr from "effect/Array";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+
+const trailingDotPattern = /\.$/;
 
 export type MailRelayMode = "archive-only" | "resend";
 
@@ -18,10 +26,13 @@ export interface MailForwarderConfigShape {
   readonly tlsKeyPath: Option.Option<string>;
 }
 
-export class InvalidMailForwarderConfig extends Data.TaggedError("InvalidMailForwarderConfig")<{
-  readonly field: string;
-  readonly reason: string;
-}> {
+export class InvalidMailForwarderConfig extends Schema.TaggedError<
+  InvalidMailForwarderConfig,
+  { readonly brand: unique symbol }
+>()("InvalidMailForwarderConfig", {
+  field: Schema.String,
+  reason: Schema.String,
+}) {
   override get message() {
     return `Invalid mail forwarder config (${this.field}): ${this.reason}`;
   }
@@ -31,7 +42,7 @@ const optionalNonEmpty = (name: string) =>
   Config.option(Config.String(name)).pipe(
     Config.map(
       Option.flatMap((value) => {
-        const trimmed = value.trim();
+        const trimmed = Str.trim(value);
         return trimmed.length > 0 ? Option.some(trimmed) : Option.none();
       }),
     ),
@@ -59,43 +70,47 @@ export const loadMailForwarderConfig: Effect.Effect<
   Config.ConfigError | InvalidMailForwarderConfig
 > = Effect.gen(function* () {
   const raw = yield* rawMailForwarderConfig;
-  const domain = raw.domain.trim().toLowerCase().replace(/\.$/, "");
+  const domain = Str.replace(trailingDotPattern, "")(Str.toLowerCase(Str.trim(raw.domain)));
   if (domain.length === 0) {
-    return yield* new InvalidMailForwarderConfig({
+    return yield* InvalidMailForwarderConfig.make({
       field: "KVITBIT_MAIL_DOMAIN",
       reason: "must be non-empty",
     });
   }
 
-  const mxHost = Option.getOrElse(raw.mxHost, () => `mx.${domain}`)
-    .toLowerCase()
-    .replace(/\.$/, "");
-  const forwardTo = raw.forwardTo.trim().toLowerCase();
-  const forwardFrom = Option.getOrElse(raw.forwardFrom, () => `forwarder@${domain}`).toLowerCase();
-  const archiveBucket = raw.archiveBucket.trim();
+  const mxHost = raw.mxHost.pipe(
+    Option.getOrElse(() => `mx.${domain}`),
+    Str.toLowerCase,
+    Str.replace(trailingDotPattern, ""),
+  );
+  const forwardTo = Str.toLowerCase(Str.trim(raw.forwardTo));
+  const forwardFrom = Str.toLowerCase(
+    Option.getOrElse(raw.forwardFrom, () => `forwarder@${domain}`),
+  );
+  const archiveBucket = Str.trim(raw.archiveBucket);
   const aliases = [
     ...new Set(
-      raw.aliasesRaw
-        .split(",")
-        .map((item) => item.trim().toLowerCase())
-        .filter((item) => item.length > 0),
+      Arr.filter(
+        Arr.map(Str.split(raw.aliasesRaw, ","), (item) => Str.toLowerCase(Str.trim(item))),
+        (item) => item.length > 0,
+      ),
     ),
   ];
 
   if (aliases.length === 0) {
-    return yield* new InvalidMailForwarderConfig({
+    return yield* InvalidMailForwarderConfig.make({
       field: "KVITBIT_MAIL_ALIASES",
       reason: "must contain at least one explicit alias",
     });
   }
   if (raw.relayMode === "resend" && Option.isNone(raw.resendApiKey)) {
-    return yield* new InvalidMailForwarderConfig({
+    return yield* InvalidMailForwarderConfig.make({
       field: "RESEND_API_KEY",
       reason: "required when KVITBIT_MAIL_RELAY_MODE=resend",
     });
   }
 
-  const allowedRecipients = new Set(aliases.map((alias) => `${alias}@${domain}`));
+  const allowedRecipients = new Set(Arr.map(aliases, (alias) => `${alias}@${domain}`));
 
   return {
     domain,

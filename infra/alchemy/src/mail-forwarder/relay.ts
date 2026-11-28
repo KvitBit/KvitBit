@@ -1,3 +1,8 @@
+import * as DateTime from "effect/DateTime";
+import * as Fn from "effect/Function";
+import * as Order from "effect/Order";
+import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 /**
  * Effect-based inbound email archival (GCS JSON API) and outbound forwarding (Resend HTTPS API).
  *
@@ -10,10 +15,24 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { Clock, Context, Data, Duration, Effect, Layer, Option, type Redacted, Ref } from "effect";
-import { HttpBody, HttpClient, HttpClientRequest } from "effect/http";
+import * as Arr from "effect/Array";
+import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as HttpBody from "effect/http/HttpBody";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientRequest from "effect/http/HttpClientRequest";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import type * as Redacted from "effect/Redacted";
+import * as Ref from "effect/Ref";
+import * as Str from "effect/String";
 import type { MailRelayMode } from "./config";
 import { type ParsedEmail, parseEmail, trimAsciiWsp } from "./mime";
+
+const zaZaZaPattern = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
+const resendBasePattern = /\/+$/;
 
 export interface InboundMessage {
   readonly remoteIp: string;
@@ -49,22 +68,33 @@ export interface MailRelayService {
   readonly handleMessage: (message: InboundMessage) => Effect.Effect<RelayResult>;
 }
 
-export class MailRelay extends Context.Service<MailRelay, MailRelayService>()("KvitbitMailRelay") {}
+export class MailRelay extends Context.Service<MailRelay, MailRelayService>()(
+  "@kvitbit/alchemy/mail-forwarder/relay/MailRelay",
+) {}
 
-export class MetadataTokenError extends Data.TaggedError("MetadataTokenError")<{
-  readonly reason: string;
-}> {}
+class MetadataTokenError extends Schema.TaggedError<
+  MetadataTokenError,
+  { readonly brand: unique symbol }
+>()("MetadataTokenError", {
+  reason: Schema.String,
+}) {}
 
-export class ArchiveUploadError extends Data.TaggedError("ArchiveUploadError")<{
-  readonly status?: number;
-  readonly reason: string;
-}> {}
+class ArchiveUploadError extends Schema.TaggedError<
+  ArchiveUploadError,
+  { readonly brand: unique symbol }
+>()("ArchiveUploadError", {
+  status: Schema.optionalKey(Schema.Finite),
+  reason: Schema.String,
+}) {}
 
-export class ResendRelayError extends Data.TaggedError("ResendRelayError")<{
-  readonly status: number;
-  readonly transient: boolean;
-  readonly reason: string;
-}> {}
+class ResendRelayError extends Schema.TaggedError<
+  ResendRelayError,
+  { readonly brand: unique symbol }
+>()("ResendRelayError", {
+  status: Schema.Finite,
+  transient: Schema.Boolean,
+  reason: Schema.String,
+}) {}
 
 const DEFAULT_RESEND_BASE_URL = "https://api.resend.com";
 const DEFAULT_GCS_UPLOAD_BASE_URL = "https://storage.googleapis.com";
@@ -76,80 +106,99 @@ const DEFAULT_TIMEOUT = Duration.seconds(15);
 const sanitizeHeaderText = (value: string, maxLen = 120): string => {
   let out = "";
   for (const ch of value) {
-    const code = ch.charCodeAt(0);
+    const code = Option.getOrElse(Str.charCodeAt(ch, 0), () => Number.NaN);
     if (code <= 0x1f || code === 0x7f || ch === '"' || ch === "<" || ch === ">" || ch === "\\") {
       out += " ";
     } else {
       out += ch;
     }
   }
-  return out.replace(/\s+/g, " ").trim().slice(0, maxLen);
+  return Str.slice(0, maxLen)(Str.trim(Str.replace(/\s+/g, " ")(out)));
 };
 
 const escapeHtml = (value: string): string =>
-  value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+  Str.replaceAll(
+    "'",
+    "&#39;",
+  )(
+    Str.replaceAll(
+      '"',
+      "&quot;",
+    )(
+      Str.replaceAll(">", "&gt;")(Str.replaceAll("<", "&lt;")(Str.replaceAll("&", "&amp;")(value))),
+    ),
+  );
 
-export const canonicalRecipients = (rcptTo: ReadonlyArray<string>): ReadonlyArray<string> =>
+const canonicalRecipients = (rcptTo: ReadonlyArray<string>): ReadonlyArray<string> =>
   [
-    ...new Set(rcptTo.map((addr) => trimAsciiWsp(addr).toLowerCase()).filter((a) => a.length > 0)),
-  ].sort();
+    ...new Set(
+      Arr.filter(
+        Arr.map(rcptTo, (addr) => Str.toLowerCase(trimAsciiWsp(addr))),
+        (a) => a.length > 0,
+      ),
+    ),
+  ].sort(Order.String);
 
 export const computeDeliveryFingerprint = (message: InboundMessage): string =>
   createHash("sha256")
-    .update(trimAsciiWsp(message.mailFrom).toLowerCase())
+    .update(Str.toLowerCase(trimAsciiWsp(message.mailFrom)))
     .update("\0")
-    .update(canonicalRecipients(message.rcptTo).join(","))
+    .update(Arr.join(canonicalRecipients(message.rcptTo), ","))
     .update("\0")
     .update(message.rawBytes)
     .digest("hex");
 
 export const buildArchivePrefix = (deliveryFingerprint: string): string =>
-  `inbound/by-hash/${deliveryFingerprint.slice(0, 32)}/`;
+  `inbound/by-hash/${Str.slice(0, 32)(deliveryFingerprint)}/`;
 
-export const buildArchiveObjectName = (
+const buildArchiveObjectNameImpl = (
   now: Date,
   deliveryFingerprint: string,
   suffixHex: string,
 ): string => `${buildArchivePrefix(deliveryFingerprint)}${now.getTime()}-${suffixHex}.eml`;
 
-export const buildAlertArchivePrefix = (deliveryFingerprint: string): string =>
-  `inbound/alerts/by-hash/${deliveryFingerprint.slice(0, 32)}/`;
+export const buildArchiveObjectName: {
+  (deliveryFingerprint: string, suffixHex: string): (now: Date) => string;
+  (now: Date, deliveryFingerprint: string, suffixHex: string): string;
+} = Fn.dual(3, buildArchiveObjectNameImpl);
 
-export const buildAlertArchiveObjectName = (
+export const buildAlertArchivePrefix = (deliveryFingerprint: string): string =>
+  `inbound/alerts/by-hash/${Str.slice(0, 32)(deliveryFingerprint)}/`;
+
+const buildAlertArchiveObjectNameImpl = (
   now: Date,
   deliveryFingerprint: string,
   suffixHex: string,
 ): string => `${buildAlertArchivePrefix(deliveryFingerprint)}${now.getTime()}-${suffixHex}.eml`;
 
+const buildAlertArchiveObjectName: {
+  (deliveryFingerprint: string, suffixHex: string): (now: Date) => string;
+  (now: Date, deliveryFingerprint: string, suffixHex: string): string;
+} = Fn.dual(3, buildAlertArchiveObjectNameImpl);
+
 const aliasTagForRecipients = (recipients: ReadonlyArray<string>): string => {
-  const locals = recipients
-    .map((addr) => addr.split("@")[0]?.trim())
-    .filter((local): local is string => Boolean(local));
-  return locals.length === 0 ? "mail" : locals.join(",");
+  const locals = Arr.filter(
+    Arr.map(recipients, (addr) => Str.trim(Str.split(addr, "@")[0])),
+    (local): local is string => Boolean(local),
+  );
+  return locals.length === 0 ? "mail" : Arr.join(locals, ",");
 };
 
 /** Compares mailboxes per RFC 5321 §2.3.11: local-part case-sensitive, domain case-insensitive. */
 const isSameMailbox = (a: string | undefined, b: string | undefined): boolean => {
-  if (!a || !b) return false;
-  const atA = a.lastIndexOf("@");
-  const atB = b.lastIndexOf("@");
+  if (!(a !== undefined && a !== "" && b !== undefined && b !== "")) return false;
+  const atA = Option.getOrElse(Str.lastIndexOf("@")(a), () => -1);
+  const atB = Option.getOrElse(Str.lastIndexOf("@")(b), () => -1);
   if (atA <= 0 || atB <= 0) return a === b;
   return (
-    a.slice(0, atA) === b.slice(0, atB) &&
-    a.slice(atA + 1).toLowerCase() === b.slice(atB + 1).toLowerCase()
+    Str.slice(0, atA)(a) === Str.slice(0, atB)(b) &&
+    Str.toLowerCase(Str.slice(atA + 1)(a)) === Str.toLowerCase(Str.slice(atB + 1)(b))
   );
 };
 
 /** Resend `reply_to` requires an ASCII address; internationalized addresses are preserved in the body instead. */
 const isAsciiResendEmail = (value: string | undefined): value is string =>
-  typeof value === "string" &&
-  value.length <= 254 &&
-  /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/.test(value);
+  Predicate.isString(value) && value.length <= 254 && zaZaZaPattern.test(value);
 
 export const buildResendForwardPayload = (params: {
   readonly message: InboundMessage;
@@ -159,7 +208,7 @@ export const buildResendForwardPayload = (params: {
   readonly forwardTo: string;
   readonly forwardFrom: string;
   readonly maxAttachmentBytes: number;
-}): Record<string, unknown> => {
+}): Schema.JsonObject => {
   const {
     message,
     parsed,
@@ -171,10 +220,11 @@ export const buildResendForwardPayload = (params: {
   } = params;
   const recipients = canonicalRecipients(message.rcptTo);
   const archivePrefixUri = `gs://${archiveBucket}/${buildArchivePrefix(deliveryFingerprint)}`;
-  const senderLabel = sanitizeHeaderText(
-    parsed.fromDisplayName || parsed.fromAddress || message.mailFrom || "External Sender",
-    80,
-  );
+  const sender = Arr.findFirst(
+    [parsed.fromDisplayName, parsed.fromAddress, message.mailFrom],
+    (name): name is string => Predicate.isString(name) && name !== "",
+  ).pipe(Option.getOrElse(() => "External Sender"));
+  const senderLabel = sanitizeHeaderText(sender, 80);
   const from = `"${senderLabel} via Kvitbit" <${forwardFrom}>`;
   const replyToCandidate = parsed.replyToAddress ?? parsed.fromAddress ?? message.mailFrom;
   const replyTo = isAsciiResendEmail(replyToCandidate) ? replyToCandidate : undefined;
@@ -203,12 +253,12 @@ export const buildResendForwardPayload = (params: {
     }
   }
 
-  const recipientList = recipients.join(", ");
+  const recipientList = Arr.join(recipients, ", ");
   const originalFrom = parsed.fromHeader || message.mailFrom || "(empty reverse-path)";
   // Surface Reply-To explicitly whenever it differs from From (case-sensitive local-part per
   // RFC 5321 §2.3.11) OR was omitted from Resend's ASCII-only `reply_to` field.
   const visibleReplyTo =
-    replyToCandidate &&
+    replyToCandidate !== "" &&
     trimAsciiWsp(replyToCandidate).length > 0 &&
     (replyTo === undefined ||
       (parsed.replyToAddress !== undefined &&
@@ -217,43 +267,51 @@ export const buildResendForwardPayload = (params: {
       : undefined;
   const skippedNotice =
     skippedAttachments.length > 0
-      ? `Omitted large attachment(s): ${skippedAttachments.join(", ")} (see ${archivePrefixUri})`
+      ? `Omitted large attachment(s): ${Arr.join(skippedAttachments, ", ")} (see ${archivePrefixUri})`
       : undefined;
 
   const metaLines = [
     `Forwarded for: ${recipientList}`,
     `Original From: ${originalFrom}`,
-    ...(visibleReplyTo ? [`Original Reply-To: ${visibleReplyTo}`] : []),
-    ...(parsed.date ? [`Date: ${parsed.date}`] : []),
+    ...(visibleReplyTo !== undefined && visibleReplyTo !== ""
+      ? [`Original Reply-To: ${visibleReplyTo}`]
+      : []),
+    ...(parsed.date !== undefined && parsed.date !== "" ? [`Date: ${parsed.date}`] : []),
     `Archive: ${archivePrefixUri}`,
-    ...(skippedNotice ? [skippedNotice] : []),
+    ...(skippedNotice !== undefined && skippedNotice !== "" ? [skippedNotice] : []),
   ];
 
-  const textBody = `${metaLines.join("\n")}\n---\n\n${parsed.text ?? "(HTML-only or empty plain-text body)"}`;
+  const textBody = `${Arr.join(metaLines, "\n")}\n---\n\n${parsed.text ?? "(HTML-only or empty plain-text body)"}`;
 
   let htmlBody: string | undefined;
-  if (parsed.html !== undefined && parsed.html.trim().length > 0) {
+  if (parsed.html !== undefined && Str.trim(parsed.html).length > 0) {
     const banner =
       `<div style="font-family:system-ui,-apple-system,sans-serif;font-size:12px;color:#475569;` +
       `background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;margin-bottom:14px;">` +
       `<strong>To:</strong> ${escapeHtml(recipientList)} &middot; ` +
       `<strong>From:</strong> ${escapeHtml(originalFrom)}` +
-      (visibleReplyTo ? ` &middot; <strong>Reply-To:</strong> ${escapeHtml(visibleReplyTo)}` : "") +
-      (skippedAttachments.length > 0
-        ? ` &middot; <strong>Omitted attachments:</strong> ${escapeHtml(skippedAttachments.join(", "))} (${escapeHtml(archivePrefixUri)})`
+      (visibleReplyTo !== undefined && visibleReplyTo !== ""
+        ? ` &middot; <strong>Reply-To:</strong> ${escapeHtml(visibleReplyTo)}`
         : "") +
-      `</div>`;
+      (skippedAttachments.length > 0
+        ? ` &middot; <strong>Omitted attachments:</strong> ${escapeHtml(Arr.join(skippedAttachments, ", "))} (${escapeHtml(archivePrefixUri)})`
+        : "") +
+      "</div>";
     htmlBody = `${banner}${parsed.html}`;
   }
 
+  const replyToFields = replyTo !== undefined && replyTo !== "" ? { reply_to: replyTo } : {};
+  const htmlFields = htmlBody !== undefined && htmlBody !== "" ? { html: htmlBody } : {};
+  const attachmentsFields =
+    forwardedAttachments.length > 0 ? { attachments: forwardedAttachments } : {};
   return {
     from,
     to: [forwardTo],
-    ...(replyTo ? { reply_to: replyTo } : {}),
+    ...replyToFields,
     subject,
     text: textBody,
-    ...(htmlBody ? { html: htmlBody } : {}),
-    ...(forwardedAttachments.length > 0 ? { attachments: forwardedAttachments } : {}),
+    ...htmlFields,
+    ...attachmentsFields,
     headers: {
       "X-Kvitbit-Original-To": sanitizeHeaderText(recipientList, 250),
       "X-Kvitbit-Archive-Prefix": sanitizeHeaderText(archivePrefixUri, 250),
@@ -269,7 +327,7 @@ export const buildResendFallbackPayload = (params: {
   readonly forwardTo: string;
   readonly forwardFrom: string;
   readonly rejectionStatus: number;
-}): Record<string, unknown> => {
+}): Schema.JsonObject => {
   const recipients = canonicalRecipients(params.message.rcptTo);
   const aliasTag = sanitizeHeaderText(aliasTagForRecipients(recipients), 64);
   const cleanSubject = sanitizeHeaderText(params.parsed.subject || "(no subject)", 180);
@@ -278,13 +336,16 @@ export const buildResendFallbackPayload = (params: {
     from: `"Kvitbit Mail Forwarder" <${params.forwardFrom}>`,
     to: [params.forwardTo],
     subject: `[${aliasTag}] (Archived) ${cleanSubject}`,
-    text: [
-      "An inbound email was archived in GCS but Resend rejected verbatim forwarding.",
-      `Status: HTTP ${params.rejectionStatus}`,
-      `Original To: ${recipients.join(", ")}`,
-      `Original From: ${params.parsed.fromHeader || params.message.mailFrom || "(unknown)"}`,
-      `Archive Prefix: ${archivePrefixUri}`,
-    ].join("\n"),
+    text: Arr.join(
+      [
+        "An inbound email was archived in GCS but Resend rejected verbatim forwarding.",
+        `Status: HTTP ${params.rejectionStatus}`,
+        `Original To: ${Arr.join(recipients, ", ")}`,
+        `Original From: ${params.parsed.fromHeader || params.message.mailFrom || "(unknown)"}`,
+        `Archive Prefix: ${archivePrefixUri}`,
+      ],
+      "\n",
+    ),
   };
 };
 
@@ -302,14 +363,20 @@ const isTransientResendStatus = (status: number): boolean =>
   status === 425 ||
   status === 429;
 
-export const makeMailRelay = (
+const makeMailRelay = (
   config: MailRelayConfig,
 ): Effect.Effect<MailRelayService, never, HttpClient.HttpClient> =>
   Effect.gen(function* () {
     const client = yield* HttpClient.HttpClient;
     const tokenRef = yield* Ref.make<Option.Option<CachedToken>>(Option.none());
-    const resendBase = (config.resendBaseUrl ?? DEFAULT_RESEND_BASE_URL).replace(/\/+$/, "");
-    const gcsBase = (config.gcsUploadBaseUrl ?? DEFAULT_GCS_UPLOAD_BASE_URL).replace(/\/+$/, "");
+    const resendBase = Str.replace(
+      resendBasePattern,
+      "",
+    )(config.resendBaseUrl ?? DEFAULT_RESEND_BASE_URL);
+    const gcsBase = Str.replace(
+      resendBasePattern,
+      "",
+    )(config.gcsUploadBaseUrl ?? DEFAULT_GCS_UPLOAD_BASE_URL);
     const metadataUrl = config.metadataTokenUrl ?? DEFAULT_METADATA_TOKEN_URL;
     const maxAttachmentBytes =
       config.maxForwardedAttachmentBytes ?? DEFAULT_MAX_FORWARDED_ATTACHMENT_BYTES;
@@ -326,40 +393,41 @@ export const makeMailRelay = (
         HttpClientRequest.setHeader("Metadata-Flavor", "Google"),
       );
       const responseOpt = yield* client.execute(req).pipe(
-        Effect.mapError((error) => new MetadataTokenError({ reason: error.reason._tag })),
+        Effect.mapError((error) => MetadataTokenError.make({ reason: error.reason._tag })),
         Effect.timeoutOption(timeout),
       );
       if (Option.isNone(responseOpt)) {
-        return yield* new MetadataTokenError({ reason: "timeout" });
+        return yield* MetadataTokenError.make({ reason: "timeout" });
       }
       const response = responseOpt.value;
       if (response.status < 200 || response.status >= 300) {
-        return yield* new MetadataTokenError({
+        return yield* MetadataTokenError.make({
           reason: `metadata HTTP ${response.status}`,
         });
       }
       const body = yield* response.json.pipe(
-        Effect.mapError(() => new MetadataTokenError({ reason: "invalid token JSON" })),
+        Effect.mapError(() => MetadataTokenError.make({ reason: "invalid token JSON" })),
       );
       if (
-        typeof body !== "object" ||
-        body === null ||
-        !("access_token" in body) ||
-        typeof body.access_token !== "string" ||
-        body.access_token.length === 0
+        !(
+          Predicate.isObject(body) &&
+          "access_token" in body &&
+          Predicate.isString(body["access_token"])
+        ) ||
+        body["access_token"].length === 0
       ) {
-        return yield* new MetadataTokenError({ reason: "missing access_token" });
+        return yield* MetadataTokenError.make({ reason: "missing access_token" });
       }
       const expiresInSec =
-        "expires_in" in body && typeof body.expires_in === "number" ? body.expires_in : 300;
+        "expires_in" in body && Predicate.isNumber(body["expires_in"]) ? body["expires_in"] : 300;
       yield* Ref.set(
         tokenRef,
         Option.some({
-          token: body.access_token,
+          token: body["access_token"],
           expiresAtMs: nowMs + expiresInSec * 1000,
         }),
       );
-      return body.access_token;
+      return body["access_token"];
     });
 
     const uploadRawToGcs = (
@@ -368,7 +436,7 @@ export const makeMailRelay = (
     ): Effect.Effect<{ readonly objectName: string; readonly uri: string }, ArchiveUploadError> =>
       Effect.gen(function* () {
         const token = yield* getAccessToken.pipe(
-          Effect.mapError((error) => new ArchiveUploadError({ reason: error.reason })),
+          Effect.mapError((error) => ArchiveUploadError.make({ reason: error.reason })),
         );
         const uploadUrl =
           `${gcsBase}/upload/storage/v1/b/${encodeURIComponent(config.archiveBucket)}` +
@@ -379,15 +447,15 @@ export const makeMailRelay = (
           HttpClientRequest.setBody(HttpBody.uint8Array(rawBytes, "message/rfc822")),
         );
         const responseOpt = yield* client.execute(req).pipe(
-          Effect.mapError((error) => new ArchiveUploadError({ reason: error.reason._tag })),
+          Effect.mapError((error) => ArchiveUploadError.make({ reason: error.reason._tag })),
           Effect.timeoutOption(timeout),
         );
         if (Option.isNone(responseOpt)) {
-          return yield* new ArchiveUploadError({ reason: "timeout" });
+          return yield* ArchiveUploadError.make({ reason: "timeout" });
         }
         const response = responseOpt.value;
         if (response.status < 200 || response.status >= 300) {
-          return yield* new ArchiveUploadError({
+          return yield* ArchiveUploadError.make({
             status: response.status,
             reason: `GCS upload HTTP ${response.status}`,
           });
@@ -403,7 +471,7 @@ export const makeMailRelay = (
       Effect.gen(function* () {
         const nowMs = yield* Clock.currentTimeMillis;
         const suffixHex = yield* Effect.sync(() => randomBytes(6).toString("hex"));
-        const now = new Date(nowMs);
+        const now = DateTime.toDateUtc(DateTime.makeUnsafe(nowMs));
         const primary = yield* uploadRawToGcs(
           rawBytes,
           buildArchiveObjectName(now, deliveryFingerprint, suffixHex),
@@ -418,18 +486,18 @@ export const makeMailRelay = (
       });
 
     const postResend = (
-      payload: Record<string, unknown>,
+      payload: Schema.JsonObject,
       idempotencySeed: string,
     ): Effect.Effect<string, ResendRelayError> =>
       Effect.gen(function* () {
         if (Option.isNone(config.resendApiKey)) {
-          return yield* new ResendRelayError({
+          return yield* ResendRelayError.make({
             status: 503,
             transient: true,
             reason: "RESEND_API_KEY not configured",
           });
         }
-        const idempotencyKey = `fwd-${createHash("sha256").update(idempotencySeed).digest("hex").slice(0, 48)}`;
+        const idempotencyKey = `fwd-${Str.slice(0, 48)(createHash("sha256").update(idempotencySeed).digest("hex"))}`;
         const req = HttpClientRequest.post(`${resendBase}/emails`).pipe(
           HttpClientRequest.bearerToken(config.resendApiKey.value),
           HttpClientRequest.acceptJson,
@@ -437,18 +505,17 @@ export const makeMailRelay = (
           HttpClientRequest.bodyJsonUnsafe(payload),
         );
         const responseOpt = yield* client.execute(req).pipe(
-          Effect.mapError(
-            (error) =>
-              new ResendRelayError({
-                status: 0,
-                transient: true,
-                reason: error.reason._tag,
-              }),
+          Effect.mapError((error) =>
+            ResendRelayError.make({
+              status: 0,
+              transient: true,
+              reason: error.reason._tag,
+            }),
           ),
           Effect.timeoutOption(timeout),
         );
         if (Option.isNone(responseOpt)) {
-          return yield* new ResendRelayError({
+          return yield* ResendRelayError.make({
             status: 408,
             transient: true,
             reason: "timeout",
@@ -458,29 +525,28 @@ export const makeMailRelay = (
         if (response.status >= 200 && response.status < 300) {
           const id = yield* response.json.pipe(
             Effect.map((body) =>
-              typeof body === "object" &&
-              body !== null &&
+              Predicate.isObject(body) &&
               "id" in body &&
-              typeof body.id === "string" &&
-              body.id.length > 0
-                ? body.id
+              Predicate.isString(body["id"]) &&
+              body["id"].length > 0
+                ? body["id"]
                 : "accepted",
             ),
             Effect.orElseSucceed(() => "accepted"),
           );
           return id;
         }
-        return yield* new ResendRelayError({
+        return yield* ResendRelayError.make({
           status: response.status,
           transient: isTransientResendStatus(response.status),
           reason: `Resend HTTP ${response.status}`,
         });
       }).pipe(Effect.withSpan("MailRelay.postResend"));
 
-    const alertRecipient = `alerts@${config.domain.toLowerCase()}`;
+    const alertRecipient = `alerts@${Str.toLowerCase(config.domain)}`;
 
-    const handleMessage: MailRelayService["handleMessage"] = (message) =>
-      Effect.gen(function* () {
+    const handleMessage: MailRelayService["handleMessage"] = Effect.fn("MailRelay.handleMessage")(
+      function* (message) {
         const parsed = parseEmail(message.rawBytes);
         const deliveryFingerprint = computeDeliveryFingerprint(message);
         const includeAlertsCopy = canonicalRecipients(message.rcptTo).includes(alertRecipient);
@@ -530,7 +596,7 @@ export const makeMailRelay = (
             rcptTo: message.rcptTo,
             sizeBytes: message.rawBytes.byteLength,
             archivePath: archive.uri,
-            deliveryHash: deliveryFingerprint.slice(0, 16),
+            deliveryHash: Str.slice(0, 16)(deliveryFingerprint),
             resendId: sendResult.success,
           });
           return {
@@ -547,7 +613,7 @@ export const makeMailRelay = (
             remoteIp: message.remoteIp,
             rcptTo: message.rcptTo,
             archivePath: archive.uri,
-            deliveryHash: deliveryFingerprint.slice(0, 16),
+            deliveryHash: Str.slice(0, 16)(deliveryFingerprint),
             resendStatus: sendError.status,
             reason: sendError.reason,
           });
@@ -599,7 +665,8 @@ export const makeMailRelay = (
           smtpMessage: "4.3.0 Temporary relay failure",
           archivePath: archive.uri,
         };
-      }).pipe(Effect.withSpan("MailRelay.handleMessage"));
+      },
+    );
 
     return MailRelay.of({ handleMessage });
   });

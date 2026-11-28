@@ -14,7 +14,7 @@
  *   callers while honoring explicit overrides and frozen delivery templates.
  * - Canonical PDF cache key including both document revision and workspace revision (core-ports §5.5, W7).
  */
-import { createHash } from "node:crypto";
+
 import { type PaymentQrPayload, forDocument as qrForDocument } from "@kvitbit/adapters/qr";
 import {
   CoreStore,
@@ -25,52 +25,68 @@ import {
 } from "@kvitbit/core";
 import { Numbering } from "@kvitbit/core/engines";
 import {
+  type AuditEntry,
+  type Caller,
   type CurrencyCode,
-  CurrentCaller,
-  type DeliveryId,
+  DeliveryId,
   type DocumentId,
+  type DocumentRelation,
   Documents,
   type DocumentView,
-  type ImageRef,
+  ImageRef,
   type IsoDate,
   type Locale,
-  type PdfTemplate,
+  PdfTemplate,
   PublicShareLinks,
   type SharedDocumentView,
   Templates,
   Unavailable,
-  type WorkspaceId,
+  VatBreakdown,
+  WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { type BlobKey, RequestOutcome } from "@kvitbit/domain/ports";
-import { BigDecimal, Context, Effect, Layer, Option, Ref, Result } from "effect";
-import { SqlClient } from "effect/sql";
+import { BlobKey, RequestOutcome } from "@kvitbit/domain/ports";
+import * as Arr from "effect/Array";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Order from "effect/Order";
+import * as Ref from "effect/Ref";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import * as SqlClient from "effect/sql/SqlClient";
 
 const ZERO = BigDecimal.fromStringUnsafe("0");
 const DELIVERY_SNAPSHOT_SYMBOL = Symbol.for("kvitbit/server/DeliveryRenderSnapshot");
 const LEGACY_DELIVERY_SYMBOL = Symbol.for("kvitbit/server/LegacyDeliveryView");
 
-export interface DeliveryBrandingSnapshot {
-  readonly workspaceRevision: number;
-  readonly accentColor: string;
-  readonly footerText: string | null;
-  readonly logo: ImageRef | null;
-  readonly stamp: ImageRef | null;
-}
-
-export interface DeliveryRenderSnapshot {
-  readonly variableSymbol: string | null;
-  readonly orderNumber: string | null;
-  readonly note: string | null;
-  readonly amountDue: BigDecimal.BigDecimal;
-  readonly template: PdfTemplate;
-  readonly branding?: DeliveryBrandingSnapshot | undefined;
-}
+const DeliveryRenderSnapshot = Schema.Struct({
+  variableSymbol: Schema.NullOr(Schema.String),
+  orderNumber: Schema.NullOr(Schema.String),
+  note: Schema.NullOr(Schema.String),
+  amountDue: Schema.BigDecimal,
+  template: PdfTemplate,
+  branding: Schema.optional(
+    Schema.Struct({
+      workspaceRevision: Schema.Finite,
+      accentColor: Schema.String,
+      footerText: Schema.NullOr(Schema.String),
+      logo: Schema.NullOr(ImageRef),
+      stamp: Schema.NullOr(ImageRef),
+    }),
+  ),
+});
+export type DeliveryRenderSnapshot = typeof DeliveryRenderSnapshot.Type;
+export type DeliveryBrandingSnapshot = NonNullable<DeliveryRenderSnapshot["branding"]>;
 
 /** Attaches frozen J3 delivery snapshot metadata as a non-enumerable symbol on `view`. */
-export const attachDeliverySnapshot = (
-  view: DocumentView,
-  snapshot: DeliveryRenderSnapshot,
-): DocumentView => {
+export const attachDeliverySnapshot: {
+  (snapshot: DeliveryRenderSnapshot): (view: DocumentView) => DocumentView;
+  (view: DocumentView, snapshot: DeliveryRenderSnapshot): DocumentView;
+} = Fn.dual(2, (view: DocumentView, snapshot: DeliveryRenderSnapshot): DocumentView => {
   Object.defineProperty(view, DELIVERY_SNAPSHOT_SYMBOL, {
     value: snapshot,
     enumerable: false,
@@ -78,22 +94,27 @@ export const attachDeliverySnapshot = (
     writable: false,
   });
   return view;
+});
+
+/** Validates attached delivery metadata before callers can fall back to live document data. */
+export const readDeliverySnapshot = (view: DocumentView): DeliveryRenderSnapshot | undefined => {
+  if (!(DELIVERY_SNAPSHOT_SYMBOL in view)) return;
+  const snapshot = view[DELIVERY_SNAPSHOT_SYMBOL];
+  Schema.asserts(DeliveryRenderSnapshot, snapshot);
+  return snapshot;
 };
 
-/** Reads frozen J3 delivery snapshot metadata from `view`, if present. */
-export const readDeliverySnapshot = (view: DocumentView): DeliveryRenderSnapshot | undefined =>
-  (view as unknown as Record<symbol, DeliveryRenderSnapshot | undefined>)[DELIVERY_SNAPSHOT_SYMBOL];
-
-export interface LegacyDeliveryInfo {
-  readonly deliveryId: DeliveryId;
-  readonly workspaceId: WorkspaceId;
-}
+const LegacyDeliveryInfo = Schema.Struct({
+  deliveryId: DeliveryId,
+  workspaceId: WorkspaceId,
+});
+type LegacyDeliveryInfo = typeof LegacyDeliveryInfo.Type;
 
 /** Marks a delivery `view` decoded from a legacy row that lacked `__snapshot`. */
-export const markLegacyDeliveryView = (
-  view: DocumentView,
-  info: LegacyDeliveryInfo,
-): DocumentView => {
+export const markLegacyDeliveryView: {
+  (info: LegacyDeliveryInfo): (view: DocumentView) => DocumentView;
+  (view: DocumentView, info: LegacyDeliveryInfo): DocumentView;
+} = Fn.dual(2, (view: DocumentView, info: LegacyDeliveryInfo): DocumentView => {
   Object.defineProperty(view, LEGACY_DELIVERY_SYMBOL, {
     value: info,
     enumerable: false,
@@ -101,11 +122,15 @@ export const markLegacyDeliveryView = (
     writable: false,
   });
   return view;
-};
+});
 
 /** Returns legacy delivery metadata when `view` came from a legacy row without frozen `__snapshot`. */
-export const readLegacyDeliveryInfo = (view: DocumentView): LegacyDeliveryInfo | undefined =>
-  (view as unknown as Record<symbol, LegacyDeliveryInfo | undefined>)[LEGACY_DELIVERY_SYMBOL];
+export const readLegacyDeliveryInfo = (view: DocumentView): LegacyDeliveryInfo | undefined => {
+  if (!(LEGACY_DELIVERY_SYMBOL in view)) return;
+  const legacy = view[LEGACY_DELIVERY_SYMBOL];
+  Schema.asserts(LegacyDeliveryInfo, legacy);
+  return legacy;
+};
 
 /**
  * Signals whether the caller explicitly specified a `template` override on `Documents.pdf`.
@@ -113,26 +138,34 @@ export const readLegacyDeliveryInfo = (view: DocumentView): LegacyDeliveryInfo |
  * after core authorization (R1a), covering Member and Export callers uniformly.
  */
 export class ExplicitPdfTemplate extends Context.Service<ExplicitPdfTemplate, boolean>()(
-  "kvitbit/server/ExplicitPdfTemplate",
+  "@kvitbit/server/projections/documents/ExplicitPdfTemplate",
 ) {}
 
-export const sha256HexSync = (value: string): string =>
-  createHash("sha256").update(value).digest("hex");
+const sha256HexSync = (value: string): string =>
+  new Bun.CryptoHasher("sha256").update(value).digest("hex");
 
 /**
  * Resolves the canonical variable symbol: the stored value when non-empty, otherwise
  * `Numbering.variableSymbol(number)` (last 10 digits of the document number, core-ports §5.2).
  */
-export const resolveVariableSymbol = (
-  storedVariableSymbol: string | null | undefined,
-  documentNumber: string | null,
-): string | null => {
-  if (storedVariableSymbol !== undefined && storedVariableSymbol !== null) {
-    const trimmed = storedVariableSymbol.trim();
-    if (trimmed.length > 0) return trimmed;
-  }
-  return documentNumber === null ? null : Numbering.variableSymbol(documentNumber);
-};
+export const resolveVariableSymbol: {
+  (
+    documentNumber: string | null,
+  ): (storedVariableSymbol: string | null | undefined) => string | null;
+  (storedVariableSymbol: string | null | undefined, documentNumber: string | null): string | null;
+} = Fn.dual(
+  2,
+  (
+    storedVariableSymbol: string | null | undefined,
+    documentNumber: string | null,
+  ): string | null => {
+    if (storedVariableSymbol !== undefined && storedVariableSymbol !== null) {
+      const trimmed = Str.trim(storedVariableSymbol);
+      if (trimmed.length > 0) return trimmed;
+    }
+    return documentNumber === null ? null : Numbering.variableSymbol(documentNumber);
+  },
+);
 
 export interface DocumentPaymentQrInput {
   readonly kind: DocumentView["kind"];
@@ -161,7 +194,8 @@ export const computeDocumentPaymentQr = (
     amount: input.amount,
     bankAccount: input.issuer.bankAccount,
     recipientName: input.issuer.name,
-    message: input.number ? `${input.kind} ${input.number}` : input.kind,
+    message:
+      input.number !== null && input.number !== "" ? `${input.kind} ${input.number}` : input.kind,
     variableSymbol,
     dueOn: input.dueOn,
   });
@@ -175,23 +209,19 @@ export interface ResolvedDocumentFields {
   readonly amountDue: BigDecimal.BigDecimal;
 }
 
-const asNullableString = (value: unknown): string | null =>
-  typeof value === "string" ? value : null;
-
-const parseJsonObject = <T>(raw: unknown): T =>
-  typeof raw === "string" ? (JSON.parse(raw) as T) : (raw as T);
-
-const parseDecimal = (raw: string | number | null | undefined): BigDecimal.BigDecimal => {
-  if (raw === null || raw === undefined) return ZERO;
-  return BigDecimal.fromStringUnsafe(String(raw));
-};
+const nullableAuditText = Schema.decodeUnknownOption(Schema.String);
+const VatBreakdownJson = Schema.toCodecJson(VatBreakdown);
+const decodeTotals = Schema.decodeUnknownEffect(
+  Schema.Union([Schema.fromJsonString(VatBreakdownJson), VatBreakdownJson]),
+);
+const IssuerSnapshotData = DocumentsModule.DocumentViewData.fields.issuer;
 
 /**
  * Computes the exact frozen fields (`variableSymbol`, `orderNumber`, `note`, `amountDue`,
  * `paymentQr`) for a document inside an active SQL transaction. Used by `DeliveriesRepoSql`
  * (J3 enqueue snapshot) and `CoreStoreSql` (C3 request-log completion).
  */
-export const projectDocumentFromSql = (
+export const projectDocumentFromSql = Effect.fn("projectDocumentFromSql")(function* (
   sql: SqlClient.SqlClient,
   workspaceId: WorkspaceId,
   documentId: DocumentId,
@@ -203,17 +233,16 @@ export const projectDocumentFromSql = (
     readonly issuer: DocumentsModule.IssuerSnapshotRecord;
     readonly dueOn: IsoDate | null;
   },
-) =>
-  Effect.gen(function* () {
-    const docRows = yield* sql<{
-      readonly variable_symbol: string | null;
-      readonly order_number: string | null;
-      readonly note: string | null;
-      readonly paid_amount: string;
-      readonly vat_breakdown: unknown;
-      readonly kind: DocumentView["kind"];
-      readonly status: DocumentView["status"];
-    }>`
+) {
+  const docRows = yield* sql<{
+    readonly variable_symbol: string | null;
+    readonly order_number: string | null;
+    readonly note: string | null;
+    readonly paid_amount: string;
+    readonly vat_breakdown: unknown;
+    readonly kind: DocumentView["kind"];
+    readonly status: DocumentView["status"];
+  }>`
       select
         variable_symbol,
         order_number,
@@ -226,79 +255,75 @@ export const projectDocumentFromSql = (
       where workspace_id = ${workspaceId} and id = ${documentId}
       limit 1
     `;
-    const docRow = docRows[0];
-    if (docRow === undefined) return undefined;
+  const docRow = docRows[0];
+  if (docRow === undefined) return;
 
-    const relRows = yield* sql<{
-      readonly to_document_id: DocumentId;
-      readonly relation: string;
-    }>`
+  const relRows = yield* sql<{
+    readonly to_document_id: DocumentId;
+    readonly relation: DocumentRelation;
+  }>`
       select to_document_id, relation
       from document_relations
       where workspace_id = ${workspaceId} and from_document_id = ${documentId}
     `;
-    const creditIds = relRows
-      .filter((r) => r.relation === "corrected_by")
-      .map((r) => r.to_document_id);
-    const creditRows =
-      creditIds.length === 0
-        ? []
-        : yield* sql<{ readonly vat_breakdown: unknown }>`
+  const creditIds = Arr.map(
+    Arr.filter(relRows, (r) => r.relation === "corrected_by"),
+    (r) => r.to_document_id,
+  );
+  const creditRows =
+    creditIds.length === 0
+      ? []
+      : yield* sql<{ readonly vat_breakdown: unknown }>`
             select vat_breakdown
             from documents
             where workspace_id = ${workspaceId} and id in ${sql.in(creditIds)}
           `;
 
-    const grossOf = (raw: unknown): BigDecimal.BigDecimal => {
-      const parsed = parseJsonObject<{ readonly gross: { readonly amount: string } }>(raw);
-      return parseDecimal(parsed.gross.amount);
-    };
-    const fakeTotals = (amount: BigDecimal.BigDecimal) => ({
-      gross: { amount, currency: view.currency },
-    });
-    const amountDue =
-      docRow.status === "draft"
-        ? docRow.kind === "invoice" || docRow.kind === "proforma"
-          ? grossOf(docRow.vat_breakdown)
-          : ZERO
-        : DocumentsModule.outstandingOf(
-            {
-              kind: docRow.kind,
-              status: docRow.status,
-              paidAmount: parseDecimal(docRow.paid_amount),
-              totals: fakeTotals(
-                grossOf(docRow.vat_breakdown),
-              ) as DocumentsModule.DocumentRecord["totals"],
-              links: relRows.map((r) => ({
-                relation: r.relation as DocumentsModule.LinkRecord["relation"],
-                id: r.to_document_id,
-              })),
-            },
-            creditRows.map((c) => ({
-              totals: fakeTotals(
-                grossOf(c.vat_breakdown),
-              ) as DocumentsModule.DocumentRecord["totals"],
-            })),
-          );
-    const variableSymbol = resolveVariableSymbol(docRow.variable_symbol, view.number);
-    const paymentQr = computeDocumentPaymentQr({
-      kind: view.kind,
-      status: view.status,
-      number: view.number,
-      currency: view.currency,
-      amount: amountDue,
-      issuer: view.issuer,
-      variableSymbol,
-      dueOn: view.dueOn,
-    });
-    return {
-      variableSymbol,
-      orderNumber: docRow.order_number,
-      note: docRow.note,
-      amountDue,
-      paymentQr,
-    };
+  let amountDue = ZERO;
+  if (docRow.status !== "draft" || docRow.kind === "invoice" || docRow.kind === "proforma") {
+    const totals = yield* decodeTotals(docRow.vat_breakdown).pipe(Effect.orDie);
+    if (docRow.status === "draft") {
+      amountDue = totals.gross.amount;
+    } else {
+      const credits = yield* Effect.forEach(
+        creditRows,
+        (row) =>
+          decodeTotals(row.vat_breakdown).pipe(
+            Effect.map((creditTotals) => ({ totals: creditTotals })),
+          ),
+        { concurrency: 1 },
+      ).pipe(Effect.orDie);
+      amountDue = DocumentsModule.outstandingOf(
+        {
+          kind: docRow.kind,
+          status: docRow.status,
+          paidAmount: BigDecimal.fromStringUnsafe(docRow.paid_amount),
+          totals,
+          links: Arr.map(relRows, (row) => ({ relation: row.relation, id: row.to_document_id })),
+        },
+        credits,
+      );
+    }
+  }
+  const variableSymbol = resolveVariableSymbol(docRow.variable_symbol, view.number);
+  const paymentQr = computeDocumentPaymentQr({
+    kind: view.kind,
+    status: view.status,
+    number: view.number,
+    currency: view.currency,
+    amount: amountDue,
+    issuer: view.issuer,
+    variableSymbol,
+    dueOn: view.dueOn,
   });
+  return {
+    variableSymbol,
+    orderNumber: docRow.order_number,
+    note: docRow.note,
+    amountDue,
+    paymentQr,
+  };
+});
 
 /**
  * Resolves `variableSymbol`, `orderNumber`, `note`, and `amountDue` for `view` as of
@@ -326,9 +351,10 @@ export const resolveDocumentFieldsAtRevision = (params: {
             : ZERO;
         return { variableSymbol, orderNumber, note, amountDue };
       }
-      const creditIds = record.links
-        .filter((link) => link.relation === "corrected_by")
-        .map((link) => link.id);
+      const creditIds = Arr.map(
+        Arr.filter(record.links, (link) => link.relation === "corrected_by"),
+        (link) => link.id,
+      );
       const creditNotes =
         creditIds.length === 0 ? [] : yield* documentsRepo.getMany(workspaceId, creditIds);
       const amountDue = DocumentsModule.outstandingOf(record, creditNotes);
@@ -340,20 +366,24 @@ export const resolveDocumentFieldsAtRevision = (params: {
         entity: "Document",
         id: record.id,
       });
-      const laterEdits = entries
-        .filter(
+      const laterEdits = Fn.pipe(
+        entries,
+        Arr.filter(
           (entry) =>
             entry.revision !== null && entry.revision > view.revision && entry.changes.length > 0,
-        )
-        .toSorted((a, b) => (b.revision ?? 0) - (a.revision ?? 0));
+        ),
+        Arr.sort(
+          Order.mapInput(Order.flip(Order.Number), (entry: AuditEntry) => entry.revision ?? 0),
+        ),
+      );
       for (const entry of laterEdits) {
         for (const change of entry.changes) {
           if (change.path === "variableSymbol") {
-            variableSymbol = asNullableString(change.before);
+            variableSymbol = Option.getOrNull(nullableAuditText(change.before));
           } else if (change.path === "orderNumber") {
-            orderNumber = asNullableString(change.before);
+            orderNumber = Option.getOrNull(nullableAuditText(change.before));
           } else if (change.path === "note") {
-            note = asNullableString(change.before);
+            note = Option.getOrNull(nullableAuditText(change.before));
           }
         }
       }
@@ -374,13 +404,14 @@ export const resolveDocumentFieldsAtRevision = (params: {
   });
 
 /** Enriches a `DocumentView` with the canonical `paymentQr` if not already populated. */
-export const enrichDocumentView = (
+const enrichDocumentView = (
   view: DocumentView,
   storedVariableSymbol?: string | null,
   amountDue?: BigDecimal.BigDecimal,
 ): DocumentView => {
   if (view.paymentQr !== null || view.status === "cancelled") return view;
-  const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
+  const issuer = view.issuer;
+  Schema.asserts(IssuerSnapshotData, issuer);
   const amount =
     amountDue !== undefined
       ? amountDue
@@ -403,12 +434,13 @@ export const enrichDocumentView = (
 };
 
 /** Enriches a `SharedDocumentView` with the canonical `paymentQr` using `view.amountDue` (flow 8.3). */
-export const enrichSharedDocumentView = (
+const enrichSharedDocumentView = (
   view: SharedDocumentView,
   storedVariableSymbol?: string | null,
 ): SharedDocumentView => {
   if (view.paymentQr !== null || view.status !== "issued") return view;
-  const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
+  const issuer = view.issuer;
+  Schema.asserts(IssuerSnapshotData, issuer);
   const number = view.number.length > 0 ? view.number : null;
   const paymentQr = computeDocumentPaymentQr({
     kind: view.kind,
@@ -440,25 +472,33 @@ export const documentPdfCacheKey = (params: {
     params.correctionReference === undefined
       ? params.language
       : `${params.language}-original-${params.correctionReference}`;
-  return `pdf/${params.workspaceId}/${params.documentId}/${params.documentRevision}/${params.workspaceRevision}/${params.template}/${variant}.pdf` as BlobKey;
+  return BlobKey.make(
+    `pdf/${params.workspaceId}/${params.documentId}/${params.documentRevision}/${params.workspaceRevision}/${params.template}/${variant}.pdf`,
+  );
 };
 
-const toDbUnavailable = () => new Unavailable({ dependency: "database" });
+const toDbUnavailable = () => Unavailable.make({ dependency: "database" });
 
-const runKeyedProjection = <A, E, R>(params: {
+const runKeyedProjection = <A extends object, E, R>(params: {
+  readonly caller: Caller;
   readonly method: string;
   readonly requestKey: string | undefined;
   readonly hasSqlRequestLog: boolean;
   readonly memoryReplays: Map<string, A>;
   readonly identityOf: (value: A) => string;
   readonly execute: Effect.Effect<A, E, R>;
-  readonly project: (
-    value: A,
-    wasReplayed: boolean,
-  ) => Effect.Effect<A, Unavailable, CurrentCaller>;
-}): Effect.Effect<A, E | Unavailable, R | CurrentCaller> => {
-  const { method, requestKey, hasSqlRequestLog, memoryReplays, identityOf, execute, project } =
-    params;
+  readonly project: (value: A, wasReplayed: boolean) => Effect.Effect<A, Unavailable>;
+}): Effect.Effect<A, E | Unavailable, R> => {
+  const {
+    caller,
+    method,
+    requestKey,
+    hasSqlRequestLog,
+    memoryReplays,
+    identityOf,
+    execute,
+    project,
+  } = params;
   if (requestKey === undefined) {
     return execute.pipe(Effect.flatMap((val) => project(val, false)));
   }
@@ -475,16 +515,14 @@ const runKeyedProjection = <A, E, R>(params: {
       ? execute
       : Effect.provideService(execute, RequestOutcome, outcome);
     const wasReplayed = yield* outcome.replayed;
-    const caller = yield* CurrentCaller;
     const cacheKey =
       caller._tag === "Member"
         ? `${caller.workspaceId}:${method}:${requestKey}:${identityOf(raw)}`
         : undefined;
     if (wasReplayed) {
       if (hasSqlRequestLog) return raw;
-      if (cacheKey !== undefined && memoryReplays.has(cacheKey)) {
-        return memoryReplays.get(cacheKey) as A;
-      }
+      const cached = cacheKey === undefined ? undefined : memoryReplays.get(cacheKey);
+      if (cached !== undefined) return cached;
     }
     const projected = yield* project(raw, wasReplayed);
     if (!hasSqlRequestLog && cacheKey !== undefined) {
@@ -495,12 +533,13 @@ const runKeyedProjection = <A, E, R>(params: {
 };
 
 const projectMemberDocumentView = (
+  caller: Caller,
   view: DocumentView,
   documentsRepo: DocumentsRepo["Service"],
   coreStore: CoreStore["Service"],
   hasSqlRequestLog: boolean,
   wasReplayed = false,
-): Effect.Effect<DocumentView, Unavailable, CurrentCaller> =>
+): Effect.Effect<DocumentView, Unavailable> =>
   Effect.gen(function* () {
     if (
       view.paymentQr !== null ||
@@ -512,9 +551,10 @@ const projectMemberDocumentView = (
       return view;
     }
     const currency = view.totals.gross.currency;
-    const issuer = view.issuer as unknown as DocumentsModule.IssuerSnapshotRecord;
+    const issuer = view.issuer;
+    Schema.asserts(IssuerSnapshotData, issuer);
     const iban = issuer.bankAccount?.iban ?? null;
-    if ((currency !== "CZK" && currency !== "EUR") || iban === null || iban.trim() === "") {
+    if ((currency !== "CZK" && currency !== "EUR") || iban === null || Str.trim(iban) === "") {
       return view;
     }
     if (wasReplayed && hasSqlRequestLog) return view;
@@ -524,12 +564,11 @@ const projectMemberDocumentView = (
       // CoreStoreSql already persisted the complete projected result (including valid null).
       if (outcomeReplayed && hasSqlRequestLog) return view;
     }
-    const caller = yield* CurrentCaller;
     if (caller._tag !== "Member") {
       return enrichDocumentView(view, null);
     }
     const record = yield* documentsRepo.get(caller.workspaceId, view.id).pipe(
-      Effect.catchTag("NotFound", () => Effect.succeed(undefined)),
+      Effect.catchTag("NotFound", () => Effect.undefined),
       Effect.mapError(toDbUnavailable),
     );
     if (record === undefined) {
@@ -552,15 +591,23 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
       const baseDocuments = yield* Documents;
       const coreStore = yield* CoreStore;
       const documentsRepo = yield* DocumentsRepo;
-      const hasSqlRequestLog = Option.isSome(yield* Effect.serviceOption(SqlClient.SqlClient));
+      const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
+      const hasSqlRequestLog = Option.isSome(sqlClient);
       const memoryViewReplays = new Map<string, DocumentView>();
       const memoryCancelReplays = new Map<
         string,
         { readonly document: DocumentView; readonly creditNote: DocumentView | null }
       >();
 
-      const projectView = (view: DocumentView, wasReplayed = false) =>
-        projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog, wasReplayed);
+      const projectView = (caller: Caller, view: DocumentView, wasReplayed = false) =>
+        projectMemberDocumentView(
+          caller,
+          view,
+          documentsRepo,
+          coreStore,
+          hasSqlRequestLog,
+          wasReplayed,
+        );
 
       const viewIdentity = (v: DocumentView) => `${v.id}:${v.revision}`;
       const cancelIdentity = (res: {
@@ -571,88 +618,112 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
 
       return Documents.of({
         ...baseDocuments,
-        preview: (input) =>
+        preview: Effect.fn("Documents.preview")((caller, input) =>
           baseDocuments
-            .preview(input)
+            .preview(caller, input)
             .pipe(Effect.map((view) => enrichDocumentView(view, input.variableSymbol ?? null))),
-        createDraft: (input, opts) =>
+        ),
+        createDraft: Effect.fn("Documents.createDraft")((caller, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "createDraft",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
             identityOf: viewIdentity,
-            execute: baseDocuments.createDraft(input, opts),
-            project: projectView,
+            execute: baseDocuments.createDraft(caller, input, opts),
+            project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
           }),
-        issue: (from, opts) =>
+        ),
+        issue: Effect.fn("Documents.issue")((caller, from, opts) =>
           runKeyedProjection({
+            caller,
             method: "issue",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
             identityOf: viewIdentity,
-            execute: baseDocuments.issue(from, opts),
-            project: projectView,
+            execute: baseDocuments.issue(caller, from, opts),
+            project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
           }),
-        edit: (id, patch, expectedRevision) =>
+        ),
+        edit: Effect.fn("Documents.edit")((caller, id, patch, expectedRevision) =>
           baseDocuments
-            .edit(id, patch, expectedRevision)
-            .pipe(Effect.flatMap((v) => projectView(v))),
-        lock: (id) => baseDocuments.lock(id).pipe(Effect.flatMap((v) => projectView(v))),
-        unlock: (id, reason) =>
-          baseDocuments.unlock(id, reason).pipe(Effect.flatMap((v) => projectView(v))),
-        cancel: (id, input, opts) =>
+            .edit(caller, id, patch, expectedRevision)
+            .pipe(Effect.flatMap((v) => projectView(caller, v))),
+        ),
+        lock: Effect.fn("Documents.lock")((caller, id) =>
+          baseDocuments.lock(caller, id).pipe(Effect.flatMap((v) => projectView(caller, v))),
+        ),
+        unlock: Effect.fn("Documents.unlock")((caller, id, reason) =>
+          baseDocuments
+            .unlock(caller, id, reason)
+            .pipe(Effect.flatMap((v) => projectView(caller, v))),
+        ),
+        cancel: Effect.fn("Documents.cancel")((caller, id, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "cancel",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryCancelReplays,
             identityOf: cancelIdentity,
-            execute: baseDocuments.cancel(id, input, opts),
-            project: (res, wasReplayed) =>
-              Effect.gen(function* () {
-                const document = yield* projectView(res.document, wasReplayed);
-                const creditNote =
-                  res.creditNote === null ? null : yield* projectView(res.creditNote, wasReplayed);
-                return { document, creditNote };
-              }),
+            execute: baseDocuments.cancel(caller, id, input, opts),
+            project: Effect.fn("Documents.projectCancellation")(function* (res, wasReplayed) {
+              const document = yield* projectView(caller, res.document, wasReplayed);
+              const creditNote =
+                res.creditNote === null
+                  ? null
+                  : yield* projectView(caller, res.creditNote, wasReplayed);
+              return { document, creditNote };
+            }),
           }),
-        correct: (id, input, opts) =>
+        ),
+        correct: Effect.fn("Documents.correct")((caller, id, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "correct",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
             identityOf: viewIdentity,
-            execute: baseDocuments.correct(id, input, opts),
-            project: projectView,
+            execute: baseDocuments.correct(caller, id, input, opts),
+            project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
           }),
-        issueFinalInvoice: (proforma, input, opts) =>
-          runKeyedProjection({
-            method: "issueFinalInvoice",
-            requestKey: opts?.requestKey,
-            hasSqlRequestLog,
-            memoryReplays: memoryViewReplays,
-            identityOf: viewIdentity,
-            execute: baseDocuments.issueFinalInvoice(proforma, input, opts),
-            project: projectView,
-          }),
-        previewFinalInvoice: (proforma, input) =>
+        ),
+        issueFinalInvoice: Effect.fn("Documents.issueFinalInvoice")(
+          (caller, proforma, input, opts) =>
+            runKeyedProjection({
+              caller,
+              method: "issueFinalInvoice",
+              requestKey: opts?.requestKey,
+              hasSqlRequestLog,
+              memoryReplays: memoryViewReplays,
+              identityOf: viewIdentity,
+              execute: baseDocuments.issueFinalInvoice(caller, proforma, input, opts),
+              project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
+            }),
+        ),
+        previewFinalInvoice: Effect.fn("Documents.previewFinalInvoice")((caller, proforma, input) =>
           baseDocuments
-            .previewFinalInvoice(proforma, input)
+            .previewFinalInvoice(caller, proforma, input)
             .pipe(
               Effect.map((view) => enrichDocumentView(view, input?.patch?.variableSymbol ?? null)),
             ),
-        previewCorrection: (id, input) =>
+        ),
+        previewCorrection: Effect.fn("Documents.previewCorrection")((caller, id, input) =>
           baseDocuments
-            .previewCorrection(id, input)
+            .previewCorrection(caller, id, input)
             .pipe(Effect.map((view) => enrichDocumentView(view, null))),
-        get: (id) => baseDocuments.get(id).pipe(Effect.flatMap((v) => projectView(v))),
-        pdf: (id, opts) =>
+        ),
+        get: Effect.fn("Documents.get")((caller, id) =>
+          baseDocuments.get(caller, id).pipe(Effect.flatMap((v) => projectView(caller, v))),
+        ),
+        pdf: Effect.fn("Documents.pdf")((caller, id, opts) =>
           baseDocuments
-            .pdf(id, opts)
+            .pdf(caller, id, opts)
             .pipe(Effect.provideService(ExplicitPdfTemplate, opts?.template !== undefined)),
+        ),
       });
     }),
   );
@@ -664,21 +735,24 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
       const baseTemplates = yield* Templates;
       const coreStore = yield* CoreStore;
       const documentsRepo = yield* DocumentsRepo;
-      const hasSqlRequestLog = Option.isSome(yield* Effect.serviceOption(SqlClient.SqlClient));
+      const sqlClient = yield* Effect.serviceOption(SqlClient.SqlClient);
+      const hasSqlRequestLog = Option.isSome(sqlClient);
       const memoryReplays = new Map<string, DocumentView>();
 
       return Templates.of({
         ...baseTemplates,
-        use: (template, input, opts) =>
+        use: Effect.fn("Templates.use")((caller, template, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "templates.use",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays,
             identityOf: (v) => `${v.id}:${v.revision}`,
-            execute: baseTemplates.use(template, input, opts),
+            execute: baseTemplates.use(caller, template, input, opts),
             project: (view, wasReplayed) =>
               projectMemberDocumentView(
+                caller,
                 view,
                 documentsRepo,
                 coreStore,
@@ -686,6 +760,7 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
                 wasReplayed,
               ),
           }),
+        ),
       });
     }),
   );
@@ -704,29 +779,29 @@ const ProjectedPublicShareLinksLive: Layer.Layer<
 
     return PublicShareLinks.of({
       ...baseShareLinks,
-      open: baseShareLinks.open.pipe(
-        Effect.flatMap((view) =>
-          Effect.gen(function* () {
-            if (view.paymentQr !== null || view.status !== "issued") return view;
-            const caller = yield* CurrentCaller;
-            let storedVariableSymbol: string | null = null;
-            if (caller._tag === "ShareLinkVisitor") {
-              const tokenHash = sha256HexSync(caller.token);
-              const linkOpt = yield* coreStore
-                .transaction(shareLinksRepo.lockByTokenHash(tokenHash))
-                .pipe(Effect.mapError(toDbUnavailable));
-              if (Option.isSome(linkOpt)) {
-                storedVariableSymbol = yield* documentsRepo
-                  .get(linkOpt.value.workspaceId, linkOpt.value.documentId)
-                  .pipe(
-                    Effect.map((row) => row.variableSymbol),
-                    Effect.catchTag("NotFound", () => Effect.succeed(null)),
-                    Effect.mapError(toDbUnavailable),
-                  );
+      open: Effect.fn("PublicShareLinks.open")((caller) =>
+        baseShareLinks.open(caller).pipe(
+          Effect.flatMap(
+            Effect.fn("PublicShareLinks.projectOpen")(function* (view) {
+              if (view.paymentQr !== null || view.status !== "issued") return view;
+              let storedVariableSymbol: string | null = null;
+              if (caller._tag === "ShareLinkVisitor") {
+                const tokenHash = sha256HexSync(caller.token);
+                const linkOpt = yield* coreStore.transaction(
+                  shareLinksRepo.lockByTokenHash(tokenHash),
+                );
+                if (Option.isSome(linkOpt)) {
+                  storedVariableSymbol = yield* documentsRepo
+                    .get(linkOpt.value.workspaceId, linkOpt.value.documentId)
+                    .pipe(
+                      Effect.map((row) => row.variableSymbol),
+                      Effect.catchTag("NotFound", () => Effect.succeed(null)),
+                    );
+                }
               }
-            }
-            return enrichSharedDocumentView(view, storedVariableSymbol);
-          }),
+              return enrichSharedDocumentView(view, storedVariableSymbol);
+            }, Effect.mapError(toDbUnavailable)),
+          ),
         ),
       ),
     });

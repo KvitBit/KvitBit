@@ -2,6 +2,7 @@
  * `ContactsRepo`: the Contacts module's repository port (conventions in src/store/tables.ts) and
  * its in-memory implementation on `MemoryTables`.
  */
+
 import type {
   Conflict,
   ContactId,
@@ -9,8 +10,12 @@ import type {
   NotFound,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { Option, Schema } from "effect";
-import { Context, Effect, Layer } from "effect";
+import * as EffectArray from "effect/Array";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import type * as Option from "effect/Option";
+import * as EffectString from "effect/String";
 import type { StoreUnavailable, UniqueViolation } from "../../store/CoreStore";
 import { defineCollection, MemoryTables } from "../../store/tables";
 import { foldText } from "./input";
@@ -23,7 +28,7 @@ export const CONTACTS_ACTIVE_ICO_UNIQUE = "contacts_active_ico_unique";
 export const ContactsTable = defineCollection<ContactRow>({
   name: "contacts",
   entity: "Contact",
-  schema: ContactRowSchema as unknown as Schema.Codec<ContactRow, unknown>,
+  schema: ContactRowSchema,
   unique: [
     {
       name: CONTACTS_ACTIVE_ICO_UNIQUE,
@@ -76,11 +81,12 @@ export class ContactsRepo extends Context.Service<
       query: ContactSearch,
     ) => Effect.Effect<ReadonlyArray<ContactRow>, StoreUnavailable>;
   }
->()("kvitbit/core/ContactsRepo") {}
+>()("@kvitbit/core/modules/contacts/repo/ContactsRepo") {}
 
 const matchesText = (row: ContactRow, folded: string): boolean =>
-  [row.name, row.ico, row.dic, ...row.billingEmails].some(
-    (value) => value !== null && foldText(value).includes(folded),
+  EffectArray.some(
+    [row.name, row.ico, row.dic, ...row.billingEmails],
+    (value) => value !== null && EffectString.includes(folded)(foldText(value)),
   );
 
 /** `ContactsRepo` on `MemoryTables` (tests and the in-memory composition). */
@@ -89,32 +95,37 @@ export const ContactsRepoMemory: Layer.Layer<ContactsRepo, never, MemoryTables> 
   Effect.gen(function* () {
     const table = (yield* MemoryTables).collection(ContactsTable);
     return {
-      get: (workspaceId, id) => table.get(workspaceId, id),
-      getForUpdate: (workspaceId, id, expectedRevision) =>
+      get: Effect.fn("ContactsRepo.get")((workspaceId, id) => table.get(workspaceId, id)),
+      getForUpdate: Effect.fn("ContactsRepo.getForUpdate")((workspaceId, id, expectedRevision) =>
         table.getForUpdate(workspaceId, id, expectedRevision),
-      lock: (workspaceId, id) => table.lock(workspaceId, id),
-      findActiveByIco: (workspaceId, ico) =>
+      ),
+      lock: Effect.fn("ContactsRepo.lock")((workspaceId, id) => table.lock(workspaceId, id)),
+      findActiveByIco: Effect.fn("contacts.activeByIco")((workspaceId, ico) =>
         table.findUnique(CONTACTS_ACTIVE_ICO_UNIQUE, [ico], workspaceId),
-      insert: (row) => table.insert(row),
-      update: (next, expectedRevision) => table.update(next, expectedRevision),
-      search: (workspaceId, query) =>
+      ),
+      insert: Effect.fn("ContactsRepo.insert")((row) => table.insert(row)),
+      update: Effect.fn("ContactsRepo.update")((next, expectedRevision) =>
+        table.update(next, expectedRevision),
+      ),
+      search: Effect.fn("ContactsRepo.search")((workspaceId, query) =>
         Effect.map(
-          table.list(workspaceId, {
-            where: { archivedAt: null },
-            orderBy: ["name"],
-            ...(query.after !== undefined ? { after: [...query.after] } : {}),
-          }),
+          table.list(
+            workspaceId,
+            query.after === undefined
+              ? { where: { archivedAt: null }, orderBy: ["name"] }
+              : { where: { archivedAt: null }, orderBy: ["name"], after: query.after },
+          ),
           (rows) => {
             const folded = query.text === undefined ? "" : foldText(query.text);
-            return rows
-              .filter(
-                (row) =>
-                  (query.role === undefined || row.roles.includes(query.role)) &&
-                  (folded === "" || matchesText(row, folded)),
-              )
-              .slice(0, query.limit);
+            return EffectArray.filter(
+              rows,
+              (row) =>
+                (query.role === undefined || row.roles.includes(query.role)) &&
+                (folded === "" || matchesText(row, folded)),
+            ).slice(0, query.limit);
           },
         ),
+      ),
     };
   }),
 );

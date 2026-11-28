@@ -2,9 +2,11 @@
  * Demo API handlers for the `public` page group (see src/demo/router.ts).
  * Returns ENCODED wire forms matching @kvitbit/api-contract schemas.
  */
+
 import {
   ALL_SCOPES,
   ConfigView,
+  ConsentDecision,
   ConsentResult,
   ConsentView,
   READ_SCOPES,
@@ -14,45 +16,55 @@ import {
   InvitationPeek,
   RegistryResult,
   SharedDocumentView,
-  WorkspaceSummary,
+  WorkspaceSlug,
   WorkspaceView,
 } from "@kvitbit/domain";
-import { Schema } from "effect";
-import { type DemoRoute, status } from "./router";
+import * as Arr from "effect/Array";
+import * as Option from "effect/Option";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
+import { type DemoRoute, isStatus, status } from "./router";
 import { DEMO_USER, DEMO_WORKSPACE, DEMO_WORKSPACES, demoId } from "./shell";
 
-const DEMO_CONFIG = Schema.encodeSync(ConfigView)(
-  Schema.decodeUnknownSync(ConfigView)({
-    version: "0.1.0-demo",
-    botProtection: "altcha",
-    uploads: {
-      attachment: {
-        maxBytes: 20 * 1024 * 1024,
-        types: ["application/pdf", "image/jpeg", "image/png", "image/heic"],
-      },
-      brandingImage: {
-        maxBytes: 5 * 1024 * 1024,
-        types: ["image/png", "image/jpeg", "image/svg+xml"],
-      },
-      themeJson: { maxBytes: 64 * 1024 },
-    },
-    features: { signUp: true, mcp: true, apiKeys: true },
-  }),
-);
+const wire = <S extends Schema.ConstraintCodec<unknown>>(schema: S, value: S["Encoded"]) => {
+  const encoded = Schema.decodeResult(schema)(value).pipe(
+    Result.flatMap(Schema.encodeResult(schema)),
+  );
+  if (Result.isFailure(encoded)) return status(500, { message: "Invalid demo response" });
+  return encoded.success;
+};
 
-const DEMO_RELEASE = Schema.encodeSync(ReleaseInfo)(
-  Schema.decodeUnknownSync(ReleaseInfo)({
-    version: "1.0.0",
-    versionCode: 10000,
-    releasedAt: "2026-11-20T10:00:00Z",
-    apkUrl: "/api/mobile/releases/1.0.0/apk",
-    apkSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    sizeBytes: 28_450_000,
-    signingCertSha256: "ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890ab12cd34ef567890",
-    minAndroidSdk: 26,
-    obtainiumUrl: "obtainium://add/https://kvitbit.cz/api/mobile/releases/latest",
-  }),
-);
+const DEMO_CONFIG = wire(ConfigView, {
+  version: "0.1.0-demo",
+  botProtection: "altcha",
+  uploads: {
+    attachment: {
+      maxBytes: 20 * 1024 * 1024,
+      types: ["application/pdf", "image/jpeg", "image/png", "image/heic"],
+    },
+    brandingImage: {
+      maxBytes: 5 * 1024 * 1024,
+      types: ["image/png", "image/jpeg", "image/svg+xml"],
+    },
+    themeJson: { maxBytes: 64 * 1024 },
+  },
+  features: { signUp: true, mcp: true, apiKeys: true },
+});
+
+const DEMO_RELEASE = wire(ReleaseInfo, {
+  version: "1.0.0",
+  versionCode: 10000,
+  releasedAt: "2026-11-20T10:00:00Z",
+  apkUrl: "/api/mobile/releases/1.0.0/apk",
+  apkSha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  sizeBytes: 28_450_000,
+  signingCertSha256: Str.repeat(4)("ab12cd34ef567890"),
+  minAndroidSdk: 26,
+  obtainiumUrl: "obtainium://add/https://kvitbit.cz/api/mobile/releases/latest",
+});
+
+const shareCodec = Schema.toCodecJson(SharedDocumentView);
 
 const buildShareFixture = (token: string): unknown | null => {
   if (token === "demo-revoked" || token === "expired") return null;
@@ -189,8 +201,21 @@ const buildShareFixture = (token: string): unknown | null => {
         : isEur
           ? {
               format: "epc",
-              payload:
-                "BCD\n002\n1\nSCT\nFIOBCZPPXXX\nNovak Design s.r.o.\nCZ9320100000002000145399\nEUR1815.00\n\n20260043",
+              payload: Arr.join(
+                [
+                  "BCD",
+                  "002",
+                  "1",
+                  "SCT",
+                  "FIOBCZPPXXX",
+                  "Novak Design s.r.o.",
+                  "CZ9320100000002000145399",
+                  "EUR1815.00",
+                  "",
+                  "20260043",
+                ],
+                "\n",
+              ),
             }
           : {
               format: "spayd",
@@ -210,8 +235,7 @@ const buildShareFixture = (token: string): unknown | null => {
     viewerIsIssuer: token === "demo-issuer",
   };
 
-  const jsonCodec = Schema.toCodecJson(SharedDocumentView);
-  return Schema.encodeSync(jsonCodec)(Schema.decodeUnknownSync(jsonCodec)(raw));
+  return wire(shareCodec, raw);
 };
 
 const buildInvitationFixture = (token: string): unknown | null => {
@@ -224,16 +248,14 @@ const buildInvitationFixture = (token: string): unknown | null => {
         : token === "demo-accepted"
           ? "accepted"
           : "pending";
-  return Schema.encodeSync(InvitationPeek)(
-    Schema.decodeUnknownSync(InvitationPeek)({
-      workspaceName: DEMO_WORKSPACE.name,
-      inviterName: "Petr Svoboda",
-      role: "member",
-      email: DEMO_USER.email,
-      status: invStatus,
-      expiresAt: "2026-12-01T12:00:00Z",
-    }),
-  );
+  return wire(InvitationPeek, {
+    workspaceName: DEMO_WORKSPACE.name,
+    inviterName: "Petr Svoboda",
+    role: "member",
+    email: DEMO_USER.email,
+    status: invStatus,
+    expiresAt: "2026-12-01T12:00:00Z",
+  });
 };
 
 const buildConsentFixture = (consentId: string): unknown | null => {
@@ -252,7 +274,7 @@ const buildConsentFixture = (consentId: string): unknown | null => {
               offerableScopes: [...READ_SCOPES],
             },
           ]
-        : DEMO_WORKSPACES.map((w) => ({
+        : Arr.map(DEMO_WORKSPACES, (w) => ({
             id: w.id,
             name: w.name,
             role: w.role,
@@ -261,51 +283,69 @@ const buildConsentFixture = (consentId: string): unknown | null => {
             offerableScopes: [...ALL_SCOPES],
           }));
 
-  return Schema.encodeSync(ConsentView)(
-    Schema.decodeUnknownSync(ConsentView)({
-      client: {
-        id: "claude-desktop",
-        name: "Claude Desktop",
-        redirectHost: "claude.ai",
-        logoUri: null,
-      },
-      requestedAccess: "read_write",
-      requestedScopes: [...ALL_SCOPES],
-      workspaces,
-    }),
-  );
+  return wire(ConsentView, {
+    client: {
+      id: "claude-desktop",
+      name: "Claude Desktop",
+      redirectHost: "claude.ai",
+      logoUri: null,
+    },
+    requestedAccess: "read_write",
+    requestedScopes: [...ALL_SCOPES],
+    workspaces,
+  });
 };
 
-const DEMO_COMPANIES: Readonly<Record<string, unknown>> = {
-  "01234567": {
-    ico: "01234567",
-    name: "Novák Design s.r.o.",
-    address: {
-      street: "Korunní 810/104",
-      city: "Praha 10",
-      postalCode: "101 00",
-      country: "CZ",
+const DEMO_COMPANIES = new Map<string, typeof RegistryResult.Encoded>([
+  [
+    "01234567",
+    {
+      ico: "01234567",
+      name: "Novák Design s.r.o.",
+      address: {
+        street: "Korunní 810/104",
+        city: "Praha 10",
+        postalCode: "101 00",
+        country: "CZ",
+      },
+      dic: "CZ01234567",
+      legalForm: "Společnost s ručením omezeným",
+      registerEntry: "Spisová značka C 214598 vedená u Městského soudu v Praze",
+      terminatedOn: null,
     },
-    dic: "CZ01234567",
-    legalForm: "Společnost s ručením omezeným",
-    registerEntry: "Spisová značka C 214598 vedená u Městského soudu v Praze",
-    terminatedOn: null,
-  },
-  "27082440": {
-    ico: "27082440",
-    name: "Alza.cz a.s.",
-    address: {
-      street: "Jankovcova 1522/53",
-      city: "Praha 7",
-      postalCode: "170 00",
-      country: "CZ",
+  ],
+  [
+    "27082440",
+    {
+      ico: "27082440",
+      name: "Alza.cz a.s.",
+      address: {
+        street: "Jankovcova 1522/53",
+        city: "Praha 7",
+        postalCode: "170 00",
+        country: "CZ",
+      },
+      dic: "CZ27082440",
+      legalForm: "Akciová společnost",
+      registerEntry: "Spisová značka B 8573 vedená u Městského soudu v Praze",
+      terminatedOn: null,
     },
-    dic: "CZ27082440",
-    legalForm: "Akciová společnost",
-    registerEntry: "Spisová značka B 8573 vedená u Městského soudu v Praze",
-    terminatedOn: null,
-  },
-};
+  ],
+]);
+
+const decodeSignUp = Schema.decodeUnknownOption(
+  Schema.Struct({
+    email: Schema.optionalKey(Schema.String),
+    invitationToken: Schema.optionalKey(Schema.String),
+  }),
+);
+const decodeConsentDecision = Schema.decodeUnknownOption(ConsentDecision);
+const decodeWorkspace = Schema.decodeUnknownOption(
+  Schema.Struct({
+    slug: Schema.optionalKey(WorkspaceSlug),
+    name: Schema.optionalKey(Schema.String),
+  }),
+);
 
 export const routes: ReadonlyArray<DemoRoute> = [
   {
@@ -319,7 +359,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
     respond: ({ params }) => ({
       parameters: {
         algorithm: "SHA-256",
-        nonce: `demo-${params.scope ?? "sign_up"}-nonce`,
+        nonce: `demo-${params["scope"] ?? "sign_up"}-nonce`,
         keyPrefix: "0",
         cost: 1,
         keyLength: 32,
@@ -332,8 +372,8 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/auth/sign-up/email",
     respond: ({ body }) => {
-      const input = body as Record<string, unknown> | null;
-      const invited = typeof input?.invitationToken === "string";
+      const input = Option.getOrUndefined(decodeSignUp(body));
+      const invited = input?.invitationToken !== undefined;
       return {
         token: invited ? "demo-invited-session" : null,
         user: {
@@ -388,7 +428,10 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "GET",
     path: "/api/auth/passkey/generate-authenticate-options",
-    respond: () => ({ challenge: "ZGVtby13ZWJhdXRobi1jaGFsbGVuZ2U", rpId: "localhost" }),
+    respond: () => ({
+      challenge: "ZGVtby13ZWJhdXRobi1jaGFsbGVuZ2U",
+      rpId: "localhost",
+    }),
   },
   {
     method: "POST",
@@ -406,9 +449,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/share/:token",
     respond: ({ params }) => {
-      const found = buildShareFixture(params.token ?? "demo-unpaid-czk");
+      const found = buildShareFixture(params["token"] ?? "demo-unpaid-czk");
       if (found === null) {
-        return status(404, { _tag: "NotFound", entity: "ShareLink", id: params.token ?? "" });
+        return status(404, { _tag: "NotFound", entity: "ShareLink", id: params["token"] ?? "" });
       }
       return found;
     },
@@ -418,9 +461,9 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/invitations/:token",
     respond: ({ params }) => {
-      const found = buildInvitationFixture(params.token ?? "demo-pending");
+      const found = buildInvitationFixture(params["token"] ?? "demo-pending");
       if (found === null) {
-        return status(404, { _tag: "NotFound", entity: "Invitation", id: params.token ?? "" });
+        return status(404, { _tag: "NotFound", entity: "Invitation", id: params["token"] ?? "" });
       }
       return found;
     },
@@ -428,16 +471,16 @@ export const routes: ReadonlyArray<DemoRoute> = [
   {
     method: "POST",
     path: "/api/v1/invitations/:token/accept",
-    respond: () => Schema.encodeSync(WorkspaceSummary)(DEMO_WORKSPACE),
+    respond: () => DEMO_WORKSPACE,
   },
   // MCP OAuth 2.1 consent
   {
     method: "GET",
     path: "/api/v1/oauth/consents/:consentId",
     respond: ({ params }) => {
-      const found = buildConsentFixture(params.consentId ?? "demo-consent");
+      const found = buildConsentFixture(params["consentId"] ?? "demo-consent");
       if (found === null) {
-        return status(404, { _tag: "NotFound", entity: "McpGrant", id: params.consentId ?? "" });
+        return status(404, { _tag: "NotFound", entity: "McpGrant", id: params["consentId"] ?? "" });
       }
       return found;
     },
@@ -446,15 +489,13 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/oauth/consents/:consentId",
     respond: ({ body }) => {
-      const tag = (body as { _tag?: string } | null)?._tag;
-      return Schema.encodeSync(ConsentResult)(
-        Schema.decodeUnknownSync(ConsentResult)({
-          redirectTo:
-            tag === "Deny"
-              ? "https://claude.ai/oauth/callback?error=access_denied"
-              : "https://claude.ai/oauth/callback?code=demo-auth-code",
-        }),
-      );
+      const decision = Option.getOrUndefined(decodeConsentDecision(body));
+      return wire(ConsentResult, {
+        redirectTo:
+          decision?._tag === "Deny"
+            ? "https://claude.ai/oauth/callback?error=access_denied"
+            : "https://claude.ai/oauth/callback?code=demo-auth-code",
+      });
     },
   },
   // ARES registry lookup
@@ -462,15 +503,15 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "GET",
     path: "/api/v1/registry/companies/:ico",
     respond: ({ params }) => {
-      const ico = params.ico ?? "";
+      const ico = params["ico"] ?? "";
       if (ico === "99999999") {
         return status(503, { _tag: "Unavailable", dependency: "company_registry" });
       }
-      const hit = DEMO_COMPANIES[ico];
+      const hit = DEMO_COMPANIES.get(ico);
       if (hit === undefined) {
         return status(404, { _tag: "NotFound", entity: "Contact", id: ico });
       }
-      return Schema.encodeSync(RegistryResult)(Schema.decodeUnknownSync(RegistryResult)(hit));
+      return wire(RegistryResult, hit);
     },
   },
   // Workspace creation (onboarding)
@@ -478,13 +519,11 @@ export const routes: ReadonlyArray<DemoRoute> = [
     method: "POST",
     path: "/api/v1/workspaces",
     respond: ({ body }) => {
-      const input = (body ?? {}) as Record<string, unknown>;
-      const slug =
-        typeof input.slug === "string" && input.slug !== "" ? input.slug : "novy-prostor";
-      const created = Schema.decodeUnknownSync(WorkspaceView)({
+      const input = Option.getOrUndefined(decodeWorkspace(body));
+      const created = wire(WorkspaceView, {
         id: demoId(105),
-        slug,
-        name: typeof input.name === "string" ? input.name : "Nový prostor",
+        slug: input?.slug ?? "novy-prostor",
+        name: input?.name ?? "Nový prostor",
         branding: {
           pdfTemplate: "classic",
           accentColor: "#111111",
@@ -495,7 +534,7 @@ export const routes: ReadonlyArray<DemoRoute> = [
         },
         revision: 1,
       });
-      return status(201, Schema.encodeSync(WorkspaceView)(created));
+      return isStatus(created) ? created : status(201, created);
     },
   },
 ];

@@ -12,7 +12,9 @@ import type {
   PaymentMethod,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Context, Effect, Layer } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import { DocumentsRepo, viewOf } from "../documents";
 
@@ -34,7 +36,7 @@ export class PaymentDocuments extends Context.Service<
       id: DocumentId,
     ) => Effect.Effect<DocumentView, ReadError>;
   }
->()("kvitbit/core/payments/PaymentDocuments") {}
+>()("@kvitbit/core/modules/payments/documentReads/PaymentDocuments") {}
 
 export const PaymentDocumentsLive: Layer.Layer<PaymentDocuments, never, DocumentsRepo> =
   Layer.effect(
@@ -43,13 +45,17 @@ export const PaymentDocumentsLive: Layer.Layer<PaymentDocuments, never, Document
     Effect.gen(function* () {
       const repo = yield* DocumentsRepo;
       return PaymentDocuments.of({
-        exists: (workspaceId, id) => Effect.asVoid(repo.get(workspaceId, id)),
-        paymentMethod: (workspaceId, id) =>
+        exists: Effect.fn("PaymentDocuments.exists")((workspaceId, id) =>
+          Effect.asVoid(repo.get(workspaceId, id)),
+        ),
+        paymentMethod: Effect.fn("PaymentDocuments.paymentMethod")((workspaceId, id) =>
           Effect.map(repo.get(workspaceId, id), (r) => r.paymentMethod),
-        view: (workspaceId, id) =>
+        ),
+        view: Effect.fn("PaymentDocuments.view")((workspaceId, id) =>
           Effect.flatMap(repo.get(workspaceId, id), (r) =>
             Effect.provideService(viewOf(r), DocumentsRepo, repo),
           ),
+        ),
       });
     }),
   );

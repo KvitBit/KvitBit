@@ -3,14 +3,13 @@ import type { Html } from "@effect/ui/html";
  * View renderers for Workspace Settings (Screens 18–21) and Mobile More hub.
  * Split from settings.ts for readability; pure Effect UI HtmlBuilder views only.
  */
-import {
-  CurrencyCode,
-  type DocumentKind,
-  type PaymentMethod,
-  type TaxRegime,
-} from "@kvitbit/domain";
+import { CurrencyCode } from "@kvitbit/domain";
 import { Format, I18n, Theme, ViewModels } from "@kvitbit/ui-port";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
+
 import { textOf, translator } from "../../app/i18n";
 import type { PageContext } from "../../app/page";
 import * as Remote from "../../app/remote";
@@ -50,7 +49,6 @@ import {
   czechAccountFromIban,
   DOCUMENT_KINDS,
   PAYMENT_METHODS,
-  type PaymentRounding,
   previewNumberingPattern,
   TAX_REGIMES,
 } from "./models";
@@ -62,7 +60,7 @@ import {
   SETTINGS_SECTIONS,
   type SettingsSection,
   scopePickerFromModel,
-} from "./settings";
+} from "./state";
 
 const sectionLabel = (t: I18n.Translator, s: SettingsSection): string => t.t(`settings.nav.${s}`);
 
@@ -87,7 +85,7 @@ const viewMoreHub = (ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
     card(h, [
       cardTitle(h, sCopy(ctx.locale, "more.workspace")),
       h.div.class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3").children(
-        workspaceLinks.map((item) =>
+        Arr.map(workspaceLinks, (item) =>
           h.a
             .class(
               "flex items-center justify-between rounded-panel border border-outline-variant bg-surface-container-lowest px-3.5 py-3 no-underline hover:bg-surface-container-low",
@@ -100,7 +98,7 @@ const viewMoreHub = (ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
     card(h, [
       cardTitle(h, sCopy(ctx.locale, "more.settings")),
       h.div.class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3").children(
-        SETTINGS_SECTIONS.map((section) =>
+        Arr.map(SETTINGS_SECTIONS, (section) =>
           h.a
             .class(
               "flex items-center justify-between rounded-panel border border-outline-variant bg-surface-container-lowest px-3.5 py-3 no-underline hover:bg-surface-container-low",
@@ -113,7 +111,7 @@ const viewMoreHub = (ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
     card(h, [
       cardTitle(h, sCopy(ctx.locale, "more.account")),
       h.div.class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3").children(
-        (["profile", "appearance", "security", "sessions", "danger"] as const).map((tab) =>
+        Arr.map(["profile", "appearance", "security", "sessions", "danger"] as const, (tab) =>
           h.a
             .class(
               "flex items-center justify-between rounded-panel border border-outline-variant bg-surface-container-lowest px-3.5 py-3 no-underline hover:bg-surface-container-low",
@@ -146,7 +144,7 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
   }
 
   const pasteAddress = (field: Format.AddressField) => (text: string) => {
-    if (!editable) return undefined;
+    if (!editable) return;
     const next = Format.applyAddressPaste(
       { street: f.street, city: f.city, postalCode: f.postalCode, country: f.country },
       field,
@@ -184,7 +182,7 @@ const viewIssuingEntity = (model: Model, ctx: PageContext, h: Html.H<Message>): 
         }),
         button(h, {
           label: t.t("settings.issuingEntity.refreshAres"),
-          disabled: !editable || f.ico.trim() === "",
+          disabled: !editable || Str.trim(f.ico) === "",
           busy: f.lookingUpAres,
           onClick: Message.ClickedAresLookup(),
         }),
@@ -305,13 +303,27 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
   const ws = Remote.dataOf(model.workspace);
   const currentRegime = ws?.taxRegime ?? ctx.workspace?.taxRegime ?? "vat_payer";
   const history = ws?.taxRegimeHistory ?? [];
+  const regimeOptions = Arr.map(
+    TAX_REGIMES,
+    (r) =>
+      ({
+        value: r,
+        label: t.translate(I18n.enumText({ name: "taxRegime", value: r })),
+      }) as const,
+  );
 
   return h.div.class(ui.stack).children([
     card(h, [
       cardTitle(h, t.t("settings.taxRegime.title"), [
-        badge(h, t.translate(I18n.enumText("taxRegime", currentRegime)), "proforma"),
+        badge(
+          h,
+          t.translate(I18n.enumText({ name: "taxRegime", value: currentRegime })),
+          "proforma",
+        ),
       ]),
-      h.p.class(ui.muted).children([t.translate(I18n.enumText("taxRegimeHint", currentRegime))]),
+      h.p
+        .class(ui.muted)
+        .children([t.translate(I18n.enumText({ name: "taxRegimeHint", value: currentRegime }))]),
       h.p.class(cn(ui.small, ui.muted)).children([t.t("settings.taxRegime.keepsOld")]),
       ...(editable
         ? [
@@ -323,11 +335,8 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                   id: "kb-tax-regime-select",
                   label: sCopy(ctx.locale, "tax.regime"),
                   value: model.taxForm.nextRegime,
-                  options: TAX_REGIMES.map((r) => ({
-                    value: r,
-                    label: t.translate(I18n.enumText("taxRegime", r)),
-                  })),
-                  onChange: (value) => Message.ChangedTaxRegime({ regime: value as TaxRegime }),
+                  options: regimeOptions,
+                  onChange: (value) => Message.ChangedTaxRegime({ regime: value }),
                 }),
                 textField(h, {
                   id: "kb-tax-effective",
@@ -365,7 +374,8 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                 },
                 {
                   header: sCopy(ctx.locale, "tax.regime"),
-                  cell: (row) => t.translate(I18n.enumText("taxRegime", row.regime)),
+                  cell: (row) =>
+                    t.translate(I18n.enumText({ name: "taxRegime", value: row.regime })),
                 },
               ],
             }),
@@ -376,7 +386,9 @@ const viewTaxRegime = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
           dialog(h, {
             id: "kb-tax-confirm-dialog",
             title: t.t("settings.taxRegime.confirmTitle", {
-              regime: t.translate(I18n.enumText("taxRegime", model.taxForm.nextRegime)),
+              regime: t.translate(
+                I18n.enumText({ name: "taxRegime", value: model.taxForm.nextRegime }),
+              ),
             }),
             body: [
               h.p.children([
@@ -408,7 +420,10 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
   const editable = canEditSettings(ctx);
   const rows = Remote.dataOf(model.bankAccounts) ?? [];
   const f = model.bankForm;
-  const removing = f.removingId === null ? undefined : rows.find((b) => b.id === f.removingId);
+  const removing =
+    f.removingId === null
+      ? undefined
+      : Option.getOrUndefined(Arr.findFirst(rows, (b) => b.id === f.removingId));
 
   return h.div.class(ui.stack).children([
     card(h, [
@@ -548,7 +563,7 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
                   id: "kb-bank-currency",
                   label: sCopy(ctx.locale, "bank.currency"),
                   value: f.currency,
-                  options: CURRENCY_OPTIONS.map((c) => ({ value: c, label: c })),
+                  options: Arr.map(CURRENCY_OPTIONS, (c) => ({ value: c, label: c })),
                   onChange: (value) =>
                     Message.ChangedBankCurrency({ currency: CurrencyCode.make(value) }),
                 }),
@@ -591,9 +606,13 @@ const viewBankAccounts = (model: Model, ctx: PageContext, h: Html.H<Message>): M
                 value: f.replacementId,
                 options: [
                   { value: "", label: sCopy(ctx.locale, "bank.removeNoReplacement") },
-                  ...rows
-                    .filter((b) => b.id !== removing.id && b.currency === removing.currency)
-                    .map((b) => ({ value: b.id, label: `${b.name ?? b.iban} (${b.currency})` })),
+                  ...Arr.map(
+                    Arr.filter(
+                      rows,
+                      (b) => b.id !== removing.id && b.currency === removing.currency,
+                    ),
+                    (b) => ({ value: b.id, label: `${b.name ?? b.iban} (${b.currency})` }),
+                  ),
                 ],
                 onChange: (value) => Message.ChangedBankReplacement({ value }),
               }),
@@ -645,7 +664,7 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
           h.div
             .class("grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3")
             .children(
-              (["classic", "modern_minimal"] as const).map((tpl) =>
+              Arr.map(["classic", "modern_minimal"] as const, (tpl) =>
                 withAttributes(h.button.class(), [
                   (element) => element.attr("type", "button"),
                   (element) =>
@@ -660,7 +679,9 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                       ? node.on("click", Message.SelectedPdfTemplate({ template: tpl }))
                       : node.disabled(true),
                 ]).children([
-                  h.strong.children([t.translate(I18n.enumText("pdfTemplate", tpl))]),
+                  h.strong.children([
+                    t.translate(I18n.enumText({ name: "pdfTemplate", value: tpl })),
+                  ]),
                   h.span
                     .class(cn(ui.small, ui.muted))
                     .children([
@@ -692,7 +713,7 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                 disabled: !editable,
                 options: [
                   { value: "", label: sCopy(ctx.locale, "branding.themeNone") },
-                  ...Theme.PRESET_IDS.map((id) => ({
+                  ...Arr.map(Theme.PRESET_IDS, (id) => ({
                     value: id,
                     label: t.translate(Theme.presetNameText(id)),
                   })),
@@ -724,7 +745,7 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
         card(h, [
           cardTitle(h, sCopy(ctx.locale, "branding.images")),
           h.p.class(cn(ui.small, ui.muted)).children([t.t("settings.branding.uploadHint")]),
-          ...(["logo", "stamp"] as const).map((kind) => {
+          ...Arr.map(["logo", "stamp"] as const, (kind) => {
             const hasImg = (brandingData?.[kind] ?? ws?.branding[kind] ?? null) !== null;
             return h.div
               .class(
@@ -756,7 +777,9 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
                             .attr("accept", "image/png,image/jpeg")
                             .class("sr-only")
                             .on("change", ({ files }) =>
-                              Message.SelectedBrandingImage({ kind, file: files[0] }),
+                              files[0] === undefined
+                                ? undefined
+                                : Message.SelectedBrandingImage({ kind, file: files[0] }),
                             ),
                         ]),
                       ]
@@ -790,7 +813,7 @@ const viewBranding = (model: Model, ctx: PageContext, h: Html.H<Message>): Marku
         ]),
         brandingMiniPreview(h, {
           template: f.pdfTemplate,
-          accentColor: Theme.isHex(f.accentColor.trim()) ? f.accentColor.trim() : "#111111",
+          accentColor: Theme.isHex(Str.trim(f.accentColor)) ? Str.trim(f.accentColor) : "#111111",
           companyName: model.entityForm.name || ws?.issuingEntity.name || "",
           ico: model.entityForm.ico || ws?.issuingEntity.ico || "",
           dic: model.entityForm.dic || ws?.issuingEntity.dic || "",
@@ -819,6 +842,14 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
   const editable = canEditSettings(ctx);
   const rows = Remote.dataOf(model.series) ?? [];
   const f = model.numberingForm;
+  const kindOptions = Arr.map(
+    DOCUMENT_KINDS,
+    (k) =>
+      ({
+        value: k,
+        label: t.translate(I18n.enumText({ name: "documentKind", value: k })),
+      }) as const,
+  );
   const preview = previewNumberingPattern(f.pattern, Number.parseInt(f.nextNumber, 10) || 1);
 
   return h.div.class(ui.stack).children([
@@ -834,7 +865,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
               columns: [
                 {
                   header: sCopy(ctx.locale, "numbering.kind"),
-                  cell: (s) => t.translate(I18n.enumText("documentKind", s.kind)),
+                  cell: (s) => t.translate(I18n.enumText({ name: "documentKind", value: s.kind })),
                 },
                 {
                   header: sCopy(ctx.locale, "numbering.name"),
@@ -911,11 +942,8 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                   label: sCopy(ctx.locale, "numbering.kind"),
                   value: f.kind,
                   disabled: f.editingId !== null,
-                  options: DOCUMENT_KINDS.map((k) => ({
-                    value: k,
-                    label: t.translate(I18n.enumText("documentKind", k)),
-                  })),
-                  onChange: (value) => Message.ChangedSeriesKind({ kind: value as DocumentKind }),
+                  options: kindOptions,
+                  onChange: (value) => Message.ChangedSeriesKind({ kind: value }),
                 }),
                 textField(h, {
                   id: "kb-series-name",
@@ -947,7 +975,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
               h.span
                 .class(cn(ui.small, ui.muted))
                 .children([`${sCopy(ctx.locale, "numbering.insertToken")}:`]),
-              ...(["YYYY", "YY", "MM", "NNNN"] as const).map((token) =>
+              ...Arr.map(["YYYY", "YY", "MM", "NNNN"] as const, (token) =>
                 button(h, {
                   label: token,
                   small: true,
@@ -960,7 +988,7 @@ const viewNumbering = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
               h.span.class(ui.mono).children([
                 preview.samples.length > 0
                   ? t.t("settings.numbering.nextNumbers", {
-                      numbers: preview.samples.join(", "),
+                      numbers: Arr.join(preview.samples, ", "),
                     })
                   : t.t("settings.numbering.patternHint"),
               ]),
@@ -999,6 +1027,14 @@ const viewDocumentDefaults = (
   const t = translator(ctx.locale);
   const editable = canEditSettings(ctx);
   const f = model.defaultsForm;
+  const methodOptions = Arr.map(
+    PAYMENT_METHODS,
+    (m) =>
+      ({
+        value: m,
+        label: t.translate(I18n.enumText({ name: "paymentMethod", value: m })),
+      }) as const,
+  );
 
   return card(h, [
     cardTitle(h, t.t("settings.documentDefaults.title"), [
@@ -1023,7 +1059,7 @@ const viewDocumentDefaults = (
           label: sCopy(ctx.locale, "defaults.currency"),
           value: f.currency,
           disabled: !editable,
-          options: CURRENCY_OPTIONS.map((c) => ({ value: c, label: c })),
+          options: Arr.map(CURRENCY_OPTIONS, (c) => ({ value: c, label: c })),
           onChange: (value) =>
             Message.ChangedDefaultCurrency({ currency: CurrencyCode.make(value) }),
         }),
@@ -1053,12 +1089,8 @@ const viewDocumentDefaults = (
           label: t.t("settings.documentDefaults.paymentMethod"),
           value: f.paymentMethod,
           disabled: !editable,
-          options: PAYMENT_METHODS.map((m) => ({
-            value: m,
-            label: t.translate(I18n.enumText("paymentMethod", m)),
-          })),
-          onChange: (value) =>
-            Message.ChangedDefaultPaymentMethod({ method: value as PaymentMethod }),
+          options: methodOptions,
+          onChange: (value) => Message.ChangedDefaultPaymentMethod({ method: value }),
         }),
         selectField(h, {
           id: "kb-defaults-rounding",
@@ -1069,8 +1101,7 @@ const viewDocumentDefaults = (
             { value: "none", label: sCopy(ctx.locale, "defaults.roundingNone") },
             { value: "whole_unit", label: sCopy(ctx.locale, "defaults.roundingWhole") },
           ],
-          onChange: (value) =>
-            Message.ChangedDefaultRounding({ rounding: value as PaymentRounding }),
+          onChange: (value) => Message.ChangedDefaultRounding({ rounding: value }),
         }),
       ]),
     textArea(h, {
@@ -1121,7 +1152,7 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
       id: "kb-reminders-proformas",
       label: sCopy(ctx.locale, "reminders.proformas"),
       checked: f.proformas,
-      disabled: !editable || !f.enabled,
+      disabled: !(editable && f.enabled),
       onToggle: (checked) => Message.ToggledRemindersProformas({ checked }),
     }),
     h.div.class("flex flex-col gap-3").children([
@@ -1132,7 +1163,7 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
           sCopy(ctx.locale, "reminders.maxNote", { max: 10, count: f.offsetsDays.length }),
         ]),
       h.div.class("flex flex-wrap items-center gap-1.5").children(
-        f.offsetsDays.map((day) =>
+        Arr.map(f.offsetsDays, (day) =>
           h.span
             .class(
               "inline-flex items-center gap-1.5 rounded-badge border border-outline-variant bg-surface-container-low px-2.5 py-1 text-[0.75rem] [&_button]:cursor-pointer [&_button]:border-0 [&_button]:bg-transparent [&_button]:px-0.5 [&_button]:py-0 [&_button]:text-on-surface-variant",
@@ -1170,7 +1201,7 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
                 }),
                 button(h, {
                   label: t.t("settings.reminders.addOffset"),
-                  disabled: f.offsetsDays.length >= 10 || f.newOffset.trim() === "",
+                  disabled: f.offsetsDays.length >= 10 || Str.trim(f.newOffset) === "",
                   onClick: Message.ClickedAddReminderOffset(),
                 }),
               ]),
@@ -1194,14 +1225,32 @@ const viewReminders = (model: Model, ctx: PageContext, h: Html.H<Message>): Mark
 const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   const t = translator(ctx.locale);
   const editable = canEditSettings(ctx);
+  const inviteRoleOptions = Arr.map(
+    ["admin", "member", "accountant"] as const,
+    (role) =>
+      ({
+        value: role,
+        label: t.translate(I18n.enumText({ name: "role", value: role })),
+      }) as const,
+  );
   const members = Remote.dataOf(model.members) ?? [];
   const invitations = Remote.dataOf(model.invitations) ?? [];
   const currentUserId = ctx.session._tag === "SignedIn" ? ctx.session.user.id : null;
   const removing =
     model.teamForm.removingUserId === null
       ? undefined
-      : members.find((m) => m.userId === model.teamForm.removingUserId);
+      : Option.getOrUndefined(
+          Arr.findFirst(members, (m) => m.userId === model.teamForm.removingUserId),
+        );
   const isOwner = ctx.workspace?.role === "owner";
+  const roleOptions = Arr.map(
+    ["admin", "member", "accountant"] as const,
+    (r) =>
+      ({
+        value: r,
+        label: t.translate(I18n.enumText({ name: "role", value: r })),
+      }) as const,
+  );
 
   return h.div.class(ui.stack).children([
     card(h, [
@@ -1249,25 +1298,22 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                           id: `kb-role-${m.userId}`,
                           label: t.t("settings.team.changeRole"),
                           value: m.role,
-                          options: (["admin", "member", "accountant"] as const).map((r) => ({
-                            value: r,
-                            label: t.translate(I18n.enumText("role", r)),
-                          })),
+                          options: roleOptions,
                           onChange: (value) =>
                             Message.ChangedMemberRole({
                               userId: m.userId,
-                              role: value as "admin" | "member" | "accountant",
+                              role: value,
                             }),
                         })
                       : badge(
                           h,
-                          t.translate(I18n.enumText("role", m.role)),
+                          t.translate(I18n.enumText({ name: "role", value: m.role })),
                           m.role === "owner" ? "paid" : "outline",
                         ),
                 },
                 {
                   header: sCopy(ctx.locale, "team.joined"),
-                  cell: (m) => h.span.class(ui.mono).children([m.joinedAt.slice(0, 10)]),
+                  cell: (m) => h.span.class(ui.mono).children([Str.slice(0, 10)(m.joinedAt)]),
                 },
                 {
                   header: "",
@@ -1305,13 +1351,10 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                   id: "kb-invite-role",
                   label: t.t("settings.team.inviteRole"),
                   value: model.teamForm.inviteRole,
-                  options: (["admin", "member", "accountant"] as const).map((r) => ({
-                    value: r,
-                    label: t.translate(I18n.enumText("role", r)),
-                  })),
+                  options: inviteRoleOptions,
                   onChange: (value) =>
                     Message.ChangedInviteRole({
-                      role: value as "admin" | "member" | "accountant",
+                      role: value,
                     }),
                 }),
               ]),
@@ -1339,16 +1382,20 @@ const viewTeam = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Me
                 { header: t.t("common.field.email"), cell: (i) => i.email },
                 {
                   header: t.t("common.field.role"),
-                  cell: (i) => t.translate(I18n.enumText("role", i.role)),
+                  cell: (i) => t.translate(I18n.enumText({ name: "role", value: i.role })),
                 },
                 {
                   header: t.t("common.field.status"),
                   cell: (i) =>
-                    badge(h, t.translate(I18n.enumText("invitationStatus", i.status)), "proforma"),
+                    badge(
+                      h,
+                      t.translate(I18n.enumText({ name: "invitationStatus", value: i.status })),
+                      "proforma",
+                    ),
                 },
                 {
                   header: t.t("common.field.expires"),
-                  cell: (i) => h.span.class(ui.mono).children([i.expiresAt.slice(0, 10)]),
+                  cell: (i) => h.span.class(ui.mono).children([Str.slice(0, 10)(i.expiresAt)]),
                 },
                 {
                   header: "",
@@ -1430,7 +1477,10 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
   const rows = Remote.dataOf(model.apiKeys) ?? [];
   const f = model.apiKeysForm;
   const picker = scopePickerFromModel(model, ctx);
-  const revoking = f.revokingId === null ? undefined : rows.find((k) => k.id === f.revokingId);
+  const revoking =
+    f.revokingId === null
+      ? undefined
+      : Option.getOrUndefined(Arr.findFirst(rows, (k) => k.id === f.revokingId));
 
   return h.div.class(ui.stack).children([
     card(h, [
@@ -1478,7 +1528,7 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
                         .children([
                           k.expiresAt === null
                             ? t.t("settings.apiKeys.noExpiry")
-                            : k.expiresAt.slice(0, 10),
+                            : Str.slice(0, 10)(k.expiresAt),
                         ]),
                   },
                   {
@@ -1535,7 +1585,8 @@ const viewApiKeys = (model: Model, ctx: PageContext, h: Html.H<Message>): Markup
               button(h, {
                 label: t.t("settings.apiKeys.create"),
                 variant: "primary",
-                disabled: f.name.trim() === "" || Option.isNone(ViewModels.toAccessRequest(picker)),
+                disabled:
+                  Str.trim(f.name) === "" || Option.isNone(ViewModels.toAccessRequest(picker)),
                 busy: f.saving,
                 onClick: Message.ClickedCreateApiKey(),
               }),
@@ -1607,7 +1658,9 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
   const revoking =
     model.connectedAppsForm.revokingGrantId === null
       ? undefined
-      : rows.find((g) => g.grantId === model.connectedAppsForm.revokingGrantId);
+      : Option.getOrUndefined(
+          Arr.findFirst(rows, (g) => g.grantId === model.connectedAppsForm.revokingGrantId),
+        );
 
   return h.div.class(ui.stack).children([
     card(h, [
@@ -1658,7 +1711,7 @@ const viewConnectedApps = (model: Model, ctx: PageContext, h: Html.H<Message>): 
                         .children([
                           g.lastUsedAt === null
                             ? sCopy(ctx.locale, "api.never")
-                            : g.lastUsedAt.slice(0, 10),
+                            : Str.slice(0, 10)(g.lastUsedAt),
                         ]),
                   },
                   {
@@ -1709,10 +1762,13 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
   const t = translator(ctx.locale);
   const isOwner = ctx.workspace?.role === "owner" && !ctx.workspace.closed;
   const members = Remote.dataOf(model.members) ?? [];
-  const candidates = members.filter((m) => m.role !== "owner");
-  const targetMember = candidates.find((m) => m.userId === model.dangerForm.transferToUserId);
+  const candidates = Arr.filter(members, (m) => m.role !== "owner");
+  const targetMember = Option.getOrUndefined(
+    Arr.findFirst(candidates, (m) => m.userId === model.dangerForm.transferToUserId),
+  );
   const wsName = ctx.workspace?.name ?? "";
-  const canClose = isOwner && model.dangerForm.closeConfirmName.trim() === wsName && wsName !== "";
+  const canClose =
+    isOwner && Str.trim(model.dangerForm.closeConfirmName) === wsName && wsName !== "";
 
   return h.div.class(ui.stack).children([
     card(h, [
@@ -1746,7 +1802,7 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
                 disabled: !isOwner,
                 options: [
                   { value: "", label: "—" },
-                  ...candidates.map((m) => ({
+                  ...Arr.map(candidates, (m) => ({
                     value: m.userId,
                     label: `${m.name} (${m.email})`,
                   })),
@@ -1817,18 +1873,18 @@ const viewDangerZone = (model: Model, ctx: PageContext, h: Html.H<Message>): Mar
 
 // --- Page Entrypoint ----------------------------------------------------------------------------
 
-export const viewSettingsPage = (
-  model: Model,
-  ctx: PageContext,
-  h: Html.H<Message>,
-): Markup<Message> => {
+export const viewSettingsPage: {
+  (ctx: PageContext, h: Html.H<Message>): (model: Model) => Markup<Message>;
+  (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message>;
+} = Fn.dual(3, (model: Model, ctx: PageContext, h: Html.H<Message>): Markup<Message> => {
   if (model.route._tag === "More") return viewMoreHub(ctx, h);
 
   const t = translator(ctx.locale);
-  const ws = ctx.workspace?.slug;
+  const workspace = ctx.workspace;
   const section: SettingsSection =
     model.route._tag === "Settings" ? model.route.section : "issuingEntity";
   const editable = canEditSettings(ctx);
+  const subtitle = workspace === null ? undefined : { subtitle: workspace.name };
 
   const body =
     section === "issuingEntity"
@@ -1856,25 +1912,25 @@ export const viewSettingsPage = (
   return page(h, [
     pageHeader(h, {
       title: t.t("settings.title"),
-      ...(ctx.workspace !== null ? { subtitle: ctx.workspace.name } : {}),
+      ...subtitle,
     }),
-    ...(ws !== undefined
-      ? [
+    ...(workspace === null
+      ? []
+      : [
           tabs(h, {
             label: t.t("settings.title"),
             selected: section,
-            items: SETTINGS_SECTIONS.map((s) => ({
+            items: Arr.map(SETTINGS_SECTIONS, (s) => ({
               id: s,
               label: sectionLabel(t, s),
-              href: href({ _tag: "Settings", ws, section: s }),
+              href: href({ _tag: "Settings", ws: workspace.slug, section: s }),
             })),
           }),
-        ]
-      : []),
+        ]),
     ...(!editable ? [banner(h, { tone: "info", text: t.t("settings.readOnly") })] : []),
     ...(model.actionFailure !== null
       ? [banner(h, { tone: "error", text: textOf(t, model.actionFailure.text) })]
       : []),
     body,
   ]);
-};
+});

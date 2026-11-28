@@ -8,109 +8,153 @@
  * `FORMAL_JAVA=/path/to/java` replaces `java` on PATH; its major version is still checked.
  */
 
-import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import pins from "./toolchain.json";
+import * as BunRuntime from "@effect/platform-bun/BunRuntime";
+import * as BunServices from "@effect/platform-bun/BunServices";
+import * as Config from "effect/Config";
+import * as Console from "effect/Console";
+import * as Digest from "effect/crypto/Digest";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as FetchHttpClient from "effect/http/FetchHttpClient";
+import * as HttpClient from "effect/http/HttpClient";
+import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
+import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
+import pinned from "./toolchain.json" with { type: "json" };
 
-export const FORMAL_DIR = path.resolve(import.meta.dir, "..");
-export const CACHE_DIR = path.join(FORMAL_DIR, ".cache");
+export const CACHE_DIR = Bun.fileURLToPath(new URL("../.cache", import.meta.url));
+export const ToolchainServicesLive = Layer.mergeAll(
+  BunServices.layer,
+  Digest.layerWebCrypto,
+  FetchHttpClient.layer,
+);
 
-export type Toolchain = {
+export interface Toolchain {
   readonly jar: string;
   readonly java: string;
   readonly javaVersion: string;
   readonly tlaVersion: string;
-};
-
-export const pinned = pins;
-
-export class ToolchainError extends Error {
-  override readonly name = "ToolchainError";
 }
 
-export const sha256Of = (file: string): string =>
-  createHash("sha256").update(readFileSync(file)).digest("hex");
+class ToolchainError extends Schema.TaggedError<
+  ToolchainError,
+  { readonly brand: unique symbol }
+>()("ToolchainError", {
+  message: Schema.String,
+}) {}
 
-const verify = (file: string, expected: string, origin: string): void => {
-  const actual = sha256Of(file);
+export const sha256Of = Effect.fn("Formal.sha256Of")(function* (file: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const digest = yield* Digest.Digest;
+  const bytes = yield* fs.readFile(file);
+  return yield* digest.digestHex(Digest.sha256, bytes);
+});
+
+const verify = Effect.fn("Formal.verifyJar")(function* (
+  file: string,
+  expected: string,
+  origin: string,
+) {
+  const actual = yield* sha256Of(file);
   if (actual !== expected)
-    throw new ToolchainError(
-      `tla2tools checksum mismatch for ${origin} (${file}): expected sha256 ${expected}, got ${actual}. Refusing to run TLC.`,
-    );
-};
+    return yield* ToolchainError.make({
+      message: `tla2tools checksum mismatch for ${origin} (${file}): expected sha256 ${expected}, got ${actual}. Refusing to run TLC.`,
+    });
+});
 
 /** Returns a checksum-verified tla2tools.jar, downloading it into the cache when absent. */
-export const ensureJar = async (
-  env: Record<string, string | undefined> = process.env,
-  pin: { version: string; url: string; sha256: string } = pins.tla2tools,
-): Promise<string> => {
-  if (env.TLA2TOOLS) {
-    // Absolute, so the file Java loads (TLC runs in each model's directory) is the one verified.
-    const override = path.resolve(env.TLA2TOOLS);
-    if (!existsSync(override)) throw new ToolchainError(`TLA2TOOLS=${override} does not exist.`);
-    verify(override, pin.sha256, "TLA2TOOLS");
-    return override;
+export const ensureJar = Effect.fn("Formal.ensureJar")(function* (
+  override: string | undefined,
+  pin: { version: string; url: string; sha256: string } = pinned.tla2tools,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  if (override !== undefined && override !== "") {
+    // TLC runs in the model directory, so Java must load the absolute path we verified.
+    const file = path.resolve(override);
+    if (!(yield* fs.exists(file)))
+      return yield* ToolchainError.make({ message: `TLA2TOOLS=${file} does not exist.` });
+    yield* verify(file, pin.sha256, "TLA2TOOLS");
+    return file;
   }
   const jar = path.join(CACHE_DIR, `tla2tools-${pin.version}.jar`);
-  if (existsSync(jar)) {
-    verify(jar, pin.sha256, "the cached jar (delete it to re-download)");
+  if (yield* fs.exists(jar)) {
+    yield* verify(jar, pin.sha256, "the cached jar (delete it to re-download)");
     return jar;
   }
-  mkdirSync(CACHE_DIR, { recursive: true });
-  const response = await fetch(pin.url, { redirect: "follow" });
-  if (!response.ok)
-    throw new ToolchainError(`Downloading ${pin.url} failed: HTTP ${response.status}.`);
-  const partial = `${jar}.partial`;
-  writeFileSync(partial, new Uint8Array(await response.arrayBuffer()));
-  try {
-    verify(partial, pin.sha256, pin.url);
-  } catch (error) {
-    rmSync(partial, { force: true });
-    throw error;
-  }
-  renameSync(partial, jar);
+  yield* fs.makeDirectory(CACHE_DIR, { recursive: true });
+  const response = yield* HttpClient.get(pin.url);
+  if (response.status < 200 || response.status >= 300)
+    return yield* ToolchainError.make({
+      message: `Downloading ${pin.url} failed: HTTP ${response.status}.`,
+    });
+  const partial = yield* fs.makeTempFileScoped({ directory: CACHE_DIR, suffix: ".partial" });
+  const content = yield* response.arrayBuffer;
+  yield* fs.writeFile(partial, new Uint8Array(content));
+  yield* verify(partial, pin.sha256, pin.url);
+  yield* fs.rename(partial, jar);
   return jar;
-};
+}, Effect.scoped);
 
-/** Returns the Java binary and its version string, failing unless its major version is pinned. */
-export const ensureJava = (
-  env: Record<string, string | undefined> = process.env,
-  major: number = pins.java.major,
-): { java: string; version: string } => {
-  const java = env.FORMAL_JAVA ?? "java";
-  const r = spawnSync(java, ["-version"], { encoding: "utf8" });
-  if (r.error || r.status !== 0)
-    throw new ToolchainError(
-      `Cannot run ${java} -version (${r.error?.message ?? `exit ${r.status}`}). Install JDK ${major} (mise install, see formal/README.md).`,
-    );
-  const out = `${r.stderr}${r.stdout}`;
-  const version = /version "([^"]+)"/.exec(out)?.[1];
-  const found = version ? Number(version.split(/[.+-]/)[0]) : Number.NaN;
-  if (found !== major)
-    throw new ToolchainError(
-      `${java} reports Java ${version ?? "unknown"}; formal checks pin JDK ${major}. Set FORMAL_JAVA or run mise install.`,
-    );
-  return { java, version: version ?? "" };
-};
+const JAVA_VERSION = /version "([^"]+)"/;
+const JAVA_VERSION_SEPARATOR = /[.+-]/;
 
-export const ensureToolchain = async (
-  env: Record<string, string | undefined> = process.env,
-): Promise<Toolchain> => {
-  const { java, version } = ensureJava(env);
-  const jar = await ensureJar(env);
-  return { jar, java, javaVersion: version, tlaVersion: pins.tla2tools.version };
-};
+const ensureJava = Effect.fn("Formal.ensureJava")(function* () {
+  const java = yield* Config.String("FORMAL_JAVA").pipe(Config.withDefault("java"));
+  const major = pinned.java.major;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const child = yield* spawner.spawn(ChildProcess.make(java, ["-version"])).pipe(
+    Effect.mapError((error) =>
+      ToolchainError.make({
+        message: `Cannot run ${java} -version (${error.message}). Install JDK ${major} (mise install, see formal/README.md).`,
+      }),
+    ),
+  );
+  const { stdout, stderr, status } = yield* Effect.all(
+    {
+      stdout: child.stdout.pipe(Stream.decodeText, Stream.mkString),
+      stderr: child.stderr.pipe(Stream.decodeText, Stream.mkString),
+      status: child.exitCode,
+    },
+    { concurrency: "unbounded" },
+  );
+  if (status !== 0)
+    return yield* ToolchainError.make({
+      message: `Cannot run ${java} -version (exit ${status}). Install JDK ${major} (mise install, see formal/README.md).`,
+    });
+  const version = JAVA_VERSION.exec(`${stderr}${stdout}`)?.[1];
+  if (version === undefined || Number(Str.split(version, JAVA_VERSION_SEPARATOR)[0]) !== major)
+    return yield* ToolchainError.make({
+      message: `${java} reports Java ${version ?? "unknown"}; formal checks pin JDK ${major}. Set FORMAL_JAVA or run mise install.`,
+    });
+  return { java, version };
+}, Effect.scoped);
+
+export const ensureToolchain = Effect.fn("Formal.ensureToolchain")(function* () {
+  const { java, version } = yield* ensureJava();
+  const override = yield* Config.String("TLA2TOOLS").pipe(Config.withDefault(""));
+  const jar = yield* ensureJar(override);
+  return { jar, java, javaVersion: version, tlaVersion: pinned.tla2tools.version };
+});
 
 if (import.meta.main) {
-  try {
-    const t = await ensureToolchain();
-    process.stdout.write(
-      `tla2tools ${t.tlaVersion} (sha256 verified): ${t.jar}\njava ${t.javaVersion}: ${t.java}\n`,
-    );
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
-  }
+  BunRuntime.runMain(
+    ensureToolchain().pipe(
+      Effect.matchEffect({
+        onSuccess: (t) =>
+          Console.log(
+            `tla2tools ${t.tlaVersion} (sha256 verified): ${t.jar}\njava ${t.javaVersion}: ${t.java}`,
+          ),
+        onFailure: (error) => {
+          process.exitCode = 1;
+          return Console.error(error.message);
+        },
+      }),
+      Effect.provide(ToolchainServicesLive),
+    ),
+  );
 }

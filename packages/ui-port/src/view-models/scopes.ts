@@ -6,6 +6,7 @@
  * (API Keys: the creator's role cap; consent: `offerableScopes` = expanded request ∩ role cap);
  * presets are offered only when their expansion fits `grantable`.
  */
+
 import {
   type AccessMode,
   type AccessPreset,
@@ -24,7 +25,10 @@ import {
   type ScopeArea,
 } from "@kvitbit/api-contract";
 import type { Role } from "@kvitbit/domain/contract";
-import { Option } from "effect";
+import * as Arr from "effect/Array";
+import * as Fn from "effect/Function";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 
 export type AreaLevel = "none" | "read" | "write";
 
@@ -55,7 +59,7 @@ const fits = (scopes: Iterable<Scope>, grantable: ReadonlySet<Scope>): boolean =
 
 /** Keeps only grantable scopes, then drops any write whose read is not kept. */
 const cap = (scopes: Iterable<Scope>, grantable: ReadonlySet<Scope>): ReadonlySet<Scope> => {
-  const kept = new Set(normalizeScopes([...scopes]).filter((s) => grantable.has(s)));
+  const kept = new Set(Arr.filter(normalizeScopes([...scopes]), (s) => grantable.has(s)));
   for (const area of SCOPE_AREAS) {
     if (kept.has(scopeOf(area, "write")) && !kept.has(scopeOf(area, "read"))) {
       kept.delete(scopeOf(area, "write"));
@@ -72,22 +76,26 @@ const levelIn = (scopes: ReadonlySet<Scope>, area: ScopeArea): AreaLevel =>
       : "none";
 
 /** The highest level `grantable` allows for an area (write needs both scopes grantable). */
-export const maxLevel = (grantable: ReadonlySet<Scope>, area: ScopeArea): AreaLevel =>
+const maxLevel = (grantable: ReadonlySet<Scope>, area: ScopeArea): AreaLevel =>
   grantable.has(scopeOf(area, "read"))
     ? grantable.has(scopeOf(area, "write"))
       ? "write"
       : "read"
     : "none";
 
-const RANK: Record<AreaLevel, number> = { none: 0, read: 1, write: 2 };
+const RANK = { none: 0, read: 1, write: 2 } satisfies Record<AreaLevel, number>;
 
 /** The scopes the state grants: the preset's expansion or the custom selection, canonical order. */
 export const effectiveScopes = (state: ScopePickerState): ReadonlyArray<Scope> =>
   state.mode === "custom" ? normalizeScopes(state.selected) : presetScopes(state.mode);
 
 /** A preset is available only when its whole expansion is grantable. */
-export const presetAvailable = (state: ScopePickerState, preset: AccessPreset): boolean =>
-  fits(presetScopes(preset), state.grantable);
+export const presetAvailable: {
+  (preset: AccessPreset): (state: ScopePickerState) => boolean;
+  (state: ScopePickerState, preset: AccessPreset): boolean;
+} = Fn.dual(2, (state: ScopePickerState, preset: AccessPreset): boolean =>
+  fits(presetScopes(preset), state.grantable),
+);
 
 export interface AreaRow {
   readonly area: ScopeArea;
@@ -156,8 +164,11 @@ export const ScopePicker = {
    * Scopes outside `grantable` cannot be checked.
    */
   toggle: (state: ScopePickerState, scope: Scope): ScopePickerState => {
-    const [area, level] = scope.split(":") as [ScopeArea, "read" | "write"];
-    const current = levelIn(toCustom(state), area);
+    const [areaText, level] = Str.split(scope, ":");
+    const area = Arr.findFirst(SCOPE_AREAS, (candidate) => candidate === areaText);
+    if (Option.isNone(area)) return state;
+    const selectedArea = area.value;
+    const current = levelIn(toCustom(state), selectedArea);
     const next: AreaLevel =
       level === "write"
         ? current === "write"
@@ -166,13 +177,13 @@ export const ScopePicker = {
         : current === "none"
           ? "read"
           : "none";
-    if (RANK[next] > RANK[maxLevel(state.grantable, area)]) return state;
-    return ScopePicker.setArea(state, area, next);
+    if (RANK[next] > RANK[maxLevel(state.grantable, selectedArea)]) return state;
+    return ScopePicker.setArea(state, selectedArea, next);
   },
   /** One row per area for the matrix view. */
   rows: (state: ScopePickerState): ReadonlyArray<AreaRow> => {
     const scopes = new Set(effectiveScopes(state));
-    return SCOPE_AREAS.map((area) => ({
+    return Arr.map(SCOPE_AREAS, (area) => ({
       area,
       level: levelIn(scopes, area),
       readEnabled: state.grantable.has(scopeOf(area, "read")),
@@ -202,7 +213,7 @@ export const describeAccess = (
   granted: GrantedAccess,
 ): ReadonlyArray<{ readonly area: ScopeArea; readonly level: AreaLevel }> => {
   const scopes = new Set(normalizeScopes(granted.scopes));
-  return SCOPE_AREAS.map((area) => ({ area, level: levelIn(scopes, area) }));
+  return Arr.map(SCOPE_AREAS, (area) => ({ area, level: levelIn(scopes, area) }));
 };
 
 /** OAuth wire scopes for the picker's grant (`kvitbit:read`, `kvitbit:write` or per-area). */
@@ -229,16 +240,19 @@ export interface ConsentDiff {
 }
 
 /** Compares what a client requested with what the picker grants. */
-export const consentDiff = (requested: GrantedAccess, state: ScopePickerState): ConsentDiff => {
+export const consentDiff: {
+  (state: ScopePickerState): (requested: GrantedAccess) => ConsentDiff;
+  (requested: GrantedAccess, state: ScopePickerState): ConsentDiff;
+} = Fn.dual(2, (requested: GrantedAccess, state: ScopePickerState): ConsentDiff => {
   const wanted = scopesOf(requested);
   const given = effectiveScopes(state);
   const givenSet = new Set(given);
   const wantedSet = new Set(wanted);
-  const withheld = wanted.filter((s) => !givenSet.has(s));
+  const withheld = Arr.filter(wanted, (s) => !givenSet.has(s));
   return {
-    granted: given.filter((s) => wantedSet.has(s)),
+    granted: Arr.filter(given, (s) => wantedSet.has(s)),
     withheld,
-    extra: given.filter((s) => !wantedSet.has(s)),
+    extra: Arr.filter(given, (s) => !wantedSet.has(s)),
     narrowed: withheld.length > 0,
   };
-};
+});

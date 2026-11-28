@@ -19,7 +19,11 @@ import type {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { MoneyMath, NotFound as NotFoundError } from "@kvitbit/domain/contract";
-import { BigDecimal, Clock, Context, Effect, Layer } from "effect";
+import * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { ExpenseRow, ExpenseSettlement } from "./model";
 import { settlementOf } from "./model";
@@ -63,14 +67,14 @@ export class ExpensePayables extends Context.Service<
       paid: PaidState,
     ) => Effect.Effect<ExpenseSettlement, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/ExpensePayables") {}
+>()("@kvitbit/core/modules/expenses/payables/ExpensePayables") {}
 
 const money = (amount: BigDecimal.BigDecimal | null, currency: CurrencyCode | null) =>
   amount === null || currency === null
     ? null
     : MoneyMath.make(BigDecimal.normalize(amount), currency);
 
-export const toPayable = (row: ExpenseRow): Payable => ({
+const toPayable = (row: ExpenseRow): Payable => ({
   id: row.id,
   workspaceId: row.workspaceId,
   revision: row.revision,
@@ -87,37 +91,36 @@ export const ExpensePayablesLive: Layer.Layer<ExpensePayables, never, ExpensesRe
   ExpensePayables,
   Effect.map(ExpensesRepo, (repo) => {
     const lockLive = (workspaceId: WorkspaceId, id: ExpenseId) =>
-      Effect.flatMap(repo.lock(workspaceId, id), (row) =>
-        row.removedAt === null
-          ? Effect.succeed(row)
-          : Effect.fail(new NotFoundError({ entity: "Expense", id })),
+      Effect.filterOrFail(
+        repo.lock(workspaceId, id),
+        (row) => row.removedAt === null,
+        () => NotFoundError.make({ entity: "Expense", id }),
       );
     return {
       lock: (workspaceId, id) => Effect.map(lockLive(workspaceId, id), toPayable),
-      settle: (workspaceId, id, paid) =>
-        Effect.gen(function* () {
-          const row = yield* lockLive(workspaceId, id);
-          const now = new Date(yield* Clock.currentTimeMillis).toISOString();
-          const next = yield* repo
-            .update(
-              {
-                ...row,
-                paid: BigDecimal.normalize(paid.amount.amount),
-                payments: paid.payments,
-                updatedAt: now,
-              },
-              row.revision,
-            )
-            // The row is locked in this transaction, so neither a revision race nor a unique
-            // index (expenses has none) can fail this update.
-            .pipe(
-              Effect.catchTags({
-                Conflict: (e) => Effect.die(e),
-                UniqueViolation: (e) => Effect.die(e),
-              }),
-            );
-          return settlementOf(next);
-        }),
+      settle: Effect.fn("settle")(function* (workspaceId, id, paid) {
+        const row = yield* lockLive(workspaceId, id);
+        const now = yield* Effect.map(DateTime.now, DateTime.formatIso);
+        const next = yield* repo
+          .update(
+            {
+              ...row,
+              paid: BigDecimal.normalize(paid.amount.amount),
+              payments: paid.payments,
+              updatedAt: now,
+            },
+            row.revision,
+          )
+          // The row is locked in this transaction, so neither a revision race nor a unique
+          // index (expenses has none) can fail this update.
+          .pipe(
+            Effect.catchTags({
+              Conflict: (e) => Effect.die(e),
+              UniqueViolation: (e) => Effect.die(e),
+            }),
+          );
+        return settlementOf(next);
+      }),
     };
   }),
 );

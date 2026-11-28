@@ -1,6 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import type { PasskeyBridge } from "../../platform/passkeys/passkey-bridge";
-import type { AuthFetch, AuthRequest, AuthResponse } from "../../session/auth-http";
+import { InvitationToken } from "@kvitbit/domain/contract";
+import * as Arr from "effect/Array";
+import {
+  type PasskeyBridge,
+  passkeyBridge as unavailablePasskeys,
+} from "../../platform/passkeys/passkey-bridge";
+import {
+  type AuthFetch,
+  type AuthRequest,
+  type AuthResponse,
+  makeAuthFetch,
+} from "../../session/auth-http";
 import { acceptInvitedSignup } from "./accept-invited-signup";
 import { makeAuthClient } from "./auth-client";
 
@@ -20,9 +30,9 @@ const makeHarness = (
   let refreshed = 0;
   let cleared = 0;
 
-  const auth: AuthFetch = async (path, req) => {
+  const auth: AuthFetch = (path, req) => {
     calls.push(req === undefined ? { path } : { path, req });
-    return handler(path, req);
+    return Promise.resolve(handler(path, req));
   };
   const passkeyBridge: PasskeyBridge = {
     availability: async () => "available",
@@ -32,15 +42,17 @@ const makeHarness = (
   };
   const client = makeAuthClient({
     auth,
-    signedIn: async (token) => {
+    signedIn: (token) => {
       signedInTokens.push(token);
-      return true;
+      return Promise.resolve(true);
     },
-    refresh: async () => {
+    refresh: () => {
       refreshed += 1;
+      return Promise.resolve();
     },
-    clear: async () => {
+    clear: () => {
       cleared += 1;
+      return Promise.resolve();
     },
     passkeyBridge,
   });
@@ -54,6 +66,43 @@ const makeHarness = (
 };
 
 describe("AuthClient", () => {
+  test("persists the replacement bearer before the next request after a password change", async () => {
+    let bearer: string | null = "old-bearer";
+    const received: Array<string | null> = [];
+    const auth = makeAuthFetch(
+      "https://kvitbit.test",
+      () => bearer,
+      (url, init) => {
+        received.push(new Headers(init.headers).get("authorization"));
+        if (url.pathname === "/api/auth/change-password") {
+          return Promise.resolve(
+            new Response("{}", {
+              headers: { "set-auth-token": "replacement-bearer" },
+            }),
+          );
+        }
+        return Promise.resolve(new Response("[]"));
+      },
+    );
+    const client = makeAuthClient({
+      auth,
+      signedIn: (token) => {
+        bearer = token;
+        return Promise.resolve(true);
+      },
+      refresh: () => Promise.resolve(),
+      clear: () => Promise.resolve(),
+      passkeyBridge: unavailablePasskeys,
+    });
+
+    expect(await client.changePassword("password-before", "password-after", true)).toEqual({
+      _tag: "Ok",
+      value: undefined,
+    });
+    expect(await client.passkeys()).toEqual({ _tag: "Ok", value: [] });
+    expect(received).toEqual(["Bearer old-bearer", "Bearer replacement-bearer"]);
+  });
+
   test("signUpEmail sends x-altcha and accept-language", async () => {
     const h = makeHarness(() => ({ status: 200, ok: true, body: {}, token: null }));
     const res = await h.client.signUpEmail(
@@ -120,7 +169,12 @@ describe("AuthClient", () => {
       },
     });
     try {
-      const joined = await acceptInvitedSignup(server.url.origin, "en", "inv1", res.value.token);
+      const joined = await acceptInvitedSignup({
+        origin: server.url.origin,
+        locale: "en",
+        token: InvitationToken.make("inv1"),
+        bearer: res.value.token,
+      });
       expect(joined._tag === "Ok" && String(joined.value.slug)).toBe("acme");
       expect(join).toEqual({
         method: "POST",
@@ -176,10 +230,10 @@ describe("AuthClient", () => {
       token: null,
     }));
     const uvRes = await unverifiedH.client.signInEmail({ email: "a@b.cz", password: "pw" }, null);
-    expect(uvRes._tag).toBe("Err");
-    if (uvRes._tag === "Err" && uvRes.error._tag === "Invalid") {
-      expect(uvRes.error.issues[0]?.code).toBe("auth.email_not_verified");
-    }
+    expect(uvRes).toMatchObject({
+      _tag: "Err",
+      error: { _tag: "Invalid", issues: [{ code: "auth.email_not_verified" }] },
+    });
 
     const botH = makeHarness(() => ({
       status: 400,
@@ -216,7 +270,7 @@ describe("AuthClient", () => {
     }));
     expect(await h.client.verifyLink("verify", "token")).toEqual({ _tag: "Ok", value: null });
     expect(h.signedInTokens).toEqual([]);
-    expect(h.calls.map(({ path }) => path)).toEqual(["/verify-email"]);
+    expect(Arr.map(h.calls, ({ path }) => path)).toEqual(["/verify-email"]);
   });
 
   test("passkeySignIn returns Cancelled quietly when user dismisses sheet", async () => {
@@ -309,16 +363,14 @@ describe("AuthClient", () => {
     });
 
     const list = await h.client.sessions();
-    expect(list._tag).toBe("Ok");
-    if (list._tag === "Ok") {
-      expect(list.value[0]?.current).toBe(true);
-      expect(list.value[1]?.current).toBe(false);
-    }
+    if (list._tag !== "Ok") throw new Error("Expected a session list");
+    expect(list.value[0]?.current).toBe(true);
+    expect(list.value[1]?.current).toBe(false);
 
     await h.client.revokeSession("others");
     await h.client.revokeSession("tok-other");
-    expect(h.calls.some((c) => c.path === "/revoke-other-sessions")).toBe(true);
-    expect(h.calls.some((c) => c.path === "/revoke-session")).toBe(true);
+    expect(Arr.some(h.calls, (c) => c.path === "/revoke-other-sessions")).toBe(true);
+    expect(Arr.some(h.calls, (c) => c.path === "/revoke-session")).toBe(true);
 
     await h.client.updateUser({ name: "Jana K." });
     expect(h.getRefreshed()).toBe(1);

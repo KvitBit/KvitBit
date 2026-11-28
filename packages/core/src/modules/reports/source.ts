@@ -4,6 +4,7 @@
  * Every operation is read-only, Workspace-scoped (another Workspace's rows are never returned),
  * runs inside the caller's `CoreStore.transaction`, and fails only with `StoreUnavailable`.
  */
+
 import type {
   ContactId,
   CurrencyCode,
@@ -19,8 +20,12 @@ import type {
   VatBucket,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { BigDecimal } from "effect";
-import { Context, Effect, Layer, Ref } from "effect";
+import * as EffectArray from "effect/Array";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import { StoreUnavailable } from "../../store/CoreStore";
 
 /** A stored CNB (or manual) fixing: `amount × rate / quantity` is CZK. */
@@ -143,7 +148,7 @@ export interface TaxRegimePeriod {
 }
 
 export class ReportsSource extends Context.Service<ReportsSource, ReportsSourceShape>()(
-  "kvitbit/core/ReportsSource",
+  "@kvitbit/core/modules/reports/source/ReportsSource",
 ) {}
 
 // In-memory fake ------------------------------------------------------------------------------
@@ -179,7 +184,7 @@ export class ReportsSourceFake extends Context.Service<
     /** Adds rows to what is served. */
     readonly seed: (rows: Partial<ReportsSourceData>) => Effect.Effect<void>;
   }
->()("kvitbit/core/testing/ReportsSourceFake") {}
+>()("@kvitbit/core/modules/reports/source/ReportsSourceFake") {}
 
 const makeFake = Effect.gen(function* () {
   const data = yield* Ref.make(EMPTY);
@@ -202,23 +207,25 @@ const makeFake = Effect.gen(function* () {
 export const ReportsSourceMemory: Layer.Layer<ReportsSource | ReportsSourceFake> = Layer.effect(
   ReportsSource,
   Effect.map(ReportsSourceFake, (fake): ReportsSourceShape => {
-    const read = <A>(f: (d: ReportsSourceData) => A) =>
-      Effect.gen(function* () {
-        if (yield* Ref.get(fake.unavailable)) {
-          return yield* new StoreUnavailable({});
-        }
-        return f(yield* Ref.get(fake.data));
-      });
+    const read = Effect.fn("read")(function* <A>(f: (d: ReportsSourceData) => A) {
+      if (yield* Ref.get(fake.unavailable)) {
+        return yield* StoreUnavailable.make({});
+      }
+      const value_1 = yield* Ref.get(fake.data);
+      return f(value_1);
+    });
     return {
       documents: (workspaceId, range) =>
         read((d) =>
-          d.documents.filter(
+          EffectArray.filter(
+            d.documents,
             (row) => row.workspaceId === workspaceId && inRange(row[range.field], range),
           ),
         ),
       openReceivables: (workspaceId) =>
         read((d) =>
-          d.documents.filter(
+          EffectArray.filter(
+            d.documents,
             (row) =>
               row.workspaceId === workspaceId &&
               row.status === "issued" &&
@@ -227,21 +234,30 @@ export const ReportsSourceMemory: Layer.Layer<ReportsSource | ReportsSourceFake>
         ),
       payments: (workspaceId, range) =>
         read((d) =>
-          d.payments.filter((row) => row.workspaceId === workspaceId && inRange(row.paidOn, range)),
+          EffectArray.filter(
+            d.payments,
+            (row) => row.workspaceId === workspaceId && inRange(row.paidOn, range),
+          ),
         ),
       expenses: (workspaceId, range) =>
         read((d) =>
-          d.expenses.filter(
+          EffectArray.filter(
+            d.expenses,
             (row) => row.workspaceId === workspaceId && inRange(row[range.field], range),
           ),
         ),
       incompleteExpenses: (workspaceId) =>
-        read((d) => d.incompleteExpenses.filter((row) => row.workspaceId === workspaceId).length),
+        read(
+          (d) =>
+            EffectArray.filter(d.incompleteExpenses, (row) => row.workspaceId === workspaceId)
+              .length,
+        ),
       taxRegimes: (workspaceId) =>
         read((d) =>
-          d.taxRegimes
-            .filter((row) => row.workspaceId === workspaceId)
-            .map(({ effectiveFrom, regime }) => ({ effectiveFrom, regime })),
+          EffectArray.map(
+            EffectArray.filter(d.taxRegimes, (row) => row.workspaceId === workspaceId),
+            ({ effectiveFrom, regime }) => ({ effectiveFrom, regime }),
+          ),
         ),
     };
   }),

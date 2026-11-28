@@ -9,9 +9,13 @@
  *   mobile/releases/<version>/kvitbit-<version>.apk
  *   mobile/releases/<version>/release.json
  */
+import * as Predicate from "effect/Predicate";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Str from "effect/String";
 
-export const updatePlatforms = ["android", "ios"] as const;
-export type UpdatePlatform = (typeof updatePlatforms)[number];
+export const UpdatePlatform = Schema.Literals(["android", "ios"]);
+export type UpdatePlatform = typeof UpdatePlatform.Type;
 
 export const defaultChannel = "production";
 
@@ -25,7 +29,7 @@ export const apkContentType = "application/vnd.android.package-archive";
 export const releasePrefix = "mobile/releases/";
 
 /** One file of an update as the Expo Updates v1 manifest describes it, minus its URL. */
-export interface StoredUpdateAsset {
+interface StoredUpdateAsset {
   /** Hex SHA-256 of the bytes; the object key and the `/assets/{sha256}` route segment. */
   readonly sha256: string;
   /** Base64url SHA-256, which the app checks after the download. */
@@ -51,7 +55,7 @@ export interface StoredUpdate {
   readonly assets: readonly StoredUpdateAsset[];
   readonly metadata: Readonly<Record<string, string>>;
   /** `{ expoClient }`: the public app config the export resolved. */
-  readonly extra: Readonly<Record<string, unknown>>;
+  readonly extra: typeof ManifestObject.Type;
 }
 
 /** Sends apps on this runtime back to the update embedded in their APK. */
@@ -65,7 +69,7 @@ export interface StoredRollback {
   readonly runtimeVersion: string;
 }
 
-export type StoredPublication = StoredUpdate | StoredRollback;
+type StoredPublication = StoredUpdate | StoredRollback;
 
 export interface StoredAssetMeta {
   readonly schema: 1;
@@ -76,6 +80,8 @@ export interface StoredAssetMeta {
 
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const releaseVersionPattern = /^[0-9A-Za-z._+-]+$/;
+const createdAtPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const timestampSeparators = /[-:.]/g;
 
 export const isValidSha256 = (value: string): boolean => sha256Pattern.test(value);
 
@@ -85,18 +91,32 @@ export const isValidSegment = (value: string): boolean =>
 export const isValidReleaseVersion = (value: string): boolean =>
   isValidSegment(value) && releaseVersionPattern.test(value);
 
+const StorageSegment = Schema.String.check(Schema.makeFilter(isValidSegment));
+const Sha256Hex = Schema.String.check(Schema.isPattern(sha256Pattern));
+const UtcTimestamp = Schema.String.check(Schema.isPattern(createdAtPattern));
+
+const checkSegment = Schema.decodeResult(StorageSegment);
+const checkSha256 = Schema.decodeResult(Sha256Hex);
+const checkCreatedAt = Schema.decodeResult(UtcTimestamp);
+
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = (value: object | string): string =>
+  Result.getOrThrowWith(encodeJsonValue(value), (error) => error);
+
 const segment = (value: string): string => {
-  if (!isValidSegment(value)) {
-    throw new Error(`${JSON.stringify(value)} is not a storage path segment.`);
-  }
-  return encodeURIComponent(value);
+  const checked = Result.getOrThrowWith(
+    checkSegment(value),
+    () => new Error(`${encodeJson(value)} is not a storage path segment.`),
+  );
+  return encodeURIComponent(checked);
 };
 
 export const assetKey = (sha256: string): string => {
-  if (!sha256Pattern.test(sha256)) {
-    throw new Error(`${JSON.stringify(sha256)} is not a hex SHA-256.`);
-  }
-  return `mobile/updates/assets/${sha256}`;
+  const checked = Result.getOrThrowWith(
+    checkSha256(sha256),
+    () => new Error(`${encodeJson(sha256)} is not a hex SHA-256.`),
+  );
+  return `mobile/updates/assets/${checked}`;
 };
 
 export const assetMetaKey = (sha256: string): string => `${assetKey(sha256)}.json`;
@@ -110,13 +130,12 @@ export const publicationPrefix = (query: {
   `mobile/updates/channels/${segment(query.channel)}/${segment(query.platform)}/${segment(query.runtimeVersion)}/`;
 
 /** `2026-11-24T10:00:00.000Z` -> `20261124T100000000Z`: sorts like the instant. */
-export const createdAtKey = (createdAt: string): string => {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/.exec(createdAt);
-  if (match === null) {
-    throw new Error(`createdAt ${createdAt} must be UTC ISO 8601 with milliseconds.`);
-  }
-  const [, y, mo, d, h, mi, s, ms] = match;
-  return `${y}${mo}${d}T${h}${mi}${s}${ms}Z`;
+const createdAtKey = (createdAt: string): string => {
+  const checked = Result.getOrThrowWith(
+    checkCreatedAt(createdAt),
+    () => new Error(`createdAt ${createdAt} must be UTC ISO 8601 with milliseconds.`),
+  );
+  return Str.replace(timestampSeparators, "")(checked);
 };
 
 export const publicationKey = (publication: StoredPublication): string =>
@@ -129,7 +148,7 @@ export const publicationKey = (publication: StoredPublication): string =>
 export const latestPublicationKey = (keys: Iterable<string>): string | undefined => {
   let latest: string | undefined;
   for (const key of keys) {
-    if (!key.endsWith(".json")) continue;
+    if (!Str.endsWith(".json")(key)) continue;
     if (latest === undefined || key > latest) latest = key;
   }
   return latest;
@@ -160,21 +179,21 @@ export const latestRelease = <R extends { readonly versionCode: number }>(
   return latest;
 };
 
-export const obtainiumSourceSettings = {
+const obtainiumSourceSettings = {
   customLinkFilterRegex: "/api/mobile/releases/[0-9]+\\.[0-9]+\\.[0-9]+/apk$",
   versionExtractionRegEx: "/api/mobile/releases/([0-9]+\\.[0-9]+\\.[0-9]+)/apk",
   matchGroupToUse: "1",
 } as const;
 
 /** `obtainium://app/...`: the app link Obtainium registers. */
-export const obtainiumAppLink = (origin: string): string =>
+const obtainiumAppLink = (origin: string): string =>
   `obtainium://app/${encodeURIComponent(
-    JSON.stringify({
+    encodeJson({
       id: androidPackage,
       url: new URL("/android", origin).href,
       author: "Kvitbit",
       name: "Kvitbit",
-      additionalSettings: JSON.stringify(obtainiumSourceSettings),
+      additionalSettings: encodeJson(obtainiumSourceSettings),
     }),
   )}`;
 
@@ -185,59 +204,47 @@ export const obtainiumImportUrl = (origin: string): string => {
   return url.href;
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
+const StoredAsset = Schema.Struct({
+  sha256: Sha256Hex,
+  hash: Schema.String,
+  key: Schema.String,
+  contentType: Schema.String,
+  fileExtension: Schema.optionalKey(Schema.String),
+});
 
-const isAsset = (value: unknown): value is StoredUpdateAsset =>
-  isRecord(value) &&
-  typeof value.sha256 === "string" &&
-  sha256Pattern.test(value.sha256) &&
-  typeof value.hash === "string" &&
-  typeof value.key === "string" &&
-  typeof value.contentType === "string" &&
-  (value.fileExtension === undefined || typeof value.fileExtension === "string");
-
-/** Reads a stored publication record; throws on anything this layout never writes. */
-export const parsePublication = (json: string): StoredPublication => {
-  const value: unknown = JSON.parse(json);
-  const common =
-    isRecord(value) &&
-    value.schema === 1 &&
-    typeof value.id === "string" &&
-    typeof value.createdAt === "string" &&
-    typeof value.channel === "string" &&
-    typeof value.runtimeVersion === "string" &&
-    updatePlatforms.includes(value.platform as UpdatePlatform);
-  if (common && value.type === "rollBackToEmbedded") return value as unknown as StoredRollback;
-  if (
-    common &&
-    value.type === "update" &&
-    isAsset(value.launchAsset) &&
-    Array.isArray(value.assets) &&
-    value.assets.every(isAsset) &&
-    isRecord(value.metadata) &&
-    isRecord(value.extra)
-  ) {
-    return value as unknown as StoredUpdate;
-  }
-  throw new Error("The stored mobile update record does not match schema 1.");
+const publicationFields = {
+  schema: Schema.Literal(1),
+  id: Schema.String,
+  createdAt: Schema.String,
+  channel: Schema.String,
+  platform: UpdatePlatform,
+  runtimeVersion: Schema.String,
 };
 
-/** Reads a stored asset sidecar; throws on anything this layout never writes. */
-export const parseAssetMeta = (json: string): StoredAssetMeta => {
-  const value: unknown = JSON.parse(json);
-  if (
-    isRecord(value) &&
-    value.schema === 1 &&
-    typeof value.sha256 === "string" &&
-    sha256Pattern.test(value.sha256) &&
-    typeof value.contentType === "string" &&
-    value.contentType.length > 0 &&
-    typeof value.size === "number" &&
-    Number.isInteger(value.size) &&
-    value.size >= 0
-  ) {
-    return value as unknown as StoredAssetMeta;
-  }
-  throw new Error("The stored mobile asset metadata does not match schema 1.");
-};
+// Expo receives both objects verbatim, including fields written by older publishers.
+const ManifestObject = Schema.declare(Predicate.isReadonlyObject);
+const Publication = Schema.Union([
+  Schema.Struct({
+    ...publicationFields,
+    type: Schema.Literal("update"),
+    launchAsset: StoredAsset,
+    assets: Schema.Array(StoredAsset),
+    metadata: ManifestObject,
+    extra: ManifestObject,
+  }),
+  Schema.Struct({ ...publicationFields, type: Schema.Literal("rollBackToEmbedded") }),
+]);
+
+export type ReadPublication = typeof Publication.Type;
+const decodePublication = Schema.decodeEffect(Schema.fromJsonString(Publication));
+export const parsePublication = (json: string) => decodePublication(json);
+
+const AssetMeta = Schema.Struct({
+  schema: Schema.Literal(1),
+  sha256: Sha256Hex,
+  contentType: Schema.String.check(Schema.isNonEmpty()),
+  size: Schema.Finite.check(Schema.makeFilter(Number.isInteger), Schema.isGreaterThanOrEqualTo(0)),
+});
+
+const decodeAssetMeta = Schema.decodeEffect(Schema.fromJsonString(AssetMeta));
+export const parseAssetMeta = (json: string) => decodeAssetMeta(json);

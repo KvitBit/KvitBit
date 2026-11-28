@@ -6,17 +6,17 @@
  *
  * `DocumentContacts` and `DocumentPriceList` are structurally identical to core-identity's
  * `ContactSnapshots.forDocument` and `PriceListItems.forLine` (board agreement #402); the
- * Issuing Entity shape is #407 as accepted in #414 and amended in #418 (it reads
- * `CurrentCaller`: a workspaceId other than the caller's is NotFound{Workspace}). Integration binds each with a one-line layer, e.g.
+ * Issuing Entity shape is #407 as accepted in #414 and amended in #418 (it checks the
+ * caller passed to it: a workspaceId other than the caller's is NotFound{Workspace}). Integration binds each with a one-line layer, e.g.
  * `Layer.effect(DocumentContacts, Effect.map(ContactSnapshots, (s) => DocumentContacts.of(s)))`.
  */
 import type {
   BankAccountId,
+  Caller,
   ContactDefaults,
   ContactId,
   ContactRole,
   CurrencyCode,
-  CurrentCaller,
   DocumentView,
   IsoDate,
   Locale,
@@ -27,8 +27,9 @@ import type {
   VatTreatment,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import type { BigDecimal, Effect } from "effect";
-import { Context } from "effect";
+import type * as BigDecimal from "effect/BigDecimal";
+import * as Context from "effect/Context";
+import type * as Effect from "effect/Effect";
 import type { WorkspaceBillingDefaults, WorkspaceReminderPolicy } from "../../shared/overrides";
 import type { StoreUnavailable } from "../../store/CoreStore";
 import type { AddressRecord } from "./record";
@@ -61,7 +62,7 @@ export class DocumentContacts extends Context.Service<
       id: ContactId,
     ) => Effect.Effect<ContactForDocument, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/documents/DocumentContacts") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentContacts") {}
 
 // Price List (core-identity #402 (2)) -------------------------------------------------------
 
@@ -87,7 +88,7 @@ export class DocumentPriceList extends Context.Service<
       id: PriceListItemId,
     ) => Effect.Effect<PriceListItemForLine, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/documents/DocumentPriceList") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentPriceList") {}
 
 // Issuing Entity (proposal #407 to core-identity / ci-workspaces) ---------------------------
 
@@ -128,11 +129,12 @@ export class DocumentIssuers extends Context.Service<
   DocumentIssuers,
   {
     readonly forDocument: (
+      caller: Caller,
       workspaceId: WorkspaceId,
       on: IsoDate,
-    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
+    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable>;
   }
->()("kvitbit/core/documents/DocumentIssuers") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentIssuers") {}
 
 // Renderer ----------------------------------------------------------------------------------
 
@@ -148,6 +150,10 @@ export interface RenderOptions {
 export class DocumentRenderer extends Context.Service<
   DocumentRenderer,
   {
-    readonly render: (view: DocumentView, options: RenderOptions) => Effect.Effect<Uint8Array>;
+    readonly render: (
+      view: DocumentView,
+      options: RenderOptions,
+      workspaceId?: WorkspaceId,
+    ) => Effect.Effect<Uint8Array>;
   }
->()("kvitbit/core/documents/DocumentRenderer") {}
+>()("@kvitbit/core/modules/documents/ports/DocumentRenderer") {}

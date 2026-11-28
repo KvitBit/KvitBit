@@ -1,10 +1,22 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as BunFileSystem from "@effect/platform-bun/BunFileSystem";
 import { GcsAccessToken } from "@kvitbit/adapters/blob";
-import { ConfigProvider, Effect, Layer, Option, Redacted, Stream } from "effect";
-import { HttpClient, HttpClientResponse, UrlParams } from "effect/http";
+import * as Arr from "effect/Array";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Fn from "effect/Function";
+import * as HttpClient from "effect/http/HttpClient";
+import * as HttpClientResponse from "effect/http/HttpClientResponse";
+import * as UrlParams from "effect/http/UrlParams";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Redacted from "effect/Redacted";
+import * as Result from "effect/Result";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
+import * as Str from "effect/String";
 import {
   MobileConfig,
   MobileConfigLive,
@@ -14,13 +26,18 @@ import {
   normalizeFingerprint,
 } from "../../../src/http/mobile";
 
+const encodeJsonValue = Schema.encodeResult(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Fn.flow(encodeJsonValue, Result.getOrThrow);
+
 const loadConfig = (env: Record<string, string>) =>
-  Effect.gen(function* () {
-    return yield* MobileConfig;
-  }).pipe(
-    Effect.provide(MobileConfigLive),
-    Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+  MobileConfig.pipe(
+    Effect.provide(
+      MobileConfigLive.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env })))),
+    ),
   );
+
+const fixtureFs = FileSystem.FileSystem.pipe(Effect.provide(BunFileSystem.layer), Effect.runSync);
+const fixturePath = Path.Path.pipe(Effect.provide(Path.layer), Effect.runSync);
 
 describe("MobileConfigLive", () => {
   test("prefers KVITBIT_MOBILE_STORAGE_BUCKET over dir and KVITBIT_BLOB_*", async () => {
@@ -76,8 +93,9 @@ describe("MobileConfigLive", () => {
     const defaultConfig = await Effect.runPromise(loadConfig({}));
     expect(defaultConfig.storage).toEqual({ _tag: "local", dir: "/var/lib/kvitbit/blobs" });
 
-    const missingBucket = await Effect.runPromise(
-      Effect.result(loadConfig({ KVITBIT_BLOB_DRIVER: "gcs" })),
+    const missingBucket = await loadConfig({ KVITBIT_BLOB_DRIVER: "gcs" }).pipe(
+      Effect.result,
+      Effect.runPromise,
     );
     expect(missingBucket._tag).toBe("Failure");
   });
@@ -95,7 +113,7 @@ describe("MobileConfigLive", () => {
       );
       expect(gcs.storage).toEqual({ _tag: "gcs", bucket: "shared-blobs", endpoint: undefined });
 
-      const implicitDisk = await Effect.runPromise(
+      const implicitDisk = await Fn.pipe(
         Effect.result(
           loadConfig({
             KVITBIT_ENV: env,
@@ -103,6 +121,7 @@ describe("MobileConfigLive", () => {
             KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
           }),
         ),
+        Effect.runPromise,
       );
       expect(implicitDisk._tag).toBe("Failure");
 
@@ -119,31 +138,37 @@ describe("MobileConfigLive", () => {
   });
 
   test("unescapes PEM signing key and normalizes comma-separated SHA-256 fingerprints", async () => {
-    const hex64 = "ab".repeat(32);
-    const colon = Array.from({ length: 32 }, () => "cd").join(":");
+    const hex64 = Str.repeat(32)("ab");
+    const colon = Arr.join(
+      Array.from({ length: 32 }, () => "cd"),
+      ":",
+    );
     const config = await Effect.runPromise(
       loadConfig({
         KVITBIT_MOBILE_UPDATES_SIGNING_KEY:
           "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----",
-        KVITBIT_ANDROID_ASSETLINKS_SHA256: ` ${hex64}, ${colon}, ${hex64.toUpperCase()} `,
+        KVITBIT_ANDROID_ASSETLINKS_SHA256: ` ${hex64}, ${colon}, ${Str.toUpperCase(hex64)} `,
       }),
     );
     expect(Option.isSome(config.signingKeyPem)).toBe(true);
-    if (Option.isSome(config.signingKeyPem)) {
-      expect(Redacted.value(config.signingKeyPem.value)).toBe(
-        "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----",
-      );
-    }
+    const signingKey = config.signingKeyPem.pipe(Option.getOrThrow, Redacted.value);
+    expect(signingKey).toBe("-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----");
     expect(config.androidAssetLinksSha256).toEqual([
-      Array.from({ length: 32 }, () => "AB").join(":"),
-      Array.from({ length: 32 }, () => "CD").join(":"),
+      Arr.join(
+        Array.from({ length: 32 }, () => "AB"),
+        ":",
+      ),
+      Arr.join(
+        Array.from({ length: 32 }, () => "CD"),
+        ":",
+      ),
     ]);
 
-    const invalid = await Effect.runPromise(
-      Effect.result(loadConfig({ KVITBIT_ANDROID_ASSETLINKS_SHA256: "not-a-fingerprint" })),
-    );
+    const invalid = await loadConfig({
+      KVITBIT_ANDROID_ASSETLINKS_SHA256: "not-a-fingerprint",
+    }).pipe(Effect.result, Effect.runPromise);
     expect(invalid._tag).toBe("Failure");
-    expect(normalizeFingerprint("zz".repeat(32))).toBeUndefined();
+    expect(normalizeFingerprint(Str.repeat(32)("zz"))).toBeUndefined();
   });
 });
 
@@ -151,15 +176,17 @@ describe("MobileStorageLocal", () => {
   let root: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(join(tmpdir(), "kvitbit-mobile-storage-"));
+    root = await Effect.runPromise(
+      fixtureFs.makeTempDirectory({ prefix: "kvitbit-mobile-storage-" }),
+    );
   });
 
   afterEach(async () => {
-    await rm(root, { recursive: true, force: true });
+    await Effect.runPromise(fixtureFs.remove(root, { recursive: true, force: true }));
   });
 
   test("returns empty list and NotFound for missing root or traversal keys", async () => {
-    const missingRoot = join(root, "does-not-exist");
+    const missingRoot = fixturePath.join(root, "does-not-exist");
     const layer = MobileStorageLocal(missingRoot);
 
     const keys = await Effect.runPromise(
@@ -167,50 +194,82 @@ describe("MobileStorageLocal", () => {
     );
     expect(keys).toEqual([]);
 
-    const traversal = await Effect.runPromise(
-      Effect.result(
-        Effect.flatMap(MobileStorage, (s) => s.getText("../etc/passwd")).pipe(
-          Effect.provide(layer),
-        ),
-      ),
+    const traversal = await MobileStorage.pipe(
+      Effect.flatMap((s) => s.getText("../etc/passwd")),
+      Effect.provide(layer),
+      Effect.result,
+      Effect.runPromise,
     );
     expect(traversal._tag).toBe("Failure");
-    if (traversal._tag === "Failure") {
-      expect(traversal.failure._tag).toBe("MobileStorageNotFound");
-    }
+    expect(traversal).toHaveProperty("failure._tag", "MobileStorageNotFound");
+  });
+
+  test("consumes a local storage stream once", async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    await Effect.runPromise(fixtureFs.writeFile(fixturePath.join(root, "asset"), bytes));
+
+    const reads = await Effect.runPromise(
+      Effect.gen(function* () {
+        const storage = yield* MobileStorage;
+        const { stream } = yield* storage.getStream("asset");
+        const first = yield* Stream.runCollect(stream);
+        const second = yield* Stream.runCollect(stream);
+        return { first, second };
+      }).pipe(Effect.provide(MobileStorageLocal(root))),
+    );
+
+    expect(reads).toEqual({ first: [bytes], second: [] });
   });
 
   test("rejects symlinks under root with MobileStorageUnavailable", async () => {
-    const outsideFile = join(root, "outside.txt");
-    const storeRoot = join(root, "store");
-    await writeFile(outsideFile, "secret");
-    await mkdir(join(storeRoot, "mobile/updates/assets"), { recursive: true });
-    await symlink(outsideFile, join(storeRoot, "mobile/updates/assets/link"));
+    const outsideFile = fixturePath.join(root, "outside.txt");
+    const storeRoot = fixturePath.join(root, "store");
+    await Effect.runPromise(fixtureFs.writeFileString(outsideFile, "secret"));
+    await Effect.runPromise(
+      fixtureFs.makeDirectory(fixturePath.join(storeRoot, "mobile/updates/assets"), {
+        recursive: true,
+      }),
+    );
+    await Effect.runPromise(
+      fixtureFs.symlink(outsideFile, fixturePath.join(storeRoot, "mobile/updates/assets/link")),
+    );
 
     const layer = MobileStorageLocal(storeRoot);
-    const readRes = await Effect.runPromise(
-      Effect.result(
-        Effect.flatMap(MobileStorage, (s) => s.getText("mobile/updates/assets/link")).pipe(
-          Effect.provide(layer),
-        ),
-      ),
+    const readRes = await MobileStorage.pipe(
+      Effect.flatMap((s) => s.getText("mobile/updates/assets/link")),
+      Effect.provide(layer),
+      Effect.result,
+      Effect.runPromise,
     );
     expect(readRes._tag).toBe("Failure");
-    if (readRes._tag === "Failure") {
-      expect(readRes.failure._tag).toBe("MobileStorageUnavailable");
-    }
+    expect(readRes).toHaveProperty("failure._tag", "MobileStorageUnavailable");
 
-    const listRes = await Effect.runPromise(
-      Effect.result(
-        Effect.flatMap(MobileStorage, (s) => s.list("mobile/updates/assets/")).pipe(
-          Effect.provide(layer),
-        ),
-      ),
+    const listRes = await MobileStorage.pipe(
+      Effect.flatMap((s) => s.list("mobile/updates/assets/")),
+      Effect.provide(layer),
+      Effect.result,
+      Effect.runPromise,
     );
     expect(listRes._tag).toBe("Failure");
-    if (listRes._tag === "Failure") {
-      expect(listRes.failure._tag).toBe("MobileStorageUnavailable");
-    }
+    expect(listRes).toHaveProperty("failure._tag", "MobileStorageUnavailable");
+  });
+
+  test("rechecks the stream's parent directories when the stream opens", async () => {
+    const storeRoot = fixturePath.join(root, "store");
+    const assets = fixturePath.join(storeRoot, "assets");
+    const movedAssets = fixturePath.join(root, "moved");
+
+    const read = await Effect.gen(function* () {
+      yield* fixtureFs.makeDirectory(assets, { recursive: true });
+      yield* fixtureFs.writeFileString(fixturePath.join(assets, "asset"), "contents");
+      const storage = yield* MobileStorage;
+      const { stream } = yield* storage.getStream("assets/asset");
+      yield* fixtureFs.rename(assets, movedAssets);
+      yield* fixtureFs.symlink(movedAssets, assets);
+      return yield* Stream.runCollect(stream).pipe(Effect.result);
+    }).pipe(Effect.provide(MobileStorageLocal(storeRoot)), Effect.runPromise);
+
+    expect(read).toHaveProperty("failure._tag", "MobileStorageUnavailable");
   });
 });
 
@@ -220,13 +279,16 @@ describe("MobileStorageGcs", () => {
     const invalidated: Array<string> = [];
     const tokensLayer = Layer.succeed(GcsAccessToken, {
       get: Effect.sync(() => `tok-${++tokenCounter}`),
-      invalidate: (token) => Effect.sync(() => void invalidated.push(token)),
+      invalidate: (token) =>
+        Effect.sync(() => {
+          invalidated.push(token);
+        }),
     });
 
     const fakeClient = HttpClient.make((request) =>
       Effect.sync(() => {
         const url = new URL(request.url);
-        const auth = request.headers.authorization;
+        const auth = request.headers["authorization"];
         if (url.pathname === "/storage/v1/b/my-bucket/o") {
           if (auth === "Bearer tok-1") {
             return HttpClientResponse.fromWeb(
@@ -241,13 +303,13 @@ describe("MobileStorageGcs", () => {
               : { items: [{ name: "mobile/releases/1.1.0/release.json" }] };
           return HttpClientResponse.fromWeb(
             request,
-            new Response(JSON.stringify(body), {
+            new Response(encodeJson(body), {
               status: 200,
               headers: { "content-type": "application/json" },
             }),
           );
         }
-        if (url.pathname.endsWith(encodeURIComponent("mobile/updates/assets/ok"))) {
+        if (Str.endsWith(encodeURIComponent("mobile/updates/assets/ok"))(url.pathname)) {
           return HttpClientResponse.fromWeb(
             request,
             new Response(new Uint8Array([9, 8, 7]), {
@@ -285,7 +347,7 @@ describe("MobileStorageGcs", () => {
         return {
           contentType: result.contentType,
           size: result.size,
-          bytes: Array.from(chunks).flatMap((c) => Array.from(c)),
+          bytes: Arr.flatMap(chunks, Arr.fromIterable),
         };
       }).pipe(Effect.provide(layer)),
     );
@@ -295,16 +357,13 @@ describe("MobileStorageGcs", () => {
       bytes: [9, 8, 7],
     });
 
-    const missing = await Effect.runPromise(
-      Effect.result(
-        Effect.flatMap(MobileStorage, (s) => s.getText("mobile/updates/assets/nope")).pipe(
-          Effect.provide(layer),
-        ),
-      ),
+    const missing = await MobileStorage.pipe(
+      Effect.flatMap((s) => s.getText("mobile/updates/assets/nope")),
+      Effect.provide(layer),
+      Effect.result,
+      Effect.runPromise,
     );
     expect(missing._tag).toBe("Failure");
-    if (missing._tag === "Failure") {
-      expect(missing.failure._tag).toBe("MobileStorageNotFound");
-    }
+    expect(missing).toHaveProperty("failure._tag", "MobileStorageNotFound");
   });
 });

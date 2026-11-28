@@ -10,7 +10,7 @@ import type {
   NumberingSeriesId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { Effect } from "effect";
+import * as Effect from "effect/Effect";
 import type { StoreUnavailable } from "./CoreStore";
 import { CoreStore } from "./CoreStore";
 

@@ -3,6 +3,9 @@ import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Fn from "effect/Function";
 
 const packageDir = fileURLToPath(new URL("..", import.meta.url));
 const migrationsFolder = fileURLToPath(new URL("../drizzle", import.meta.url));
@@ -22,22 +25,32 @@ afterAll(async () => {
 });
 
 describe("committed migration", () => {
-  test("matches the schema: drizzle-kit generate has nothing to generate", () => {
-    const result = Bun.spawnSync(
-      ["bunx", "drizzle-kit", "generate", "--explain", "--output", "json"],
-      { cwd: packageDir, env: { ...process.env, DATABASE_URL: "", DATABASE_URL_UNPOOLED: "" } },
-    );
-    const stdout = result.stdout.toString();
-    expect(result.exitCode).toBe(0);
-    expect(stdout).toContain('"status":"no_changes"');
-  }, 60_000);
+  test(
+    "matches the schema: drizzle-kit generate has nothing to generate",
+    () =>
+      Effect.gen(function* () {
+        const child = yield* Effect.sync(() =>
+          Bun.spawn(["bunx", "drizzle-kit", "generate", "--explain", "--output", "json"], {
+            cwd: packageDir,
+            env: { ...Bun.env, DATABASE_URL: "", DATABASE_URL_UNPOOLED: "" },
+            stdout: "pipe",
+            stderr: "inherit",
+          }),
+        );
+        const stdout = yield* Effect.promise(() => Bun.readableStreamToText(child.stdout));
+        const exitCode = yield* Effect.promise(() => child.exited);
+        expect(exitCode).toBe(0);
+        expect(stdout).toContain('"status":"no_changes"');
+      }).pipe(Effect.runPromise),
+    60_000,
+  );
 
   test("creates the public and auth tables", async () => {
     const tables = await rows<{ name: string }>(
       `select table_schema || '.' || table_name as name from information_schema.tables
        where table_schema in ('public', 'auth') and table_type = 'BASE TABLE'`,
     );
-    const names = tables.map((t) => t.name);
+    const names = Arr.map(tables, (t) => t.name);
     for (const name of [
       "public.workspaces",
       "public.documents",
@@ -68,7 +81,7 @@ describe("schema invariants", () => {
        where table_schema = 'public' and column_name = 'revision'
          and is_nullable = 'NO' and column_default = '1'`,
     );
-    const names = withRevision.map((r) => r.table_name);
+    const names = Arr.map(withRevision, (r) => r.table_name);
     for (const table of [
       "workspaces",
       "invitations",
@@ -110,9 +123,11 @@ describe("schema invariants", () => {
         and c.column_name = 'workspace_id'
        where t.table_schema = 'public' and t.table_type = 'BASE TABLE'`,
     );
-    const offenders = tables
-      .filter((t) => !global.has(t.table_name) && t.nullable !== "NO")
-      .map((t) => t.table_name);
+    const offenders = Fn.pipe(
+      tables,
+      Arr.filter((t) => !global.has(t.table_name) && t.nullable !== "NO"),
+      Arr.map((t) => t.table_name),
+    );
     expect(offenders).toEqual([]);
   });
 
@@ -130,9 +145,13 @@ describe("schema invariants", () => {
          and f.relname <> 'workspaces'`,
     );
     expect(fks.length).toBeGreaterThan(10);
-    const unscoped = fks
-      .filter((fk) => !fk.cols.includes("workspace_id") || !fk.refcols.includes("workspace_id"))
-      .map((fk) => fk.name);
+    const unscoped = Fn.pipe(
+      fks,
+      Arr.filter(
+        (fk) => !(fk.cols.includes("workspace_id") && fk.refcols.includes("workspace_id")),
+      ),
+      Arr.map((fk) => fk.name),
+    );
     expect(unscoped).toEqual([]);
   });
 });
@@ -160,7 +179,7 @@ describe("constraints", () => {
          values ('0190a000-0000-7000-8000-0000000000d1', $1, 'invoice', $2, 'CZK', 'cs', 'bank_transfer')`,
         [wsB, contactA],
       ),
-    ).rejects.toThrow(/documents_contact_fk/);
+    ).rejects.toThrow("documents_contact_fk");
   });
 
   test("a document number is reserved once per Workspace and kind", async () => {
@@ -170,7 +189,7 @@ describe("constraints", () => {
         [ws, kind, ws === wsA ? seriesA : null],
       );
     await reserve(wsA, "invoice");
-    await expect(reserve(wsA, "invoice")).rejects.toThrow(/number_reservations_pkey/);
+    await expect(reserve(wsA, "invoice")).rejects.toThrow("number_reservations_pkey");
     await reserve(wsA, "proforma");
     await reserve(wsB, "invoice");
   });
@@ -185,12 +204,12 @@ describe("constraints", () => {
     await insert("0190a000-0000-7000-8000-0000000000d2", "issued", "20260001");
     await expect(
       insert("0190a000-0000-7000-8000-0000000000d3", "issued", "20260001"),
-    ).rejects.toThrow(/documents_number_unique/);
+    ).rejects.toThrow("documents_number_unique");
     await expect(
       insert("0190a000-0000-7000-8000-0000000000d4", "draft", "20260002"),
-    ).rejects.toThrow(/documents_number_iff_not_draft/);
+    ).rejects.toThrow("documents_number_iff_not_draft");
     await expect(insert("0190a000-0000-7000-8000-0000000000d5", "issued", null)).rejects.toThrow(
-      /documents_number_iff_not_draft/,
+      "documents_number_iff_not_draft",
     );
   });
 
@@ -201,13 +220,13 @@ describe("constraints", () => {
         [wsA, seriesA],
       );
     await counter();
-    await expect(counter()).rejects.toThrow(/numbering_counters_pkey/);
+    await expect(counter()).rejects.toThrow("numbering_counters_pkey");
     await expect(
       client.query(
         `insert into numbering_counters (workspace_id, series_id, period) values ($1, $2, '2027')`,
         [wsB, seriesA],
       ),
-    ).rejects.toThrow(/numbering_counters_series_fk/);
+    ).rejects.toThrow("numbering_counters_series_fk");
   });
 
   test("only one default series per kind and one owner per Workspace", async () => {
@@ -217,7 +236,7 @@ describe("constraints", () => {
          values ('0190a000-0000-7000-8000-0000000000e2', $1, 'invoice', 'Second', 'NNNN', true)`,
         [wsA],
       ),
-    ).rejects.toThrow(/numbering_series_one_default_per_kind/);
+    ).rejects.toThrow("numbering_series_one_default_per_kind");
     await client.exec(`
       insert into auth."user" (id, name, email) values ('u2', 'Other', 'other@example.test');
       insert into memberships (workspace_id, user_id, role) values ('${wsA}', 'u1', 'owner');
@@ -227,7 +246,7 @@ describe("constraints", () => {
         `insert into memberships (workspace_id, user_id, role) values ($1, 'u2', 'owner')`,
         [wsA],
       ),
-    ).rejects.toThrow(/memberships_one_owner/);
+    ).rejects.toThrow("memberships_one_owner");
   });
 
   test("an ALTCHA solution is consumed exactly once", async () => {
@@ -248,7 +267,7 @@ describe("constraints", () => {
          values ('0190a000-0000-7000-8000-0000000000c2', $1, 'X', 'custom')`,
         [wsA],
       ),
-    ).rejects.toThrow(/contacts_reminder_offsets_match_mode/);
+    ).rejects.toThrow("contacts_reminder_offsets_match_mode");
     await client.query(
       `insert into contacts (id, workspace_id, name, reminder_policy_mode, reminder_offsets_days)
        values ('0190a000-0000-7000-8000-0000000000c3', $1, 'Y', 'custom', '{7,14}')`,
@@ -257,9 +276,9 @@ describe("constraints", () => {
   });
 
   test("account preferences default to the elegant style and follow the Workspace theme", async () => {
-    await client.query(`insert into user_preferences (user_id) values ('u1')`);
+    await client.query("insert into user_preferences (user_id) values ('u1')");
     const [prefs] = await rows<{ theme_style: string; theme_source: unknown; revision: number }>(
-      `select theme_style, theme_source, revision from user_preferences where user_id = 'u1'`,
+      "select theme_style, theme_source, revision from user_preferences where user_id = 'u1'",
     );
     expect(prefs).toEqual({ theme_style: "elegant", theme_source: null, revision: 1 });
   });
@@ -289,9 +308,10 @@ describe("council follow-up constraints", () => {
   });
 
   test("the expected workspace-scoped foreign keys exist", async () => {
-    const names = (
-      await rows<{ conname: string }>(`select conname from pg_constraint where contype = 'f'`)
-    ).map((r) => r.conname);
+    const names = Arr.map(
+      await rows<{ conname: string }>("select conname from pg_constraint where contype = 'f'"),
+      (row) => row.conname,
+    );
     for (const fk of [
       "documents_contact_fk",
       "documents_series_fk",
@@ -330,7 +350,7 @@ describe("council follow-up constraints", () => {
         `insert into number_reservations (workspace_id, kind, number, document_id) values ($1, 'invoice', 'X1', $2)`,
         [other, finalA],
       ),
-    ).rejects.toThrow(/number_reservations_document_fk/);
+    ).rejects.toThrow("number_reservations_document_fk");
   });
 
   test("a Proforma has at most one Final Invoice", async () => {
@@ -341,7 +361,7 @@ describe("council follow-up constraints", () => {
         [ws, proforma, to],
       );
     await link(finalA);
-    await expect(link(finalB)).rejects.toThrow(/document_relations_one_final_invoice_per_proforma/);
+    await expect(link(finalB)).rejects.toThrow("document_relations_one_final_invoice_per_proforma");
   });
 
   test("a deducted VAT amount needs the deducted document", async () => {
@@ -351,7 +371,7 @@ describe("council follow-up constraints", () => {
          values ('0190a000-0000-7000-8000-0000000000fa', $1, $2, 1, 'Advance', '-100', 'standard', '-21')`,
         [ws, finalA],
       ),
-    ).rejects.toThrow(/document_lines_deducted_vat_on_deduction/);
+    ).rejects.toThrow("document_lines_deducted_vat_on_deduction");
   });
 
   test("a detached schedule keeps its row while a new one attaches", async () => {
@@ -363,9 +383,9 @@ describe("council follow-up constraints", () => {
       );
     await attach("0190a000-0000-7000-8000-0000000000fb");
     await expect(attach("0190a000-0000-7000-8000-0000000000fc")).rejects.toThrow(
-      /schedules_one_attached_per_template/,
+      "schedules_one_attached_per_template",
     );
-    await client.query(`update schedules set detached_at = now() where id = $1`, [
+    await client.query("update schedules set detached_at = now() where id = $1", [
       "0190a000-0000-7000-8000-0000000000fb",
     ]);
     await attach("0190a000-0000-7000-8000-0000000000fc");
@@ -378,13 +398,13 @@ describe("council follow-up constraints", () => {
          values (gen_random_uuid(), $1, 'DataExport', $2::jsonb, 'Export', 'e1', 'export.ready')`,
         [ws, job],
       );
-    await expect(audit(null)).rejects.toThrow(/audit_entries_job_with_system_actor/);
+    await expect(audit(null)).rejects.toThrow("audit_entries_job_with_system_actor");
     await audit('{"exportId":"e1"}');
   });
 
   test("a Workspace-bound MCP grant needs a user and scopes", async () => {
     await client.query(
-      `insert into auth.oauth_client (id, client_id, redirect_uris) values ('c1', 'client-1', '{https://a.test/cb}')`,
+      "insert into auth.oauth_client (id, client_id, redirect_uris) values ('c1', 'client-1', '{https://a.test/cb}')",
     );
     const grant = (userId: string | null, scopes: string) =>
       client.query(
@@ -392,18 +412,19 @@ describe("council follow-up constraints", () => {
          values (gen_random_uuid()::text, 'client-1', $1, '{kvitbit:read}', $2, 'read', $3::text[])`,
         [userId, ws, scopes],
       );
-    await expect(grant(null, "{documents:read}")).rejects.toThrow(/oauth_consent_grant_bound/);
-    await expect(grant("u9", "{}")).rejects.toThrow(/oauth_consent_grant_bound/);
+    await expect(grant(null, "{documents:read}")).rejects.toThrow("oauth_consent_grant_bound");
+    await expect(grant("u9", "{}")).rejects.toThrow("oauth_consent_grant_bound");
     await grant("u9", "{documents:read}");
   });
 
   test("timestamp columns keep their own names", async () => {
-    const cols = (
+    const cols = Arr.map(
       await rows<{ name: string }>(
         `select table_name || '.' || column_name as name from information_schema.columns
          where table_schema = 'public' and column_name in ('joined_at', 'reserved_at', 'consumed_at', 'at')`,
-      )
-    ).map((c) => c.name);
+      ),
+      (column) => column.name,
+    );
     for (const col of [
       "memberships.joined_at",
       "number_reservations.reserved_at",
@@ -444,9 +465,9 @@ describe("review round 1 regressions", () => {
          values (gen_random_uuid(), $1, 'X', 'invoice', $2, '{}', $3)`,
         [ws, contact, value],
       );
-    await expect(tpl("series_id", foreignSeries)).rejects.toThrow(/templates_series_fk/);
+    await expect(tpl("series_id", foreignSeries)).rejects.toThrow("templates_series_fk");
     await expect(tpl("bank_account_id", foreignAccount)).rejects.toThrow(
-      /templates_bank_account_fk/,
+      "templates_bank_account_fk",
     );
     await expect(
       client.query(
@@ -454,7 +475,7 @@ describe("review round 1 regressions", () => {
          values (gen_random_uuid(), $1, $2, 1, $3)`,
         [ws, template, foreignItem],
       ),
-    ).rejects.toThrow(/template_lines_price_list_item_fk/);
+    ).rejects.toThrow("template_lines_price_list_item_fk");
   });
 
   test("schedule workflow starts record their occurrence", async () => {
@@ -464,24 +485,25 @@ describe("review round 1 regressions", () => {
          values (gen_random_uuid(), $1, $2, 'weeks', 1, '2026-01-01', 'invoice', now())`,
         [ws, template],
       ),
-    ).rejects.toThrow(/schedules_workflow_start_complete/);
+    ).rejects.toThrow("schedules_workflow_start_complete");
   });
 
   test("an account deletion tombstone carries its purge date", async () => {
     await expect(
       client.query(
-        `insert into auth."user" (id, name, email, deleted_at) values ('u-del', 'D', 'd@example.test', now())`,
+        "insert into auth.\"user\" (id, name, email, deleted_at) values ('u-del', 'D', 'd@example.test', now())",
       ),
-    ).rejects.toThrow(/user_deletion_complete/);
+    ).rejects.toThrow("user_deletion_complete");
   });
 
   test("reminder offsets, expense removal and OAuth provider columns exist", async () => {
-    const cols = (
+    const cols = Arr.map(
       await rows<{ name: string }>(
         `select table_schema || '.' || table_name || '.' || column_name as name
          from information_schema.columns where table_schema in ('public', 'auth')`,
-      )
-    ).map((c) => c.name);
+      ),
+      (column) => column.name,
+    );
     for (const col of [
       "public.documents.reminder_offsets_days",
       "public.expenses.removed_at",

@@ -1,3 +1,4 @@
+import * as Str from "effect/String";
 /**
  * Explicit migration runner (`bun apps/server/src/migrate.ts`), per board #871/#913 and rule S5.
  *
@@ -9,12 +10,15 @@
  *
  * Migrations NEVER run at server or worker boot.
  */
+
 import { fileURLToPath } from "node:url";
 import { PgClient } from "@effect/sql-pg";
 import { clusterStorageMigrationsLayer } from "@kvitbit/adapters/jobs";
 import { readMigrationFiles } from "drizzle-orm/migrator";
-import { Config, Effect, Layer } from "effect";
-import { SqlClient } from "effect/sql";
+import * as Config from "effect/Config";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/sql/SqlClient";
 import { runServerMain } from "./logging/logger";
 
 /** Resolves `packages/db/drizzle` via the `@kvitbit/db` workspace package. */
@@ -25,13 +29,17 @@ export const defaultMigrationsFolder = (): string =>
  * Applies all pending Drizzle SQL migrations from `migrationsFolder` through `SqlClient`.
  * Uses the standard `drizzle.__drizzle_migrations` table and `created_at` ordering.
  */
-export const applyDrizzleMigrations = (migrationsFolder = defaultMigrationsFolder()) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const migrations = readMigrationFiles({ migrationsFolder });
+export const applyDrizzleMigrations = Effect.fn("applyDrizzleMigrations")(function* (
+  migrationsFolder = defaultMigrationsFolder(),
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const migrations = yield* Effect.try({
+    try: () => readMigrationFiles({ migrationsFolder }),
+    catch: (cause) => ({ cause }),
+  }).pipe(Effect.catch(({ cause }) => Effect.die(cause)));
 
-    yield* sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "drizzle"`);
-    yield* sql.unsafe(`
+  yield* sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "drizzle"`);
+  yield* sql.unsafe(`
       CREATE TABLE IF NOT EXISTS "drizzle"."__drizzle_migrations" (
         id SERIAL PRIMARY KEY,
         hash text NOT NULL,
@@ -39,51 +47,52 @@ export const applyDrizzleMigrations = (migrationsFolder = defaultMigrationsFolde
       )
     `);
 
-    const appliedRows = yield* sql.unsafe<{ readonly created_at: string | number | null }>(
-      `SELECT created_at FROM "drizzle"."__drizzle_migrations" ORDER BY created_at DESC LIMIT 1`,
-    );
-    const lastCreatedAt =
-      appliedRows[0]?.created_at !== undefined && appliedRows[0]?.created_at !== null
-        ? Number(appliedRows[0].created_at)
-        : -1;
+  const appliedRows = yield* sql.unsafe<{ readonly created_at: string | number | null }>(
+    `SELECT created_at FROM "drizzle"."__drizzle_migrations" ORDER BY created_at DESC LIMIT 1`,
+  );
+  const lastCreatedAt =
+    appliedRows[0]?.created_at !== undefined && appliedRows[0]?.created_at !== null
+      ? Number(appliedRows[0].created_at)
+      : -1;
 
-    let applied = 0;
-    for (const migration of migrations) {
-      if (migration.folderMillis <= lastCreatedAt) continue;
-      yield* sql.withTransaction(
-        Effect.gen(function* () {
-          for (const stmt of migration.sql) {
-            const trimmed = stmt.trim();
-            if (trimmed !== "") {
-              yield* sql.unsafe(trimmed);
-            }
+  let applied = 0;
+  for (const migration of migrations) {
+    if (migration.folderMillis <= lastCreatedAt) continue;
+    yield* sql.withTransaction(
+      Effect.gen(function* () {
+        for (const stmt of migration.sql) {
+          const trimmed = Str.trim(stmt);
+          if (trimmed !== "") {
+            yield* sql.unsafe(trimmed);
           }
-          yield* sql.unsafe(
-            `INSERT INTO "drizzle"."__drizzle_migrations" ("hash", "created_at") VALUES ($1, $2)`,
-            [migration.hash, migration.folderMillis],
-          );
-        }),
-      );
-      applied++;
-    }
+        }
+        yield* sql.unsafe(
+          `INSERT INTO "drizzle"."__drizzle_migrations" ("hash", "created_at") VALUES ($1, $2)`,
+          [migration.hash, migration.folderMillis],
+        );
+      }),
+    );
+    applied++;
+  }
 
-    return { total: migrations.length, applied } as const;
-  });
+  return { total: migrations.length, applied } as const;
+});
 
 /**
  * Applies BOTH `@kvitbit/db` Drizzle migrations AND Effect Cluster/Workflow SQL tables.
  * Requires `SqlClient` connected as the schema owner over the direct (unpooled) endpoint.
  */
-export const runMigrations = (migrationsFolder = defaultMigrationsFolder()) =>
-  Effect.gen(function* () {
-    const drizzleResult = yield* applyDrizzleMigrations(migrationsFolder);
-    yield* Effect.logInfo("Applied Drizzle migrations", drizzleResult);
+export const runMigrations = Effect.fn("runMigrations")(function* (
+  migrationsFolder = defaultMigrationsFolder(),
+) {
+  const drizzleResult = yield* applyDrizzleMigrations(migrationsFolder);
+  yield* Effect.logInfo("Applied Drizzle migrations", drizzleResult);
 
-    yield* Layer.build(clusterStorageMigrationsLayer).pipe(Effect.scoped);
-    yield* Effect.logInfo("Applied Effect Cluster SQL storage migrations");
+  yield* Layer.build(clusterStorageMigrationsLayer).pipe(Effect.scoped);
+  yield* Effect.logInfo("Applied Effect Cluster SQL storage migrations");
 
-    return drizzleResult;
-  });
+  return drizzleResult;
+});
 
 /** Owner-role direct Postgres layer reading `DATABASE_URL_UNPOOLED` explicitly (never pooled). */
 export const UnpooledOwnerDatabaseLive = PgClient.layerConfig({
@@ -92,13 +101,12 @@ export const UnpooledOwnerDatabaseLive = PgClient.layerConfig({
   applicationName: Config.succeed("kvitbit-migrate"),
 });
 
-export const migrateProgram = runMigrations().pipe(Effect.provide(UnpooledOwnerDatabaseLive));
-
+// Older Node versions lack import.meta.main.
+const entryPath = process.argv[1] ?? "";
 const isMain =
-  typeof import.meta.main === "boolean"
-    ? import.meta.main
-    : process.argv[1]?.endsWith("migrate.ts") || process.argv[1]?.endsWith("migrate.js");
+  import.meta.main ??
+  (Str.endsWith("migrate.ts")(entryPath) || Str.endsWith("migrate.js")(entryPath));
 
 if (isMain) {
-  runServerMain(migrateProgram);
+  runServerMain(runMigrations().pipe(Effect.provide(UnpooledOwnerDatabaseLive)));
 }

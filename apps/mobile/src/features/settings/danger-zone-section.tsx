@@ -1,7 +1,12 @@
 import type { MemberView, UserId } from "@kvitbit/domain/contract";
+import type { KvitbitApiClient } from "@kvitbit/ui-port/api";
 import { inWorkspace } from "@kvitbit/ui-port/api";
+import * as Arr from "effect/Array";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+import * as Str from "effect/String";
 import { router } from "expo-router";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { View } from "react-native";
 import { useI18n } from "../../i18n/i18n-provider";
 import { useApi, useRemote } from "../../runtime/api-runtime";
@@ -17,6 +22,7 @@ import {
   useOverlay,
 } from "../../ui";
 import { useWorkspace } from "../../workspace/workspace-provider";
+import { forkFeatureEffect } from "../ui-effect";
 import { canCloseWorkspace, canTransferOwnership } from "./permissions";
 import { type FormErrorState, formErrorFrom, noFormError } from "./settings-feedback";
 
@@ -32,8 +38,14 @@ export function DangerZoneSection() {
   const canClose = canCloseWorkspace(workspace.role, workspace.closed);
 
   const membersRemote = useRemote(
-    canTransfer ? (client) => client.team.listMembers({ params: inWorkspace(workspace.id) }) : null,
-    [workspace.id, canTransfer],
+    useMemo(
+      () =>
+        canTransfer
+          ? (client: KvitbitApiClient) =>
+              client.team.listMembers({ params: inWorkspace(workspace.id) })
+          : null,
+      [workspace.id, canTransfer],
+    ),
   );
 
   const [targetAdminId, setTargetAdminId] = useState<UserId | null>(null);
@@ -41,7 +53,7 @@ export function DangerZoneSection() {
   const [busy, setBusy] = useState<"transfer" | "close" | null>(null);
   const [errorState, setErrorState] = useState<FormErrorState>(noFormError);
 
-  if (!canTransfer && !canClose) {
+  if (!(canTransfer || canClose)) {
     return (
       <View className="gap-4">
         <Banner
@@ -55,25 +67,31 @@ export function DangerZoneSection() {
     );
   }
 
-  const handleTransfer = async (admins: ReadonlyArray<MemberView>) => {
+  const handleTransfer = Effect.fn("danger-zone-section.handleTransfer")(function* (
+    admins: ReadonlyArray<MemberView>,
+  ) {
     if (targetAdminId === null) return;
-    const picked = admins.find((m) => m.userId === targetAdminId);
+    const picked = Option.getOrUndefined(Arr.findFirst(admins, (m) => m.userId === targetAdminId));
     if (picked === undefined) return;
-    const confirmed = await overlay.confirm({
-      title: t("settings.dangerZone.transferConfirm", { name: picked.name }),
-      body: t("settings.dangerZone.transferBody"),
-      confirmLabel: t("settings.dangerZone.transfer"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+    const confirmed = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.dangerZone.transferConfirm", { name: picked.name }),
+        body: t("settings.dangerZone.transferBody"),
+        confirmLabel: t("settings.dangerZone.transfer"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setBusy("transfer");
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.team.transferOwnership({
-        params: inWorkspace(workspace.id),
-        payload: { to: targetAdminId },
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.team.transferOwnership({
+          params: inWorkspace(workspace.id),
+          payload: { to: targetAdminId },
+        }),
+      ),
     );
     setBusy(null);
     if (result._tag === "Ok") {
@@ -82,25 +100,29 @@ export function DangerZoneSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
-  const handleClose = async () => {
-    if (confirmName.trim() !== workspace.name) return;
-    const confirmed = await overlay.confirm({
-      title: t("settings.dangerZone.close"),
-      body: t("settings.dangerZone.closeBody"),
-      confirmLabel: t("settings.dangerZone.close"),
-      cancelLabel: t("common.action.cancel"),
-      destructive: true,
-    });
+  const handleClose = Effect.fn("danger-zone-section.handleClose")(function* () {
+    if (Str.trim(confirmName) !== workspace.name) return;
+    const confirmed = yield* Effect.promise(() =>
+      overlay.confirm({
+        title: t("settings.dangerZone.close"),
+        body: t("settings.dangerZone.closeBody"),
+        confirmLabel: t("settings.dangerZone.close"),
+        cancelLabel: t("common.action.cancel"),
+        destructive: true,
+      }),
+    );
     if (!confirmed) return;
     setBusy("close");
     setErrorState(noFormError);
-    const result = await api.run((client) =>
-      client.workspace.close({
-        params: inWorkspace(workspace.id),
-        payload: { confirmName: confirmName.trim() },
-      }),
+    const result = yield* Effect.promise(() =>
+      api.run((client) =>
+        client.workspace.close({
+          params: inWorkspace(workspace.id),
+          payload: { confirmName: Str.trim(confirmName) },
+        }),
+      ),
     );
     setBusy(null);
     if (result._tag === "Ok") {
@@ -109,7 +131,7 @@ export function DangerZoneSection() {
     } else {
       setErrorState(formErrorFrom(result.error, i18n));
     }
-  };
+  });
 
   return (
     <View className="gap-4">
@@ -118,7 +140,7 @@ export function DangerZoneSection() {
       <Section title={t("settings.dangerZone.transfer")}>
         <RemoteView state={membersRemote.state} onRetry={membersRemote.reload}>
           {(members) => {
-            const admins = members.filter((m) => m.role === "admin");
+            const admins = Arr.filter(members, (m) => m.role === "admin");
             return (
               <Card>
                 <Text variant="bodyMedium" color="onSurfaceVariant">
@@ -136,7 +158,7 @@ export function DangerZoneSection() {
                     <SegmentedChoice<UserId>
                       label={t("settings.dangerZone.transferPick")}
                       value={targetAdminId}
-                      choices={admins.map((a) => ({ value: a.userId, label: a.name }))}
+                      choices={Arr.map(admins, (a) => ({ value: a.userId, label: a.name }))}
                       onChange={setTargetAdminId}
                     />
                     <Button
@@ -145,7 +167,7 @@ export function DangerZoneSection() {
                       label={t("settings.dangerZone.transfer")}
                       busy={busy === "transfer"}
                       disabled={targetAdminId === null}
-                      onPress={() => void handleTransfer(admins)}
+                      onPress={() => forkFeatureEffect(handleTransfer(admins))}
                     />
                   </>
                 )}
@@ -171,8 +193,8 @@ export function DangerZoneSection() {
             kind="danger"
             label={t("settings.dangerZone.close")}
             busy={busy === "close"}
-            disabled={confirmName.trim() !== workspace.name}
-            onPress={() => void handleClose()}
+            disabled={Str.trim(confirmName) !== workspace.name}
+            onPress={() => forkFeatureEffect(handleClose())}
           />
         </Card>
       </Section>

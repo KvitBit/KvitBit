@@ -5,6 +5,9 @@ import {
   type M3ColorRole,
   ThemePresets,
 } from "@kvitbit/api-contract";
+import * as Arr from "effect/Array";
+import * as Order from "effect/Order";
+import * as Rec from "effect/Record";
 import {
   auditTheme,
   contrastRatio,
@@ -30,20 +33,24 @@ const labLch = (hex: string) => {
 };
 const hueDistance = (a: number, b: number) => 180 - Math.abs(Math.abs(a - b) - 180);
 
-const themes = PRESET_IDS.map((id) => [id, resolvePreset(id)] as const);
+const themes = Arr.map(PRESET_IDS, (id) => [id, resolvePreset(id)] as const);
 
 describe("preset schemes", () => {
   test("cover the six canonical preset ids", () => {
-    expect<string[]>([...PRESET_IDS].sort()).toEqual(Object.keys(ThemePresets).sort());
+    expect(Arr.sort(PRESET_IDS, Order.String)).toEqual(
+      Arr.sort(Rec.keys(ThemePresets), Order.String),
+    );
   });
 
   test.each(themes)("%s: every variant has every role as #RRGGBB", (_, theme) => {
     for (const v of SCHEME_VARIANTS) {
       const s = theme.schemes[v];
-      expect(Object.keys(s.roles).sort()).toEqual([...M3_COLOR_ROLES].sort());
+      expect(Arr.sort(Rec.keys(s.roles), Order.String)).toEqual(
+        Arr.sort(M3_COLOR_ROLES, Order.String),
+      );
       for (const role of M3_COLOR_ROLES) expect(s.roles[role]).toMatch(HEX);
       for (const e of EXTENDED_ROLES)
-        for (const value of Object.values(s.extended[e])) expect(value).toMatch(HEX);
+        for (const value of Rec.values(s.extended[e])) expect(value).toMatch(HEX);
     }
   });
 
@@ -105,12 +112,15 @@ describe("tonal neutrals", () => {
     "outline",
     "outlineVariant",
   ];
-  const tinted = themes.filter(([id]) => id !== "graphite_atelier");
+  const tinted = Arr.filter(themes, ([id]) => id !== "graphite_atelier");
 
   test.each(tinted)("%s: neutral roles carry the seed's undertone", (id, theme) => {
     const seedHue = labLch(PresetDefinitions[id].seed).hue;
     for (const v of ["light", "dark"] as const) {
-      for (const role of TINTED.filter((r) => r !== "surfaceContainerLowest" || v === "dark")) {
+      for (const role of Arr.filter(
+        TINTED,
+        (r) => r !== "surfaceContainerLowest" || v === "dark",
+      )) {
         const c = labLch(theme.schemes[v].roles[role]);
         expect({ id, v, role, tinted: c.chroma >= 1.5 }).toEqual({ id, v, role, tinted: true });
         expect(hueDistance(c.hue, seedHue)).toBeLessThanOrEqual(40);
@@ -119,7 +129,7 @@ describe("tonal neutrals", () => {
   });
 
   test("presets have distinct undertones (surfaces differ between presets)", () => {
-    const surfaces = new Set(themes.map(([, t]) => t.schemes.light.roles.surfaceContainer));
+    const surfaces = new Set(Arr.map(themes, ([, t]) => t.schemes.light.roles.surfaceContainer));
     expect(surfaces.size).toBe(themes.length);
   });
 
@@ -135,7 +145,7 @@ describe("tonal neutrals", () => {
   });
 });
 
-describe("Graphite Atelier (KvitbitDefaultTheme)", () => {
+describe("Graphite Atelier default theme", () => {
   test("is the graphite_atelier preset", () => {
     expect(KvitbitDefaultTheme.source).toEqual({ _tag: "Preset", id: "graphite_atelier" });
   });
@@ -169,14 +179,14 @@ describe("Graphite Atelier (KvitbitDefaultTheme)", () => {
   test("more contrast never lowers contrast of DESIGN.md's exact pairs", () => {
     const s = KvitbitDefaultTheme.schemes;
     for (const side of ["light", "dark"] as const) {
-      const steps = [s[side], s[`${side}Medium`], s[`${side}High`]].map((x) => x.roles);
+      const steps = Arr.map([s[side], s[`${side}Medium`], s[`${side}High`]], (x) => x.roles);
       for (const [fg, bg] of [
         ["onPrimary", "primary"],
         ["onSurface", "surface"],
         ["onSurfaceVariant", "surfaceContainerHigh"],
         ["onErrorContainer", "errorContainer"],
       ] as const) {
-        const r = steps.map((m) => ratio(m[fg], m[bg]));
+        const r = Arr.map(steps, (m) => ratio(m[fg], m[bg]));
         expect(r[1] ?? 0).toBeGreaterThanOrEqual((r[0] ?? 0) - 0.01);
         expect(r[2] ?? 0).toBeGreaterThanOrEqual((r[1] ?? 0) - 0.01);
       }
@@ -186,13 +196,16 @@ describe("Graphite Atelier (KvitbitDefaultTheme)", () => {
   test("light surface containers step down from lowest to highest", () => {
     for (const v of ["light", "lightMedium", "lightHigh"] as const) {
       const r = KvitbitDefaultTheme.schemes[v].roles;
-      const tones = [
-        r.surfaceContainerLowest,
-        r.surfaceContainerLow,
-        r.surfaceContainer,
-        r.surfaceContainerHigh,
-        r.surfaceContainerHighest,
-      ].map((h) => Hct.fromRgb(rgbFromHex(h)).tone);
+      const tones = Arr.map(
+        [
+          r.surfaceContainerLowest,
+          r.surfaceContainerLow,
+          r.surfaceContainer,
+          r.surfaceContainerHigh,
+          r.surfaceContainerHighest,
+        ],
+        (h) => Hct.fromRgb(rgbFromHex(h)).tone,
+      );
       for (let i = 1; i < tones.length; i++) expect(tones[i] ?? 0).toBeLessThan(tones[i - 1] ?? 0);
     }
   });
@@ -215,7 +228,10 @@ describe("seeds", () => {
   );
 
   test("tuned seeds equal api-contract's ThemePresets seeds", () => {
-    const diff = PRESET_IDS.filter((id) => PresetDefinitions[id].seed !== ThemePresets[id].seed);
+    const diff = Arr.filter(
+      PRESET_IDS,
+      (id) => PresetDefinitions[id].seed !== ThemePresets[id].seed,
+    );
     expect(diff).toEqual([]);
   });
 
