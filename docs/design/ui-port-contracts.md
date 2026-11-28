@@ -169,7 +169,7 @@ import { Api } from "@kvitbit/api-contract"
 export class KvitbitApi extends Context.Service<
   KvitbitApi,
   Effect.Success<ReturnType<typeof HttpApiClient.make<typeof Api>>>
->()("ui-port/KvitbitApi") {}
+>()("@kvitbit/ui-port/api/client/KvitbitApi") {}
 
 /** The one way a presenter talks to the server. */
 export const call = <A, E, Msg>(
@@ -712,7 +712,7 @@ export class ThemeEngine extends Context.Service<ThemeEngine, {
    */
   readonly harmonizeExtended: (primary: { readonly light: Hex; readonly dark: Hex }, contrast: ThemeContrast) =>
     Effect.Effect<{ readonly light: ResolvedScheme["extended"]; readonly dark: ResolvedScheme["extended"] }, UiError>
-}>()("ui-port/ThemeEngine") {}
+}>()("@kvitbit/ui-port/theme/engine/ThemeEngine") {}
 
 export const RemoteThemeEngine: Layer.Layer<ThemeEngine, never, KvitbitApi>
 ```

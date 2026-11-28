@@ -57,7 +57,7 @@ export const make = Effect.fn("CnbDailyTxt.make")(function* (options: Options = 
             message: `fixing ${result.fixingDate} is after ${date}`,
           }),
       ),
-      Effect.mapError((cause) => new RatesUnavailable({ cause })),
+      Effect.mapError((cause) => RatesUnavailable.make({ cause })),
       Effect.withSpan("CnbDailyTxt.fixing", { attributes: { date } }),
     );
 

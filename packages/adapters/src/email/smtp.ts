@@ -207,26 +207,26 @@ export const classifySmtpError = Fn.flow(decodeSmtpError, (decoded): SendError =
       code === "EMESSAGE" ||
       (isString(command) && messageStageCommand.test(command));
     return messageStage && responseCode !== 530 && code !== "EAUTH"
-      ? new EmailRejected({ cause })
-      : new EmailNotAccepted({ cause });
+      ? EmailRejected.make({ cause })
+      : EmailNotAccepted.make({ cause });
   }
   if (isNumber(responseCode) && responseCode >= 400 && responseCode < 500) {
-    return new EmailNotAccepted({ cause });
+    return EmailNotAccepted.make({ cause });
   }
   if (code === "ETIMEDOUT") {
     return isString(timeoutType) && setupTimeouts.has(timeoutType)
-      ? new EmailNotAccepted({ cause })
-      : new EmailOutcomeUnknown({ cause });
+      ? EmailNotAccepted.make({ cause })
+      : EmailOutcomeUnknown.make({ cause });
   }
-  if (isString(code) && setupCodes.has(code)) return new EmailNotAccepted({ cause });
+  if (isString(code) && setupCodes.has(code)) return EmailNotAccepted.make({ cause });
   const transportCode = originalCode ?? code;
   if (isString(transportCode) && unconnectedCodes.has(transportCode)) {
-    return new EmailNotAccepted({ cause });
+    return EmailNotAccepted.make({ cause });
   }
   if ((code === "EENVELOPE" || code === "EMESSAGE") && responseCode === undefined) {
-    return new EmailRejected({ cause });
+    return EmailRejected.make({ cause });
   }
-  return new EmailOutcomeUnknown({ cause });
+  return EmailOutcomeUnknown.make({ cause });
 });
 
 /**
@@ -239,7 +239,7 @@ const checkRecipients = Effect.fnUntraced(function* (info: SmtpSendInfo) {
   const rejected = info.rejected?.length ?? 0;
   if (rejected === 0) return info;
   if (accepted === 0) {
-    return yield* new EmailRejected({ cause: { rejectedRecipients: rejected } });
+    return yield* EmailRejected.make({ cause: { rejectedRecipients: rejected } });
   }
   yield* Effect.logWarning("SMTP server refused some recipients").pipe(
     Effect.annotateLogs({ accepted, rejected, messageId: info.messageId }),

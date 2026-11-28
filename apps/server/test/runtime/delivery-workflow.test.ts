@@ -57,7 +57,7 @@ test.each([
           attemptedKeys.push(idempotencyKey);
           return succeeds && attemptedKeys.length === 2
             ? Effect.succeed({ provider: "fixture", providerMessageId: "sent" })
-            : Effect.fail(new EmailNotAccepted({}));
+            : Effect.fail(EmailNotAccepted.make({}));
         }),
     });
     const exit = await runSqlCore(

@@ -71,9 +71,7 @@ export const Principal = Schema.Struct({
 export type Principal = typeof Principal.Type;
 
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()(
-  // This key is part of the shared HTTP middleware contract.
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the shared HTTP middleware principal service key.
-  "kvitbit/edge/Principal",
+  "@kvitbit/api-contract/security/CurrentPrincipal",
 ) {}
 
 /**

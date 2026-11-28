@@ -60,8 +60,7 @@ export class Payments extends Context.Service<
       CurrentCaller
     >;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Payments") {}
+>()("@kvitbit/domain/modules/payments") {}
 
 export const ShareViewEvent = Schema.Struct({
   id: ShareViewId,
@@ -143,5 +142,4 @@ export class PublicShareLinks extends Context.Service<
     /** The issuing Workspace's logo for the page header; NotFound when it has none. */
     readonly logo: Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/PublicShareLinks") {}
+>()("@kvitbit/domain/modules/payments/PublicShareLinks") {}

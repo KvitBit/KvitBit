@@ -83,7 +83,7 @@ describe("MemoryCache", () => {
     const inner = counting({
       fixing: (date) =>
         Effect.suspend(() =>
-          fail ? Effect.fail(new RatesUnavailable({})) : FixtureRates.make([friday]).fixing(date),
+          fail ? Effect.fail(RatesUnavailable.make({})) : FixtureRates.make([friday]).fixing(date),
         ),
     });
     await withCache(

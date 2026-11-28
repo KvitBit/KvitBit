@@ -49,7 +49,7 @@ export class FakeCompanyRegistry extends Context.Service<
       Effect.map(FakeCompanyRegistry, (fake) => ({
         lookup: Effect.fn("lookup")(function* (ico: string) {
           yield* Ref.update(fake.lookups, (all) => [...all, ico]);
-          if (yield* Ref.get(fake.unavailable)) return yield* new RegistryUnavailable({});
+          if (yield* Ref.get(fake.unavailable)) return yield* RegistryUnavailable.make({});
           return (yield* Ref.get(fake.records)).get(ico) ?? null;
         }),
       })),
@@ -92,7 +92,7 @@ export class FixtureRates extends Context.Service<
       ExchangeRates,
       Effect.map(FixtureRates, (fake) => ({
         fixing: Effect.fn("fixing")(function* (date: IsoDate) {
-          if (yield* Ref.get(fake.unavailable)) return yield* new RatesUnavailable({});
+          if (yield* Ref.get(fake.unavailable)) return yield* RatesUnavailable.make({});
           let best: CnbFixing | undefined;
           for (const f of yield* Ref.get(fake.fixings)) {
             if (f.fixingDate <= date && (best === undefined || f.fixingDate > best.fixingDate)) {
@@ -100,7 +100,7 @@ export class FixtureRates extends Context.Service<
             }
           }
           if (best === undefined) {
-            return yield* new RatesUnavailable({ cause: `no fixing on or before ${date}` });
+            return yield* RatesUnavailable.make({ cause: `no fixing on or before ${date}` });
           }
           return best;
         }),
@@ -147,10 +147,10 @@ export class CaptureEmailSender extends Context.Service<
         ...queue,
         ...EffectArray.map(failures, (kind) =>
           kind === "rejected"
-            ? new EmailRejected({})
+            ? EmailRejected.make({})
             : kind === "not_accepted"
-              ? new EmailNotAccepted({})
-              : new EmailOutcomeUnknown({}),
+              ? EmailNotAccepted.make({})
+              : EmailOutcomeUnknown.make({}),
         ),
       ]),
     );
@@ -216,7 +216,7 @@ export class MemoryBlobStorage extends Context.Service<
     BlobStorage,
     Effect.map(MemoryBlobStorage, (memory) => {
       const guard = Effect.flatMap(Ref.get(memory.unavailable), (down) =>
-        down ? Effect.fail(new BlobUnavailable({})) : Effect.void,
+        down ? Effect.fail(BlobUnavailable.make({})) : Effect.void,
       );
       return {
         put: Effect.fn("put")(function* (
@@ -231,7 +231,7 @@ export class MemoryBlobStorage extends Context.Service<
           yield* Stream.runForEach(body, (chunk) => {
             size += chunk.byteLength;
             if (size > meta.maxBytes)
-              return Effect.fail(new BlobTooLarge({ maxBytes: meta.maxBytes }));
+              return Effect.fail(BlobTooLarge.make({ maxBytes: meta.maxBytes }));
             // Copy now: a producer may reuse its buffer (Buffer#slice shares memory).
             chunks.push(new Uint8Array(chunk));
             return Effect.void;
@@ -251,7 +251,7 @@ export class MemoryBlobStorage extends Context.Service<
         get: Effect.fn("get")(function* (key: BlobKey) {
           yield* guard;
           const blob = (yield* Ref.get(memory.blobs)).get(key);
-          if (blob === undefined) return yield* new BlobMissing({ key });
+          if (blob === undefined) return yield* BlobMissing.make({ key });
           return Stream.succeed(new Uint8Array(blob.bytes)); // detached copy
         }),
         delete: (key: BlobKey) =>

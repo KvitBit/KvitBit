@@ -97,10 +97,10 @@ type SendError = EmailRejected | EmailNotAccepted | EmailOutcomeUnknown;
  */
 export const classifyResendStatus = (status: number): SendError => {
   const cause = { status };
-  if (status === 409 || status === 408) return new EmailOutcomeUnknown({ cause });
-  if ([401, 403, 404, 405, 425, 429].includes(status)) return new EmailNotAccepted({ cause });
-  if (status >= 400 && status < 500) return new EmailRejected({ cause });
-  return new EmailNotAccepted({ cause });
+  if (status === 409 || status === 408) return EmailOutcomeUnknown.make({ cause });
+  if ([401, 403, 404, 405, 425, 429].includes(status)) return EmailNotAccepted.make({ cause });
+  if (status >= 400 && status < 500) return EmailRejected.make({ cause });
+  return EmailNotAccepted.make({ cause });
 };
 
 /**
@@ -170,15 +170,15 @@ export const classifyResendTransport = (error: HttpClientError.HttpClientError):
   switch (reason._tag) {
     case "EncodeError":
     case "InvalidUrlError":
-      return new EmailNotAccepted({ cause });
+      return EmailNotAccepted.make({ cause });
     case "TransportError":
       return Arr.some(cause.codes, (code) => preConnectCodes.has(code))
-        ? new EmailNotAccepted({ cause })
-        : new EmailOutcomeUnknown({ cause });
+        ? EmailNotAccepted.make({ cause })
+        : EmailOutcomeUnknown.make({ cause });
     case "StatusCodeError":
       return classifyResendStatus(reason.response.status);
     default:
-      return new EmailOutcomeUnknown({ cause });
+      return EmailOutcomeUnknown.make({ cause });
   }
 };
 
@@ -189,12 +189,12 @@ const acceptedId = (
   response: HttpClientResponse.HttpClientResponse,
 ): Effect.Effect<string, EmailOutcomeUnknown> =>
   response.json.pipe(
-    Effect.mapError((error) => new EmailOutcomeUnknown({ cause: safeCause(error.reason) })),
+    Effect.mapError((error) => EmailOutcomeUnknown.make({ cause: safeCause(error.reason) })),
     Effect.flatMap((body) => {
       const decoded = decodeAcceptedBody(body);
       return Option.isSome(decoded)
         ? Effect.succeed(decoded.value.id)
-        : Effect.fail(new EmailOutcomeUnknown({ cause: { body: "missing id" } }));
+        : Effect.fail(EmailOutcomeUnknown.make({ cause: { body: "missing id" } }));
     }),
   );
 
@@ -226,7 +226,7 @@ export const makeResendEmailSender = (
         Effect.timeoutOption(timeout),
       );
       if (Option.isNone(answer)) {
-        return yield* new EmailOutcomeUnknown({ cause: { timedOut: true } });
+        return yield* EmailOutcomeUnknown.make({ cause: { timedOut: true } });
       }
       return { provider: RESEND_PROVIDER, providerMessageId: answer.value };
     });

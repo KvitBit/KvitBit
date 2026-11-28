@@ -106,5 +106,4 @@ export class Reports extends Context.Service<
       id: ExportId,
     ) => Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Reports") {}
+>()("@kvitbit/domain/modules/reports") {}

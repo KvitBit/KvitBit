@@ -559,7 +559,7 @@ describe("council round: ordering, language, overlapping attempts", () => {
           send: () =>
             Effect.andThen(
               Effect.andThen(Deferred.succeed(reached, undefined), Deferred.await(gate)),
-              Effect.fail(new EmailNotAccepted({})),
+              Effect.fail(EmailNotAccepted.make({})),
             ),
         });
         const first = yield* Effect.forkChild(

@@ -36,7 +36,7 @@ const make: Effect.Effect<BlobStorage["Service"]> = Effect.gen(function* () {
                 ? Effect.void
                 : // LocalDisk cannot hold both `a` and `a/b`; fail here as it would.
                   Effect.fail(
-                    new BlobUnavailable({
+                    BlobUnavailable.make({
                       cause: { reason: "key prefix clash", clash: clash.value },
                     }),
                   ),
@@ -52,7 +52,7 @@ const make: Effect.Effect<BlobStorage["Service"]> = Effect.gen(function* () {
         Effect.flatMap((map) => {
           const blob = map.get(key);
           return blob === undefined
-            ? Effect.fail(new BlobMissing({ key }))
+            ? Effect.fail(BlobMissing.make({ key }))
             : // A copy per read, so a consumer that mutates its chunk cannot change the store.
               Effect.succeed(Stream.make(blob.data.slice()));
         }),

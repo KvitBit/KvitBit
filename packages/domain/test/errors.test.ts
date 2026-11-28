@@ -46,13 +46,21 @@ describe("error codecs", () => {
     });
   });
 
-  test("preserves the JSON encoding of a non-finite revision", () => {
-    const wire = { _tag: "Conflict", reason: "revision_changed", currentRevision: "Infinity" };
-    const decoded = Schema.decodeEffect(json)(wire).pipe(Effect.runSync);
-    expect(decoded).toEqual(
-      Conflict.make({ reason: "revision_changed", currentRevision: Number.POSITIVE_INFINITY }),
-    );
-    expect(decoded.pipe(Schema.encodeEffect(json), Effect.runSync)).toEqual(wire);
+  test.each([
+    [
+      "a non-finite revision",
+      { _tag: "Conflict", reason: "revision_changed", currentRevision: "Infinity" },
+    ],
+    [
+      "a fractional revision",
+      { _tag: "Conflict", reason: "revision_changed", currentRevision: 1.5 },
+    ],
+    [
+      "a non-finite retry delay",
+      { _tag: "Unavailable", dependency: "database", retryAfterSeconds: "NaN" },
+    ],
+  ])("rejects %s", (_, input) => {
+    expect(Schema.decodeExit(json)(input).pipe(Exit.isFailure)).toBe(true);
   });
 
   test("errors are yieldable Error instances", () => {

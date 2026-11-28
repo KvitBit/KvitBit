@@ -29,9 +29,7 @@ const STRONG_ETAG = /^"(0|[1-9]\d{0,9})"$/;
 export type KvitbitApiClient = HttpApiClient.ForApi<typeof Api>;
 
 export class KvitbitApi extends Context.Service<KvitbitApi, KvitbitApiClient>()(
-  // Keep the service identifier used by existing layers.
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the KvitbitApi service key in ui-port-contracts 2.3.
-  "ui-port/KvitbitApi",
+  "@kvitbit/ui-port/api/client/KvitbitApi",
 ) {}
 
 /**
@@ -83,9 +81,7 @@ export interface ResponseCell {
 }
 
 export class ResponseObserver extends Context.Service<ResponseObserver, ResponseCell>()(
-  // Keep the service identifier used by existing response observers.
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the response observer key required by existing layers and tests.
-  "ui-port/ResponseObserver",
+  "@kvitbit/ui-port/api/client/ResponseObserver",
 ) {}
 
 export const emptyResponseCell = (): ResponseCell => ({ current: null });

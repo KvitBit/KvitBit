@@ -222,7 +222,7 @@ export const make = Effect.fn("make")(function* (config: AresV3Config = {}) {
             registry: "ares.gov.cz",
             reason: cause._tag === "UnexpectedStatus" ? `status ${cause.status}` : cause._tag,
           }),
-          Effect.andThen(Effect.fail(new RegistryUnavailable({ cause }))),
+          Effect.andThen(Effect.fail(RegistryUnavailable.make({ cause }))),
         ),
       ),
     );

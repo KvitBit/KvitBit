@@ -188,11 +188,7 @@ export class ThemeEngine extends Context.Service<
       contrast: ThemeContrast,
     ) => Effect.Effect<ExtendedPair, ThemeEngineError>;
   }
->()(
-  // Keep the identifier specified by ui-port-contracts 4.4.
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the ThemeEngine service key in ui-port-contracts 4.4.
-  "ui-port/ThemeEngine",
-) {}
+>()("@kvitbit/ui-port/theme/engine/ThemeEngine") {}
 
 /**
  * The pure engine as a layer. `contrast` does not change `resolve`'s result: a `ResolvedTheme`

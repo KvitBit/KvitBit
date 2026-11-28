@@ -52,8 +52,7 @@ export class Contacts extends Context.Service<
       readonly limit?: number; // 1 to 100, default 50
     }) => Effect.Effect<Page<ContactView>, Invalid | Unavailable | Forbidden, CurrentCaller>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Contacts") {}
+>()("@kvitbit/domain/modules/contacts") {}
 
 // biome-ignore lint/security/noSecrets: This literal names the Price List Item Input brand.
 export const PriceListItemInput = Schema.Unknown.pipe(Schema.brand("PriceListItemInput"));
@@ -86,5 +85,4 @@ export class PriceList extends Context.Service<
       readonly includeArchived?: boolean;
     }) => Effect.Effect<ReadonlyArray<PriceListItemView>, Unavailable | Forbidden, CurrentCaller>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/PriceList") {}
+>()("@kvitbit/domain/modules/contacts/PriceList") {}

@@ -31,7 +31,7 @@ const attachmentKey = new RegExp(
   `^workspaces/${uuidPattern}/expenses/${uuidPattern}/attachments/${uuidPattern}$`,
   "i",
 );
-const unavailable = (cause: BlobUnavailable["cause"]) => new BlobUnavailable({ cause });
+const unavailable = (cause: BlobUnavailable["cause"]) => BlobUnavailable.make({ cause });
 
 const decodeErrno = Schema.decodeUnknownOption(Schema.Struct({ code: Schema.String }));
 const isMissingCause = (cause: BlobUnavailable["cause"]): boolean =>

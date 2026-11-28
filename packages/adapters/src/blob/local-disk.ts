@@ -57,7 +57,7 @@ const isAbsent = (error: PlatformError.PlatformError) => {
 };
 
 const unavailable = (cause: PlatformError.PlatformError | UnsafePath) =>
-  new BlobUnavailable({ cause });
+  BlobUnavailable.make({ cause });
 
 export const makeLocalDiskBlobStorage = Effect.fn("LocalDiskBlobStorage.make")(function* (
   options: LocalDiskBlobStorageOptions,
@@ -143,7 +143,7 @@ export const makeLocalDiskBlobStorage = Effect.fn("LocalDiskBlobStorage.make")(f
     }
     yield* Effect.tryPromise({
       try: () => rmdir(dir),
-      catch: (cause) => new BlobUnavailable({ cause }),
+      catch: (cause) => BlobUnavailable.make({ cause }),
     });
   });
 
@@ -197,17 +197,17 @@ export const makeLocalDiskBlobStorage = Effect.fn("LocalDiskBlobStorage.make")(f
     get: Effect.fn("LocalDiskBlobStorage.get")(function* (key) {
       const { dirs, target } = yield* pathsOf(key);
       const parentsPresent = yield* ancestorsExist(dirs).pipe(Effect.mapError(unavailable));
-      if (!parentsPresent) return yield* new BlobMissing({ key });
+      if (!parentsPresent) return yield* BlobMissing.make({ key });
       const stats = yield* statIfPresent(target).pipe(Effect.mapError(unavailable));
-      if (Option.isNone(stats)) return yield* new BlobMissing({ key });
+      if (Option.isNone(stats)) return yield* BlobMissing.make({ key });
       if (stats.value.type === "SymbolicLink") {
         return yield* unavailable(UnsafePath.make({ path: target, reason: "symlink" }));
       }
-      if (stats.value.type !== "File") return yield* new BlobMissing({ key });
+      if (stats.value.type !== "File") return yield* BlobMissing.make({ key });
 
       // Recheck the parents at consumption and open the file without following its last component.
       const handle = Effect.gen(function* () {
-        if (!(yield* ancestorsExist(dirs))) return yield* new BlobMissing({ key });
+        if (!(yield* ancestorsExist(dirs))) return yield* BlobMissing.make({ key });
         return yield* fs.open(target, { noFollow: true });
       });
       return Stream.unwrap(

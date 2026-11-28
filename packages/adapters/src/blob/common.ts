@@ -80,7 +80,7 @@ export const consumeBounded = Effect.fn("consumeBounded")(function* <E, R>(
   let bytes = 0;
   yield* Stream.runForEach(body, (chunk): Effect.Effect<void, BlobTooLarge | E, R> => {
     bytes += chunk.byteLength;
-    if (bytes > maxBytes) return Effect.fail(new BlobTooLarge({ maxBytes }));
+    if (bytes > maxBytes) return Effect.fail(BlobTooLarge.make({ maxBytes }));
     hash.update(chunk);
     return onChunk(chunk);
   });

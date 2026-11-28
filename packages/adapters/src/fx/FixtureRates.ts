@@ -30,8 +30,8 @@ export const make = (fixings: Iterable<CnbFixing>): ExchangeRates["Service"] => 
     fixing: Effect.fnUntraced(function* (date) {
       const found = Arr.findFirst(newestFirst, (candidate) => candidate.fixingDate <= date);
       const latest = yield* Effect.fromOption(found).pipe(
-        Effect.mapError(
-          () => new RatesUnavailable({ cause: NoFixingOnOrBefore.make({ message: date }) }),
+        Effect.mapError(() =>
+          RatesUnavailable.make({ cause: NoFixingOnOrBefore.make({ message: date }) }),
         ),
       );
       return latest;

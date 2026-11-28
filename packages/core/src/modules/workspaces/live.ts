@@ -1460,7 +1460,7 @@ export const makeWorkspaces = Effect.gen(function* () {
               contentType,
               maxBytes: BRANDING_IMAGE_MAX_BYTES,
             }),
-            (error) => error instanceof BlobTooLarge,
+            Schema.is(BlobTooLarge),
             () => Effect.fail(invalid(["file"], "branding.image_too_large")),
           );
           const fresh: ImageRef = { contentType, bytes: size, sha256, updatedAt: yield* nowIso };

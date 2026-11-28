@@ -75,7 +75,7 @@ describe("test fakes", () => {
         return [rates, registry];
       }),
     );
-    expect(exit).toEqual(Exit.succeed([new RatesUnavailable({}), new RegistryUnavailable({})]));
+    expect(exit).toEqual(Exit.succeed([RatesUnavailable.make({}), RegistryUnavailable.make({})]));
   });
 
   test("FakeCompanyRegistry serves fixtures and records lookups", async () => {
@@ -119,7 +119,7 @@ describe("test fakes", () => {
       }),
     );
     expect(exit).toEqual(
-      Exit.succeed({ failed: new EmailNotAccepted({}), same: true, sent: 1, attempts: 3 }),
+      Exit.succeed({ failed: EmailNotAccepted.make({}), same: true, sent: 1, attempts: 3 }),
     );
   });
 
@@ -153,8 +153,8 @@ describe("test fakes", () => {
           sha256: new Bun.CryptoHasher("sha256").update("abc").digest("hex"),
         },
         read: [[97, 98, 99]],
-        tooLarge: new BlobTooLarge({ maxBytes: 2 }),
-        missing: new BlobMissing({ key }),
+        tooLarge: BlobTooLarge.make({ maxBytes: 2 }),
+        missing: BlobMissing.make({ key }),
         stored: 0,
       }),
     );
@@ -173,7 +173,7 @@ describe("test fakes", () => {
         return yield* Effect.flip(blobs.put(key, body, { contentType: "x", maxBytes: 2 }));
       }),
     );
-    expect(exit).toEqual(Exit.succeed(new BlobTooLarge({ maxBytes: 2 })));
+    expect(exit).toEqual(Exit.succeed(BlobTooLarge.make({ maxBytes: 2 })));
   });
 
   test("MemoryBlobStorage returns detached copies", async () => {

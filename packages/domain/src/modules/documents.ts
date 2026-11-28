@@ -327,5 +327,4 @@ export class Documents extends Context.Service<
       CurrentCaller
     >;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Documents") {}
+>()("@kvitbit/domain/modules/documents") {}

@@ -99,7 +99,7 @@ export const makeEmailSenderLayer: {
 
         return EmailSender.of({
           send: Effect.fn("EmailSender.send")(() =>
-            Effect.fail(new EmailRejected({ cause: "Email delivery is not configured" })),
+            Effect.fail(EmailRejected.make({ cause: "Email delivery is not configured" })),
           ),
         });
       }),

@@ -85,8 +85,8 @@ describe("Caller", () => {
     expect(forged._tag).toBe("System");
   });
 
-  test("CurrentCaller is a Context service keyed kvitbit/Caller", () => {
-    expect(CurrentCaller.key).toBe("kvitbit/Caller");
+  test("CurrentCaller is a Context service with its deterministic key", () => {
+    expect(CurrentCaller.key).toBe("@kvitbit/domain/caller/CurrentCaller");
     const caller = Caller.account({ userId, email: "a@b.cz", locale: "en", channel: "api" });
     const tag = Effect.runSync(
       Effect.gen(function* () {

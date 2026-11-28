@@ -123,7 +123,7 @@ export function makeFallbackEmailSender(
   const mayHaveSent = new Set(["EmailOutcomeUnknown", "Interrupt", "Die"]);
 
   const stillUnknown = (cause: EmailNotAccepted) =>
-    new EmailOutcomeUnknown({ cause: { retryRefused: cause, earlierAttemptMayHaveSent: true } });
+    EmailOutcomeUnknown.make({ cause: { retryRefused: cause, earlierAttemptMayHaveSent: true } });
 
   return EmailSender.of({
     send: Effect.fn("FallbackEmailSender.send")((message: OutboundEmail, opts: Opts) =>

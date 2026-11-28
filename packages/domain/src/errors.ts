@@ -28,8 +28,7 @@ export class Forbidden extends Schema.TaggedError<Forbidden, CoreErrorBrand>()("
 }
 
 export const Issue = Schema.Struct({
-  // @effect-diagnostics-next-line schemaNumber:off Preserve the JSON codec for numeric path segments.
-  path: Schema.Array(Schema.Union([Schema.String, Schema.Number])),
+  path: Schema.Array(Schema.Union([Schema.String, Schema.Finite])),
   code: IssueCode, // stable i18n key; presenters localize cs/en
   params: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 });
@@ -52,8 +51,7 @@ export type ConflictReason = typeof ConflictReason.Type;
 
 export class Conflict extends Schema.TaggedError<Conflict, CoreErrorBrand>()("Conflict", {
   reason: ConflictReason,
-  // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "Infinity".
-  currentRevision: Schema.optional(Schema.Number),
+  currentRevision: Schema.optional(Schema.Int),
   detail: Schema.optional(IssueCode),
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("Conflict")); // 409
@@ -69,8 +67,7 @@ export type UnavailableDependency = typeof UnavailableDependency.Type;
 
 export class Unavailable extends Schema.TaggedError<Unavailable, CoreErrorBrand>()("Unavailable", {
   dependency: UnavailableDependency,
-  // @effect-diagnostics-next-line schemaNumber:off Preserve decoding of legacy JSON strings such as "NaN".
-  retryAfterSeconds: Schema.optional(Schema.Number),
+  retryAfterSeconds: Schema.optional(Schema.Finite),
 }) {
   static readonly schema = this.pipe(HttpApiSchema.status("ServiceUnavailable")); // 503
 }

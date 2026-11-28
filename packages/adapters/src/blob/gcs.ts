@@ -123,10 +123,10 @@ const make = (
           }));
     const refused = (operation: string, response: HttpClientResponse.HttpClientResponse) =>
       Effect.flatMap(statusCause(operation, response), (cause) =>
-        Effect.fail(new BlobUnavailable({ cause })),
+        Effect.fail(BlobUnavailable.make({ cause })),
       );
 
-    const getToken = tokens.get.pipe(Effect.mapError((cause) => new BlobUnavailable({ cause })));
+    const getToken = tokens.get.pipe(Effect.mapError((cause) => BlobUnavailable.make({ cause })));
     const execute = Effect.fn("GcsBlob.execute")(function* (
       operation: string,
       request: HttpClientRequest.HttpClientRequest,
@@ -181,7 +181,7 @@ const make = (
           times: retries,
           while: (error) => error._tag === "Transient",
         }),
-        Effect.catchTag("Transient", ({ cause }) => Effect.fail(new BlobUnavailable({ cause }))),
+        Effect.catchTag("Transient", ({ cause }) => Effect.fail(BlobUnavailable.make({ cause }))),
       );
 
     // Resumable uploads -------------------------------------------------------------------
@@ -232,19 +232,19 @@ const make = (
       );
       const loop = (from: number, failures: number): Effect.Effect<void, BlobUnavailable> => {
         if (failures > retries) {
-          return Effect.fail(new BlobUnavailable({ cause: "resumable upload made no progress" }));
+          return Effect.fail(BlobUnavailable.make({ cause: "resumable upload made no progress" }));
         }
         const settle = (answer: ChunkAnswer, nextFailures: number, afterTransient: boolean) => {
           if (answer._tag === "Done") {
             if (total === undefined) {
-              return Effect.fail(new BlobUnavailable({ cause: "GCS finalized the upload early" }));
+              return Effect.fail(BlobUnavailable.make({ cause: "GCS finalized the upload early" }));
             }
             return Effect.void;
           }
           if (answer.bytes === end && total === undefined) return Effect.void;
           if (answer.bytes < start || answer.bytes > end) {
             return Effect.fail(
-              new BlobUnavailable({ cause: { reason: "persisted offset out of range", answer } }),
+              BlobUnavailable.make({ cause: { reason: "persisted offset out of range", answer } }),
             );
           }
           // Resend the rest. A transient failure was already counted; a 308 that persisted
@@ -266,7 +266,7 @@ const make = (
           Effect.flatMap((answer) => settle(answer, failures, false)),
           Effect.catchTag("Transient", (error) =>
             failures + 1 > retries
-              ? Effect.fail(new BlobUnavailable({ cause: error.cause }))
+              ? Effect.fail(BlobUnavailable.make({ cause: error.cause }))
               : Effect.sleep(delayFor(failures + 1)).pipe(
                   Effect.andThen(send("session", status)),
                   Effect.flatMap(answerOf),
@@ -361,7 +361,7 @@ const make = (
         );
         if (response.status === 404) {
           yield* drain(response);
-          return yield* new BlobMissing({ key });
+          return yield* BlobMissing.make({ key });
         }
         if (response.status !== 200) return yield* refused("get", response);
         // An empty object may come with no body at all, which `response.stream` rejects.
@@ -376,7 +376,7 @@ const make = (
             duration: idleTimeout,
             orElse: () =>
               Stream.die(
-                new BlobUnavailable({ cause: { operation: "get", reason: "idle timeout" } }),
+                BlobUnavailable.make({ cause: { operation: "get", reason: "idle timeout" } }),
               ),
           }),
           Stream.orDie,

@@ -78,7 +78,7 @@ const build = Effect.fn("build")(function* (options: FakeCompanyRegistryOptions)
     lookup: Effect.fn("CompanyRegistry.lookup")(function* (ico) {
       yield* Ref.update(lookups, (seen) => [...seen, ico]);
       if (yield* Ref.get(unavailable)) {
-        return yield* new RegistryUnavailable({ cause: "FakeCompanyRegistry: unavailable" });
+        return yield* RegistryUnavailable.make({ cause: "FakeCompanyRegistry: unavailable" });
       }
       return (yield* Ref.get(records)).get(ico) ?? null;
     }),

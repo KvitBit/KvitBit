@@ -1,6 +1,6 @@
 /**
  * Driven ports (core-ports section 6) and the request-scoped RequestOutcome (section 2.1).
- * Interfaces only. Port errors are internal `Data.TaggedError`s; modules translate them to
+ * Interfaces only. Port errors are internal `Schema.TaggedError`s; modules translate them to
  * `Unavailable`, so provider details never cross the seam.
  *
  * The spec names the port errors and gives the value types only as field lists in comments;
@@ -8,7 +8,6 @@
  */
 import type * as BigDecimal from "effect/BigDecimal";
 import * as Context from "effect/Context";
-import * as Data from "effect/Data";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
@@ -32,10 +31,12 @@ export interface RegistryRecord {
   readonly terminatedOn: IsoDate | null;
 }
 
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class RegistryUnavailable extends Data.TaggedError("RegistryUnavailable")<{
-  readonly cause?: unknown;
-}> {}
+export class RegistryUnavailable extends Schema.TaggedError<
+  RegistryUnavailable,
+  { readonly brand: unique symbol }
+>()("RegistryUnavailable", {
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 /** Czech business register. Core validates the IČO checksum and caches results. */
 export class CompanyRegistry extends Context.Service<
@@ -43,8 +44,7 @@ export class CompanyRegistry extends Context.Service<
   {
     readonly lookup: (ico: string) => Effect.Effect<RegistryRecord | null, RegistryUnavailable>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/CompanyRegistry") {}
+>()("@kvitbit/domain/ports/CompanyRegistry") {}
 
 // ExchangeRates -----------------------------------------------------------------------------
 
@@ -58,10 +58,12 @@ export interface CnbFixing {
   }>;
 }
 
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class RatesUnavailable extends Data.TaggedError("RatesUnavailable")<{
-  readonly cause?: unknown;
-}> {}
+export class RatesUnavailable extends Schema.TaggedError<
+  RatesUnavailable,
+  { readonly brand: unique symbol }
+>()("RatesUnavailable", {
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 /** CNB daily fixing. Returns the latest fixing published on or before `date`. */
 export class ExchangeRates extends Context.Service<
@@ -69,8 +71,7 @@ export class ExchangeRates extends Context.Service<
   {
     readonly fixing: (date: IsoDate) => Effect.Effect<CnbFixing, RatesUnavailable>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/ExchangeRates") {}
+>()("@kvitbit/domain/ports/ExchangeRates") {}
 
 // EmailSender -------------------------------------------------------------------------------
 
@@ -90,20 +91,26 @@ export interface OutboundEmail {
 }
 
 /** Permanent (bad address, policy); never retried. */
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class EmailRejected extends Data.TaggedError("EmailRejected")<{
-  readonly cause?: unknown;
-}> {}
+export class EmailRejected extends Schema.TaggedError<
+  EmailRejected,
+  { readonly brand: unique symbol }
+>()("EmailRejected", {
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 /** The provider certainly did not take the message; retrying or failing over is safe. */
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class EmailNotAccepted extends Data.TaggedError("EmailNotAccepted")<{
-  readonly cause?: unknown;
-}> {}
+export class EmailNotAccepted extends Schema.TaggedError<
+  EmailNotAccepted,
+  { readonly brand: unique symbol }
+>()("EmailNotAccepted", {
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 /** Timeout or dropped connection after sending; retry the SAME provider with the same key only. */
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class EmailOutcomeUnknown extends Data.TaggedError("EmailOutcomeUnknown")<{
-  readonly cause?: unknown;
-}> {}
+export class EmailOutcomeUnknown extends Schema.TaggedError<
+  EmailOutcomeUnknown,
+  { readonly brand: unique symbol }
+>()("EmailOutcomeUnknown", {
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 /** Transactional email. The idempotency key is the delivery id. */
 export class EmailSender extends Context.Service<
@@ -117,8 +124,7 @@ export class EmailSender extends Context.Service<
       EmailRejected | EmailNotAccepted | EmailOutcomeUnknown
     >;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/EmailSender") {}
+>()("@kvitbit/domain/ports/EmailSender") {}
 
 // BlobStorage -------------------------------------------------------------------------------
 
@@ -126,21 +132,26 @@ export class EmailSender extends Context.Service<
 export const BlobKey = Schema.String.pipe(Schema.brand("BlobKey"));
 export type BlobKey = typeof BlobKey.Type;
 
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class BlobTooLarge extends Data.TaggedError(
+export class BlobTooLarge extends Schema.TaggedError<
+  BlobTooLarge,
+  { readonly brand: unique symbol }
+>()(
   // biome-ignore lint/security/noSecrets: This literal is the error's discriminant.
   "BlobTooLarge",
-)<{
-  readonly maxBytes: number;
-}> {}
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class BlobMissing extends Data.TaggedError("BlobMissing")<{
-  readonly key: BlobKey;
-}> {}
-// @effect-diagnostics-next-line preferSchemaTaggedError:off Internal port error translated to a CoreError.
-export class BlobUnavailable extends Data.TaggedError("BlobUnavailable")<{
-  readonly cause?: unknown;
-}> {}
+  { maxBytes: Schema.Finite },
+) {}
+export class BlobMissing extends Schema.TaggedError<
+  BlobMissing,
+  { readonly brand: unique symbol }
+>()("BlobMissing", {
+  key: BlobKey,
+}) {}
+export class BlobUnavailable extends Schema.TaggedError<
+  BlobUnavailable,
+  { readonly brand: unique symbol }
+>()("BlobUnavailable", {
+  cause: Schema.optional(Schema.Defect()),
+}) {}
 
 /** Attachments and rendered PDFs. */
 export class BlobStorage extends Context.Service<
@@ -159,8 +170,7 @@ export class BlobStorage extends Context.Service<
     ) => Effect.Effect<Stream.Stream<Uint8Array>, BlobMissing | BlobUnavailable>;
     readonly delete: (key: BlobKey) => Effect.Effect<void, BlobUnavailable>; // idempotent
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/BlobStorage") {}
+>()("@kvitbit/domain/ports/BlobStorage") {}
 
 // RequestOutcome ----------------------------------------------------------------------------
 
@@ -174,5 +184,4 @@ export class RequestOutcome extends Context.Service<
     readonly markReplayed: Effect.Effect<void>;
     readonly replayed: Effect.Effect<boolean>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/RequestOutcome") {}
+>()("@kvitbit/domain/ports/RequestOutcome") {}

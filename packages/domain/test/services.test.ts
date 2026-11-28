@@ -38,15 +38,15 @@ describe("service tags", () => {
         (service) => service.key,
       ),
     ).toEqual([
-      "kvitbit/Workspaces",
-      "kvitbit/Contacts",
-      "kvitbit/PriceList",
-      "kvitbit/Documents",
-      "kvitbit/Payments",
-      "kvitbit/Expenses",
-      "kvitbit/Templates",
-      "kvitbit/Reports",
-      "kvitbit/PublicShareLinks",
+      "@kvitbit/domain/modules/workspaces",
+      "@kvitbit/domain/modules/contacts",
+      "@kvitbit/domain/modules/contacts/PriceList",
+      "@kvitbit/domain/modules/documents",
+      "@kvitbit/domain/modules/payments",
+      "@kvitbit/domain/modules/expenses",
+      "@kvitbit/domain/modules/expenses/Templates",
+      "@kvitbit/domain/modules/reports",
+      "@kvitbit/domain/modules/payments/PublicShareLinks",
     ]);
   });
   test("driven ports use the spec keys", () => {
@@ -56,11 +56,11 @@ describe("service tags", () => {
         (service) => service.key,
       ),
     ).toEqual([
-      "kvitbit/CompanyRegistry",
-      "kvitbit/ExchangeRates",
-      "kvitbit/EmailSender",
-      "kvitbit/BlobStorage",
-      "kvitbit/RequestOutcome",
+      "@kvitbit/domain/ports/CompanyRegistry",
+      "@kvitbit/domain/ports/ExchangeRates",
+      "@kvitbit/domain/ports/EmailSender",
+      "@kvitbit/domain/ports/BlobStorage",
+      "@kvitbit/domain/ports/RequestOutcome",
     ]);
   });
 });

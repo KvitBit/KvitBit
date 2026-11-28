@@ -21,7 +21,7 @@ export const makeBlobStorageLayer = (
       return Layer.effect(
         BlobStorage,
         Effect.fail(
-          new BlobUnavailable({
+          BlobUnavailable.make({
             cause: "KVITBIT_BLOB_BUCKET is required when KVITBIT_BLOB_DRIVER=gcs",
           }),
         ),

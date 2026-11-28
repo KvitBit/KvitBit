@@ -228,7 +228,7 @@ export interface SystemCaller {
 
 export type Caller = MemberCaller | AccountCaller | ShareLinkVisitorCaller | InvitationHolderCaller | SystemCaller
 
-export class CurrentCaller extends Context.Service<CurrentCaller, Caller>()("kvitbit/Caller") {}
+export class CurrentCaller extends Context.Service<CurrentCaller, Caller>()("@kvitbit/domain/caller/CurrentCaller") {}
 
 /** Edge constructors. There is deliberately no constructor for System. */
 export const Caller: {
@@ -250,7 +250,7 @@ Replay signal. apps/server sets the `Idempotent-Replayed` header from a request-
 export class RequestOutcome extends Context.Service<RequestOutcome, {
   readonly markReplayed: Effect.Effect<void>
   readonly replayed: Effect.Effect<boolean>
-}>()("kvitbit/RequestOutcome") {
+}>()("@kvitbit/domain/ports/RequestOutcome") {
   /** A fresh Ref-backed instance; the edge provides one per HTTP request. */
   static readonly make: Effect.Effect<RequestOutcome["Service"]>
 }
@@ -327,7 +327,7 @@ export class Forbidden extends Schema.TaggedError<Forbidden>()("Forbidden", {
 
 export class Invalid extends Schema.TaggedError<Invalid>()("Invalid", {
   issues: Schema.NonEmptyArray(Schema.Struct({
-    path: Schema.Array(Schema.Union([Schema.String, Schema.Number])),
+    path: Schema.Array(Schema.Union([Schema.String, Schema.Finite])),
     code: IssueCode,                                 // stable i18n key; presenters localize cs/en
     params: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   })),
@@ -341,13 +341,13 @@ export class Conflict extends Schema.TaggedError<Conflict>()("Conflict", {
     "duplicate",            // number override taken, second Final Invoice, duplicate IČO Contact
     "idempotency_mismatch", // same requestKey, different payload
   ]),
-  currentRevision: Schema.optional(Schema.Number),
+  currentRevision: Schema.optional(Schema.Int),
   detail: Schema.optional(IssueCode),
 }) { static schema = this.pipe(HttpApiSchema.status("Conflict")) }            // 409
 
 export class Unavailable extends Schema.TaggedError<Unavailable>()("Unavailable", {
   dependency: Schema.Literals(["company_registry", "exchange_rates", "blob_storage", "database"]),
-  retryAfterSeconds: Schema.optional(Schema.Number),
+  retryAfterSeconds: Schema.optional(Schema.Finite),
 }) { static schema = this.pipe(HttpApiSchema.status("ServiceUnavailable")) }  // 503
 
 export type CoreError = NotFound | Forbidden | Invalid | Conflict | Unavailable
@@ -376,7 +376,7 @@ Codes added for the HTTP, MCP and ui-port contracts (#19, #20):
 
 `theme.low_contrast`, `request.malformed` and the `mcp.*` codes are raised only by apps/server; they live in the union so there is one i18n table.
 
-Email outages never surface as errors: `send` returns `queued`, and the delivery status shows the outcome later. Driven-port failures are internal `Data.TaggedError`s; modules translate them to `Unavailable`, so provider details (ARES payloads, Resend bodies, SQL text) never cross the seam.
+Email outages never surface as errors: `send` returns `queued`, and the delivery status shows the outcome later. Driven-port failures are internal branded `Schema.TaggedError`s; modules translate them to `Unavailable`, so provider details (ARES payloads, Resend bodies, SQL text) never cross the seam.
 
 ---
 
@@ -497,7 +497,7 @@ export class Workspaces extends Context.Service<Workspaces, {
     readonly subject: { readonly entity: "ApiKey" | "McpGrant"; readonly id: string; readonly name: string }
     readonly onBehalfOf?: UserId // the grant's Member, when an owner or admin revokes someone else's grant
   }) => Effect.Effect<void, Forbidden, CurrentCaller>
-}>()("kvitbit/Workspaces") {}
+}>()("@kvitbit/domain/modules/workspaces") {}
 
 export const BrandingImage = Schema.Literals(["logo", "stamp"])
 
@@ -598,7 +598,7 @@ export class Contacts extends Context.Service<Contacts, {
   readonly get: (id: ContactId) => Effect.Effect<ContactView, NotFound | Forbidden, CurrentCaller>
   readonly search: (q: { readonly text?: string; readonly role?: "customer" | "supplier"; readonly cursor?: string }) =>
     Effect.Effect<Page<ContactView>, Forbidden, CurrentCaller>
-}>()("kvitbit/Contacts") {}
+}>()("@kvitbit/domain/modules/contacts") {}
 ```
 
 Invariants: IČO is unique per Workspace among active Contacts (`Conflict{duplicate}`). The mod-11 checksum runs before any registry call. Registry results are cached 24 hours per IČO and never fanned out in parallel. VAT-payer status is never inferred from the presence of a DIČ. Contacts referenced by documents are archived, never deleted; issued documents keep their frozen party snapshot.
@@ -635,7 +635,7 @@ export class PriceList extends Context.Service<PriceList, {
   readonly archive: (id: PriceListItemId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
   readonly list: (q?: { readonly text?: string; readonly includeArchived?: boolean }) =>
     Effect.Effect<ReadonlyArray<PriceListItemView>, Forbidden, CurrentCaller>
-}>()("kvitbit/PriceList") {}
+}>()("@kvitbit/domain/modules/contacts/PriceList") {}
 ```
 
 A Price List Item only supplies defaults. Lines copy its values when a document is drafted, so later item edits never change existing documents. Not audited (no tax effect).
@@ -755,7 +755,7 @@ export class Documents extends Context.Service<Documents, {
   readonly get: (id: DocumentId) => Effect.Effect<DocumentView, NotFound | Forbidden, CurrentCaller>
   readonly list: (q: DocumentQuery) => Effect.Effect<Page<DocumentSummary>, Invalid | Forbidden, CurrentCaller>
   readonly history: (id: DocumentId) => Effect.Effect<ReadonlyArray<AuditEntry>, NotFound | Forbidden, CurrentCaller>
-}>()("kvitbit/Documents") {}
+}>()("@kvitbit/domain/modules/documents") {}
 
 export interface CorrectionInput {
   readonly reason: string
@@ -848,7 +848,7 @@ export class Payments extends Context.Service<Payments, {
     Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
   readonly listFor: (target: { readonly document: DocumentId } | { readonly expense: ExpenseId }) =>
     Effect.Effect<ReadonlyArray<PaymentView>, NotFound | Forbidden, CurrentCaller>
-}>()("kvitbit/Payments") {}
+}>()("@kvitbit/domain/modules/payments") {}
 ```
 
 Invariants:
@@ -883,7 +883,7 @@ export class PublicShareLinks extends Context.Service<PublicShareLinks, {
   readonly pdf: (opts?: { readonly language?: Locale }) => Effect.Effect<FileDownload, NotFound | Unavailable, CurrentCaller>
   /** The issuing Workspace's logo for the page header; NotFound when it has none. */
   readonly logo: Effect.Effect<FileDownload, NotFound | Unavailable, CurrentCaller>
-}>()("kvitbit/PublicShareLinks") {}
+}>()("@kvitbit/domain/modules/payments/PublicShareLinks") {}
 
 export const ShareViewEvent = Schema.Struct({
   id: ShareViewId,
@@ -916,7 +916,7 @@ export class Expenses extends Context.Service<Expenses, {
     Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>
   readonly get: (id: ExpenseId) => Effect.Effect<ExpenseView, NotFound | Forbidden, CurrentCaller>
   readonly list: (q: ExpenseQuery) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden, CurrentCaller>
-}>()("kvitbit/Expenses") {}
+}>()("@kvitbit/domain/modules/expenses") {}
 
 // Fields this spec fixes; the rest of ExpenseInput (supplier, dates, VAT breakdown, category, tags) is unchanged.
 // ExpenseInput.status?: "complete" | "incomplete"   default "complete"
@@ -955,7 +955,7 @@ export class Templates extends Context.Service<Templates, {
   /** Run history of the template's Recurring Schedule, newest occurrence first. */
   readonly runs: (template: TemplateId, page?: PageRequest) =>
     Effect.Effect<Page<RecurringRunView>, Invalid | NotFound | Forbidden, CurrentCaller>
-}>()("kvitbit/Templates") {}
+}>()("@kvitbit/domain/modules/expenses/Templates") {}
 
 // TemplateInput = DocumentInput without issuedOn/taxableSupplyOn plus name and a relative due (inDays).
 // The schedule argument of `schedule` is a ScheduleRule (section 5.6) plus issueAs and autoSend.
@@ -994,7 +994,7 @@ export class Reports extends Context.Service<Reports, {
   /** The ZIP. Conflict{illegal_transition, export.not_ready} while running or failed; NotFound after expiry. */
   readonly exportFile: (id: ExportId) =>
     Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>
-}>()("kvitbit/Reports") {}
+}>()("@kvitbit/domain/modules/reports") {}
 
 export const ReportKind = Schema.Literals(["revenue", "vat_summary", "receivables", "expenses", "profit", "cashflow"])
 export interface ReportQuery {
@@ -1210,7 +1210,7 @@ Occurrence k is `startOn + k × every` on the Prague calendar, computed from `st
 
 ## 6. Driven ports
 
-A port exists only where two adapters are justified (two production adapters, or production plus a test fake). Port errors are internal `Data.TaggedError`s; modules map them to `Unavailable` (section 3).
+A port exists only where two adapters are justified (two production adapters, or production plus a test fake). Port errors are internal branded `Schema.TaggedError`s; modules map them to `Unavailable` (section 3).
 
 ```ts
 // @kvitbit/core/ports
@@ -1219,7 +1219,7 @@ import { Context, Data, Effect, Stream } from "effect"
 /** Czech business register. Core validates the IČO checksum and caches results. */
 export class CompanyRegistry extends Context.Service<CompanyRegistry, {
   readonly lookup: (ico: string) => Effect.Effect<RegistryRecord | null, RegistryUnavailable>
-}>()("kvitbit/CompanyRegistry") {}
+}>()("@kvitbit/domain/ports/CompanyRegistry") {}
 // RegistryRecord: name, address, dic | null, legalForm, registerEntry | null.
 // It carries no VAT-payer flag: ARES dic presence does not prove payer status.
 // Adapters: AresV3 (shape from Deskohub packages/ares), FakeCompanyRegistry.
@@ -1227,7 +1227,7 @@ export class CompanyRegistry extends Context.Service<CompanyRegistry, {
 /** CNB daily fixing. Returns the latest fixing published on or before `date`. */
 export class ExchangeRates extends Context.Service<ExchangeRates, {
   readonly fixing: (date: IsoDate) => Effect.Effect<CnbFixing, RatesUnavailable>
-}>()("kvitbit/ExchangeRates") {}
+}>()("@kvitbit/domain/ports/ExchangeRates") {}
 // CnbFixing = { fixingDate, sequence, rates: ReadonlyArray<{ code; quantity /* množství */; rate: BigDecimal }> }
 // Core caches fixings in fx_fixings; a currency missing from the fixing is Invalid{fx.rate_missing}.
 // Adapters: CnbDailyTxt (denni_kurz.txt?date=DD.MM.YYYY), FixtureRates.
@@ -1236,7 +1236,7 @@ export class ExchangeRates extends Context.Service<ExchangeRates, {
 export class EmailSender extends Context.Service<EmailSender, {
   readonly send: (message: OutboundEmail, opts: { readonly idempotencyKey: string }) =>
     Effect.Effect<{ readonly provider: string; readonly providerMessageId: string }, EmailRejected | EmailNotAccepted | EmailOutcomeUnknown>
-}>()("kvitbit/EmailSender") {}
+}>()("@kvitbit/domain/ports/EmailSender") {}
 // OutboundEmail = { to, cc?, replyTo, subject, html, text, attachments: { filename, contentType, bytes }[], tags }
 // EmailRejected       permanent (bad address, policy); never retried.
 // EmailNotAccepted    the provider certainly did not take the message (connect failure, 429, 5xx
@@ -1256,7 +1256,7 @@ export class BlobStorage extends Context.Service<BlobStorage, {
     Effect.Effect<{ readonly key: BlobKey; readonly bytes: number; readonly sha256: string }, BlobTooLarge | BlobUnavailable>
   readonly get: (key: BlobKey) => Effect.Effect<Stream.Stream<Uint8Array>, BlobMissing | BlobUnavailable>
   readonly delete: (key: BlobKey) => Effect.Effect<void, BlobUnavailable> // idempotent
-}>()("kvitbit/BlobStorage") {}
+}>()("@kvitbit/domain/ports/BlobStorage") {}
 // Keys are core-chosen and Workspace-prefixed. Adapters: GcsBlobStorage (hosted),
 // S3CompatibleBlobStorage (S3, MinIO), LocalDiskBlobStorage (Docker/Nix), MemoryBlobStorage (tests).
 ```
@@ -1272,7 +1272,7 @@ export class BotProtection extends Context.Service<BotProtection, {
   /** Checks HMAC, proof of work and expiry, then consumes the challenge once (atomic Postgres insert). */
   readonly verify: (scope: BotScope, payload: string) =>
     Effect.Effect<void, InvalidBotProof | BotProtectionUnavailable>
-}>()("kvitbit/edge/BotProtection") {}
+}>()("@kvitbit/adapters/altcha/BotProtection") {}
 // Adapters: AltchaBotProtection (altcha-lib, Postgres single-use store), NoopBotProtection (self-host opt-out, tests).
 // The route picks the scope; it is never read from client input. verify runs before any side effect.
 ```

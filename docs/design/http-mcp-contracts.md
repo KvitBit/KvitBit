@@ -129,7 +129,7 @@ export interface Principal {
     | { readonly _tag: "McpGrant"; readonly grantId: string; readonly clientId: string; readonly clientName: string; readonly workspaceId: WorkspaceId; readonly scopes: ReadonlyArray<Scope> }
   readonly locale: Locale // account preference, else Accept-Language, else "cs"
 }
-export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()("kvitbit/edge/Principal") {}
+export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()("@kvitbit/api-contract/security/CurrentPrincipal") {}
 
 /** Session (cookie or bearer) or API Key. Provides the principal and an Account caller. */
 export class Authentication extends HttpApiMiddleware.Service<Authentication>()("kvitbit/edge/Authentication", {

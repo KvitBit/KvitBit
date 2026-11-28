@@ -83,9 +83,9 @@ export type Caller =
   | InvitationHolderCaller
   | SystemCaller;
 
-// CurrentCaller uses the key fixed by core-ports 2.1.
-// @effect-diagnostics-next-line deterministicKeys:off
-export class CurrentCaller extends Context.Service<CurrentCaller, Caller>()("kvitbit/Caller") {}
+export class CurrentCaller extends Context.Service<CurrentCaller, Caller>()(
+  "@kvitbit/domain/caller/CurrentCaller",
+) {}
 
 /** Edge constructors. There is deliberately no constructor for System. */
 export const Caller = {

@@ -101,7 +101,7 @@ describe("ShareWorkspacesLive", () => {
         const real = yield* BlobStorage;
         const failing = Layer.succeed(BlobStorage, {
           ...real,
-          get: () => Effect.fail(new BlobUnavailable({ cause: "down" })),
+          get: () => Effect.fail(BlobUnavailable.make({ cause: "down" })),
         });
         const exit = yield* Effect.exit(
           Effect.flatMap(SW, (share) => share.logo(s.workspaceId)).pipe(
@@ -109,7 +109,7 @@ describe("ShareWorkspacesLive", () => {
           ),
         );
         expect(exit.pipe(withoutStackTrace)).toEqual(
-          Exit.fail(new BlobUnavailable({ cause: "down" })),
+          Exit.fail(BlobUnavailable.make({ cause: "down" })),
         );
       }),
     ));

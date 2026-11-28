@@ -24,11 +24,8 @@ export class RevisionConflict extends Schema.TaggedError<
 >()("RevisionConflict", {
   table: RevisionedTableName,
   id: Schema.String,
-  // Comparisons also report caller-provided or malformed non-finite revisions.
-  // @effect-diagnostics-next-line schemaNumber:off Retain a caller-provided non-finite expected revision in the conflict.
-  expectedRevision: Schema.Number,
-  // @effect-diagnostics-next-line schemaNumber:off Retain a malformed non-finite stored revision in the conflict.
-  currentRevision: Schema.Number,
+  expectedRevision: Schema.Int,
+  currentRevision: Schema.Int,
 }) {}
 
 /** The number is already reserved for this Workspace and kind (core-ports.md S3, rule D4). */

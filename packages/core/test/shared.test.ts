@@ -371,7 +371,7 @@ describe("small helpers", () => {
 
   test("orUnavailable maps port failures and keeps domain errors", () => {
     const database = StoreUnavailable.make({}).pipe(Effect.fail, orUnavailable, Effect.runSyncExit);
-    const rates = new RatesUnavailable({}).pipe(Effect.fail, orUnavailable, Effect.runSyncExit);
+    const rates = RatesUnavailable.make({}).pipe(Effect.fail, orUnavailable, Effect.runSyncExit);
     expect(database).toEqual(Exit.fail(Unavailable.make({ dependency: "database" })));
     expect(rates).toEqual(Exit.fail(Unavailable.make({ dependency: "exchange_rates" })));
     const notFound = NotFound.make({ entity: "Document", id: "x" });

@@ -99,8 +99,7 @@ export class Expenses extends Context.Service<
       q: ExpenseQuery,
     ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Unavailable | Forbidden, CurrentCaller>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Expenses") {}
+>()("@kvitbit/domain/modules/expenses") {}
 
 /** DocumentInput without issuedOn/taxableSupplyOn plus name and a relative due (inDays). */
 export const TemplateInput = Schema.Struct({
@@ -196,5 +195,4 @@ export class Templates extends Context.Service<
       CurrentCaller
     >;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Templates") {}
+>()("@kvitbit/domain/modules/expenses/Templates") {}

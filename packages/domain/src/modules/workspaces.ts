@@ -315,5 +315,4 @@ export class Workspaces extends Context.Service<
       event: AccessEvent,
     ) => Effect.Effect<void, Unavailable | Forbidden, CurrentCaller>;
   }
-  // @effect-diagnostics-next-line deterministicKeys:off Preserve the service key specified in core-ports.
->()("kvitbit/Workspaces") {}
+>()("@kvitbit/domain/modules/workspaces") {}

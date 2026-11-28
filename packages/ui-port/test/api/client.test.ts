@@ -289,8 +289,8 @@ describe("typed error decoding into UiError", () => {
 
 describe("client configuration", () => {
   test("keeps the existing API and observer service keys", () => {
-    expect(KvitbitApi.key).toBe("ui-port/KvitbitApi");
-    expect(ResponseObserver.key).toBe("ui-port/ResponseObserver");
+    expect(KvitbitApi.key).toBe("@kvitbit/ui-port/api/client/KvitbitApi");
+    expect(ResponseObserver.key).toBe("@kvitbit/ui-port/api/client/ResponseObserver");
   });
   test("Accept-Language follows a locale switch between requests", async () => {
     let locale = "cs";

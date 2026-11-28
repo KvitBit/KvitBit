@@ -484,15 +484,15 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
         // commits is deleted here when the rollback is certain, else collected by housekeeping
         // after 24 h (core-ports 4.7). The prefix is sniffed while streaming.
         const sniffed = sniffing(contentType, file.bytes, maxBytes);
-        const put = yield* blobs.put(key, sniffed.stream, { contentType, maxBytes }).pipe(
-          Effect.catchIf(
-            (e) => e instanceof BlobTooLarge,
-            (e) =>
+        const put = yield* blobs
+          .put(key, sniffed.stream, { contentType, maxBytes })
+          .pipe(
+            Effect.catchIf(Schema.is(BlobTooLarge), (e) =>
               Effect.fail(
                 invalid("attachment.too_large", ["file"], { maxBytes: String(e.maxBytes) }),
               ),
-          ),
-        );
+            ),
+          );
         if (!sniffed.verdict()) {
           yield* discard;
           return yield* rejected;

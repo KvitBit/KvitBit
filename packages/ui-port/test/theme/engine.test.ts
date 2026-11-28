@@ -448,7 +448,7 @@ describe("ThemeEngine seam", () => {
   });
 
   test("LocalThemeEngine resolves presets and seeds", () => {
-    expect(ThemeEngine.key).toBe("ui-port/ThemeEngine");
+    expect(ThemeEngine.key).toBe("@kvitbit/ui-port/theme/engine/ThemeEngine");
     const exit = run(withEngine((e) => e.resolve({ _tag: "Preset", id: "sand" }, "standard")));
     expect(Exit.isSuccess(exit) && exit.value).toEqual(resolvePreset("sand"));
   });

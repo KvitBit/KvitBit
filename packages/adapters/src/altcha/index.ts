@@ -79,10 +79,7 @@ export class BotProtection extends Context.Service<
       payload: string,
     ) => Effect.Effect<void, InvalidBotProof | BotProtectionUnavailable>;
   }
->()(
-  // @effect-diagnostics-next-line deterministicKeys:off Keep the documented edge port key.
-  "kvitbit/edge/BotProtection",
-) {}
+>()("@kvitbit/adapters/altcha/BotProtection") {}
 
 // --- Options ---------------------------------------------------------------------------------
 
