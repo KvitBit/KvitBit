@@ -1,3 +1,4 @@
+import * as SecretManager from "@alchemy.run/gcp/SecretManager";
 import { Stage } from "alchemy/Stage";
 import * as State from "alchemy/State";
 import * as Data from "effect/Data";
@@ -20,6 +21,98 @@ import { declareServerService } from "./resources/server";
 import { declareTurboCache } from "./resources/turbo-cache";
 
 export const KVITBIT_STACK_NAME = "Kvitbit";
+
+export const feedbackSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-feedback-github-token`;
+
+export const altchaSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-altcha-hmac-key`;
+
+export const resendSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-resend-api-key`;
+
+export const turboCacheSecretFqn = (stage: KvitbitStackConfig["stage"]): string =>
+  `Secret-kvitbit-${stage}-turbo-cache-token`;
+
+export class BootstrapSelectionError extends Data.TaggedError("BootstrapSelectionError")<{
+  readonly flagName: string;
+  readonly expectedInclude: string;
+  readonly observedIncludes: ReadonlyArray<string>;
+}> {
+  override get message() {
+    return (
+      `Refusing ${this.flagName}=true without exact resource selection: ` +
+      `expected --include ${this.expectedInclude} only (got [${this.observedIncludes.join(", ")}]).`
+    );
+  }
+}
+
+/** Extracts every `--include <value>` / `--include=<value>` selector from CLI arguments. */
+export const parseIncludeArgs = (argv: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const includes: Array<string> = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === "--include") {
+      const next = argv[i + 1];
+      if (next !== undefined && next.length > 0) {
+        includes.push(next);
+        i += 1;
+      }
+    } else if (arg?.startsWith("--include=")) {
+      const value = arg.slice("--include=".length);
+      if (value.length > 0) {
+        includes.push(value);
+      }
+    }
+  }
+  return includes;
+};
+
+/**
+ * Enforces that a targeted secret-bootstrap CLI invocation explicitly selects ONLY the single
+ * target secret container.
+ */
+export const assertTargetedSecretSelection = (
+  config: KvitbitStackConfig,
+  argv: ReadonlyArray<string>,
+): Effect.Effect<void, BootstrapSelectionError> => {
+  const target =
+    (config.bootstrapFeedbackSecret ?? false)
+      ? {
+          flagName: "KVITBIT_BOOTSTRAP_FEEDBACK_SECRET",
+          expectedInclude: feedbackSecretFqn(config.stage),
+        }
+      : (config.bootstrapAltchaSecret ?? false)
+        ? {
+            flagName: "KVITBIT_BOOTSTRAP_ALTCHA_SECRET",
+            expectedInclude: altchaSecretFqn(config.stage),
+          }
+        : (config.bootstrapResendSecret ?? false)
+          ? {
+              flagName: "KVITBIT_BOOTSTRAP_RESEND_SECRET",
+              expectedInclude: resendSecretFqn(config.stage),
+            }
+          : (config.bootstrapTurboCacheSecret ?? false)
+            ? {
+                flagName: "KVITBIT_BOOTSTRAP_TURBO_CACHE_SECRET",
+                expectedInclude: turboCacheSecretFqn(config.stage),
+              }
+            : undefined;
+  if (target === undefined) {
+    return Effect.void;
+  }
+  const observedIncludes = parseIncludeArgs(argv);
+  if (observedIncludes.length !== 1 || observedIncludes[0] !== target.expectedInclude) {
+    return Effect.fail(
+      new BootstrapSelectionError({
+        flagName: target.flagName,
+        expectedInclude: target.expectedInclude,
+        observedIncludes,
+      }),
+    );
+  }
+  return Effect.void;
+};
 
 export class StackStageMismatchError extends Data.TaggedError("StackStageMismatchError")<{
   readonly alchemyStage: string;
@@ -125,6 +218,90 @@ export const declareKvitbitStack = (config: KvitbitStackConfig) =>
         alchemyStage: stage,
         configStage: config.stage,
       });
+    }
+
+    if (config.bootstrapFeedbackSecret ?? false) {
+      const targetId = feedbackSecretFqn(config.stage);
+      const feedbackDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (feedbackDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_FEEDBACK_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(feedbackDecl.id, feedbackDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapFeedbackSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        feedbackSecretId: secret.secretId,
+      };
+    }
+
+    if (config.bootstrapAltchaSecret ?? false) {
+      const targetId = altchaSecretFqn(config.stage);
+      const altchaDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (altchaDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_ALTCHA_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(altchaDecl.id, altchaDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapAltchaSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        altchaSecretId: secret.secretId,
+      };
+    }
+
+    if (config.bootstrapResendSecret ?? false) {
+      const targetId = resendSecretFqn(config.stage);
+      const resendDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (resendDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_RESEND_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(resendDecl.id, resendDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapResendSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        resendSecretId: secret.secretId,
+      };
+    }
+
+    if (config.bootstrapTurboCacheSecret ?? false) {
+      const targetId = turboCacheSecretFqn(config.stage);
+      const turboDecl = secretDeclarations(config).find((decl) => decl.id === targetId);
+      if (turboDecl === undefined) {
+        return yield* new BootstrapSelectionError({
+          flagName: "KVITBIT_BOOTSTRAP_TURBO_CACHE_SECRET",
+          expectedInclude: targetId,
+          observedIncludes: [],
+        });
+      }
+      const secret = yield* SecretManager.Secret(turboDecl.id, turboDecl.props);
+      return {
+        stage: config.stage,
+        bootstrapFoundation: false as const,
+        bootstrapTurboCacheSecret: true as const,
+        projectId: config.projectId,
+        region: config.region,
+        turboCacheSecretId: secret.secretId,
+      };
     }
 
     if (config.bootstrapFoundation) {

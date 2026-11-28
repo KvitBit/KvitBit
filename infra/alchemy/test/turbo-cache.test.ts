@@ -17,13 +17,22 @@ import {
 
 const SAMPLE_DIGEST = `sha256:${"a".repeat(64)}`;
 
+const PROD_BASE_ENV = {
+  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+  KVITBIT_APP_ORIGIN: "https://kvitbit.cz",
+  KVITBIT_EMAIL_FROM: "Kvitbit <no-reply@kvitbit.cz>",
+  KVITBIT_EDGE_DOMAINS: "kvitbit.cz,kvitbit.app",
+  KVITBIT_ENABLE_RESEND_SECRET: "true",
+  KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
+} as const;
+
 const loadWithEnv = (env: Record<string, string>) =>
   Effect.runPromise(
     loadStackConfig.pipe(
       Effect.provide(
         ConfigProvider.layer(
           ConfigProvider.fromEnv({
-            env: { KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, ...env },
+            env: { ...PROD_BASE_ENV, ...env },
           }),
         ),
       ),

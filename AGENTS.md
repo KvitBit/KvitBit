@@ -24,6 +24,7 @@ Before you change a file below, read the skill it maps to so your edit keeps its
 | `packages/core/src/shared/{idempotency,revision,requestOutcome}.ts`, `packages/core/src/store/{CoreStore,memory,tables}.ts`, `packages/core/src/modules/contacts/live.ts`, `formal/idempotency/**` | `verify-idempotency-cas` |
 | `packages/core/src/modules/documents/{lifecycle,transitions,final,credit,corrections,payments,compose,service}.ts`, `packages/core/src/modules/payments/**`, `packages/core/src/store/memory.ts`, `formal/lifecycle/**` | `verify-document-lifecycle` |
 | `packages/core/src/modules/recurring/**`, `packages/core/src/modules/documents/deliveries/**`, `packages/core/src/modules/documents/record.ts`, `packages/core/src/store/{CoreStore,memory}.ts`, `formal/outbox/**` | `verify-outbox-recurring` |
+| `apps/server/src/{app,config-contract,config,main,worker}.ts`, `apps/server/src/wiring/{config,email,blob}.ts`, `apps/server/src/http/{config,mobile/config}.ts`, `apps/server/src/runtime/workflows.ts`, `infra/alchemy/src/{deploy-preflight,preflight-cli,config,env,bootstrap}.ts`, `infra/alchemy/alchemy.run.ts`, `.github/workflows/deploy.yml` | `verify-deploy-config` |
 
 A path in several rows needs every listed skill. `formal/manifest.json` holds the exact coverage of covered files with sha256 and guarded symbols. When it and this table disagree, the manifest wins.
 

@@ -82,6 +82,42 @@ describe("MobileConfigLive", () => {
     expect(missingBucket._tag).toBe("Failure");
   });
 
+  test("honors explicit GCS driver in staging/preview even when image default KVITBIT_MOBILE_STORAGE_DIR is set, and rejects implicit local fallback", async () => {
+    for (const env of ["staging", "preview"] as const) {
+      const gcs = await Effect.runPromise(
+        loadConfig({
+          KVITBIT_ENV: env,
+          APP_ORIGIN: "https://staging.kvitbit.cz",
+          KVITBIT_BLOB_DRIVER: "gcs",
+          KVITBIT_BLOB_BUCKET: "shared-blobs",
+          KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
+        }),
+      );
+      expect(gcs.storage).toEqual({ _tag: "gcs", bucket: "shared-blobs", endpoint: undefined });
+
+      const implicitDisk = await Effect.runPromise(
+        Effect.result(
+          loadConfig({
+            KVITBIT_ENV: env,
+            APP_ORIGIN: "https://staging.kvitbit.cz",
+            KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
+          }),
+        ),
+      );
+      expect(implicitDisk._tag).toBe("Failure");
+
+      const explicitLocal = await Effect.runPromise(
+        loadConfig({
+          KVITBIT_ENV: env,
+          APP_ORIGIN: "https://staging.kvitbit.cz",
+          KVITBIT_BLOB_DRIVER: "local",
+          KVITBIT_MOBILE_STORAGE_DIR: "/var/lib/kvitbit/mobile",
+        }),
+      );
+      expect(explicitLocal.storage).toEqual({ _tag: "local", dir: "/var/lib/kvitbit/mobile" });
+    }
+  });
+
   test("unescapes PEM signing key and normalizes comma-separated SHA-256 fingerprints", async () => {
     const hex64 = "ab".repeat(32);
     const colon = Array.from({ length: 32 }, () => "cd").join(":");

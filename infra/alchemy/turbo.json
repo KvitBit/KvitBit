@@ -11,6 +11,8 @@
       "inputs": [
         "package.json",
         "tsconfig.json",
+        "src/deploy-preflight.ts",
+        "src/preflight-cli.ts",
         "test/selfhost.test.ts",
         "$TURBO_ROOT$/Dockerfile",
         "$TURBO_ROOT$/.dockerignore",
@@ -45,6 +47,7 @@
         "package.json",
         "tsconfig.json",
         "src/config.ts",
+        "src/deploy-preflight.ts",
         "src/env.ts",
         "src/mail-forwarder/**",
         "src/resources/mail.ts",

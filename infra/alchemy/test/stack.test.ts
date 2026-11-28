@@ -13,19 +13,30 @@ import * as State from "alchemy/State";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import { loadAlchemyStackConfig } from "../alchemy.run";
 import {
+  altchaSecretFqn,
+  assertTargetedSecretSelection,
   BootstrapPopulatedStateError,
+  BootstrapSelectionError,
   declareKvitbitStack,
+  feedbackSecretFqn,
   foundationResourceIds,
   KVITBIT_STACK_NAME,
+  resendSecretFqn,
+  turboCacheSecretFqn,
 } from "../src/bootstrap";
 import {
+  composeStackEnvLayers,
   defaultSecretBindings,
   imageReference,
   KVITBIT_PROD_DEFAULTS,
   type KvitbitStackConfig,
   loadStackConfig,
+  makeStackEnvLayer,
+  readAlchemyRawEnv,
   resourceNames,
+  StackEnv,
   validateStackConfig,
 } from "../src/config";
 import { type PlainEnvVar, runnerPlainEnv, serverPlainEnv, serverSecretEnv } from "../src/env";
@@ -98,6 +109,7 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
     enableResend: true,
     enableSmtp: true,
     enableMobileSigningKey: true,
+    enableAltchaHmacKey: true,
   }),
   dnsZones: [],
   edge: {
@@ -111,12 +123,19 @@ const sampleProdConfig = (overrides: Partial<KvitbitStackConfig> = {}): KvitbitS
   ...overrides,
 });
 
+const PROD_REQUIRED_ENV = {
+  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+  KVITBIT_APP_ORIGIN: "https://kvitbit.cz",
+  KVITBIT_EMAIL_FROM: "Kvitbit <no-reply@kvitbit.cz>",
+  KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
+  KVITBIT_ENABLE_RESEND_SECRET: "true",
+  KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "true",
+} as const;
+
 describe("Kvitbit Alchemy stack config", () => {
-  test("loads kvitbit-prod defaults from ConfigProvider", async () => {
+  test("loads kvitbit-prod defaults from ConfigProvider with required prod services", async () => {
     const provider = ConfigProvider.fromEnv({
-      env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
-      },
+      env: { ...PROD_REQUIRED_ENV },
     });
     const config = await Effect.runPromise(
       loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider))),
@@ -128,18 +147,58 @@ describe("Kvitbit Alchemy stack config", () => {
     expect(config.zone).toBe("europe-west3-a");
     expect(config.stateBucket).toBe("alchemy-state-kvitbit-prod");
     expect(config.runnerPort).toBe(34431);
-    expect(config.trustedProxyHops).toBe(1);
-    expect(config.edge).toBeUndefined();
+    expect(config.trustedProxyHops).toBe(2);
+    expect(config.edge?.domains).toEqual(["kvitbit.cz", "kvitbit.app"]);
     expect(config.dnsZones).toEqual([]);
     expect(imageReference(config)).toBe(
       `europe-west3-docker.pkg.dev/kvitbit-prod/kvitbit/kvitbit@${SAMPLE_DIGEST}`,
     );
   });
 
-  test("loads and normalizes the configured DNS zone apexes without enabling the edge", async () => {
+  test("rejects incomplete prod configs and non-prod modes in prod", async () => {
+    for (const [label, overrides] of [
+      ["missing APP_ORIGIN", { KVITBIT_APP_ORIGIN: "" }],
+      ["http APP_ORIGIN", { KVITBIT_APP_ORIGIN: "http://kvitbit.cz" }],
+      ["localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://localhost" }],
+      ["trailing-dot localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://localhost." }],
+      ["trailing-dot sub.localhost APP_ORIGIN", { KVITBIT_APP_ORIGIN: "https://app.localhost." }],
+      ["missing EMAIL_FROM", { KVITBIT_EMAIL_FROM: "" }],
+      ["malformed consecutive-dot EMAIL_FROM", { KVITBIT_EMAIL_FROM: "a..b@example.org" }],
+      ["missing edge domains", { KVITBIT_EDGE_DOMAINS: "" }],
+      [
+        "no email secret",
+        { KVITBIT_ENABLE_RESEND_SECRET: "false", KVITBIT_ENABLE_SMTP_SECRET: "false" },
+      ],
+      ["no ALTCHA secret", { KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "false" }],
+      ["capture email mode", { KVITBIT_EMAIL_MODE: "capture" }],
+      ["console email mode", { KVITBIT_EMAIL_MODE: "console" }],
+      ["disabled email mode", { KVITBIT_EMAIL_MODE: "disabled" }],
+      ["none bot protection mode", { KVITBIT_BOT_PROTECTION_MODE: "none" }],
+      ["disabled bot protection mode", { KVITBIT_BOT_PROTECTION_MODE: "disabled" }],
+      ["local blob driver", { KVITBIT_BLOB_DRIVER: "local" }],
+      ["legacy disable flag", { KVITBIT_PREVIEW_DISABLE_EMAIL: "true" }],
+      ["disable bot protection flag", { KVITBIT_DISABLE_BOT_PROTECTION: "true" }],
+      ["dynamic disable blob flag", { KVITBIT_DISABLE_BLOB: "true" }],
+      ["dynamic custom disable flag", { KVITBIT_DISABLE_ANYTHING: "1" }],
+    ] as const) {
+      const provider = ConfigProvider.fromEnv({
+        env: { ...PROD_REQUIRED_ENV, ...overrides },
+      });
+      const error = await Effect.runPromise(
+        Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)))),
+      );
+      expect(error, `expected failure for ${label}`).toMatchObject({ _tag: "InvalidStackConfig" });
+    }
+  });
+
+  test("loads and normalizes the configured DNS zone apexes without enabling the edge in staging", async () => {
     const provider = ConfigProvider.fromEnv({
       env: {
+        KVITBIT_STAGE: "staging",
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_APP_ORIGIN: "https://staging.kvitbit.cz",
+        KVITBIT_EMAIL_MODE: "capture",
+        KVITBIT_BOT_PROTECTION_MODE: "none",
         KVITBIT_DNS_ZONES:
           " Kvitbit.cz., kvitbit.APP, kvitbit.com, kvitbit.eu, kvitbit.dev, kvitbit.cz ",
       },
@@ -163,7 +222,7 @@ describe("Kvitbit Alchemy stack config", () => {
     `${`${"x".repeat(63)}.`.repeat(4)}cz`,
   ])("rejects invalid DNS zone %s", async (zone) => {
     const provider = ConfigProvider.fromEnv({
-      env: { KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, KVITBIT_DNS_ZONES: zone },
+      env: { ...PROD_REQUIRED_ENV, KVITBIT_DNS_ZONES: zone },
     });
     const error = await Effect.runPromise(
       Effect.flip(loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(provider)))),
@@ -183,7 +242,7 @@ describe("Kvitbit Alchemy stack config", () => {
   test("enables HTTPS edge, restricts direct Cloud Run ingress by default, and bumps trustedProxyHops when KVITBIT_EDGE_DOMAINS is set", async () => {
     const provider = ConfigProvider.fromEnv({
       env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        ...PROD_REQUIRED_ENV,
         KVITBIT_EDGE_DOMAINS: "kvitbit.cz, kvitbit.app",
       },
     });
@@ -248,7 +307,7 @@ describe("Kvitbit Alchemy stack config", () => {
   test("normalizes optional secret boolean flags case-insensitively (true/1/yes/on, false/0/no/off) and rejects invalid values", async () => {
     const enabledProvider = ConfigProvider.fromEnv({
       env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        ...PROD_REQUIRED_ENV,
         KVITBIT_ENABLE_RESEND_SECRET: "YES",
         KVITBIT_ENABLE_SMTP_SECRET: "1",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "On",
@@ -264,25 +323,30 @@ describe("Kvitbit Alchemy stack config", () => {
 
     const disabledProvider = ConfigProvider.fromEnv({
       env: {
+        KVITBIT_STAGE: "staging",
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_APP_ORIGIN: "https://staging.kvitbit.cz",
+        KVITBIT_EMAIL_MODE: "capture",
+        KVITBIT_BOT_PROTECTION_MODE: "none",
         KVITBIT_ENABLE_RESEND_SECRET: "OFF",
         KVITBIT_ENABLE_SMTP_SECRET: "0",
         KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: "No",
         KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "OFF",
+        KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: "OFF",
       },
     });
     const disabledConfig = await Effect.runPromise(
       loadStackConfig.pipe(Effect.provide(ConfigProvider.layer(disabledProvider))),
     );
     const disabledIds = disabledConfig.secrets.map((s) => s.secretId);
-    expect(disabledIds).not.toContain("kvitbit-prod-resend-api-key");
-    expect(disabledIds).not.toContain("kvitbit-prod-smtp-url");
-    expect(disabledIds).not.toContain("kvitbit-prod-mobile-updates-signing-key");
-    expect(disabledIds).not.toContain("kvitbit-prod-feedback-github-token");
+    expect(disabledIds).not.toContain("kvitbit-staging-resend-api-key");
+    expect(disabledIds).not.toContain("kvitbit-staging-smtp-url");
+    expect(disabledIds).not.toContain("kvitbit-staging-mobile-updates-signing-key");
+    expect(disabledIds).not.toContain("kvitbit-staging-feedback-github-token");
 
     const invalidProvider = ConfigProvider.fromEnv({
       env: {
-        KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        ...PROD_REQUIRED_ENV,
         KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: "maybe",
       },
     });
@@ -294,6 +358,286 @@ describe("Kvitbit Alchemy stack config", () => {
       field: "KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET",
     });
   });
+
+  test("loadStackConfig rejects IPv4-mapped IPv6 loopback, >63-octet email labels, Array-node disable flags, and fallback provider opt-outs", async () => {
+    const loadWithLayer = <A>(layer: Layer.Layer<A>) =>
+      Effect.runPromise(loadStackConfig.pipe(Effect.provide(layer), Effect.result));
+
+    // Valid boundary controls: 63-octet domain label, public IPv4-mapped IPv6 origin,
+    // permitted scalar KVITBIT_DISABLE, and permitted longer exact-key neighbors are accepted.
+    for (const [label, extra] of [
+      ["63-octet email label", { KVITBIT_EMAIL_FROM: `a@${"b".repeat(63)}.org` }],
+      ["public IPv4-mapped IPv6", { KVITBIT_APP_ORIGIN: "https://[::ffff:192.0.2.1]" }],
+      ["permitted scalar KVITBIT_DISABLE=metadata", { KVITBIT_DISABLE: "metadata" }],
+      ["permitted empty KVITBIT_DISABLE", { KVITBIT_DISABLE: "" }],
+      ["permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA empty", { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "" }],
+      [
+        "permitted KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA metadata",
+        { KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+      ],
+    ] as const) {
+      expect(
+        (await loadWithLayer(makeStackEnvLayer({ ...PROD_REQUIRED_ENV, ...extra })))._tag,
+        `makeStackEnvLayer ${label}`,
+      ).toBe("Success");
+      expect(
+        (
+          await loadWithLayer(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, ...extra } }),
+            ),
+          )
+        )._tag,
+        `bare ConfigProvider ${label}`,
+      ).toBe("Success");
+    }
+
+    for (const [label, overrides, expectedField] of [
+      [
+        "IPv4-mapped IPv6 loopback",
+        { KVITBIT_APP_ORIGIN: "https://[::ffff:127.0.0.1]" },
+        "appOrigin",
+      ],
+      [
+        "IPv4-mapped IPv6 unspecified",
+        { KVITBIT_APP_ORIGIN: "https://[::ffff:0.0.0.0]" },
+        "appOrigin",
+      ],
+      [
+        "64-char email domain label",
+        { KVITBIT_EMAIL_FROM: `a@${"b".repeat(64)}.org` },
+        "emailFrom",
+      ],
+      [
+        "64-char email TLD label",
+        { KVITBIT_EMAIL_FROM: `a@example.${"c".repeat(64)}` },
+        "emailFrom",
+      ],
+      ["Array-node disable flag", { KVITBIT_DISABLE_HTTP_2: "true" }, "KVITBIT_DISABLE_HTTP_2"],
+      [
+        "sparse Array-node disable flag (1200=true + 3000 empty)",
+        { KVITBIT_DISABLE_HTTP_1200: "true", KVITBIT_DISABLE_HTTP_3000: "" },
+        "KVITBIT_DISABLE_HTTP_1200",
+      ],
+      [
+        "very sparse Array-node disable flag (5000=true + 10000 empty)",
+        { KVITBIT_DISABLE_HTTP_5000: "true", KVITBIT_DISABLE_HTTP_10000: "" },
+        "KVITBIT_DISABLE_HTTP_5000",
+      ],
+      [
+        "empty forbidden key KVITBIT_DISABLE_OTHER",
+        { KVITBIT_DISABLE_OTHER: "" },
+        "KVITBIT_DISABLE_OTHER",
+      ],
+      [
+        "empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
+      [
+        "empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
+      [
+        "non-empty exact KVITBIT_ALLOW_LOCAL_BLOBS alongside EXTRA",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "true", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
+    ] as const) {
+      const res = await loadWithLayer(makeStackEnvLayer({ ...PROD_REQUIRED_ENV, ...overrides }));
+      expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
+      if (res._tag === "Failure") {
+        expect(res.failure).toMatchObject({ _tag: "InvalidStackConfig", field: expectedField });
+      }
+    }
+
+    // Bare ConfigProvider.fromEnv also rejects empty exact KVITBIT_ALLOW_LOCAL_BLOBS alone.
+    const bareEmptyExact = await loadWithLayer(
+      ConfigProvider.layer(
+        ConfigProvider.fromEnv({ env: { ...PROD_REQUIRED_ENV, KVITBIT_ALLOW_LOCAL_BLOBS: "" } }),
+      ),
+    );
+    expect(bareEmptyExact._tag).toBe("Failure");
+    if (bareEmptyExact._tag === "Failure") {
+      expect(bareEmptyExact.failure).toMatchObject({
+        _tag: "InvalidStackConfig",
+        field: "KVITBIT_ALLOW_LOCAL_BLOBS",
+      });
+    }
+
+    for (const [label, primaryExtra, fallbackEnv, expectedField] of [
+      [
+        "fallback KVITBIT_DISABLE_CUSTOM",
+        {},
+        { KVITBIT_DISABLE_CUSTOM: "true" },
+        "KVITBIT_DISABLE_CUSTOM",
+      ],
+      [
+        "scalar primary KVITBIT_DISABLE=metadata + fallback KVITBIT_DISABLE_CUSTOM=true",
+        { KVITBIT_DISABLE: "metadata" },
+        { KVITBIT_DISABLE_CUSTOM: "true" },
+        "KVITBIT_DISABLE_CUSTOM",
+      ],
+      [
+        "empty primary KVITBIT_DISABLE_OTHER + fallback KVITBIT_DISABLE_CUSTOM=true",
+        { KVITBIT_DISABLE_OTHER: "" },
+        { KVITBIT_DISABLE_CUSTOM: "true" },
+        "KVITBIT_DISABLE_CUSTOM",
+      ],
+      [
+        "empty primary KVITBIT_PREVIEW_DISABLE_OTHER + fallback KVITBIT_PREVIEW_DISABLE_CUSTOM=true",
+        { KVITBIT_PREVIEW_DISABLE_OTHER: "" },
+        { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+        "KVITBIT_PREVIEW_DISABLE_CUSTOM",
+      ],
+      [
+        "empty primary KVITBIT_ALLOW_LOCAL_BLOBS + EXTRA + fallback KVITBIT_ALLOW_LOCAL_BLOBS=true",
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "", KVITBIT_ALLOW_LOCAL_BLOBS_EXTRA: "metadata" },
+        { KVITBIT_ALLOW_LOCAL_BLOBS: "true" },
+        "KVITBIT_ALLOW_LOCAL_BLOBS",
+      ],
+      [
+        "fallback KVITBIT_DISABLE_HTTP_2",
+        {},
+        { KVITBIT_DISABLE_HTTP_2: "true" },
+        "KVITBIT_DISABLE_HTTP_2",
+      ],
+      [
+        "fallback KVITBIT_PREVIEW_DISABLE_CUSTOM",
+        {},
+        { KVITBIT_PREVIEW_DISABLE_CUSTOM: "true" },
+        "KVITBIT_PREVIEW_DISABLE_CUSTOM",
+      ],
+    ] as const) {
+      const res = await loadWithLayer(
+        composeStackEnvLayers({ ...PROD_REQUIRED_ENV, ...primaryExtra }, fallbackEnv),
+      );
+      expect(res._tag, `expected InvalidStackConfig for ${label}`).toBe("Failure");
+      if (res._tag === "Failure") {
+        expect(res.failure).toMatchObject({ _tag: "InvalidStackConfig", field: expectedField });
+      }
+    }
+  });
+
+  test("alchemy.run.ts stack entrypoint preserves CLI --env-file precedence and rejects forbidden keys from both file and shell", async () => {
+    const sandbox = mkdtempSync(join(tmpdir(), "kvitbit-alchemy-envfile-"));
+    try {
+      // 1. Valid production shell + --env-file with forbidden KVITBIT_DISABLE_CUSTOM=true:
+      // Alchemy CLI's provider (dotEnv over shell) flows into alchemy.run.ts without being replaced.
+      const forbiddenFile = join(sandbox, "forbidden.env");
+      writeFileSync(forbiddenFile, "KVITBIT_DISABLE_CUSTOM=true\n");
+      const forbiddenCliProvider = ConfigProvider.orElse(
+        ConfigProvider.fromDotEnvContents(readFileSync(forbiddenFile, "utf8")),
+        ConfigProvider.fromEnv({ env: PROD_REQUIRED_ENV }),
+      );
+      const forbiddenRes = await Effect.runPromise(
+        loadAlchemyStackConfig.pipe(
+          Effect.provide(ConfigProvider.layer(forbiddenCliProvider)),
+          Effect.result,
+        ),
+      );
+      expect(forbiddenRes._tag).toBe("Failure");
+      if (forbiddenRes._tag === "Failure") {
+        expect(forbiddenRes.failure).toMatchObject({
+          _tag: "InvalidStackConfig",
+          field: "KVITBIT_DISABLE_CUSTOM",
+        });
+      }
+
+      // 2. Valid production shell + --env-file overriding stage, stateBucket, origin, and emailMode:
+      // confirms --env-file governs both state selection and stack declaration.
+      const stagingFile = join(sandbox, "staging.env");
+      writeFileSync(
+        stagingFile,
+        [
+          "KVITBIT_STAGE=staging",
+          "KVITBIT_ALCHEMY_STATE_BUCKET=custom-staging-state-bucket",
+          "KVITBIT_APP_ORIGIN=https://staging.kvitbit.cz",
+          "KVITBIT_EMAIL_MODE=capture",
+          "KVITBIT_BOT_PROTECTION_MODE=none",
+          "KVITBIT_ENABLE_RESEND_SECRET=false",
+          "KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET=false",
+        ].join("\n"),
+      );
+      const stagingCliProvider = ConfigProvider.orElse(
+        ConfigProvider.fromDotEnvContents(readFileSync(stagingFile, "utf8")),
+        ConfigProvider.fromEnv({ env: PROD_REQUIRED_ENV }),
+      );
+      const stagingCfg = await Effect.runPromise(
+        loadAlchemyStackConfig.pipe(Effect.provide(ConfigProvider.layer(stagingCliProvider))),
+      );
+      expect(stagingCfg.stage).toBe("staging");
+      expect(stagingCfg.stateBucket).toBe("custom-staging-state-bucket");
+      expect(stagingCfg.appOrigin).toBe("https://staging.kvitbit.cz");
+      expect(stagingCfg.emailMode).toBe("capture");
+
+      // 3. readAlchemyRawEnv preserves exact keys from both --env-file and shell (including empty exact keys alongside EXTRA and scalar KVITBIT_DISABLE + fallback .env).
+      const emptyExactFile = join(sandbox, "empty-exact.env");
+      writeFileSync(
+        emptyExactFile,
+        'KVITBIT_ALLOW_LOCAL_BLOBS=""\nKVITBIT_ALLOW_LOCAL_BLOBS_EXTRA=metadata\n',
+      );
+      const rawWithEnvFile = readAlchemyRawEnv(
+        ["bun", "alchemy", "plan", "--env-file", emptyExactFile],
+        PROD_REQUIRED_ENV,
+        sandbox,
+      );
+      const emptyExactRes = await Effect.runPromise(
+        loadStackConfig.pipe(
+          Effect.provide(
+            Layer.merge(
+              ConfigProvider.layer(
+                ConfigProvider.orElse(
+                  ConfigProvider.fromDotEnvContents(readFileSync(emptyExactFile, "utf8")),
+                  ConfigProvider.fromEnv({ env: PROD_REQUIRED_ENV }),
+                ),
+              ),
+              Layer.succeed(StackEnv, rawWithEnvFile),
+            ),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(emptyExactRes._tag).toBe("Failure");
+      if (emptyExactRes._tag === "Failure") {
+        expect(emptyExactRes.failure).toMatchObject({
+          _tag: "InvalidStackConfig",
+          field: "KVITBIT_ALLOW_LOCAL_BLOBS",
+        });
+      }
+
+      // 4. Default .env fallback behind shell KVITBIT_DISABLE=metadata still rejects .env's KVITBIT_DISABLE_CUSTOM=true.
+      writeFileSync(join(sandbox, ".env"), "KVITBIT_DISABLE_CUSTOM=true\n");
+      const shellWithScalar = { ...PROD_REQUIRED_ENV, KVITBIT_DISABLE: "metadata" };
+      const rawWithDotEnv = readAlchemyRawEnv(["bun", "alchemy", "plan"], shellWithScalar, sandbox);
+      const dotEnvRes = await Effect.runPromise(
+        loadStackConfig.pipe(
+          Effect.provide(
+            Layer.merge(
+              ConfigProvider.layer(
+                ConfigProvider.orElse(
+                  ConfigProvider.fromEnv({ env: shellWithScalar }),
+                  ConfigProvider.fromDotEnvContents(readFileSync(join(sandbox, ".env"), "utf8")),
+                ),
+              ),
+              Layer.succeed(StackEnv, rawWithDotEnv),
+            ),
+          ),
+          Effect.result,
+        ),
+      );
+      expect(dotEnvRes._tag).toBe("Failure");
+      if (dotEnvRes._tag === "Failure") {
+        expect(dotEnvRes.failure).toMatchObject({
+          _tag: "InvalidStackConfig",
+          field: "KVITBIT_DISABLE_CUSTOM",
+        });
+      }
+    } finally {
+      rmSync(sandbox, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("PostHog deployment configuration", () => {
@@ -301,7 +645,9 @@ describe("PostHog deployment configuration", () => {
     loadStackConfig.pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, ...env } }),
+          ConfigProvider.fromEnv({
+            env: { ...PROD_REQUIRED_ENV, KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST, ...env },
+          }),
         ),
       ),
     );
@@ -504,8 +850,54 @@ describe("Bootstrap state safety guard", () => {
       delete: () => Effect.die("Unexpected secret deletion"),
     });
     const feedbackConfig = sampleProdConfig({
+      bootstrapFeedbackSecret: true,
+      appOrigin: undefined,
+      emailFrom: undefined,
+      edge: undefined,
       secrets: defaultSecretBindings("prod", { enableFeedbackGitHubToken: true }),
     });
+    // CLI selection guard enforces exact --include for feedback secret bootstrap.
+    expect(
+      await Effect.runPromise(
+        Effect.result(assertTargetedSecretSelection(feedbackConfig, ["bun", "alchemy", "deploy"])),
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertTargetedSecretSelection(feedbackConfig, [
+            "bun",
+            "alchemy",
+            "deploy",
+            "--include",
+            fqn,
+            "--include",
+            "KvitbitServer",
+          ]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertTargetedSecretSelection(feedbackConfig, [
+            "bun",
+            "alchemy",
+            "deploy",
+            "--include",
+            fqn,
+          ]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Success" });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertTargetedSecretSelection(feedbackConfig, [`--include=${feedbackSecretFqn("prod")}`]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Success" });
+
     await Effect.runPromise(
       Effect.gen(function* () {
         const compiled = yield* Stack.Stack(
@@ -513,6 +905,8 @@ describe("Bootstrap state safety guard", () => {
           { state, providers },
           declareKvitbitStack(feedbackConfig).pipe(Effect.orDie),
         );
+        // Feedback bootstrap never declares server, runner, VPC, or edge workloads.
+        expect(Object.keys(compiled.resources)).toEqual([fqn]);
         yield* Effect.gen(function* () {
           const plan = yield* Plan.make(compiled, { include: [fqn] });
           expect(Object.keys(plan.resources)).toEqual([fqn]);
@@ -537,6 +931,221 @@ describe("Bootstrap state safety guard", () => {
       }).pipe(Effect.provideService(Stage, target.stage), Effect.scoped),
     );
   });
+
+  test("selected ALTCHA secret bootstrap adds only the container to populated state", async () => {
+    const target = { stack: KVITBIT_STACK_NAME, stage: "prod" };
+    const secretId = "kvitbit-prod-altcha-hmac-key";
+    const fqn = altchaSecretFqn("prod");
+    const existing = {
+      KvitbitImages: makeFakeResourceState("KvitbitImages"),
+      KvitbitVpc: makeFakeResourceState("KvitbitVpc"),
+      KvitbitRunner0: makeFakeResourceState("KvitbitRunner0"),
+      KvitbitServer: makeFakeResourceState("KvitbitServer"),
+    };
+    const existingOutput = { serverService: "kvitbit-prod-server", repository: "kvitbit" };
+    const state = State.inMemoryState(
+      { [target.stack]: { [target.stage]: { ...existing } } },
+      { [target.stack]: { [target.stage]: existingOutput } },
+    );
+    const providers = Provider.succeed(Secret, {
+      read: () => Effect.succeed(undefined),
+      reconcile: ({ news }) => {
+        expect(news.secretId).toBe(secretId);
+        return Effect.succeed({
+          name: `projects/kvitbit-prod/secrets/${secretId}`,
+          secretId,
+          project: "kvitbit-prod",
+          labels: {},
+          annotations: {},
+          replication: { automatic: {} },
+          expireTime: undefined,
+          createTime: undefined,
+          etag: undefined,
+          topics: [],
+          rotation: undefined,
+          versionAliases: {},
+          versionDestroyTtl: undefined,
+        });
+      },
+      delete: () => Effect.die("Unexpected secret deletion"),
+    });
+    const altchaConfig = sampleProdConfig({
+      bootstrapAltchaSecret: true,
+      appOrigin: undefined,
+      emailFrom: undefined,
+      edge: undefined,
+      secrets: defaultSecretBindings("prod", { enableAltchaHmacKey: true }),
+    });
+    expect(
+      await Effect.runPromise(
+        Effect.result(assertTargetedSecretSelection(altchaConfig, ["bun", "alchemy", "deploy"])),
+      ),
+    ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+    expect(
+      await Effect.runPromise(
+        Effect.result(
+          assertTargetedSecretSelection(altchaConfig, [
+            "bun",
+            "alchemy",
+            "deploy",
+            "--include",
+            fqn,
+          ]),
+        ),
+      ),
+    ).toMatchObject({ _tag: "Success" });
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const compiled = yield* Stack.Stack(
+          target.stack,
+          { state, providers },
+          declareKvitbitStack(altchaConfig).pipe(Effect.orDie),
+        );
+        expect(Object.keys(compiled.resources)).toEqual([fqn]);
+        yield* Effect.gen(function* () {
+          const plan = yield* Plan.make(compiled, { include: [fqn] });
+          expect(Object.keys(plan.resources)).toEqual([fqn]);
+          expect(plan.resources[fqn]?.action).toBe("create");
+          expect(plan.deletions).toEqual({});
+          yield* Apply.apply(plan);
+
+          const store = yield* yield* State.State;
+          expect((yield* store.list(target)).toSorted()).toEqual(
+            [...Object.keys(existing), fqn].sort(),
+          );
+          expect(yield* store.get({ ...target, fqn })).toMatchObject({
+            status: "created",
+            resourceType: Secret.Type,
+            attr: { secretId },
+          });
+          expect(yield* store.getOutput(target)).toEqual(existingOutput);
+        }).pipe(Effect.provideContext(compiled.services), Effect.provide(state));
+      }).pipe(Effect.provideService(Stage, target.stage), Effect.scoped),
+    );
+  });
+
+  test.each([
+    {
+      label: "Resend",
+      secretId: "kvitbit-prod-resend-api-key",
+      fqn: resendSecretFqn("prod"),
+      unrelatedFqn: altchaSecretFqn("prod"),
+      config: sampleProdConfig({
+        bootstrapResendSecret: true,
+        appOrigin: undefined,
+        emailFrom: undefined,
+        edge: undefined,
+        secrets: defaultSecretBindings("prod", { enableResend: true }),
+      }),
+    },
+    {
+      label: "Turbo Cache",
+      secretId: "kvitbit-prod-turbo-cache-token",
+      fqn: turboCacheSecretFqn("prod"),
+      unrelatedFqn: resendSecretFqn("prod"),
+      config: sampleProdConfig({
+        bootstrapTurboCacheSecret: true,
+        appOrigin: undefined,
+        emailFrom: undefined,
+        edge: undefined,
+        secrets: defaultSecretBindings("prod", { enableTurboCache: true }),
+      }),
+    },
+  ])(
+    "selected $label secret bootstrap compiles only its expected container and rejects unrelated --include",
+    async ({ secretId, fqn, unrelatedFqn, config }) => {
+      const target = { stack: KVITBIT_STACK_NAME, stage: "prod" };
+      const existing = {
+        KvitbitImages: makeFakeResourceState("KvitbitImages"),
+        KvitbitVpc: makeFakeResourceState("KvitbitVpc"),
+        KvitbitRunner0: makeFakeResourceState("KvitbitRunner0"),
+        KvitbitServer: makeFakeResourceState("KvitbitServer"),
+      };
+      const existingOutput = { serverService: "kvitbit-prod-server", repository: "kvitbit" };
+      const state = State.inMemoryState(
+        { [target.stack]: { [target.stage]: { ...existing } } },
+        { [target.stack]: { [target.stage]: existingOutput } },
+      );
+      const providers = Provider.succeed(Secret, {
+        read: () => Effect.succeed(undefined),
+        reconcile: ({ news }) => {
+          expect(news.secretId).toBe(secretId);
+          return Effect.succeed({
+            name: `projects/kvitbit-prod/secrets/${secretId}`,
+            secretId,
+            project: "kvitbit-prod",
+            labels: {},
+            annotations: {},
+            replication: { automatic: {} },
+            expireTime: undefined,
+            createTime: undefined,
+            etag: undefined,
+            topics: [],
+            rotation: undefined,
+            versionAliases: {},
+            versionDestroyTtl: undefined,
+          });
+        },
+        delete: () => Effect.die("Unexpected secret deletion"),
+      });
+
+      expect(
+        await Effect.runPromise(
+          Effect.result(assertTargetedSecretSelection(config, ["bun", "alchemy", "deploy"])),
+        ),
+      ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+      expect(
+        await Effect.runPromise(
+          Effect.result(
+            assertTargetedSecretSelection(config, [
+              "bun",
+              "alchemy",
+              "deploy",
+              "--include",
+              unrelatedFqn,
+            ]),
+          ),
+        ),
+      ).toMatchObject({ _tag: "Failure", failure: expect.any(BootstrapSelectionError) });
+      expect(
+        await Effect.runPromise(
+          Effect.result(
+            assertTargetedSecretSelection(config, ["bun", "alchemy", "deploy", "--include", fqn]),
+          ),
+        ),
+      ).toMatchObject({ _tag: "Success" });
+
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const compiled = yield* Stack.Stack(
+            target.stack,
+            { state, providers },
+            declareKvitbitStack(config).pipe(Effect.orDie),
+          );
+          expect(Object.keys(compiled.resources)).toEqual([fqn]);
+          yield* Effect.gen(function* () {
+            const plan = yield* Plan.make(compiled, { include: [fqn] });
+            expect(Object.keys(plan.resources)).toEqual([fqn]);
+            expect(plan.resources[fqn]?.action).toBe("create");
+            expect(plan.deletions).toEqual({});
+            yield* Apply.apply(plan);
+
+            const store = yield* yield* State.State;
+            expect((yield* store.list(target)).toSorted()).toEqual(
+              [...Object.keys(existing), fqn].sort(),
+            );
+            expect(yield* store.get({ ...target, fqn })).toMatchObject({
+              status: "created",
+              resourceType: Secret.Type,
+              attr: { secretId },
+            });
+            expect(yield* store.getOutput(target)).toEqual(existingOutput);
+          }).pipe(Effect.provideContext(compiled.services), Effect.provide(state));
+        }).pipe(Effect.provideService(Stage, target.stage), Effect.scoped),
+      );
+    },
+  );
 
   test.each([
     ["empty", []],
@@ -652,6 +1261,14 @@ describe("Foundation resources", () => {
       (g) => g.secretId === "kvitbit-prod-mobile-updates-signing-key",
     );
     expect(mobileSigningGrants.map((g) => g.workload)).toEqual(["server"]);
+    const altchaGrants = grants.filter((g) => g.secretId === "kvitbit-prod-altcha-hmac-key");
+    expect(altchaGrants.map((g) => g.workload)).toEqual(["server"]);
+    const serverEnvSecretNames = serverSecretEnv(config).map((s) => s.name);
+    expect(serverEnvSecretNames).toContain("ALTCHA_HMAC_KEY");
+    const runnerSecretNames = buildRunnerWorkerConfig(config).secrets.map(
+      (s) => s.environmentVariable,
+    );
+    expect(runnerSecretNames).not.toContain("ALTCHA_HMAC_KEY");
     const dbGrants = grants.filter((g) => g.secretId === "kvitbit-prod-database-url");
     expect(dbGrants.map((g) => g.workload).sort()).toEqual(["runner", "server"]);
     const runnerUnpooledGrants = grants.filter(
@@ -1460,6 +2077,9 @@ describe("Cloud Run server service", () => {
         KVITBIT_STAGE: "staging",
         KVITBIT_GCP_PROJECT_ID: "kvitbit-staging",
         KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+        KVITBIT_APP_ORIGIN: "https://staging.kvitbit.cz",
+        KVITBIT_EMAIL_MODE: "capture",
+        KVITBIT_BOT_PROTECTION_MODE: "none",
         KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: " YES ",
         KVITBIT_FEEDBACK_GITHUB_REPO: " owner/feedback ",
         KVITBIT_FEEDBACK_OWNER_EMAILS: " owner@example.com, admin@example.com ",
@@ -1701,7 +2321,15 @@ describe("Pure-Alchemy Cloud DNS", () => {
       upstream[id] = { nameServers };
       expectedNameServers[domain] = nameServers;
     }
-    if (compiled.output.bootstrapFoundation) throw new Error("Expected a full stack");
+    if (
+      compiled.output.bootstrapFoundation ||
+      ("bootstrapFeedbackSecret" in compiled.output && compiled.output.bootstrapFeedbackSecret) ||
+      ("bootstrapAltchaSecret" in compiled.output && compiled.output.bootstrapAltchaSecret) ||
+      ("bootstrapResendSecret" in compiled.output && compiled.output.bootstrapResendSecret) ||
+      ("bootstrapTurboCacheSecret" in compiled.output && compiled.output.bootstrapTurboCacheSecret)
+    ) {
+      throw new Error("Expected a full stack");
+    }
     expect(await resolveOutputs(compiled.output.dnsNameServers, upstream)).toEqual(
       expectedNameServers,
     );
@@ -1743,7 +2371,9 @@ describe("Pure-Alchemy Cloud DNS", () => {
 
   test("wires Always-Free US inbound mail forwarder, write-only archive bucket, and kvitbit.com email DNS records", async () => {
     const mailEnv = {
-      KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+      ...PROD_REQUIRED_ENV,
+      KVITBIT_ENABLE_RESEND_SECRET: "false",
+      KVITBIT_ENABLE_SMTP_SECRET: "true",
       KVITBIT_DNS_ZONES: PROD_DNS_ZONES.join(","),
       KVITBIT_EDGE_DOMAINS: "kvitbit.cz,kvitbit.com",
       KVITBIT_MAIL_DOMAIN: "kvitbit.com",
@@ -1876,7 +2506,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
                 env: {
-                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  ...PROD_REQUIRED_ENV,
                   KVITBIT_DNS_ZONES: "kvitbit.com",
                   KVITBIT_MAIL_DOMAIN: "kvitbit.com",
                   KVITBIT_MAIL_FORWARD_TO: "ops@kvitbit.com",
@@ -1897,7 +2527,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
                 env: {
-                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  ...PROD_REQUIRED_ENV,
                   KVITBIT_DNS_ZONES: "kvitbit.com",
                   KVITBIT_MAIL_DOMAIN: "kvitbit.com",
                   KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
@@ -1921,7 +2551,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
                 env: {
-                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  ...PROD_REQUIRED_ENV,
                   KVITBIT_DNS_ZONES: "kvitbit.com",
                   KVITBIT_MAIL_DOMAIN: "kvitbit.com",
                   KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
@@ -1945,7 +2575,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
                 env: {
-                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  ...PROD_REQUIRED_ENV,
                   KVITBIT_DNS_ZONES: "kvitbit.cz",
                   KVITBIT_MAIL_DOMAIN: "kvitbit.com",
                   KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
@@ -1966,7 +2596,7 @@ describe("Pure-Alchemy Cloud DNS", () => {
             ConfigProvider.layer(
               ConfigProvider.fromEnv({
                 env: {
-                  KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+                  ...PROD_REQUIRED_ENV,
                   KVITBIT_MAIL_DOMAIN: "kvitbit.com",
                   KVITBIT_MAIL_FORWARD_TO: "filkalny@gmail.com",
                   KVITBIT_MAIL_ALIASES: "ops",
@@ -1999,7 +2629,7 @@ describe("Cloud Monitoring", () => {
         ConfigProvider.layer(
           ConfigProvider.fromEnv({
             env: {
-              KVITBIT_IMAGE_DIGEST: SAMPLE_DIGEST,
+              ...PROD_REQUIRED_ENV,
               ...(alertEmail === undefined ? {} : { KVITBIT_ALERT_EMAIL: alertEmail }),
             },
           }),

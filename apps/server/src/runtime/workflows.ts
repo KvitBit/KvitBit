@@ -33,11 +33,12 @@ import {
   WorkspaceId,
 } from "@kvitbit/domain/contract";
 import { type BlobKey, BlobStorage, EmailSender } from "@kvitbit/domain/ports";
-import { Cause, Clock, Config, Duration, Effect, Layer, Schedule, Schema, Stream } from "effect";
+import { Cause, Clock, Duration, Effect, Layer, Schedule, Schema, Stream } from "effect";
 import { SqlClient } from "effect/sql";
 import * as Activity from "effect/workflow/Activity";
 import * as DurableClock from "effect/workflow/DurableClock";
 import * as Workflow from "effect/workflow/Workflow";
+import { loadValidatedAppOrigin } from "../config-contract";
 import { archivePages, withReportArchivePage } from "../persistence/repos/reportArchivePages";
 import { MAX_ZIP_BYTES, streamZip, type ZipEntry } from "./zip";
 
@@ -556,10 +557,7 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
   );
 };
 
-/** Live workflow handlers reading `APP_ORIGIN` from environment. */
+/** Live workflow handlers reading validated `APP_ORIGIN` from environment. */
 export const WorkflowHandlersLive = Layer.unwrap(
-  Effect.map(
-    Config.String("APP_ORIGIN").pipe(Config.withDefault("http://localhost:8080")),
-    (appOrigin) => makeWorkflowHandlersLayer({ appOrigin }),
-  ),
+  Effect.map(loadValidatedAppOrigin, (appOrigin) => makeWorkflowHandlersLayer({ appOrigin })),
 );

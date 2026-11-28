@@ -1405,6 +1405,150 @@
         "bun": "1.4.2",
         "effect": "4.1.4"
       }
+    },
+    {
+      "id": "deploy-config.contract",
+      "skill": "verify-deploy-config",
+      "tier": 1,
+      "kind": "exhaustive",
+      "syncCommit": "751971cf",
+      "command": "bun test --cwd apps/server ./test/runtime/deploy-config.exhaustive.test.ts",
+      "coveredFiles": [
+        {
+          "path": "apps/server/src/app.ts",
+          "sha256": "b292890bafe4a14f513f556399a0d61f2e9a088994c4c59994ecafe16cde59bb"
+        },
+        {
+          "path": "apps/server/src/config-contract.ts",
+          "sha256": "8250ab698d002ecb361b0179fd63eba494616836e81fada8cfab5cbd2f58f20c"
+        },
+        {
+          "path": "apps/server/src/config.ts",
+          "sha256": "cb77ea7ad3b1b3b27bc83245f3452124cbff1250c425b66e1364ed5ac5f83697"
+        },
+        {
+          "path": "apps/server/src/http/config.ts",
+          "sha256": "52be938fce2621ce469290e194b6ddbb98b7719ac83f148263b1fc233d499e35"
+        },
+        {
+          "path": "apps/server/src/main.ts",
+          "sha256": "3fd179ff2790ec7312ff34de39e39f75562dcee6391ff5c33465c92579546e4b"
+        },
+        {
+          "path": "apps/server/src/worker.ts",
+          "sha256": "30b46636aad40a4cf43f9d9c584680c79e73b070b6c253964eb694bca234590a"
+        },
+        {
+          "path": "apps/server/src/wiring/config.ts",
+          "sha256": "f2c486af6b10530021a0911e8fb884baaffe5b49bd9da597fa4fb378b17303a7"
+        },
+        {
+          "path": "apps/server/src/wiring/email.ts",
+          "sha256": "ee8c2283fcebe16805e556738b980b7d227266831bf202ce91cbb3753cf05bf1"
+        },
+        {
+          "path": "apps/server/src/wiring/blob.ts",
+          "sha256": "a97109fadbf93ae8498270dcdb81c2ee0696f487fd27402f829a2c9f718d0d70"
+        },
+        {
+          "path": "apps/server/src/http/mobile/config.ts",
+          "sha256": "d089bc4397f046d7a9f52cdcd336e8f7abe961ab7059d495a98b92780c16ed24"
+        },
+        {
+          "path": "apps/server/src/runtime/workflows.ts",
+          "sha256": "01b2483084444c266604d28208696ca4b06f757ba645190a3acc94928a80d08f"
+        },
+        {
+          "path": "infra/alchemy/src/deploy-preflight.ts",
+          "sha256": "3465a4396e19511c5ca174f132cc739762e80596d9849a1d77e042a9ebc2c0e4"
+        },
+        {
+          "path": "infra/alchemy/src/preflight-cli.ts",
+          "sha256": "c1958fd5385b1f0c72d891b17164b10c1512d10937ae3b02e11380eec43060c1"
+        },
+        {
+          "path": "infra/alchemy/src/config.ts",
+          "sha256": "93da0ab71c3dced6e3235f1dca2af3c1d5ccdd555e6e3dc859282b7085054625"
+        },
+        {
+          "path": "infra/alchemy/src/env.ts",
+          "sha256": "b65d3ec820ee448426c65c7a6836247c3d6bb03ac40489894a8d9af7533f3d57"
+        },
+        {
+          "path": "infra/alchemy/src/bootstrap.ts",
+          "sha256": "930caaf73e3d6755e54c5f4616df3a4cf07fdef23f8ded28f376d429e852b35b"
+        },
+        {
+          "path": "infra/alchemy/alchemy.run.ts",
+          "sha256": "d77d366a9c111a945d32e6337a395c64c1008631629e161a21b0fbe6a209f8f4"
+        },
+        {
+          "path": ".github/workflows/deploy.yml",
+          "sha256": "29ba6d83a22728ce3f65ebb1156733eec1925c3aeba78c8ae846887e1b2665d4"
+        }
+      ],
+      "guardedSymbols": [
+        "KVITBIT_ENVS",
+        "EMAIL_MODES",
+        "PROD_EMAIL_MODES",
+        "RESOLVED_EMAIL_MODES",
+        "BLOB_DRIVERS",
+        "BOT_PROTECTION_MODES",
+        "PROD_BOT_PROTECTION_MODES",
+        "RESOLVED_BOT_PROTECTION_MODES",
+        "SERVER_WORKLOADS",
+        "FORBIDDEN_OPT_OUT_ENV_VARS",
+        "resolveKvitbitEnv",
+        "validateAppOrigin",
+        "resolveEmailConfig",
+        "resolveBlobConfig",
+        "resolveBotProtectionConfig",
+        "validateServerRuntimeEnv",
+        "loadBootRuntimeConfig",
+        "loadBotProtectionConfig",
+        "RuntimeEnv",
+        "mergeRuntimeEnvSources",
+        "makeRuntimeEnvLayer",
+        "composeRuntimeEnvLayers",
+        "BotProtectionLive",
+        "HttpConfigLive",
+        "ServerConfig",
+        "makeEmailSenderLayer",
+        "makeBlobStorageLayer",
+        "MobileConfigLive",
+        "WorkflowHandlersLive",
+        "validateDeployPreflight",
+        "validateStackConfigSync",
+        "validateStackConfig",
+        "loadStackConfig",
+        "StackEnv",
+        "mergeStackEnvSources",
+        "readAlchemyRawEnv",
+        "makeStackEnvLayer",
+        "composeStackEnvLayers",
+        "defaultSecretBindings",
+        "serverPlainEnv",
+        "serverSecretEnv",
+        "runnerPlainEnv",
+        "buildRunnerWorkerConfig",
+        "declareKvitbitStack",
+        "assertTargetedSecretSelection",
+        "altchaSecretFqn",
+        "feedbackSecretFqn",
+        "resendSecretFqn",
+        "turboCacheSecretFqn",
+        "loadAlchemyStackConfig"
+      ],
+      "bounds": "49 (KVITBIT_ENV x NODE_ENV) pairs; 295,680 server/worker runtime env states + 990 bot protection states (75 direct, 840 runtime, 75 live HttpConfigLive/BotProtectionLive parity) + 405 core secret/dynamic & composed opt-out/exact-key/sparse-array/boundary/upgrade states; 780 real Effect layer builds (280 email, 20 blob, 480 mobile); 215,040 Alchemy stack states + 2,688 Alchemy bot-protection & bootstrap states + 1,024 full 2^5 bootstrap-flag combinations + 38 core consumer & live loadStackConfig opt-out checks with cross-layer server+worker soundness; 423,360 deploy.yml preflight states + 3,360 preflight bot-protection & bootstrap states + 1,024 full 2^5 bootstrap-flag combinations + 106 GCP/bool/opt-out/repo-vars checks with 3-layer soundness (944,544 total exhaustive cases)",
+      "assumptions": [
+        "Representative values stand for each equivalence class (origin, EMAIL_FROM, SMTP URL, domain); live network/credential validity and Secret Manager ENABLED state are outside pure config verification",
+        "Cross-layer soundness substitutes synthetic valid non-empty strings for Secret Manager refs",
+        "YAML step wiring in deploy.yml is verified by infra/alchemy/test/selfhost.test.ts"
+      ],
+      "toolVersions": {
+        "bun": "1.4.2",
+        "effect": "4.1.4"
+      }
     }
   ]
 }

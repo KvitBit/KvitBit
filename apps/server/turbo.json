@@ -57,6 +57,11 @@
       "passThroughEnv": ["CI"],
       "outputs": []
     },
+    "typecheck": {
+      "dependsOn": ["^transit"],
+      "inputs": ["$TURBO_DEFAULT$", "!**/*.md", "$TURBO_ROOT$/infra/alchemy/src/**"],
+      "outputs": ["*.tsbuildinfo"]
+    },
     "test:runtime": {
       "dependsOn": ["^transit"],
       "inputs": [
@@ -67,7 +72,8 @@
         "test/analytics.test.ts",
         "test/analytics-fixture.ts",
         "test/http/**",
-        "test/persistence/**"
+        "test/persistence/**",
+        "$TURBO_ROOT$/infra/alchemy/src/**"
       ],
       "env": ["TZ"],
       "passThroughEnv": ["CI"],

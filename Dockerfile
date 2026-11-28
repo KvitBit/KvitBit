@@ -98,7 +98,6 @@ ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8080 \
     KVITBIT_RUNNER_MODE=single \
-    KVITBIT_BLOB_DRIVER=local \
     KVITBIT_BLOB_DIR=/var/lib/kvitbit/blobs \
     KVITBIT_BLOB_BUCKET="" \
     KVITBIT_GCS_PROJECT="" \

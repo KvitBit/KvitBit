@@ -16,6 +16,7 @@ import { Effect, Layer } from "effect";
 import { HttpMiddleware, HttpRouter } from "effect/http";
 import { AllRoutesLive, EdgeServicesLive } from "./app";
 import { ServerConfig } from "./config";
+import { loadBootRuntimeConfig, makeRuntimeEnvLayer } from "./config-contract";
 import { withRequestLogging } from "./http/edge/requestId";
 import { runServerMain } from "./logging/logger";
 import { PersistenceLive, PgDatabaseLive } from "./persistence";
@@ -73,12 +74,16 @@ const ServerRuntimeLive = Layer.unwrap(
 ).pipe(Layer.provide(AnalyticsLive));
 
 export const serverProgram = Effect.gen(function* () {
+  const boot = yield* loadBootRuntimeConfig("server");
   const config = yield* ServerConfig;
   yield* Effect.logInfo("Starting Kvitbit server", {
+    env: boot.env,
     host: config.host,
     port: config.port,
     runnerMode: config.runnerMode,
     appOrigin: config.appOrigin,
+    emailMode: boot.email.mode,
+    blobDriver: boot.blob.driver,
   });
   return yield* Layer.launch(ServerRuntimeLive);
 });
@@ -89,5 +94,5 @@ const isMain =
     : process.argv[1]?.endsWith("main.ts") || process.argv[1]?.endsWith("main.js");
 
 if (isMain) {
-  runServerMain(serverProgram);
+  runServerMain(serverProgram.pipe(Effect.provide(makeRuntimeEnvLayer(process.env))));
 }

@@ -152,7 +152,6 @@
                 "HOST=0.0.0.0"
                 "PORT=8080"
                 "KVITBIT_RUNNER_MODE=single"
-                "KVITBIT_BLOB_DRIVER=local"
                 "KVITBIT_BLOB_DIR=/var/lib/kvitbit/blobs"
                 "KVITBIT_WEB_DIR=${server}/lib/kvitbit/public/web"
                 "KVITBIT_PWA_DIR=${server}/lib/kvitbit/public/app"
@@ -210,7 +209,7 @@
               environmentFile = lib.mkOption {
                 type = lib.types.nullOr lib.types.path;
                 default = null;
-                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with a dedicated NOSUPERUSER NOCREATEDB NOCREATEROLE app role distinct from the migration owner, granted USAGE and SELECT/INSERT/UPDATE/DELETE plus sequence USAGE/SELECT on both public and auth schemas, BETTER_AUTH_SECRET, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
+                description = "Path to an EnvironmentFile containing DML-only runtime secrets for the kvitbit server unit (DATABASE_URL with a dedicated NOSUPERUSER NOCREATEDB NOCREATEROLE app role distinct from the migration owner, granted USAGE and SELECT/INSERT/UPDATE/DELETE plus sequence USAGE/SELECT on both public and auth schemas, BETTER_AUTH_SECRET, ALTCHA_HMAC_KEY, RESEND_API_KEY, KVITBIT_SMTP_URL, KVITBIT_MOBILE_UPDATES_SIGNING_KEY). Never include migration owner credentials here.";
               };
 
               migrationEnvironmentFile = lib.mkOption {
@@ -223,6 +222,53 @@
                 type = lib.types.str;
                 default = "/var/lib/kvitbit";
                 description = "Persistent state directory for Kvitbit.";
+              };
+
+              environment = lib.mkOption {
+                type = lib.types.enum [
+                  "production"
+                  "staging"
+                  "preview"
+                  "development"
+                ];
+                default = "production";
+                description = "Typed Kvitbit runtime environment (KVITBIT_ENV). Defaults to 'production' to preserve fail-fast behavior on upgrade; explicitly set 'development' or 'preview' for non-production self-hosting.";
+              };
+
+              blobDriver = lib.mkOption {
+                type = lib.types.nullOr (
+                  lib.types.enum [
+                    "local"
+                    "gcs"
+                  ]
+                );
+                default = null;
+                description = "Optional explicit blob storage driver (KVITBIT_BLOB_DRIVER). Must be 'gcs' in production and explicitly set ('gcs' or 'local') in staging/preview; omitted in development to use the server default.";
+              };
+
+              emailMode = lib.mkOption {
+                type = lib.types.nullOr (
+                  lib.types.enum [
+                    "resend"
+                    "smtp"
+                    "resend+smtp"
+                    "capture"
+                    "console"
+                  ]
+                );
+                default = null;
+                description = "Optional explicit typed email mode (KVITBIT_EMAIL_MODE).";
+              };
+
+              botProtectionMode = lib.mkOption {
+                type = lib.types.nullOr (
+                  lib.types.enum [
+                    "altcha"
+                    "none"
+                  ]
+                );
+                default = null;
+                description = "Optional explicit typed bot protection mode (KVITBIT_BOT_PROTECTION_MODE). Must be 'altcha' (with ALTCHA_HMAC_KEY) in production; 'none' is only permitted in non-production.";
               };
 
               blobDir = lib.mkOption {
@@ -347,15 +393,20 @@
                 environment =
                   {
                     NODE_ENV = "production";
+                    KVITBIT_ENV = cfg.environment;
                     HOST = effectiveHost;
                     PORT = toString cfg.port;
                     KVITBIT_RUNNER_MODE = "single";
-                    KVITBIT_BLOB_DRIVER = "local";
                     KVITBIT_BLOB_DIR = cfg.blobDir;
                     KVITBIT_MOBILE_STORAGE_DIR = cfg.mobileStorageDir;
                     KVITBIT_CHROMIUM_PATH = cfg.chromiumPath;
                     KVITBIT_TRUSTED_PROXY_HOPS = toString effectiveTrustedProxyHops;
                     KVITBIT_SHARE_KEY_VERSION = toString cfg.shareKeyVersion;
+                  }
+                  // lib.optionalAttrs (cfg.blobDriver != null) { KVITBIT_BLOB_DRIVER = cfg.blobDriver; }
+                  // lib.optionalAttrs (cfg.emailMode != null) { KVITBIT_EMAIL_MODE = cfg.emailMode; }
+                  // lib.optionalAttrs (cfg.botProtectionMode != null) {
+                    KVITBIT_BOT_PROTECTION_MODE = cfg.botProtectionMode;
                   }
                   // lib.optionalAttrs (cfg.appOrigin != null) { APP_ORIGIN = cfg.appOrigin; }
                   // lib.optionalAttrs (cfg.emailFrom != null) { EMAIL_FROM = cfg.emailFrom; }

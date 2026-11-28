@@ -31,6 +31,10 @@ on:
         description: Create the feedback token container after enabling the feedback secret flag
         type: boolean
         default: false
+      bootstrap_altcha_secret:
+        description: Create the ALTCHA HMAC key secret container after enabling the ALTCHA secret flag
+        type: boolean
+        default: false
       bootstrap_resend_secret:
         description: Create the Resend API key container after enabling the Resend secret flag
         type: boolean
@@ -58,6 +62,7 @@ jobs:
       DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
       BOOTSTRAP_FOUNDATION: ${{ inputs.bootstrap_foundation && 'true' || 'false' }}
       BOOTSTRAP_FEEDBACK_SECRET: ${{ inputs.bootstrap_feedback_secret && 'true' || 'false' }}
+      BOOTSTRAP_ALTCHA_SECRET: ${{ inputs.bootstrap_altcha_secret && 'true' || 'false' }}
       BOOTSTRAP_RESEND_SECRET: ${{ inputs.bootstrap_resend_secret && 'true' || 'false' }}
       BOOTSTRAP_TURBO_CACHE_SECRET: ${{ inputs.bootstrap_turbo_cache_secret && 'true' || 'false' }}
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -71,74 +76,17 @@ jobs:
       KVITBIT_ENABLE_SMTP_SECRET: ${{ vars.KVITBIT_ENABLE_SMTP_SECRET }}
       KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
       KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: ${{ vars.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}
+      KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: ${{ vars.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET }}
       KVITBIT_ENABLE_TURBO_CACHE: ${{ vars.KVITBIT_ENABLE_TURBO_CACHE }}
+      APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+      EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+      KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
+      KVITBIT_EMAIL_MODE: ${{ vars.KVITBIT_EMAIL_MODE }}
+      KVITBIT_BLOB_DRIVER: ${{ vars.KVITBIT_BLOB_DRIVER }}
+      KVITBIT_BOT_PROTECTION_MODE: ${{ vars.KVITBIT_BOT_PROTECTION_MODE }}
+      KVITBIT_ENV: ${{ vars.KVITBIT_ENV }}
 
     steps:
-      - name: Validate GCP deployment variables
-        run: |
-          set -euo pipefail
-          if [ "$KVITBIT_STAGE" != "prod" ]; then
-            echo "::error::deploy.yml is strictly production-only until an isolated staging environment exists (got KVITBIT_STAGE=${KVITBIT_STAGE})"
-            exit 1
-          fi
-          bootstrap_modes=0
-          for flag in "${BOOTSTRAP_FOUNDATION:-false}" "${BOOTSTRAP_FEEDBACK_SECRET:-false}" "${BOOTSTRAP_RESEND_SECRET:-false}" "${BOOTSTRAP_TURBO_CACHE_SECRET:-false}"; do
-            if [ "$flag" = "true" ]; then
-              bootstrap_modes=$((bootstrap_modes + 1))
-            fi
-          done
-          if [ "$bootstrap_modes" -gt 1 ]; then
-            echo "::error::Select only one of bootstrap_foundation, bootstrap_feedback_secret, bootstrap_resend_secret, and bootstrap_turbo_cache_secret."
-            exit 1
-          fi
-          for name in \
-            GCP_PROJECT_ID \
-            GCP_PROJECT_NUMBER \
-            GCP_REGION \
-            GCP_ZONE \
-            GCP_WORKLOAD_IDENTITY_PROVIDER \
-            GCP_DEPLOYER_SERVICE_ACCOUNT \
-            ALCHEMY_STATE_BUCKET; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Missing required repository variable: ${name}"
-              exit 1
-            fi
-          done
-          case "$GCP_DEPLOYER_SERVICE_ACCOUNT" in
-            *"@${GCP_PROJECT_ID}.iam.gserviceaccount.com") ;;
-            *)
-              echo "::error::GCP_DEPLOYER_SERVICE_ACCOUNT must belong to ${GCP_PROJECT_ID}"
-              exit 1
-              ;;
-          esac
-
-          # Normalize optional secret boolean switches ONCE so preflight and Alchemy
-          # agree on canonical true/false values (accepting true/1/yes/on, false/0/no/off).
-          normalize_bool_var() {
-            local var_name="$1"
-            local raw="${!var_name:-}"
-            local trimmed
-            trimmed="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
-            case "$trimmed" in
-              ""|false|0|no|off)
-                printf '%s=false\n' "$var_name" >> "$GITHUB_ENV"
-                ;;
-              true|1|yes|on)
-                printf '%s=true\n' "$var_name" >> "$GITHUB_ENV"
-                ;;
-              *)
-                echo "::error::Invalid boolean value for ${var_name}: '${raw}' (expected true/1/yes/on or false/0/no/off)"
-                exit 1
-                ;;
-            esac
-          }
-
-          normalize_bool_var KVITBIT_ENABLE_RESEND_SECRET
-          normalize_bool_var KVITBIT_ENABLE_SMTP_SECRET
-          normalize_bool_var KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET
-          normalize_bool_var KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET
-          normalize_bool_var KVITBIT_ENABLE_TURBO_CACHE
-
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -146,6 +94,13 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.2
+
+      - name: Validate GCP deployment variables
+        env:
+          KVITBIT_REPO_VARS_JSON: ${{ toJSON(vars) }}
+        run: |
+          set -euo pipefail
+          bun infra/alchemy/src/preflight-cli.ts
 
       - uses: actions/cache@v4
         with:
@@ -159,7 +114,7 @@ jobs:
 
       # Step 1: Federated credentials file for gcloud and Artifact Registry Docker push.
       - name: Authenticate to Google Cloud (OIDC)
-        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         id: gcp-auth
         uses: google-github-actions/auth@v3
         with:
@@ -181,7 +136,7 @@ jobs:
           create_credentials_file: false
 
       - name: Set up gcloud
-        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         uses: google-github-actions/setup-gcloud@v3
 
       # Guard against accidentally running foundation-only bootstrap on a populated production
@@ -210,7 +165,7 @@ jobs:
       # Fail fast before pushing images or running migrations if foundation resources
       # or required Secret Manager versions have not been bootstrapped yet.
       - name: Preflight Artifact Registry and Secret Manager versions
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         run: |
           set -euo pipefail
           if ! gcloud artifacts repositories describe kvitbit \
@@ -235,6 +190,10 @@ jobs:
           if [ "${KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET:-false}" = "true" ]; then
             required_secrets="${required_secrets} ${feedback_secret}"
           fi
+          altcha_secret="kvitbit-${KVITBIT_STAGE}-altcha-hmac-key"
+          if [ "${KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET:-false}" = "true" ]; then
+            required_secrets="${required_secrets} ${altcha_secret}"
+          fi
           turbo_cache_secret="kvitbit-${KVITBIT_STAGE}-turbo-cache-token"
           if [ "${KVITBIT_ENABLE_TURBO_CACHE:-false}" = "true" ]; then
             required_secrets="${required_secrets} ${turbo_cache_secret}"
@@ -248,6 +207,8 @@ jobs:
             if [ "$state" != "ENABLED" ]; then
               if [ "$secret_id" = "$feedback_secret" ]; then
                 echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_feedback_secret=true if the container is missing, then add an enabled token version before deploying."
+              elif [ "$secret_id" = "$altcha_secret" ]; then
+                echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_altcha_secret=true if the container is missing, then add an enabled ALTCHA HMAC key version before deploying."
               elif [ "$secret_id" = "$resend_secret" ]; then
                 echo "::error::Secret Manager secret '${secret_id}' does not have an ENABLED 'latest' version (got '${state:-missing}'). Run bootstrap_resend_secret=true if the container is missing, then add an enabled API key version before deploying."
               elif [ "$secret_id" = "$turbo_cache_secret" ]; then
@@ -260,16 +221,16 @@ jobs:
           done
 
       - name: Configure Docker for Artifact Registry
-        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Set up Docker Buildx
-        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push Kvitbit OCI image
         id: image
-        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         run: |
           set -euo pipefail
           IMAGE_REPO="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/kvitbit/kvitbit"
@@ -301,7 +262,7 @@ jobs:
 
       # Explicit migration step BEFORE Cloud Run / runner pool rollout (rule S5, #878).
       - name: Run database and cluster schema migrations
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           DATABASE_URL_UNPOOLED: ${{ secrets.DATABASE_DIRECT_URL }}
@@ -317,13 +278,18 @@ jobs:
           fi
           bun apps/server/src/migrate.ts
 
-      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || inputs.bootstrap_feedback_secret && 'feedback secret bootstrap' || inputs.bootstrap_resend_secret && 'resend secret bootstrap' || inputs.bootstrap_turbo_cache_secret && 'turbo cache secret bootstrap' || inputs.bootstrap_foundation && 'foundation bootstrap' || 'deploy' }})
+      - name: Run pure-Alchemy GCP stack (${{ inputs.dry_run && 'plan' || inputs.bootstrap_feedback_secret && 'feedback secret bootstrap' || inputs.bootstrap_altcha_secret && 'ALTCHA secret bootstrap' || inputs.bootstrap_resend_secret && 'resend secret bootstrap' || inputs.bootstrap_turbo_cache_secret && 'turbo cache secret bootstrap' || inputs.bootstrap_foundation && 'foundation bootstrap' || 'deploy' }})
         working-directory: infra/alchemy
         env:
           GOOGLE_ACCESS_TOKEN: ${{ steps.alchemy-auth.outputs.access_token }}
           GOOGLE_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           KVITBIT_STAGE: ${{ env.KVITBIT_STAGE }}
+          KVITBIT_ENV: ${{ env.KVITBIT_ENV }}
           KVITBIT_BOOTSTRAP_FOUNDATION: ${{ env.BOOTSTRAP_FOUNDATION }}
+          KVITBIT_BOOTSTRAP_FEEDBACK_SECRET: ${{ env.BOOTSTRAP_FEEDBACK_SECRET }}
+          KVITBIT_BOOTSTRAP_ALTCHA_SECRET: ${{ env.BOOTSTRAP_ALTCHA_SECRET }}
+          KVITBIT_BOOTSTRAP_RESEND_SECRET: ${{ env.BOOTSTRAP_RESEND_SECRET }}
+          KVITBIT_BOOTSTRAP_TURBO_CACHE_SECRET: ${{ env.BOOTSTRAP_TURBO_CACHE_SECRET }}
           KVITBIT_GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
           KVITBIT_GCP_PROJECT_NUMBER: ${{ vars.GCP_PROJECT_NUMBER }}
           KVITBIT_GCP_REGION: ${{ vars.GCP_REGION }}
@@ -331,7 +297,10 @@ jobs:
           KVITBIT_ALCHEMY_STATE_BUCKET: ${{ vars.ALCHEMY_STATE_BUCKET }}
           KVITBIT_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
           KVITBIT_APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+          KVITBIT_EMAIL_MODE: ${{ env.KVITBIT_EMAIL_MODE }}
           KVITBIT_EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          KVITBIT_BLOB_DRIVER: ${{ env.KVITBIT_BLOB_DRIVER }}
+          KVITBIT_BOT_PROTECTION_MODE: ${{ env.KVITBIT_BOT_PROTECTION_MODE }}
           KVITBIT_ALERT_EMAIL: ${{ vars.KVITBIT_ALERT_EMAIL }}
           KVITBIT_POSTHOG_KEY: ${{ vars.KVITBIT_POSTHOG_KEY }}
           KVITBIT_POSTHOG_HOST: ${{ vars.KVITBIT_POSTHOG_HOST }}
@@ -343,6 +312,7 @@ jobs:
           KVITBIT_ENABLE_SMTP_SECRET: ${{ env.KVITBIT_ENABLE_SMTP_SECRET }}
           KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET: ${{ env.KVITBIT_ENABLE_MOBILE_SIGNING_KEY_SECRET }}
           KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET: ${{ env.KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET }}
+          KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET: ${{ env.KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET }}
           KVITBIT_ENABLE_TURBO_CACHE: ${{ env.KVITBIT_ENABLE_TURBO_CACHE }}
           KVITBIT_TURBO_CACHE_BUCKET: ${{ vars.KVITBIT_TURBO_CACHE_BUCKET }}
           KVITBIT_TURBO_CACHE_IMAGE: ${{ vars.KVITBIT_TURBO_CACHE_IMAGE }}
@@ -372,10 +342,19 @@ jobs:
               echo "::error::Set the KVITBIT_ENABLE_FEEDBACK_GITHUB_TOKEN_SECRET repository variable to true before bootstrapping the feedback token container."
               exit 1
             fi
-            # Alchemy evaluates the full declaration before selecting the one secret.
+            # Alchemy evaluates the stack config before selecting the one secret.
             KVITBIT_IMAGE_DIGEST="sha256:$(printf '%s' "$GITHUB_SHA" | sha256sum | awk '{print $1}')"
             export KVITBIT_IMAGE_DIGEST
             selection=(--include "Secret-kvitbit-${KVITBIT_STAGE}-feedback-github-token")
+          elif [ "${BOOTSTRAP_ALTCHA_SECRET:-false}" = "true" ]; then
+            if [ "${KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET:-false}" != "true" ]; then
+              echo "::error::Set the KVITBIT_ENABLE_ALTCHA_HMAC_KEY_SECRET repository variable to true before bootstrapping the ALTCHA HMAC key container."
+              exit 1
+            fi
+            # Alchemy evaluates the stack config before selecting the one secret.
+            KVITBIT_IMAGE_DIGEST="sha256:$(printf '%s' "$GITHUB_SHA" | sha256sum | awk '{print $1}')"
+            export KVITBIT_IMAGE_DIGEST
+            selection=(--include "Secret-kvitbit-${KVITBIT_STAGE}-altcha-hmac-key")
           elif [ "${BOOTSTRAP_RESEND_SECRET:-false}" = "true" ]; then
             if [ "${KVITBIT_ENABLE_RESEND_SECRET:-false}" != "true" ]; then
               echo "::error::Set the KVITBIT_ENABLE_RESEND_SECRET repository variable to true before bootstrapping the Resend API key container."
@@ -400,7 +379,7 @@ jobs:
           fi
 
       - name: Sync Turborepo remote cache bucket lifecycle
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true' && env.KVITBIT_ENABLE_TURBO_CACHE == 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true' && env.KVITBIT_ENABLE_TURBO_CACHE == 'true'
         env:
           KVITBIT_TURBO_CACHE_BUCKET: ${{ vars.KVITBIT_TURBO_CACHE_BUCKET }}
           KVITBIT_TURBO_CACHE_TTL_DAYS: ${{ vars.KVITBIT_TURBO_CACHE_TTL_DAYS }}
@@ -417,7 +396,7 @@ jobs:
             --quiet
 
       - name: Verify runner pool reconciled target digest and config
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         env:
           TARGET_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
@@ -484,7 +463,7 @@ jobs:
           done
 
       - name: Verify inbound mail forwarder reconciled target config and script
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true' && vars.KVITBIT_MAIL_DOMAIN != ''
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true' && vars.KVITBIT_MAIL_DOMAIN != ''
         env:
           KVITBIT_MAIL_ZONE: ${{ vars.KVITBIT_MAIL_ZONE }}
         run: |
@@ -525,7 +504,7 @@ jobs:
           exit 1
 
       - name: Verify database readiness and static mounts
-        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
+        if: env.DRY_RUN != 'true' && env.BOOTSTRAP_FOUNDATION != 'true' && env.BOOTSTRAP_FEEDBACK_SECRET != 'true' && env.BOOTSTRAP_ALTCHA_SECRET != 'true' && env.BOOTSTRAP_RESEND_SECRET != 'true' && env.BOOTSTRAP_TURBO_CACHE_SECRET != 'true'
         env:
           KVITBIT_EDGE_DOMAINS: ${{ vars.KVITBIT_EDGE_DOMAINS }}
           APP_ORIGIN: ${{ vars.APP_ORIGIN }}

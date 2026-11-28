@@ -44,6 +44,20 @@ const entries = (lines: ReadonlyArray<string>) =>
     return JSON.parse(line) as Record<string, unknown>;
   });
 
+const failingProdEmail = (status = 422, body = "private-provider-payload") => {
+  const send = Object.assign(async () => new Response(body, { status }), {
+    preconnect: () => {},
+  });
+  return makeEmailSenderLayer(
+    {
+      from: "noreply@kvitbit.test",
+      resendApiKey: Option.some(Redacted.make("private-resend-key")),
+      smtpUrl: Option.none(),
+    },
+    "production",
+  ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)), Layer.orDie);
+};
+
 const unconfiguredEmail = makeEmailSenderLayer(
   { from: "noreply@kvitbit.test", resendApiKey: Option.none(), smtpUrl: Option.none() },
   "production",
@@ -305,7 +319,12 @@ describe("server logging", () => {
     ).not.toThrow();
   });
 
-  test("logs an unconfigured invitation send without envelope data and preserves EmailRejected", () => {
+  test("fails fast for unconfigured production email, logs rejected invitation sends without envelope data, and logs console dev sends safely", async () => {
+    const unconfiguredExit = await Effect.runPromiseExit(
+      Layer.build(unconfiguredEmail).pipe(Effect.scoped),
+    );
+    expect(unconfiguredExit._tag).toBe("Failure");
+
     const { lines, layer } = capture();
     const send = Effect.flatMap(EmailSender, (sender) =>
       sender.send(
@@ -321,12 +340,12 @@ describe("server logging", () => {
         { idempotencyKey: "private-idempotency-key" },
       ),
     );
-    const result = Effect.runSync(
-      send.pipe(Effect.provide(unconfiguredEmail), Effect.provide(layer), Effect.result),
+    const result = await Effect.runPromise(
+      send.pipe(Effect.provide(failingProdEmail()), Effect.provide(layer), Effect.result),
     );
     expect(result).toMatchObject({
       _tag: "Failure",
-      failure: { _tag: "EmailRejected", cause: "Email delivery is not configured" },
+      failure: { _tag: "EmailRejected" },
     });
     expect(entries(lines)).toMatchObject([
       {
@@ -335,7 +354,7 @@ describe("server logging", () => {
         annotations: {
           event: "EmailRejected",
           emailKind: "invitation",
-          reason: "Email delivery is not configured",
+          reason: "Email provider failed to deliver",
         },
       },
     ]);
@@ -358,7 +377,7 @@ describe("server logging", () => {
   test("logs rejected verification, reset and magic-link deliveries through actual Better Auth routes", async () => {
     const { lines, layer } = capture("example-project");
     const consoleError = spyOn(console, "error").mockImplementation(() => {});
-    const app = makeHarness({ authEmailSender: unconfiguredEmail, logger: layer });
+    const app = makeHarness({ authEmailSender: failingProdEmail(), logger: layer });
     const email = "private-identity@example.test";
     const password = "A private-strong password!";
     const post = (path: string, body: object) =>
@@ -386,7 +405,7 @@ describe("server logging", () => {
           annotations: {
             event: "EmailRejected",
             emailKind,
-            reason: "Email delivery is not configured",
+            reason: "Email provider failed to deliver",
           },
         })),
       );
@@ -413,7 +432,7 @@ describe("server logging", () => {
         smtpUrl: Option.none(),
       },
       "production",
-    ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)));
+    ).pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, send)), Layer.orDie);
     const app = makeHarness({ authEmailSender, logger: layer });
     const email = "private-configured-recipient@example.test";
     const password = "A private-strong password!";
