@@ -63,6 +63,17 @@ describe("error codecs", () => {
     expect(Schema.decodeExit(json)(input).pipe(Exit.isFailure)).toBe(true);
   });
 
+  test("rejects a non-finite numeric segment in an issue path", () => {
+    expect(
+      Schema.decodeExit(CoreError)({
+        _tag: "Invalid",
+        issues: [
+          { path: ["lines", Number.POSITIVE_INFINITY, "vat"], code: "vat.not_allowed_for_regime" },
+        ],
+      }).pipe(Exit.isFailure),
+    ).toBe(true);
+  });
+
   test("errors are yieldable Error instances", () => {
     expect(Forbidden.make({ action: "workspace.close" })).toBeInstanceOf(Error);
   });

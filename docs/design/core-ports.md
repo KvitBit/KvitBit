@@ -1312,7 +1312,7 @@ export const DocumentDelivery = Workflow.make("kvitbit/DocumentDelivery", {
   idempotencyKey: ({ deliveryId }) => deliveryId,
   success: Schema.Literals(["sent", "failed", "skipped"]),
 })
-// Started by: Documents.send, Documents.issue({ send }), Payments.record (PTD auto-send),
+// Started by: Documents.send, Documents.issue with send options, Payments.record (PTD auto-send),
 //             RecurringIssuance (autoSend), PaymentReminders (each step).
 // The deliveries row (minted in the starting transaction) holds the immutable snapshot of J3:
 // documentId, revision, recipients, language, purpose, subject, render model. Steps:

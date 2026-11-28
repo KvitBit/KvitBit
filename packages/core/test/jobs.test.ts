@@ -21,7 +21,6 @@ import { DeliveriesRepo } from "../src/modules/documents/deliveries/repo";
 import { ScheduleViewSchema } from "../src/modules/recurring/view";
 import { WorkspacesRepo } from "../src/modules/workspaces/repo";
 import { TestCore, type TestCoreServices } from "../src/testing/TestCore";
-import { TestCaller } from "./helpers/callerContext";
 import { account } from "./helpers/callers";
 import { dec } from "./modules/documents/fixtures";
 import { templateInput } from "./modules/recurring/fixtures";
@@ -48,12 +47,12 @@ const setupWorkspaceAndContact = () =>
   Effect.gen(function* () {
     const ownerCaller = yield* Effect.flatMap(Workspaces, (w) =>
       w.create(account({ userId: OWNER, email: "owner@test.cz" }), { name: "Acme s.r.o." }),
-    ).pipe(Effect.provideService(TestCaller, account({ userId: OWNER, email: "owner@test.cz" })));
+    );
 
     const workspaceId = ownerCaller.workspaceId;
     const contact = yield* Effect.flatMap(Contacts, (c) =>
       c.save(ownerCaller, { name: "Buyer s.r.o.", billingEmails: ["billing@buyer.cz"] }),
-    ).pipe(Effect.provideService(TestCaller, ownerCaller));
+    );
 
     const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
     return {
@@ -77,11 +76,9 @@ describe("CoreJobs System-caller entry points (#894)", () => {
               lines: [{ description: "Consulting", quantity: dec("1"), unitPrice: dec("1000") }],
             },
           }),
-        ).pipe(Effect.provideService(TestCaller, ownerCaller));
-
-        const sent = yield* Effect.flatMap(Documents, (d) => d.send(ownerCaller, doc.id)).pipe(
-          Effect.provideService(TestCaller, ownerCaller),
         );
+
+        const sent = yield* Effect.flatMap(Documents, (d) => d.send(ownerCaller, doc.id));
         return yield* deliveryJob.deliver(workspaceId, sent.deliveryId);
       }),
     );
@@ -102,12 +99,10 @@ describe("CoreJobs System-caller entry points (#894)", () => {
               lines: [{ description: "Work", quantity: dec("1"), unitPrice: dec("500") }],
             },
           }),
-        ).pipe(Effect.provideService(TestCaller, ownerCaller));
+        );
 
         // Send document so reminders are armed (default offsets [3, 10, 30] -> due 2026-04-13)
-        yield* Effect.flatMap(Documents, (d) => d.send(ownerCaller, doc.id)).pipe(
-          Effect.provideService(TestCaller, ownerCaller),
-        );
+        yield* Effect.flatMap(Documents, (d) => d.send(ownerCaller, doc.id));
 
         const swept = yield* reminderJob.sweepWorkspaces([workspaceId], IsoDate.make("2026-04-15"));
         const deliveries = yield* Effect.flatMap(DeliveriesRepo, (r) =>
@@ -128,7 +123,7 @@ describe("CoreJobs System-caller entry points (#894)", () => {
         const { workspaceId, ownerCaller, contactId } = yield* setupWorkspaceAndContact();
         const tpl = yield* Effect.flatMap(Templates, (t) =>
           t.save(ownerCaller, templateInput({ contact: contactId })),
-        ).pipe(Effect.provideService(TestCaller, ownerCaller));
+        );
 
         const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(tpl["id"]);
         const scheduled = yield* Effect.flatMap(Templates, (t) =>
@@ -143,7 +138,7 @@ describe("CoreJobs System-caller entry points (#894)", () => {
             },
             tpl.revision,
           ),
-        ).pipe(Effect.provideService(TestCaller, ownerCaller));
+        );
 
         const schedule = yield* Schema.decodeUnknownEffect(Schema.toType(ScheduleViewSchema))(
           scheduled.schedule,
@@ -162,9 +157,7 @@ describe("CoreJobs System-caller entry points (#894)", () => {
     const out = await runWithCore(
       Effect.gen(function* () {
         const { workspaceId, ownerCaller } = yield* setupWorkspaceAndContact();
-        const job = yield* Effect.flatMap(Reports, (r) => r.startExport(ownerCaller)).pipe(
-          Effect.provideService(TestCaller, ownerCaller),
-        );
+        const job = yield* Effect.flatMap(Reports, (r) => r.startExport(ownerCaller));
         const tables = yield* exportJob.reportingTables(workspaceId, "cs");
         const finished = yield* exportJob.finish(workspaceId, job.id, 1024);
         return {
@@ -186,7 +179,7 @@ describe("CoreJobs System-caller entry points (#894)", () => {
         const { workspaceId, ownerCaller } = yield* setupWorkspaceAndContact();
         const inv = yield* Effect.flatMap(Workspaces, (w) =>
           w.invite(ownerCaller, "new@acme.cz", "member"),
-        ).pipe(Effect.provideService(TestCaller, ownerCaller));
+        );
 
         const pendingNow = yield* invitationJob.getPending(
           WorkspaceId.make(workspaceId),

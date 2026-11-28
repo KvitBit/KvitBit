@@ -877,11 +877,11 @@ Rules for the edge-owned administration endpoints:
 | `documents` | `list` | `GET {ws}/documents?<DocumentQuery>&cursor&limit` | `Documents.list` | | `Page<DocumentSummary>` | `Invalid` |
 | `documents` | `preview` | `POST {ws}/documents/preview` | `Documents.preview` | | `DocumentView` | `Invalid`, `Unavailable` |
 | `documents` | `createDraft` | `POST {ws}/documents` | `Documents.createDraft` | Idem | 201 `DocumentView` | `Invalid`, `Unavailable` |
-| `documents` | `issueFromInput` | `POST {ws}/documents/issue` | `Documents.issue({ input })` | Idem | 201 `DocumentView` | core errors |
+| `documents` | `issueFromInput` | `POST {ws}/documents/issue` | `Documents.issue(caller, { input })` | Idem | 201 `DocumentView` | core errors |
 | `documents` | `get` | `GET {ws}/documents/{documentId}` | `Documents.get` | | `DocumentView` (ETag) | |
 | `documents` | `edit` | `PATCH {ws}/documents/{documentId}` | `Documents.edit` | If-Match | `DocumentView` (ETag) | core errors |
 | `documents` | `discardDraft` | `DELETE {ws}/documents/{documentId}` | `Documents.discardDraft` | If-Match | 204 | `Conflict{illegal_transition}` |
-| `documents` | `issueDraft` | `POST {ws}/documents/{documentId}/issue` | `Documents.issue({ draft, expectedRevision })` | If-Match, Idem | `DocumentView` (ETag) | core errors |
+| `documents` | `issueDraft` | `POST {ws}/documents/{documentId}/issue` | `Documents.issue(caller, { draft, expectedRevision })` | If-Match, Idem | `DocumentView` (ETag) | core errors |
 | `documents` | `lock` | `POST {ws}/documents/{documentId}/lock` | `Documents.lock` | | `DocumentView` (ETag) | `Conflict` |
 | `documents` | `unlock` | `POST {ws}/documents/{documentId}/unlock` | `Documents.unlock` | | `DocumentView` (ETag) | `Conflict`, `Invalid` |
 | `documents` | `cancel` | `POST {ws}/documents/{documentId}/cancel` | `Documents.cancel` | Idem | `CancelResult` | core errors |
@@ -1019,19 +1019,31 @@ export class DocumentsGroup extends HttpApiGroup.make("documents")
   .annotate(OpenApi.Description, "Invoices, Proformas, Payment Tax Documents and Credit Notes") {}
 ```
 
-Handler sketch for the two `issue` shapes, showing the header mapping:
+Both `issue` handlers read the caller from `RequestCaller` and map the request headers to core options.
 
 ```ts
-// apps/server/src/http/documents.ts
+// apps/server/src/http/groups/documents.ts (sketch)
 export const DocumentsLive = HttpApiBuilder.group(Api, "documents", (handlers) => handlers
   .handle("issueDraft", ({ params, headers, payload }) =>
-    withRevision(headers["if-match"], (expectedRevision) =>
-      Documents.use((d) => d.issue(
-        { draft: params.documentId, expectedRevision },
-        { requestKey: headers["idempotency-key"], send: payload.send },
-      ))))
+    Effect.flatMap(RequestCaller, (caller) =>
+      withRevision(headers["if-match"], (expectedRevision) =>
+        Documents.use((d) => d.issue(
+          caller,
+          { draft: params.documentId, expectedRevision },
+          { ...requestOptions(headers), ...compact({ send: payload.send }) },
+        )),
+      ),
+    ),
+  )
   .handle("issueFromInput", ({ headers, payload }) =>
-    Documents.use((d) => d.issue({ input: payload.input }, { requestKey: headers["idempotency-key"], send: payload.send })))
+    Effect.flatMap(RequestCaller, (caller) =>
+      Documents.use((d) => d.issue(
+        caller,
+        { input: payload.input },
+        { ...requestOptions(headers), ...compact({ send: payload.send }) },
+      )),
+    ),
+  )
   // ... one line per endpoint, each calling one core method
 )
 ```
