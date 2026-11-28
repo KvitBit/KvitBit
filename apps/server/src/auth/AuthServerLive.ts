@@ -20,7 +20,7 @@ import { HttpConfig } from "../http/config";
 import { acceptLanguageLocale } from "../http/edge/request";
 import { Analytics } from "../runtime/analytics";
 import { AuthServer } from "./AuthServer";
-import { makeDrizzleOverSqlClient, runAuthEffect } from "./drizzleBridge";
+import { makeAuthEffectRunner, makeDrizzleOverSqlClient } from "./drizzleBridge";
 import { makeAuthWithInvitationSignUp, SIGN_UP_PATH } from "./invitationSignUp";
 import { makeWorkspaceAuth } from "./oauthWorkspace";
 
@@ -47,6 +47,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
       const emailSender = yield* EmailSender;
       const workspaces = yield* Workspaces;
       const clock = yield* Clock.Clock;
+      const runAuthEffect = yield* makeAuthEffectRunner;
       const emailRateLimiter = yield* makeEmailRateLimiter();
 
       const db = makeDrizzleOverSqlClient(sql);

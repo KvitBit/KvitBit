@@ -24,7 +24,9 @@ import {
 export const loadAlchemyStackConfig = loadStackConfig.pipe(
   Effect.provideServiceEffect(
     StackEnv,
-    readAlchemyRawEnv().pipe(
+    Effect.suspend(() =>
+      readAlchemyRawEnv({ argv: process.argv, env: process.env, cwd: process.cwd() }),
+    ).pipe(
       Effect.mapError(
         (cause) =>
           new Config.ConfigError(

@@ -515,23 +515,22 @@ const createRawSmtpServer = (
             continue;
           }
 
-          const result = yield* options
-            .onMessage({
-              remoteIp,
-              tls: isTls,
-              helo: heloDomain,
-              mailFrom: currentMailFrom,
-              rcptTo: currentRcptTo,
-              rawBytes,
-            })
-            .pipe(
-              Effect.catchDefect(() =>
-                Effect.succeed({
-                  smtpCode: 451 as const,
-                  smtpMessage: "4.3.0 Temporary local error",
-                }),
-              ),
-            );
+          const message = {
+            remoteIp,
+            tls: isTls,
+            helo: heloDomain,
+            mailFrom: currentMailFrom,
+            rcptTo: currentRcptTo,
+            rawBytes,
+          };
+          const result = yield* Effect.suspend(() => options.onMessage(message)).pipe(
+            Effect.catchDefect(() =>
+              Effect.succeed({
+                smtpCode: 451 as const,
+                smtpMessage: "4.3.0 Temporary local error",
+              }),
+            ),
+          );
           writeLine(`${result.smtpCode} ${result.smtpMessage}`);
         } else {
           prevDataLineHadCrlf = hasCrlf;

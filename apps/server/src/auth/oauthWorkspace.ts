@@ -27,7 +27,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import {
   AuthCallbackError,
   fromAuthPromise,
-  runAuthEffect,
+  makeAuthEffectRunner,
   withDrizzleSqlContext,
 } from "./drizzleBridge";
 
@@ -185,6 +185,12 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
     config: AuthConfig,
     databaseHooks: NonNullable<BetterAuthOptions["databaseHooks"]>,
   ) {
+    const runAuthEffect = yield* makeAuthEffectRunner;
+    const recoverAuthFailure = Effect.fn("oauth.recoverAuthFailure")(function* (cause: unknown) {
+      if (isResponse(cause)) return cause;
+      if (!isDeliveryError(cause)) yield* Effect.logError("Authentication request failed");
+      return new Response(null, { status: 500, statusText: "Internal Server Error" });
+    });
     const authorizeConsent = Effect.fn("authorizeWorkspaceConsent")(function* () {
       // The provider's earlier hook verifies the signed query before populating this state.
       const decision = decisionContext.getStore();
@@ -422,9 +428,7 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
         Effect.provideService(SqlClient.BeginTransaction, "BEGIN ISOLATION LEVEL READ COMMITTED"),
         Effect.catch((error) => {
           if (error._tag === "OAuthProviderServerFailure") return Effect.succeed(error.response);
-          if (error._tag === "AuthCallbackError" && isResponse(error.cause)) {
-            return Effect.succeed(error.cause);
-          }
+          if (error._tag === "AuthCallbackError") return recoverAuthFailure(error.cause);
           return Effect.succeed(
             Response.json(
               { error: "server_error" },
@@ -437,15 +441,7 @@ export const makeWorkspaceAuth = (sql: SqlClient.SqlClient) =>
 
     const handler = (request: Request) =>
       runAuthEffect(
-        handleOAuth(request).pipe(
-          Effect.catch(({ cause }) => {
-            if (isResponse(cause)) return Effect.succeed(cause);
-            if (isDeliveryError(cause)) return Effect.succeed(new Response(null, { status: 500 }));
-            return Effect.logError("Authentication request failed").pipe(
-              Effect.as(new Response(null, { status: 500 })),
-            );
-          }),
-        ),
+        handleOAuth(request).pipe(Effect.catch(({ cause }) => recoverAuthFailure(cause))),
       );
     return { ...auth, fetch: handler, handler };
   });

@@ -19,7 +19,7 @@ import type * as SqlClient from "effect/sql/SqlClient";
 
 const DrizzleRow = Schema.Record(Schema.String, Schema.Unknown);
 
-import { currentAuthLogContext } from "./logging";
+import { currentAuthLogContext, pickAuthLogContext } from "./logging";
 
 const sqlContext = new AsyncLocalStorage<Context.Context<never>>();
 
@@ -44,14 +44,21 @@ export const withDrizzleSqlContext = <A>(callback: () => PromiseLike<A>) =>
     fromAuthPromise(() => sqlContext.run(context, callback)),
   );
 
-export const runAuthEffect = <A, E>(effect: Effect.Effect<A, E>) => {
-  const context = sqlContext.getStore() ?? currentAuthLogContext() ?? Context.empty();
-  // Better Auth and Drizzle require promises and recognize their original rejection values.
+const authEffectRunner =
+  (fallback: Context.Context<never>) =>
+  <A, E>(effect: Effect.Effect<A, E>) => {
+    const context = sqlContext.getStore() ?? currentAuthLogContext() ?? fallback;
+    // Better Auth and Drizzle require promises and recognize their original rejection values.
+    return Effect.runPromiseWith(context)(
+      effect.pipe(Effect.catchIf(isAuthCallbackError, (error) => Effect.die(error.cause))),
+    );
+  };
 
-  return Effect.runPromiseWith(context)(
-    effect.pipe(Effect.catchIf(isAuthCallbackError, (error) => Effect.die(error.cause))),
-  );
-};
+export const runAuthEffect = authEffectRunner(Context.empty());
+
+export const makeAuthEffectRunner = Effect.withFiberSucceed((fiber) =>
+  authEffectRunner(pickAuthLogContext(fiber.context)),
+);
 
 export const makeDrizzleOverSqlClient = (sql: SqlClient.SqlClient) => {
   const execute: RemoteCallback = (query, params, method) =>

@@ -958,14 +958,14 @@ const parseEnvFileFlag = (argv: ReadonlyArray<string>): string | undefined => {
  * shell > `.env`) without modifying Effect's `ConfigProvider`.
  */
 export const readAlchemyRawEnv = Effect.fn("Alchemy.readRawEnv")(function* ({
-  argv = process.argv,
-  env = process.env,
-  cwd = process.cwd(),
+  argv,
+  env,
+  cwd,
 }: {
-  readonly argv?: ReadonlyArray<string>;
-  readonly env?: Readonly<Record<string, string | undefined>>;
-  readonly cwd?: string;
-} = {}) {
+  readonly argv: ReadonlyArray<string>;
+  readonly env: Readonly<Record<string, string | undefined>>;
+  readonly cwd: string;
+}) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const envFile = parseEnvFileFlag(argv);

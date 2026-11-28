@@ -164,7 +164,7 @@ export const makeServerLogger = ({
             ? redactLogText(first)
             : first === undefined
               ? "Effect log"
-              : Predicate.isObject(first)
+              : Predicate.isObjectOrArray(first)
                 ? encodeJson(sanitizeLogValue(first))
                 : String(sanitizeLogValue(first)),
           timestamp,

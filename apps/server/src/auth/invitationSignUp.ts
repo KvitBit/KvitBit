@@ -17,7 +17,12 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import { acceptLanguageLocale } from "../http/edge/request";
 import type { SignUpMethod } from "../runtime/analytics";
-import { fromAuthPromise, runAuthEffect, withDrizzleSqlContext } from "./drizzleBridge";
+import {
+  fromAuthPromise,
+  makeAuthEffectRunner,
+  runAuthEffect as runInvitationGateEffect,
+  withDrizzleSqlContext,
+} from "./drizzleBridge";
 
 export const SIGN_UP_PATH = "/sign-up/email";
 
@@ -87,7 +92,7 @@ const invitationSignUpHook = (
 
   return {
     matcher: (ctx) => ctx.path === SIGN_UP_PATH,
-    handler: createAuthMiddleware((ctx) => runAuthEffect(verifyInvitation(ctx))),
+    handler: createAuthMiddleware((ctx) => runInvitationGateEffect(verifyInvitation(ctx))),
   };
 };
 
@@ -125,6 +130,7 @@ export const makeAuthWithInvitationSignUp = Effect.fn("auth.invitationSetup")(fu
     readonly capture: (request: Request, method: SignUpMethod) => Effect.Effect<void>;
   },
 ) {
+  const runAuthEffect = yield* makeAuthEffectRunner;
   // The normal OAuth provider initializes its resource rows before the invitation-only instance.
   yield* withDrizzleSqlContext(() => auth.$context);
   const verifiedEmails = new WeakMap<Request, string>();

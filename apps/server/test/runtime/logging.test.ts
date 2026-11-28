@@ -335,6 +335,12 @@ describe("server logging", () => {
     }
   });
 
+  test("keeps array headlines encoded as JSON", () => {
+    const { lines, layer } = capture();
+    Effect.runSync(Effect.logInfo(["first", "second"]).pipe(Effect.provide(layer)));
+    expect(entries(lines)[0]).toMatchObject({ message: '["first","second"]' });
+  });
+
   test("escapes terminal controls and keeps oversized JSON entries valid", () => {
     const pretty = capture(undefined, "pretty");
     Effect.runSync(Effect.logInfo("Hello\u001b[2J\nworld").pipe(Effect.provide(pretty.layer)));

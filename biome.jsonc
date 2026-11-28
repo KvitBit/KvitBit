@@ -120,8 +120,6 @@
         "!apps/web/src/runtime/altcha.worker.ts",
         // Better Auth and Drizzle expect Promise callbacks and original rejection values.
         "!apps/server/src/auth/drizzleBridge.ts",
-        // Better Auth invokes its invitation logger synchronously.
-        "!apps/server/src/auth/invitationSignUp.ts",
         // Better Auth's middleware callbacks return native Promises.
         "!packages/adapters/src/auth/better-auth.ts",
         // The public API key verifier accepts a Promise lookup and returns a Promise.
@@ -144,7 +142,7 @@
         "!**/*.{test,spec,test-utils}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}",
         // Deployment validation needs exact raw keys, including empty and unknown opt-outs.
         "!apps/server/src/{main,worker}.ts",
-        "!infra/alchemy/src/{config,preflight-cli}.ts",
+        "!infra/alchemy/src/preflight-cli.ts",
         "!apps/mobile/src/config/env.ts"
       ]
     },

@@ -1249,6 +1249,30 @@ describe("Effect SMTP server (RFC 5321 + RFC 6531 SMTPUTF8 + STARTTLS)", () => {
       attach(sock);
     });
 
+  test("returns a temporary SMTP failure when the relay callback throws synchronously", async () => {
+    const replies = await Effect.gen(function* () {
+      const { port } = yield* startSmtpServer({
+        host: "127.0.0.1",
+        port: 0,
+        domain: "kvitbit.com",
+        mxHost: "mx.kvitbit.com",
+        allowedRecipients: new Set(["ops@kvitbit.com"]),
+        onMessage: () => {
+          throw new Error("Synchronous relay failure");
+        },
+      });
+      return yield* runSmtpSession(port, [
+        { send: "EHLO sender.example.com\r\n" },
+        { send: "MAIL FROM:<sender@example.com>\r\n" },
+        { send: "RCPT TO:<ops@kvitbit.com>\r\n" },
+        { send: "DATA\r\n" },
+        { send: "Subject: Relay failure\r\n\r\nBody\r\n.\r\n" },
+        { send: "QUIT\r\n" },
+      ]);
+    }).pipe(Effect.scoped, Effect.runPromise);
+    expect(replies).toContain("451 4.3.0 Temporary local error");
+  });
+
   test("enforces allowlist, bare Postmaster, SMTPUTF8, strict both-sides CRLF DATA termination, size cap, and STARTTLS", async () => {
     const certDir = await Effect.runPromise(
       fixtureFileSystem.makeTempDirectory({ prefix: "kvitbit-smtp-tls-" }),
