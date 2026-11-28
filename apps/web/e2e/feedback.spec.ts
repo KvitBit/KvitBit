@@ -225,7 +225,7 @@ if (!("Bun" in globalThis)) {
       element.replaceChildren("Visible title", hidden, ariaHidden);
     });
     await page.locator(overlay).getByRole("button", { name: "Visual feedback" }).click();
-    await heading.click();
+    await heading.dispatchEvent("click");
     const { submission, body } = await captureSubmission(page, "Adjust the title.");
     expect(submission.pins[0]).toMatchObject({
       tag: "h1",
