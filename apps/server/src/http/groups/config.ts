@@ -9,6 +9,7 @@ import {
 } from "@kvitbit/api-contract";
 import { Effect } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
+import { POSTHOG_PROXY_PATH } from "../analyticsProxy";
 import { HttpConfig } from "../config";
 
 export const ConfigGroupLive = HttpApiBuilder.group(Api, "config", (handlers) =>
@@ -18,7 +19,12 @@ export const ConfigGroupLive = HttpApiBuilder.group(Api, "config", (handlers) =>
       Effect.succeed({
         version: config.version,
         botProtection: config.botProtection,
-        analytics: { posthog: config.posthog },
+        analytics: {
+          posthog:
+            config.posthog === null
+              ? null
+              : { apiKey: config.posthog.apiKey, host: POSTHOG_PROXY_PATH },
+        },
         uploads: {
           attachment: {
             maxBytes: ATTACHMENT_MAX_BYTES,

@@ -12,6 +12,7 @@ import { extname, resolve, sep } from "node:path";
 import { Effect, Option } from "effect";
 import { HttpRouter, HttpServerResponse } from "effect/http";
 import { HttpServerRequest } from "effect/http/HttpServerRequest";
+import { POSTHOG_PROXY_PATH } from "./analyticsProxy";
 import { HttpConfig } from "./config";
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
@@ -99,8 +100,22 @@ const isHashedAsset = (rel: string): boolean =>
   rel.startsWith("_expo/static/") ||
   /[.-][0-9a-f]{8,}\.[a-z0-9]+$/i.test(rel);
 
-const WEB_EXCLUDED_PREFIXES = ["/api/", "/mcp/", "/app/", "/assets/", "/.well-known/"];
-const WEB_EXCLUDED_EXACT = new Set(["/api", "/mcp", "/app", "/assets", "/.well-known"]);
+const WEB_EXCLUDED_PREFIXES = [
+  "/api/",
+  "/mcp/",
+  "/app/",
+  "/assets/",
+  "/.well-known/",
+  `${POSTHOG_PROXY_PATH}/`,
+];
+const WEB_EXCLUDED_EXACT = new Set([
+  "/api",
+  "/mcp",
+  "/app",
+  "/assets",
+  "/.well-known",
+  POSTHOG_PROXY_PATH,
+]);
 
 const isWebFallbackExcluded = (pathname: string): boolean =>
   WEB_EXCLUDED_EXACT.has(pathname) ||

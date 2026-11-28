@@ -4,7 +4,8 @@ import { createPageviewTracker } from "./analytics";
 
 const origin = "https://kvitbit.test";
 const apiKey = "phc_test";
-const host = "https://eu.i.posthog.com";
+const host = "/_kvb";
+const resolvedHost = `${origin}${host}`;
 const nextTurn = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 test("initializes once and captures only sanitized pageviews", async () => {
@@ -26,7 +27,7 @@ test("initializes once and captures only sanitized pageviews", async () => {
   expect(init).toHaveBeenCalledWith(
     apiKey,
     expect.objectContaining({
-      api_host: host,
+      api_host: resolvedHost,
       persistence: "memory",
       cookieless_mode: "always",
       autocapture: false,

@@ -180,7 +180,7 @@ if (typeof Bun === "undefined") {
     test("sends only cookieless pageviews after a single startup config request", async ({
       page,
     }) => {
-      const host = "https://eu.i.posthog.com";
+      const host = "/_kvb";
       let configRequests = 0;
       const uploads: { event: string; properties: Record<string, unknown> }[] = [];
       // Exercise actual ingestion while keeping PostHog's bot filter enabled in production.
@@ -199,7 +199,7 @@ if (typeof Bun === "undefined") {
           },
         });
       });
-      await page.route(`${host}/**`, async (route) => {
+      await page.route(`**${host}/**`, async (route) => {
         const request = route.request();
         if (request.method() === "POST") {
           const data = request.postDataBuffer();

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +6,7 @@ import { generateId } from "@kvitbit/adapters/auth";
 import { Effect, Layer, Option } from "effect";
 import { HttpRouter } from "effect/http";
 import { SqlClient } from "effect/sql";
+import { POSTHOG_PROXY_PATH } from "../../src/http/analyticsProxy";
 import { RequestIdsLive } from "../../src/http/edge/requestId";
 import { captureAnalytics, posthogSettings } from "../analytics-fixture";
 import { as, type Harness, json, makeHarness } from "./harness";
@@ -124,11 +125,136 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     });
   });
 
-  test("GET /api/v1/config exposes the configured PostHog project", async () => {
+  test("GET /api/v1/config exposes the configured PostHog project via the first-party proxy path", async () => {
     harness = makeHarness({ config: { posthog: posthogSettings } });
     const response = await harness.fetch("/api/v1/config");
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ analytics: { posthog: posthogSettings } });
+    expect(await response.json()).toMatchObject({
+      analytics: { posthog: { apiKey: posthogSettings.apiKey, host: POSTHOG_PROXY_PATH } },
+    });
+  });
+
+  test("POST /_kvb/* proxies allowlisted PostHog ingestion with credentials stripped and visitor IP forwarded", async () => {
+    const upstreamCalls: Array<{
+      readonly url: string;
+      readonly method: string | undefined;
+      readonly headers: Headers;
+      readonly body: string;
+      readonly redirect: string | undefined;
+    }> = [];
+    const proxyFetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      const body =
+        init?.body instanceof Uint8Array
+          ? new TextDecoder().decode(init.body)
+          : String(init?.body ?? "");
+      upstreamCalls.push({
+        url,
+        method: init?.method,
+        headers: new Headers(init?.headers),
+        body,
+        redirect: init?.redirect,
+      });
+      return new Response(JSON.stringify({ status: 1 }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "set-cookie": "ph_session=should-not-leak",
+        },
+      });
+    });
+
+    harness = makeHarness({
+      config: { posthog: posthogSettings, trustedProxyHops: 2 },
+      feedbackFetch: proxyFetch as unknown as typeof globalThis.fetch,
+    });
+
+    const payload = JSON.stringify({ event: "$pageview", properties: { $pathname: "/" } });
+    const ok = await harness.fetch(
+      `${POSTHOG_PROXY_PATH}/e/?ip=0&ver=1.455.4&compression=gzip-js&extra=dropped`,
+      {
+        method: "POST",
+        headers: {
+          host: "kvitbit.com",
+          origin: "https://kvitbit.com",
+          "content-type": "application/json",
+          "user-agent": "KvitbitTestBrowser/1.0",
+          cookie: "__Secure-kvitbit.session_token=secret-session",
+          authorization: "Bearer kvb_secret_token",
+          "x-api-key": "secret-key",
+          referer: "https://kvitbit.com/i/private-share-token",
+          "x-forwarded-for": "198.51.100.7, 203.0.113.9",
+        },
+        body: payload,
+      },
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ status: 1 });
+    expect(ok.headers.get("set-cookie")).toBeNull();
+    expect(ok.headers.get("cache-control")).toBe("no-store");
+    expect(ok.headers.get("x-content-type-options")).toBe("nosniff");
+
+    expect(upstreamCalls).toHaveLength(1);
+    const forwarded = upstreamCalls[0];
+    if (forwarded === undefined) throw new Error("Expected upstream proxy call");
+    expect(forwarded.url).toBe(`${posthogSettings.host}/e/?ip=0&ver=1.455.4&compression=gzip-js`);
+    expect(forwarded.method).toBe("POST");
+    expect(forwarded.redirect).toBe("manual");
+    expect(forwarded.body).toBe(payload);
+    expect(forwarded.headers.get("x-forwarded-for")).toBe("198.51.100.7");
+    expect(forwarded.headers.get("user-agent")).toBe("KvitbitTestBrowser/1.0");
+    expect(forwarded.headers.get("content-type")).toBe("application/json");
+    expect(forwarded.headers.get("cookie")).toBeNull();
+    expect(forwarded.headers.get("authorization")).toBeNull();
+    expect(forwarded.headers.get("x-api-key")).toBeNull();
+    expect(forwarded.headers.get("referer")).toBeNull();
+    expect(forwarded.headers.get("origin")).toBeNull();
+
+    // Disallowed subpaths, third-party origins, and oversized payloads are rejected before upstream fetch.
+    expect(
+      (await harness.fetch(`${POSTHOG_PROXY_PATH}/flags/`, { method: "POST", body: "{}" })).status,
+    ).toBe(404);
+    expect(
+      (
+        await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, {
+          method: "POST",
+          headers: { host: "kvitbit.com", origin: "https://evil.example" },
+          body: "{}",
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "x".repeat(64 * 1024 + 1),
+        })
+      ).status,
+    ).toBe(413);
+    expect(upstreamCalls).toHaveLength(1);
+
+    // Upstream redirects and network errors fail closed as 502.
+    proxyFetch.mockResolvedValueOnce(
+      new Response(null, { status: 302, headers: { location: "http://169.254.169.254" } }),
+    );
+    expect(
+      (await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, { method: "POST", body: "{}" })).status,
+    ).toBe(502);
+
+    proxyFetch.mockRejectedValueOnce(new Error("upstream unreachable"));
+    expect(
+      (await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, { method: "POST", body: "{}" })).status,
+    ).toBe(502);
+  });
+
+  test("POST /_kvb/e/ returns 404 when PostHog is disabled", async () => {
+    harness = makeHarness({ config: { posthog: null } });
+    const response = await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`, {
+      method: "POST",
+      body: "{}",
+    });
+    expect(response.status).toBe(404);
   });
 
   test("workspace creation succeeds when PostHog capture throws", async () => {
@@ -240,6 +366,7 @@ describe("Edge routes: health, config, botProtection, invitations, oauthConsent,
     expect((await harness.fetch("/assets/missing.js")).status).toBe(404);
     expect((await harness.fetch("/.well-known/unknown")).status).toBe(404);
     expect((await harness.fetch("/api/does-not-exist")).status).toBe(404);
+    expect((await harness.fetch(`${POSTHOG_PROXY_PATH}/e/`)).status).toBe(404);
 
     // PWA routes under /app/
     const pwaSpa = await harness.fetch("/app/w/123/invoices");

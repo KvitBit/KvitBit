@@ -56,6 +56,11 @@ export const analyticsPathname = (path: string): string => {
   return "/[id]";
 };
 
+const resolveApiHost = (host: string, origin: string): string =>
+  host.startsWith("/") && !host.startsWith("//")
+    ? new URL(host, origin).toString().replace(/\/+$/, "")
+    : host;
+
 export const createPageviewTracker = (
   origin: string,
   loadConfig: () => Promise<AnalyticsConfig | undefined>,
@@ -98,7 +103,7 @@ export const createPageviewTracker = (
         $geoip_disable: true,
       });
       client.init(config.apiKey, {
-        api_host: config.host,
+        api_host: resolveApiHost(config.host, origin),
         api_transport: "fetch",
         cookieless_mode: "always",
         persistence: "memory",
