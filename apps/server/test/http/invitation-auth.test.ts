@@ -18,7 +18,14 @@ import { captureAnalytics } from "../analytics-fixture";
 import { type Harness, json, makeHarness, ORIGIN } from "./harness";
 
 const decodeAccount = Schema.decodeUnknownResult(
-  Schema.Struct({ user: Schema.Struct({ id: Schema.String }) }),
+  Schema.Struct({
+    token: Schema.String.pipe(Schema.NullOr, Schema.optionalKey),
+    user: Schema.Struct({
+      id: Schema.String,
+      email: Schema.String,
+      emailVerified: Schema.Boolean,
+    }),
+  }),
 );
 
 const emailLink = /https:\/\/\S+/;
