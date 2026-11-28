@@ -1417,71 +1417,71 @@
       "coveredFiles": [
         {
           "path": "apps/server/src/app.ts",
-          "sha256": "b292890bafe4a14f513f556399a0d61f2e9a088994c4c59994ecafe16cde59bb"
+          "sha256": "919e5e5420e8ea5c1f47252d40c9c945dd409141ac04c42509b1e909e1b0dffe"
         },
         {
           "path": "apps/server/src/config-contract.ts",
-          "sha256": "8250ab698d002ecb361b0179fd63eba494616836e81fada8cfab5cbd2f58f20c"
+          "sha256": "d4b6f2b0675eb731578437212768f49dc31c79d22de6246eff8a548d8be7e584"
         },
         {
           "path": "apps/server/src/config.ts",
-          "sha256": "cb77ea7ad3b1b3b27bc83245f3452124cbff1250c425b66e1364ed5ac5f83697"
+          "sha256": "be2da2e9fba8f7be88956eee5107903efba2d2cc8dea96fa45851ee720c22db0"
         },
         {
           "path": "apps/server/src/http/config.ts",
-          "sha256": "52be938fce2621ce469290e194b6ddbb98b7719ac83f148263b1fc233d499e35"
+          "sha256": "675d4e20dcefca8c9399b700dc607806bcd032c57944ee7382ebf40892fae380"
         },
         {
           "path": "apps/server/src/main.ts",
-          "sha256": "3fd179ff2790ec7312ff34de39e39f75562dcee6391ff5c33465c92579546e4b"
+          "sha256": "43cda42edc032ee358b52f0671204f3fb3387740a171a08c0b4b103b275f44f4"
         },
         {
           "path": "apps/server/src/worker.ts",
-          "sha256": "30b46636aad40a4cf43f9d9c584680c79e73b070b6c253964eb694bca234590a"
+          "sha256": "ffa405e22d59b712b14ba26ddce4216de875850f2c5461d9141031aeed8409e0"
         },
         {
           "path": "apps/server/src/wiring/config.ts",
-          "sha256": "f2c486af6b10530021a0911e8fb884baaffe5b49bd9da597fa4fb378b17303a7"
+          "sha256": "e33f79315deb9105e2731cc7cbb5d95da6f1c21a006815fed00fac1a128ef4f7"
         },
         {
           "path": "apps/server/src/wiring/email.ts",
-          "sha256": "ee8c2283fcebe16805e556738b980b7d227266831bf202ce91cbb3753cf05bf1"
+          "sha256": "31cfc52b5510482ad9eed1854e006c4173872d02ffa6416a3bbd5040ea75baec"
         },
         {
           "path": "apps/server/src/wiring/blob.ts",
-          "sha256": "a97109fadbf93ae8498270dcdb81c2ee0696f487fd27402f829a2c9f718d0d70"
+          "sha256": "efc5b3be4dcb3719580f8fe8215dd6ed9f53c8d663be13a17a74b1487ab7ebdb"
         },
         {
           "path": "apps/server/src/http/mobile/config.ts",
-          "sha256": "d089bc4397f046d7a9f52cdcd336e8f7abe961ab7059d495a98b92780c16ed24"
+          "sha256": "ae75ed9de9f0584bd2950433c28a82ef65c0810f45602d25fe6a8b5160771804"
         },
         {
           "path": "apps/server/src/runtime/workflows.ts",
-          "sha256": "01b2483084444c266604d28208696ca4b06f757ba645190a3acc94928a80d08f"
+          "sha256": "f1aa51393fd2a7824382a4ea67be73d962d05d1dbb6dd5e34eebad07d15394a3"
         },
         {
           "path": "infra/alchemy/src/deploy-preflight.ts",
-          "sha256": "3465a4396e19511c5ca174f132cc739762e80596d9849a1d77e042a9ebc2c0e4"
+          "sha256": "773ea36920273d7943502f70ec43504b080170e0ff5cd050c82513ca05c89d34"
         },
         {
           "path": "infra/alchemy/src/preflight-cli.ts",
-          "sha256": "c1958fd5385b1f0c72d891b17164b10c1512d10937ae3b02e11380eec43060c1"
+          "sha256": "54b3df146f273fac21b022e092f19c504725154d43671c66a8e76f5aadc8b2d0"
         },
         {
           "path": "infra/alchemy/src/config.ts",
-          "sha256": "93da0ab71c3dced6e3235f1dca2af3c1d5ccdd555e6e3dc859282b7085054625"
+          "sha256": "1be89df326331d49c3c2bd1b7d90ce0bd3c8458a2d9a7719aa0defc75467b6ef"
         },
         {
           "path": "infra/alchemy/src/env.ts",
-          "sha256": "b65d3ec820ee448426c65c7a6836247c3d6bb03ac40489894a8d9af7533f3d57"
+          "sha256": "c5cf56cf36778a2aecc8de6d043885013bee877669c75987c4e64f0287f0ad5d"
         },
         {
           "path": "infra/alchemy/src/bootstrap.ts",
-          "sha256": "930caaf73e3d6755e54c5f4616df3a4cf07fdef23f8ded28f376d429e852b35b"
+          "sha256": "b651ddcb8e7396dbabf96a64b06afbc1772c7c7d8bbc294392af92b1ec8d006c"
         },
         {
           "path": "infra/alchemy/alchemy.run.ts",
-          "sha256": "d77d366a9c111a945d32e6337a395c64c1008631629e161a21b0fbe6a209f8f4"
+          "sha256": "81eabb519c49997aa8815abf8b1d013427498f2135f4bd998d6a0847df6a425b"
         },
         {
           "path": ".github/workflows/deploy.yml",
