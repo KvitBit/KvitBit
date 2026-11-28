@@ -42,7 +42,6 @@ import {
   ContactSnapshot,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
   DocumentId,
   Documents,
   type DocumentView,
@@ -292,82 +291,67 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           locale: "cs",
           channel: "web",
         });
-        const memberCaller = yield* workspaces
-          .create({
+        const memberCaller = yield* workspaces.create(accountCaller, {
+          name: "Ateliér Kalný s.r.o.",
+          issuingEntity: {
             name: "Ateliér Kalný s.r.o.",
-            issuingEntity: {
-              name: "Ateliér Kalný s.r.o.",
-              ico: "12345678",
-              dic: "CZ12345678",
-              address: {
-                street: "Křižíkova 185/35",
-                city: "Praha 8",
-                postalCode: "186 00",
-                country: "CZ",
-              },
+            ico: "12345678",
+            dic: "CZ12345678",
+            address: {
+              street: "Křižíkova 185/35",
+              city: "Praha 8",
+              postalCode: "186 00",
+              country: "CZ",
             },
-            initialTaxRegime: "vat_payer",
-          })
-          .pipe(Effect.provideService(CurrentCaller, accountCaller));
-
-        const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
-          Effect.provideService(eff, CurrentCaller, memberCaller);
+          },
+          initialTaxRegime: "vat_payer",
+        });
 
         // Add CZK bank account with IBAN, upload logo & stamp, set modern_minimal + accent + footer
-        yield* asMember(
-          workspaces.saveBankAccount(
-            BankAccountInput.make({
-              name: "Hlavní CZK",
-              currency: CurrencyCode.make("CZK"),
-              accountNumber: "123456789/0100",
-              iban: "CZ6508000000192000145399",
-              bic: "GIBACZPX",
-              isDefault: true,
-            }),
-          ),
-        );
-        yield* asMember(
-          workspaces.setBrandingImage("logo", {
-            contentType: "image/png",
-            bytes: Stream.succeed(LOGO_PNG),
+        yield* workspaces.saveBankAccount(
+          memberCaller,
+          BankAccountInput.make({
+            name: "Hlavní CZK",
+            currency: CurrencyCode.make("CZK"),
+            accountNumber: "123456789/0100",
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
           }),
         );
-        yield* asMember(
-          workspaces.setBrandingImage("stamp", {
-            contentType: "image/png",
-            bytes: Stream.succeed(STAMP_PNG),
-          }),
-        );
-        const wsBefore = yield* asMember(workspaces.current);
-        const wsBranded = yield* asMember(
-          workspaces.updateSettings(
-            {
-              branding: {
-                pdfTemplate: "modern_minimal",
-                accentColor: "#0F5D42",
-                footerText: "Děkujeme za spolupráci",
-              },
+        yield* workspaces.setBrandingImage(memberCaller, "logo", {
+          contentType: "image/png",
+          bytes: Stream.succeed(LOGO_PNG),
+        });
+        yield* workspaces.setBrandingImage(memberCaller, "stamp", {
+          contentType: "image/png",
+          bytes: Stream.succeed(STAMP_PNG),
+        });
+        const wsBefore = yield* workspaces.current(memberCaller);
+        const wsBranded = yield* workspaces.updateSettings(
+          memberCaller,
+          {
+            branding: {
+              pdfTemplate: "modern_minimal",
+              accentColor: "#0F5D42",
+              footerText: "Děkujeme za spolupráci",
             },
-            wsBefore.revision,
-          ),
+          },
+          wsBefore.revision,
         );
 
         // Finding 8a: previewBranding includes uploaded logo + stamp + accent + footer, and is never cached
-        const preview1 = yield* asMember(
-          workspaces.previewBranding({
-            kind: "invoice",
-            language: "cs",
-            branding: {},
-          }),
-        );
+        const preview1 = yield* workspaces.previewBranding(memberCaller, {
+          kind: "invoice",
+          language: "cs",
+          branding: {},
+        });
         yield* Stream.runDrain(preview1.bytes);
-        const preview2 = yield* asMember(
-          workspaces.previewBranding({
-            kind: "invoice",
-            language: "cs",
-            branding: {},
-          }),
-        );
+        const preview2 = yield* workspaces.previewBranding(memberCaller, {
+          kind: "invoice",
+          language: "cs",
+          branding: {},
+        });
         yield* Stream.runDrain(preview2.bytes);
         expect(capturedHtml.length).toBe(2);
         const logoB64 = Buffer.from(LOGO_PNG).toString("base64");
@@ -378,45 +362,41 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(capturedHtml[0]).toContain(`data:image/png;base64,${stampB64}`);
 
         // Create contact and issue invoice on 2026-10-05 with custom variableSymbol
-        const contact = yield* asMember(
-          contacts.save({
-            name: "Odběratel a.s.",
-            ico: "27074358",
-            dic: "CZ27074358",
-            address: {
-              street: "Václavské nám. 1",
-              city: "Praha 1",
-              postalCode: "110 00",
-              country: "CZ",
-            },
-            billingEmails: ["billing@odberatel.cz"],
-          }),
-        );
-        const invoice = yield* asMember(
-          documents.issue({
-            input: {
-              kind: "invoice",
-              contact: decodeContactId(contact["id"]),
-              issuedOn: IsoDate.make("2026-10-05"),
-              taxableSupplyOn: IsoDate.make("2026-10-05"),
-              variableSymbol: "2612345678",
-              lines: [
-                {
-                  description: "Vývoj software",
-                  quantity: BigDecimal.fromStringUnsafe("1"),
-                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                },
-              ],
-            },
-          }),
-        );
+        const contact = yield* contacts.save(memberCaller, {
+          name: "Odběratel a.s.",
+          ico: "27074358",
+          dic: "CZ27074358",
+          address: {
+            street: "Václavské nám. 1",
+            city: "Praha 1",
+            postalCode: "110 00",
+            country: "CZ",
+          },
+          billingEmails: ["billing@odberatel.cz"],
+        });
+        const invoice = yield* documents.issue(memberCaller, {
+          input: {
+            kind: "invoice",
+            contact: decodeContactId(contact["id"]),
+            issuedOn: IsoDate.make("2026-10-05"),
+            taxableSupplyOn: IsoDate.make("2026-10-05"),
+            variableSymbol: "2612345678",
+            lines: [
+              {
+                description: "Vývoj software",
+                quantity: BigDecimal.fromStringUnsafe("1"),
+                unitPrice: BigDecimal.fromStringUnsafe("1000"),
+              },
+            ],
+          },
+        });
         expect(invoice.paymentQr?.format).toBe("spayd");
         expect(invoice.paymentQr?.payload).toContain("X-VS:2612345678");
 
         // Finding 8b: Documents.pdf without template uses workspace default ("modern_minimal"),
         // embeds workspace branding + logo/stamp, and caches under (docRev, wsRev).
         const countBeforePdf = capturedHtml.length;
-        const pdf1 = yield* asMember(documents.pdf(invoice.id));
+        const pdf1 = yield* documents.pdf(memberCaller, invoice.id);
         yield* Stream.runDrain(pdf1.bytes);
         expect(capturedHtml.length).toBe(countBeforePdf + 1);
         const invoiceHtml = capturedHtml.at(-1) ?? "";
@@ -442,63 +422,61 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(cachedChunks.length).toBeGreaterThan(0);
 
         // Second call at same docRev + wsRev hits cache (no new render)
-        const pdf2 = yield* asMember(documents.pdf(invoice.id));
+        const pdf2 = yield* documents.pdf(memberCaller, invoice.id);
         yield* Stream.runDrain(pdf2.bytes);
         expect(capturedHtml.length).toBe(countBeforePdf + 1);
 
         // Share link open returns exact same paymentQr; share PDF hits the same cache!
-        const createdShare = yield* asMember(shareLinks.create(invoice.id));
+        const createdShare = yield* shareLinks.create(memberCaller, invoice.id);
         const shareToken = Str.split(createdShare.url, "/").pop() ?? "";
         const visitorCaller = Caller.shareLinkVisitor({
           token: ShareToken.make(shareToken),
           visitor: VisitorHash.make("visitor-hash-1"),
           locale: "cs",
         });
-        const sharedView = yield* shareLinks.open.pipe(
-          Effect.provideService(CurrentCaller, visitorCaller),
-        );
+        const sharedView = yield* shareLinks.open(visitorCaller);
         expect(sharedView.paymentQr).toEqual(invoice.paymentQr);
 
-        const sharePdf = yield* shareLinks
-          .pdf()
-          .pipe(Effect.provideService(CurrentCaller, visitorCaller));
+        const sharePdf = yield* shareLinks.pdf(visitorCaller);
         yield* Stream.runDrain(sharePdf.bytes);
         expect(capturedHtml.length).toBe(countBeforePdf + 1);
 
         // Changing workspace branding bumps workspace revision -> cache miss and new accent rendered
-        yield* asMember(
-          workspaces.updateSettings({ branding: { accentColor: "#1D4ED8" } }, wsBranded.revision),
+        yield* workspaces.updateSettings(
+          memberCaller,
+          { branding: { accentColor: "#1D4ED8" } },
+          wsBranded.revision,
         );
-        const pdfAfterBranding = yield* asMember(documents.pdf(invoice.id));
+        const pdfAfterBranding = yield* documents.pdf(memberCaller, invoice.id);
         yield* Stream.runDrain(pdfAfterBranding.bytes);
         expect(capturedHtml.length).toBe(countBeforePdf + 2);
         expect(capturedHtml.at(-1)).toContain("#1D4ED8");
 
         // Explicit template override ("classic") bypasses workspace default
-        const pdfClassic = yield* asMember(documents.pdf(invoice.id, { template: "classic" }));
+        const pdfClassic = yield* documents.pdf(memberCaller, invoice.id, { template: "classic" });
         yield* Stream.runDrain(pdfClassic.bytes);
         expect(capturedHtml.length).toBe(countBeforePdf + 3);
         expect(capturedHtml.at(-1)).not.toContain("hero-val");
 
         // Finding 6: Issue Credit Note on a DIFFERENT date (2026-11-20) with a stored reason
         yield* TestClock.setTime(Date.parse("2026-11-20T10:00:00Z"));
-        const creditNote = yield* asMember(
-          documents.correct(invoice.id, {
-            reason: "Vrácení vadného zboží",
-            lines: "full",
-          }),
-        );
+        const creditNote = yield* documents.correct(memberCaller, invoice.id, {
+          reason: "Vrácení vadného zboží",
+          lines: "full",
+        });
         expect(String(creditNote.dates.issuedOn)).toBe("2026-11-20");
         expect(creditNote.paymentQr).toBeNull();
 
         const beforeCreditPdf = capturedHtml.length;
         rejectRead = invoice.id;
-        const unavailableOriginal = yield* asMember(documents.pdf(creditNote.id)).pipe(Effect.exit);
+        const unavailableOriginal = yield* documents
+          .pdf(memberCaller, creditNote.id)
+          .pipe(Effect.exit);
         expect(unavailableOriginal._tag).toBe("Failure");
         expect(rejectRead).toBeUndefined();
         expect(capturedHtml).toHaveLength(beforeCreditPdf);
 
-        const cnPdf = yield* asMember(documents.pdf(creditNote.id));
+        const cnPdf = yield* documents.pdf(memberCaller, creditNote.id);
         yield* Stream.runDrain(cnPdf.bytes);
         expect(capturedHtml).toHaveLength(beforeCreditPdf + 1);
         const cnHtml = Str.replace(/\u00a0/g, " ")(capturedHtml.at(-1) ?? "");
@@ -508,7 +486,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(cnHtml).toContain("05. 10. 2026");
         expect(cnHtml).toContain("20. 11. 2026");
 
-        const cachedCreditPdf = yield* asMember(documents.pdf(creditNote.id));
+        const cachedCreditPdf = yield* documents.pdf(memberCaller, creditNote.id);
         yield* Stream.runDrain(cachedCreditPdf.bytes);
         expect(capturedHtml).toHaveLength(beforeCreditPdf + 1);
       }).pipe(Effect.provide(layer)),
@@ -531,6 +509,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         Effect.gen(function* () {
           const ws = yield* Workspaces;
           yield* ws.saveBankAccount(
+            member,
             BankAccountInput.make({
               name: "CZK",
               currency: CurrencyCode.make("CZK"),
@@ -540,7 +519,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               isDefault: true,
             }),
           );
-        }).pipe(Effect.provideService(CurrentCaller, member)),
+        }),
       );
 
       const contactRes = await http.fetch(`/api/v1/workspaces/${member.workspaceId}/contacts`, {
@@ -621,6 +600,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const contacts = yield* Contacts;
           const docs = yield* Documents;
           yield* ws.saveBankAccount(
+            member,
             BankAccountInput.make({
               name: "CZK",
               currency: CurrencyCode.make("CZK"),
@@ -630,11 +610,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               isDefault: true,
             }),
           );
-          const contact = yield* contacts.save({
+          const contact = yield* contacts.save(member, {
             name: "MCP Buyer s.r.o.",
             address: { street: "Ulice 2", city: "Brno", postalCode: "602 00", country: "CZ" },
           });
-          const issued = yield* docs.issue({
+          const issued = yield* docs.issue(member, {
             input: {
               kind: "invoice",
               contact: decodeContactId(contact["id"]),
@@ -649,7 +629,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           });
           return issued.id;
-        }).pipe(Effect.provideService(CurrentCaller, member)),
+        }),
       );
 
       const toolCall = await mcp.callTool(grant.token, "get_document", { documentId: docId });
@@ -691,116 +671,102 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           locale: "cs",
           channel: "web",
         });
-        const memberCaller = yield* workspaces
-          .create({
+        const memberCaller = yield* workspaces.create(accountCaller, {
+          name: "Ateliér Kalný s.r.o.",
+          issuingEntity: {
             name: "Ateliér Kalný s.r.o.",
-            issuingEntity: {
-              name: "Ateliér Kalný s.r.o.",
-              ico: "12345678",
-              dic: "CZ12345678",
-              address: {
-                street: "Křižíkova 185/35",
-                city: "Praha 8",
-                postalCode: "186 00",
-                country: "CZ",
-              },
+            ico: "12345678",
+            dic: "CZ12345678",
+            address: {
+              street: "Křižíkova 185/35",
+              city: "Praha 8",
+              postalCode: "186 00",
+              country: "CZ",
             },
-            initialTaxRegime: "non_vat_payer",
-          })
-          .pipe(Effect.provideService(CurrentCaller, accountCaller));
+          },
+          initialTaxRegime: "non_vat_payer",
+        });
 
-        const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
-          Effect.provideService(eff, CurrentCaller, memberCaller);
-
-        yield* asMember(
-          workspaces.saveBankAccount(
-            BankAccountInput.make({
-              name: "Hlavní CZK",
-              currency: CurrencyCode.make("CZK"),
-              accountNumber: "123456789/0100",
-              iban: "CZ6508000000192000145399",
-              bic: "GIBACZPX",
-              isDefault: true,
-            }),
-          ),
-        );
-        const uploadedLogo = yield* asMember(
-          workspaces.setBrandingImage("logo", {
-            contentType: "image/png",
-            bytes: Stream.succeed(LOGO_PNG),
+        yield* workspaces.saveBankAccount(
+          memberCaller,
+          BankAccountInput.make({
+            name: "Hlavní CZK",
+            currency: CurrencyCode.make("CZK"),
+            accountNumber: "123456789/0100",
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
           }),
         );
-        const wsCur = yield* asMember(workspaces.current);
-        yield* asMember(
-          workspaces.updateSettings(
-            { branding: { pdfTemplate: "modern_minimal" } },
-            wsCur.revision,
-          ),
+        const uploadedLogo = yield* workspaces.setBrandingImage(memberCaller, "logo", {
+          contentType: "image/png",
+          bytes: Stream.succeed(LOGO_PNG),
+        });
+        const wsCur = yield* workspaces.current(memberCaller);
+        yield* workspaces.updateSettings(
+          memberCaller,
+          { branding: { pdfTemplate: "modern_minimal" } },
+          wsCur.revision,
         );
 
-        const contact = yield* asMember(
-          contacts.save({
-            name: "Odběratel a.s.",
-            address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
-          }),
-        );
+        const contact = yield* contacts.save(memberCaller, {
+          name: "Odběratel a.s.",
+          address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
+        });
 
         // 1. C3 request-key replay + J3 queued delivery snapshot
         const issueReqKey = RequestKey.make("rk-c3-issue-001");
-        const issued = yield* asMember(
-          documents.issue(
-            {
-              input: {
-                kind: "invoice",
-                contact: decodeContactId(contact["id"]),
-                variableSymbol: "2612345678",
-                note: "Původní poznámka",
-                lines: [
-                  {
-                    description: "Konzultace",
-                    quantity: BigDecimal.fromStringUnsafe("1"),
-                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                  },
-                ],
-              },
+        const issued = yield* documents.issue(
+          memberCaller,
+          {
+            input: {
+              kind: "invoice",
+              contact: decodeContactId(contact["id"]),
+              variableSymbol: "2612345678",
+              note: "Původní poznámka",
+              lines: [
+                {
+                  description: "Konzultace",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
             },
-            { requestKey: issueReqKey },
-          ),
+          },
+          { requestKey: issueReqKey },
         );
         expect(issued.paymentQr?.payload).toContain("AM:1000.00");
         expect(issued.paymentQr?.payload).toContain("X-VS:2612345678");
 
         // Edit variableSymbol and note -> rev 2
-        const edited = yield* asMember(
-          documents.edit(
-            issued.id,
-            { variableSymbol: "777777", note: "Nová poznámka" },
-            issued.revision,
-          ),
+        const edited = yield* documents.edit(
+          memberCaller,
+          issued.id,
+          { variableSymbol: "777777", note: "Nová poznámka" },
+          issued.revision,
         );
         expect(edited.revision).toBe(issued.revision + 1);
         expect(edited.paymentQr?.payload).toContain("X-VS:777777");
 
         // C3: Replay original issue requestKey -> must return original rev and original QR symbol!
-        const replayed = yield* asMember(
-          documents.issue(
-            {
-              input: {
-                kind: "invoice",
-                contact: decodeContactId(contact["id"]),
-                variableSymbol: "2612345678",
-                note: "Původní poznámka",
-                lines: [
-                  {
-                    description: "Konzultace",
-                    quantity: BigDecimal.fromStringUnsafe("1"),
-                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                  },
-                ],
-              },
+        const replayed = yield* documents.issue(
+          memberCaller,
+          {
+            input: {
+              kind: "invoice",
+              contact: decodeContactId(contact["id"]),
+              variableSymbol: "2612345678",
+              note: "Původní poznámka",
+              lines: [
+                {
+                  description: "Konzultace",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
             },
-            { requestKey: issueReqKey },
-          ),
+          },
+          { requestKey: issueReqKey },
         );
         expect(replayed.revision).toBe(issued.revision);
         expect(replayed.paymentQr).toEqual(issued.paymentQr);
@@ -808,7 +774,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // J3: Rendering frozen historical view (rev 1) uses rev 1's variableSymbol & note, not rev 2's,
         // and uses workspace default template ("modern_minimal") when ExplicitPdfTemplate is absent!
         const frozenView = { ...issued, paymentQr: null };
-        yield* asMember(renderer.render(frozenView, { template: "classic", language: "cs" }));
+        yield* renderer.render(
+          frozenView,
+          { template: "classic", language: "cs" },
+          memberCaller.workspaceId,
+        );
         const frozenHtml = capturedHtml.at(-1) ?? "";
         expect(frozenHtml).toContain("2612345678");
         expect(frozenHtml).not.toContain("777777");
@@ -817,63 +787,53 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         expect(frozenHtml).toContain("hero-val");
 
         // 2. Partial payment (300 of 1000) -> QR requests 700.00; full payment -> QR is null
-        yield* asMember(
-          payments.record({
-            target: { document: issued.id },
-            amount: money("300"),
-            paidOn: IsoDate.make("2026-10-06"),
-            method: "bank_transfer",
-          }),
-        );
-        const partialDoc = yield* asMember(documents.get(issued.id));
+        yield* payments.record(memberCaller, {
+          target: { document: issued.id },
+          amount: money("300"),
+          paidOn: IsoDate.make("2026-10-06"),
+          method: "bank_transfer",
+        });
+        const partialDoc = yield* documents.get(memberCaller, issued.id);
         expect(partialDoc.paymentQr?.payload).toContain("AM:700.00");
 
-        const shareCreated = yield* asMember(shareLinks.create(issued.id));
+        const shareCreated = yield* shareLinks.create(memberCaller, issued.id);
         const shareToken = Str.split(shareCreated.url, "/").pop() ?? "";
         const visitorCaller = Caller.shareLinkVisitor({
           token: ShareToken.make(shareToken),
           visitor: VisitorHash.make("visitor-pay-1"),
           locale: "cs",
         });
-        const partialShare = yield* shareLinks.open.pipe(
-          Effect.provideService(CurrentCaller, visitorCaller),
-        );
+        const partialShare = yield* shareLinks.open(visitorCaller);
         expect(partialShare.paymentQr).toEqual(partialDoc.paymentQr);
 
-        yield* asMember(
-          payments.record({
-            target: { document: issued.id },
-            amount: money("700"),
-            paidOn: IsoDate.make("2026-10-07"),
-            method: "bank_transfer",
-          }),
-        );
-        const paidDoc = yield* asMember(documents.get(issued.id));
+        yield* payments.record(memberCaller, {
+          target: { document: issued.id },
+          amount: money("700"),
+          paidOn: IsoDate.make("2026-10-07"),
+          method: "bank_transfer",
+        });
+        const paidDoc = yield* documents.get(memberCaller, issued.id);
         expect(paidDoc.paymentQr).toBeNull();
-        const paidShare = yield* shareLinks.open.pipe(
-          Effect.provideService(CurrentCaller, visitorCaller),
-        );
+        const paidShare = yield* shareLinks.open(visitorCaller);
         expect(paidShare.paymentQr).toBeNull();
 
         // 3. Templates.use returns projected paymentQr matching Documents.get
-        const tpl = yield* asMember(
-          templates.save({
-            name: "Měsíční paušál",
-            kind: "invoice",
-            contact: decodeContactId(contact["id"]),
-            lines: [
-              {
-                description: "Paušál",
-                quantity: BigDecimal.fromStringUnsafe("1"),
-                unitPrice: BigDecimal.fromStringUnsafe("2000"),
-              },
-            ],
-          }),
-        );
-        const fromTemplate = yield* asMember(
-          templates.use(decodeTemplateId(tpl["id"]), { as: "issued" }),
-        );
-        const fromGet = yield* asMember(documents.get(fromTemplate.id));
+        const tpl = yield* templates.save(memberCaller, {
+          name: "Měsíční paušál",
+          kind: "invoice",
+          contact: decodeContactId(contact["id"]),
+          lines: [
+            {
+              description: "Paušál",
+              quantity: BigDecimal.fromStringUnsafe("1"),
+              unitPrice: BigDecimal.fromStringUnsafe("2000"),
+            },
+          ],
+        });
+        const fromTemplate = yield* templates.use(memberCaller, decodeTemplateId(tpl["id"]), {
+          as: "issued",
+        });
+        const fromGet = yield* documents.get(memberCaller, fromTemplate.id);
         expect(fromTemplate.paymentQr).not.toBeNull();
         expect(fromTemplate.paymentQr).toEqual(fromGet.paymentQr);
 
@@ -886,7 +846,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         yield* blobs.delete(logoKey);
 
         const rendersBeforeMissing = capturedHtml.length;
-        const pdfMissingLogo = yield* asMember(documents.pdf(fromTemplate.id));
+        const pdfMissingLogo = yield* documents.pdf(memberCaller, fromTemplate.id);
         yield* Stream.runDrain(pdfMissingLogo.bytes);
         expect(capturedHtml.length).toBe(rendersBeforeMissing + 1);
         expect(capturedHtml.at(-1)).not.toContain(`data:image/png;base64,${logoB64}`);
@@ -896,13 +856,13 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           contentType: "image/png",
           maxBytes: 1024 * 1024,
         });
-        const pdfRestoredLogo = yield* asMember(documents.pdf(fromTemplate.id));
+        const pdfRestoredLogo = yield* documents.pdf(memberCaller, fromTemplate.id);
         yield* Stream.runDrain(pdfRestoredLogo.bytes);
         expect(capturedHtml.length).toBe(rendersBeforeMissing + 2);
         expect(capturedHtml.at(-1)).toContain(`data:image/png;base64,${logoB64}`);
 
         // Subsequent call now hits the complete cache
-        const pdfCachedComplete = yield* asMember(documents.pdf(fromTemplate.id));
+        const pdfCachedComplete = yield* documents.pdf(memberCaller, fromTemplate.id);
         yield* Stream.runDrain(pdfCachedComplete.bytes);
         expect(capturedHtml.length).toBe(rendersBeforeMissing + 2);
       }).pipe(Effect.provide(layer)),
@@ -928,6 +888,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const docs = yield* Documents;
           const payments = yield* Payments;
           yield* ws.saveBankAccount(
+            httpMember,
             BankAccountInput.make({
               name: "EUR",
               currency: CurrencyCode.make("EUR"),
@@ -936,11 +897,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               isDefault: true,
             }),
           );
-          const contact = yield* contacts.save({
+          const contact = yield* contacts.save(httpMember, {
             name: "EU Client GmbH",
             address: { street: "Strasse 1", city: "Berlin", postalCode: "10115", country: "DE" },
           });
-          const issued = yield* docs.issue({
+          const issued = yield* docs.issue(httpMember, {
             input: {
               kind: "invoice",
               contact: decodeContactId(contact["id"]),
@@ -955,14 +916,14 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               ],
             },
           });
-          yield* payments.record({
+          yield* payments.record(httpMember, {
             target: { document: issued.id },
             amount: money("250", CurrencyCode.make("EUR")),
             paidOn: IsoDate.make("2026-11-23"),
             method: "bank_transfer",
           });
           return issued.id;
-        }).pipe(Effect.provideService(CurrentCaller, httpMember)),
+        }),
       );
 
       const httpDocRes = await http.fetch(
@@ -1005,6 +966,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           const docs = yield* Documents;
           const payments = yield* Payments;
           yield* ws.saveBankAccount(
+            mcpMember,
             BankAccountInput.make({
               name: "EUR",
               currency: CurrencyCode.make("EUR"),
@@ -1013,11 +975,11 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               isDefault: true,
             }),
           );
-          const contact = yield* contacts.save({
+          const contact = yield* contacts.save(mcpMember, {
             name: "EU Client GmbH",
             address: { street: "Strasse 1", city: "Berlin", postalCode: "10115", country: "DE" },
           });
-          const issued = yield* docs.issue({
+          const issued = yield* docs.issue(mcpMember, {
             input: {
               kind: "invoice",
               contact: decodeContactId(contact["id"]),
@@ -1032,14 +994,14 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
               ],
             },
           });
-          yield* payments.record({
+          yield* payments.record(mcpMember, {
             target: { document: issued.id },
             amount: money("250", CurrencyCode.make("EUR")),
             paidOn: IsoDate.make("2026-11-23"),
             method: "bank_transfer",
           });
           return issued.id;
-        }).pipe(Effect.provideService(CurrentCaller, mcpMember)),
+        }),
       );
 
       const toolCall = await mcp.callTool(grant.token, "get_document", { documentId: mcpDocId });
@@ -1128,66 +1090,54 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           locale: "cs",
           channel: "web",
         });
-        const memberCaller = yield* workspaces
-          .create({
+        const memberCaller = yield* workspaces.create(accountCaller, {
+          name: "SQL Studio s.r.o.",
+          issuingEntity: {
             name: "SQL Studio s.r.o.",
-            issuingEntity: {
-              name: "SQL Studio s.r.o.",
-              ico: "12345678",
-              dic: "CZ12345678",
-              address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
-            },
-            initialTaxRegime: "non_vat_payer",
-          })
-          .pipe(Effect.provideService(CurrentCaller, accountCaller));
+            ico: "12345678",
+            dic: "CZ12345678",
+            address: { street: "Ulice 1", city: "Praha", postalCode: "110 00", country: "CZ" },
+          },
+          initialTaxRegime: "non_vat_payer",
+        });
 
-        const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
-          Effect.provideService(eff, CurrentCaller, memberCaller);
-
-        yield* asMember(
-          workspaces.saveBankAccount(
-            BankAccountInput.make({
-              name: "CZK",
-              currency: CurrencyCode.make("CZK"),
-              accountNumber: "123456789/0100",
-              iban: "CZ6508000000192000145399",
-              bic: "GIBACZPX",
-              isDefault: true,
-            }),
-          ),
-        );
-        yield* asMember(
-          workspaces.saveBankAccount(
-            BankAccountInput.make({
-              name: "EUR",
-              currency: CurrencyCode.make("EUR"),
-              iban: "CZ6508000000192000145399",
-              bic: "GIBACZPX",
-              isDefault: true,
-            }),
-          ),
-        );
-        yield* asMember(
-          workspaces.setBrandingImage("logo", {
-            contentType: "image/png",
-            bytes: Stream.succeed(LOGO_PNG),
+        yield* workspaces.saveBankAccount(
+          memberCaller,
+          BankAccountInput.make({
+            name: "CZK",
+            currency: CurrencyCode.make("CZK"),
+            accountNumber: "123456789/0100",
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
           }),
         );
-        const ws1 = yield* asMember(workspaces.current);
-        yield* asMember(
-          workspaces.updateSettings(
-            { branding: { pdfTemplate: "modern_minimal", footerText: "QUEUE-FOOTER" } },
-            ws1.revision,
-          ),
-        );
-
-        const contact = yield* asMember(
-          contacts.save({
-            name: "Klient s.r.o.",
-            address: { street: "Ulice 2", city: "Brno", postalCode: "602 00", country: "CZ" },
-            billingEmails: ["klient@example.cz"],
+        yield* workspaces.saveBankAccount(
+          memberCaller,
+          BankAccountInput.make({
+            name: "EUR",
+            currency: CurrencyCode.make("EUR"),
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
           }),
         );
+        yield* workspaces.setBrandingImage(memberCaller, "logo", {
+          contentType: "image/png",
+          bytes: Stream.succeed(LOGO_PNG),
+        });
+        const ws1 = yield* workspaces.current(memberCaller);
+        yield* workspaces.updateSettings(
+          memberCaller,
+          { branding: { pdfTemplate: "modern_minimal", footerText: "QUEUE-FOOTER" } },
+          ws1.revision,
+        );
+
+        const contact = yield* contacts.save(memberCaller, {
+          name: "Klient s.r.o.",
+          address: { street: "Ulice 2", city: "Brno", postalCode: "602 00", country: "CZ" },
+          billingEmails: ["klient@example.cz"],
+        });
 
         // 1. Draft QR consistency: preview, createDraft, and replayed createDraft all return the same eligible QR
         const draftInput = {
@@ -1202,75 +1152,70 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           ] as const,
         };
-        const previewDraft = yield* asMember(documents.preview(draftInput));
+        const previewDraft = yield* documents.preview(memberCaller, draftInput);
         expect(previewDraft.paymentQr?.format).toBe("spayd");
         expect(previewDraft.paymentQr?.payload).toContain("AM:1000.00");
         const draftReqKey = RequestKey.make("rk-draft-001");
-        const createdDraft = yield* asMember(
-          documents.createDraft(draftInput, { requestKey: draftReqKey }),
-        );
+        const createdDraft = yield* documents.createDraft(memberCaller, draftInput, {
+          requestKey: draftReqKey,
+        });
         expect(createdDraft.paymentQr).toEqual(previewDraft.paymentQr);
-        yield* asMember(
-          documents.edit(createdDraft.id, { note: "Upravená poznámka" }, createdDraft.revision),
+        yield* documents.edit(
+          memberCaller,
+          createdDraft.id,
+          { note: "Upravená poznámka" },
+          createdDraft.revision,
         );
-        const replayedDraft = yield* asMember(
-          documents.createDraft(draftInput, { requestKey: draftReqKey }),
-        );
+        const replayedDraft = yield* documents.createDraft(memberCaller, draftInput, {
+          requestKey: draftReqKey,
+        });
         expect(replayedDraft.revision).toBe(createdDraft.revision);
         expect(replayedDraft.paymentQr).toEqual(createdDraft.paymentQr);
 
         // 2. Queued delivery snapshot (J3): partial payment (300/1000 -> 700 due), modern_minimal template,
         // then edit note/symbol AND change workspace template to classic BEFORE rendering!
-        const invoice = yield* asMember(
-          documents.issue({
-            input: {
-              kind: "invoice",
-              contact: decodeContactId(contact["id"]),
-              variableSymbol: "2612345678",
-              note: "Frozen note",
-              lines: [
-                {
-                  description: "Vývoj",
-                  quantity: BigDecimal.fromStringUnsafe("1"),
-                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                },
-              ],
-            },
-          }),
-        );
-        yield* asMember(
-          payments.record({
-            target: { document: invoice.id },
-            amount: money("300"),
-            paidOn: IsoDate.make("2026-10-06"),
-            method: "bank_transfer",
-          }),
-        );
-        const sent = yield* asMember(documents.send(invoice.id, { purpose: "document" }));
-        const afterPayment = yield* asMember(documents.get(invoice.id));
+        const invoice = yield* documents.issue(memberCaller, {
+          input: {
+            kind: "invoice",
+            contact: decodeContactId(contact["id"]),
+            variableSymbol: "2612345678",
+            note: "Frozen note",
+            lines: [
+              {
+                description: "Vývoj",
+                quantity: BigDecimal.fromStringUnsafe("1"),
+                unitPrice: BigDecimal.fromStringUnsafe("1000"),
+              },
+            ],
+          },
+        });
+        yield* payments.record(memberCaller, {
+          target: { document: invoice.id },
+          amount: money("300"),
+          paidOn: IsoDate.make("2026-10-06"),
+          method: "bank_transfer",
+        });
+        const sent = yield* documents.send(memberCaller, invoice.id, { purpose: "document" });
+        const afterPayment = yield* documents.get(memberCaller, invoice.id);
         expect(afterPayment.paymentQr?.payload).toContain("AM:700.00");
 
         // Mutate document AND switch workspace default back to classic AFTER enqueue
-        yield* asMember(
-          documents.edit(
-            invoice.id,
-            { variableSymbol: "777777", note: "Edited note" },
-            afterPayment.revision,
-          ),
+        yield* documents.edit(
+          memberCaller,
+          invoice.id,
+          { variableSymbol: "777777", note: "Edited note" },
+          afterPayment.revision,
         );
         // Replace workspace logo + change template/footer AFTER enqueue
-        yield* asMember(
-          workspaces.setBrandingImage("logo", {
-            contentType: "image/png",
-            bytes: Stream.succeed(STAMP_PNG),
-          }),
-        );
-        const wsAfterLogoSwap = yield* asMember(workspaces.current);
-        yield* asMember(
-          workspaces.updateSettings(
-            { branding: { pdfTemplate: "classic", footerText: "LATER-FOOTER" } },
-            wsAfterLogoSwap.revision,
-          ),
+        yield* workspaces.setBrandingImage(memberCaller, "logo", {
+          contentType: "image/png",
+          bytes: Stream.succeed(STAMP_PNG),
+        });
+        const wsAfterLogoSwap = yield* workspaces.current(memberCaller);
+        yield* workspaces.updateSettings(
+          memberCaller,
+          { branding: { pdfTemplate: "classic", footerText: "LATER-FOOTER" } },
+          wsAfterLogoSwap.revision,
         );
 
         const deliveryRow = yield* deliveriesRepo.get(memberCaller.workspaceId, sent.deliveryId);
@@ -1299,7 +1244,7 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         // deliveryJob.dispatch returns "failed" normally on the FIRST call (J6), bumps revision,
         // keeps attempts=0, and makes zero EmailSender calls!
         const sql = yield* SqlClient.SqlClient;
-        const wsCurrent = yield* asMember(workspaces.current);
+        const wsCurrent = yield* workspaces.current(memberCaller);
         const blobs = yield* BlobStorage;
         const emailCapture = yield* CaptureEmailSender;
         const warmCurrentKey = documentPdfCacheKey({
@@ -1421,59 +1366,61 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           ] as const,
         };
         const bigEurKey = RequestKey.make("rk-epc-limit-sql-1");
-        const bigEurInv = yield* asMember(
-          documents.issue({ input: bigEurInput }, { requestKey: bigEurKey }),
+        const bigEurInv = yield* documents.issue(
+          memberCaller,
+          { input: bigEurInput },
+          { requestKey: bigEurKey },
         );
         expect(bigEurInv.paymentQr).toBeNull();
-        yield* asMember(
-          documents.edit(bigEurInv.id, { note: "Edited big EUR note" }, bigEurInv.revision),
+        yield* documents.edit(
+          memberCaller,
+          bigEurInv.id,
+          { note: "Edited big EUR note" },
+          bigEurInv.revision,
         );
         failSqlAudit = true;
-        const bigEurReplay = yield* asMember(
-          documents.issue({ input: bigEurInput }, { requestKey: bigEurKey }),
+        const bigEurReplay = yield* documents.issue(
+          memberCaller,
+          { input: bigEurInput },
+          { requestKey: bigEurKey },
         );
         failSqlAudit = false;
         expect(bigEurReplay.revision).toBe(bigEurInv.revision);
         expect(bigEurReplay.paymentQr).toBeNull();
 
         // 3. System caller export default template: restore modern_minimal, render without ExplicitPdfTemplate
-        const wsAfterClassic = yield* asMember(workspaces.current);
-        yield* asMember(
-          workspaces.updateSettings(
-            { branding: { pdfTemplate: "modern_minimal" } },
-            wsAfterClassic.revision,
-          ),
+        const wsAfterClassic = yield* workspaces.current(memberCaller);
+        yield* workspaces.updateSettings(
+          memberCaller,
+          { branding: { pdfTemplate: "modern_minimal" } },
+          wsAfterClassic.revision,
         );
-        const eurInvoice = yield* asMember(
-          documents.issue({
-            input: {
-              kind: "invoice",
-              contact: decodeContactId(contact["id"]),
-              currency: CurrencyCode.make("EUR"),
-              fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
-              lines: [
-                {
-                  description: "Advisory",
-                  quantity: BigDecimal.fromStringUnsafe("1"),
-                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                },
-              ],
-            },
-          }),
-        );
-        yield* asMember(
-          payments.record({
-            target: { document: eurInvoice.id },
-            amount: money("250", CurrencyCode.make("EUR")),
-            paidOn: IsoDate.make("2026-10-06"),
-            method: "bank_transfer",
-          }),
-        );
-        const eurAfterPay = yield* asMember(documents.get(eurInvoice.id));
+        const eurInvoice = yield* documents.issue(memberCaller, {
+          input: {
+            kind: "invoice",
+            contact: decodeContactId(contact["id"]),
+            currency: CurrencyCode.make("EUR"),
+            fx: { manual: { rate: BigDecimal.fromStringUnsafe("25"), quantity: 1 } },
+            lines: [
+              {
+                description: "Advisory",
+                quantity: BigDecimal.fromStringUnsafe("1"),
+                unitPrice: BigDecimal.fromStringUnsafe("1000"),
+              },
+            ],
+          },
+        });
+        yield* payments.record(memberCaller, {
+          target: { document: eurInvoice.id },
+          amount: money("250", CurrencyCode.make("EUR")),
+          paidOn: IsoDate.make("2026-10-06"),
+          method: "bank_transfer",
+        });
+        const eurAfterPay = yield* documents.get(memberCaller, eurInvoice.id);
         expect(eurAfterPay.paymentQr?.format).toBe("epc");
         expect(eurAfterPay.paymentQr?.payload).toContain("EUR750.00");
 
-        // Render EUR PDF as System caller (export path, no CurrentCaller Member, template="classic")
+        // Render EUR PDF as System caller (export path, template="classic")
         yield* renderer.render(
           { ...eurAfterPay, paymentQr: null },
           {
@@ -1563,118 +1510,109 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
         const workspaces = yield* Workspaces;
         const contacts = yield* Contacts;
         const documents = yield* Documents;
-        const memberCaller = yield* workspaces
-          .create({ name: "Spy Studio", initialTaxRegime: "non_vat_payer" })
-          .pipe(
-            Effect.provideService(
-              CurrentCaller,
-              Caller.account({ userId, email: "eva@example.cz", locale: "cs", channel: "web" }),
-            ),
-          );
-        const asMember = <A, E, R>(eff: Effect.Effect<A, E, R>) =>
-          Effect.provideService(eff, CurrentCaller, memberCaller);
-        yield* asMember(
-          workspaces.saveBankAccount(
-            BankAccountInput.make({
-              name: "CZK",
-              currency: CurrencyCode.make("CZK"),
-              iban: "CZ6508000000192000145399",
-              bic: "GIBACZPX",
-              isDefault: true,
-            }),
-          ),
+        const memberCaller = yield* workspaces.create(
+          Caller.account({ userId, email: "eva@example.cz", locale: "cs", channel: "web" }),
+          { name: "Spy Studio", initialTaxRegime: "non_vat_payer" },
         );
-        const contact = yield* asMember(
-          contacts.save({
-            name: "Buyer",
-            address: { street: "A 1", city: "Praha", postalCode: "110 00", country: "CZ" },
+
+        yield* workspaces.saveBankAccount(
+          memberCaller,
+          BankAccountInput.make({
+            name: "CZK",
+            currency: CurrencyCode.make("CZK"),
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
           }),
         );
-        const inv = yield* asMember(
-          documents.issue(
-            {
-              input: {
-                kind: "invoice",
-                contact: decodeContactId(contact["id"]),
-                variableSymbol: "2612345678",
-                lines: [
-                  {
-                    description: "Work",
-                    quantity: BigDecimal.fromStringUnsafe("1"),
-                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                  },
-                ],
-              },
+        const contact = yield* contacts.save(memberCaller, {
+          name: "Buyer",
+          address: { street: "A 1", city: "Praha", postalCode: "110 00", country: "CZ" },
+        });
+        const inv = yield* documents.issue(
+          memberCaller,
+          {
+            input: {
+              kind: "invoice",
+              contact: decodeContactId(contact["id"]),
+              variableSymbol: "2612345678",
+              lines: [
+                {
+                  description: "Work",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
             },
-            { requestKey: RequestKey.make("rk-spy-1") },
-          ),
+          },
+          { requestKey: RequestKey.make("rk-spy-1") },
         );
 
         // R1a: unauthorized caller fails with Forbidden with ZERO WorkspacesRepo reads
         const limitedCaller = { ...memberCaller, scopes: ["contacts:read"] as const };
         const readsBeforeDenied = workspaceReads;
-        const deniedExit = yield* Effect.exit(
-          documents.pdf(inv.id).pipe(Effect.provideService(CurrentCaller, limitedCaller)),
-        );
+        const deniedExit = yield* Effect.exit(documents.pdf(limitedCaller, inv.id));
         expect(deniedExit._tag).toBe("Failure");
         expect(workspaceReads).toBe(readsBeforeDenied);
 
         // Failed credit lookup (StoreUnavailable on getMany) must NOT return payable QR
-        yield* asMember(documents.correct(inv.id, { reason: "Full credit", lines: "full" }));
+        yield* documents.correct(memberCaller, inv.id, { reason: "Full credit", lines: "full" });
         failGetMany = true;
-        const creditFailExit = yield* documents.get(inv.id).pipe(asMember, Effect.exit);
+        const creditFailExit = yield* documents.get(memberCaller, inv.id).pipe(Effect.exit);
         failGetMany = false;
         expect(creditFailExit._tag).toBe("Failure");
 
         // Keyed replay on memory store preserves the original projected result even during an audit outage,
         // while direct historical rendering of an un-snapshotted older revision fails when audit is unavailable.
-        const inv2 = yield* asMember(
-          documents.issue(
-            {
-              input: {
-                kind: "invoice",
-                contact: decodeContactId(contact["id"]),
-                variableSymbol: "2612345678",
-                lines: [
-                  {
-                    description: "Work 2",
-                    quantity: BigDecimal.fromStringUnsafe("1"),
-                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                  },
-                ],
-              },
+        const inv2 = yield* documents.issue(
+          memberCaller,
+          {
+            input: {
+              kind: "invoice",
+              contact: decodeContactId(contact["id"]),
+              variableSymbol: "2612345678",
+              lines: [
+                {
+                  description: "Work 2",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
             },
-            { requestKey: RequestKey.make("rk-spy-2") },
-          ),
+          },
+          { requestKey: RequestKey.make("rk-spy-2") },
         );
-        yield* asMember(documents.edit(inv2.id, { variableSymbol: "777777" }, inv2.revision));
+        yield* documents.edit(memberCaller, inv2.id, { variableSymbol: "777777" }, inv2.revision);
         failAudit = true;
-        const replayedDuringAuditOutage = yield* asMember(
-          documents.issue(
-            {
-              input: {
-                kind: "invoice",
-                contact: decodeContactId(contact["id"]),
-                variableSymbol: "2612345678",
-                lines: [
-                  {
-                    description: "Work 2",
-                    quantity: BigDecimal.fromStringUnsafe("1"),
-                    unitPrice: BigDecimal.fromStringUnsafe("1000"),
-                  },
-                ],
-              },
+        const replayedDuringAuditOutage = yield* documents.issue(
+          memberCaller,
+          {
+            input: {
+              kind: "invoice",
+              contact: decodeContactId(contact["id"]),
+              variableSymbol: "2612345678",
+              lines: [
+                {
+                  description: "Work 2",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("1000"),
+                },
+              ],
             },
-            { requestKey: RequestKey.make("rk-spy-2") },
-          ),
+          },
+          { requestKey: RequestKey.make("rk-spy-2") },
         );
         expect(replayedDuringAuditOutage.revision).toBe(inv2.revision);
         expect(replayedDuringAuditOutage.paymentQr).toEqual(inv2.paymentQr);
 
         const spyRenderer = yield* DocumentRenderer;
         const auditFailExit = yield* spyRenderer
-          .render({ ...inv2, paymentQr: null }, { template: "classic", language: "cs" })
-          .pipe(asMember, Effect.exit);
+          .render(
+            { ...inv2, paymentQr: null },
+            { template: "classic", language: "cs" },
+            memberCaller.workspaceId,
+          )
+          .pipe(Effect.exit);
         failAudit = false;
         expect(auditFailExit._tag).toBe("Failure");
 
@@ -1693,14 +1631,23 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           ] as const,
         };
         const usdReqKey = RequestKey.make("rk-spy-usd-1");
-        const usdInv = yield* asMember(
-          documents.issue({ input: usdInput }, { requestKey: usdReqKey }),
+        const usdInv = yield* documents.issue(
+          memberCaller,
+          { input: usdInput },
+          { requestKey: usdReqKey },
         );
         expect(usdInv.paymentQr).toBeNull();
-        yield* asMember(documents.edit(usdInv.id, { note: "Edited USD note" }, usdInv.revision));
+        yield* documents.edit(
+          memberCaller,
+          usdInv.id,
+          { note: "Edited USD note" },
+          usdInv.revision,
+        );
         failAudit = true;
-        const usdReplay = yield* asMember(
-          documents.issue({ input: usdInput }, { requestKey: usdReqKey }),
+        const usdReplay = yield* documents.issue(
+          memberCaller,
+          { input: usdInput },
+          { requestKey: usdReqKey },
         );
         failAudit = false;
         expect(usdReplay.revision).toBe(usdInv.revision);
@@ -1719,32 +1666,38 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           ] as const,
         };
         const zeroMemKey = RequestKey.make("rk-spy-zero-1");
-        const zeroMemInv = yield* asMember(
-          documents.issue({ input: zeroMemInput }, { requestKey: zeroMemKey }),
+        const zeroMemInv = yield* documents.issue(
+          memberCaller,
+          { input: zeroMemInput },
+          { requestKey: zeroMemKey },
         );
         expect(zeroMemInv.paymentQr).toBeNull();
-        yield* asMember(
-          documents.edit(zeroMemInv.id, { note: "Edited zero" }, zeroMemInv.revision),
+        yield* documents.edit(
+          memberCaller,
+          zeroMemInv.id,
+          { note: "Edited zero" },
+          zeroMemInv.revision,
         );
         failAudit = true;
-        const zeroMemReplay = yield* asMember(
-          documents.issue({ input: zeroMemInput }, { requestKey: zeroMemKey }),
+        const zeroMemReplay = yield* documents.issue(
+          memberCaller,
+          { input: zeroMemInput },
+          { requestKey: zeroMemKey },
         );
         failAudit = false;
         expect(zeroMemReplay.revision).toBe(zeroMemInv.revision);
         expect(zeroMemReplay.paymentQr).toBeNull();
 
         // EUR 1,000,000,000 invoice (valid null QR due to EPC limit) replayed on memory store during audit outage
-        yield* asMember(
-          workspaces.saveBankAccount(
-            BankAccountInput.make({
-              name: "EUR",
-              currency: CurrencyCode.make("EUR"),
-              iban: "CZ6508000000192000145399",
-              bic: "GIBACZPX",
-              isDefault: true,
-            }),
-          ),
+        yield* workspaces.saveBankAccount(
+          memberCaller,
+          BankAccountInput.make({
+            name: "EUR",
+            currency: CurrencyCode.make("EUR"),
+            iban: "CZ6508000000192000145399",
+            bic: "GIBACZPX",
+            isDefault: true,
+          }),
         );
         const bigEurMemInput = {
           kind: "invoice" as const,
@@ -1760,16 +1713,23 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
           ] as const,
         };
         const bigEurMemKey = RequestKey.make("rk-spy-epc-limit-1");
-        const bigEurMemInv = yield* asMember(
-          documents.issue({ input: bigEurMemInput }, { requestKey: bigEurMemKey }),
+        const bigEurMemInv = yield* documents.issue(
+          memberCaller,
+          { input: bigEurMemInput },
+          { requestKey: bigEurMemKey },
         );
         expect(bigEurMemInv.paymentQr).toBeNull();
-        yield* asMember(
-          documents.edit(bigEurMemInv.id, { note: "Edited mega EUR" }, bigEurMemInv.revision),
+        yield* documents.edit(
+          memberCaller,
+          bigEurMemInv.id,
+          { note: "Edited mega EUR" },
+          bigEurMemInv.revision,
         );
         failAudit = true;
-        const bigEurMemReplay = yield* asMember(
-          documents.issue({ input: bigEurMemInput }, { requestKey: bigEurMemKey }),
+        const bigEurMemReplay = yield* documents.issue(
+          memberCaller,
+          { input: bigEurMemInput },
+          { requestKey: bigEurMemKey },
         );
         failAudit = false;
         expect(bigEurMemReplay.revision).toBe(bigEurMemInv.revision);
@@ -1777,23 +1737,22 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
 
         // Expired memory requestKey reused with new payload after 24h must NOT return predecessor invoice
         const reuseKey = RequestKey.make("rk-spy-expire-reuse");
-        const firstReuse = yield* asMember(
-          documents.issue(
-            {
-              input: {
-                kind: "invoice",
-                contact: decodeContactId(contact["id"]),
-                lines: [
-                  {
-                    description: "First invoice",
-                    quantity: BigDecimal.fromStringUnsafe("1"),
-                    unitPrice: BigDecimal.fromStringUnsafe("500"),
-                  },
-                ],
-              },
+        const firstReuse = yield* documents.issue(
+          memberCaller,
+          {
+            input: {
+              kind: "invoice",
+              contact: decodeContactId(contact["id"]),
+              lines: [
+                {
+                  description: "First invoice",
+                  quantity: BigDecimal.fromStringUnsafe("1"),
+                  unitPrice: BigDecimal.fromStringUnsafe("500"),
+                },
+              ],
             },
-            { requestKey: reuseKey },
-          ),
+          },
+          { requestKey: reuseKey },
         );
         yield* TestClock.adjust("25 hours");
         const secondPayload = {
@@ -1807,12 +1766,16 @@ describe("Phase 3A Round 1 fixes 6–8: PDF, branding, and document/share read p
             },
           ] as const,
         };
-        const secondReuse = yield* asMember(
-          documents.issue({ input: secondPayload }, { requestKey: reuseKey }),
+        const secondReuse = yield* documents.issue(
+          memberCaller,
+          { input: secondPayload },
+          { requestKey: reuseKey },
         );
         expect(secondReuse.id).not.toBe(firstReuse.id);
-        const secondReuseReplay = yield* asMember(
-          documents.issue({ input: secondPayload }, { requestKey: reuseKey }),
+        const secondReuseReplay = yield* documents.issue(
+          memberCaller,
+          { input: secondPayload },
+          { requestKey: reuseKey },
         );
         expect(secondReuseReplay.id).toBe(secondReuse.id);
         expect(secondReuseReplay.paymentQr?.payload).toContain("AM:900.00");

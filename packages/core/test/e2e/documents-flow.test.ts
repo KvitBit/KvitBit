@@ -10,6 +10,7 @@ import {
   Contacts,
   Documents,
   IsoDate,
+  type MemberCaller,
   Payments,
   PriceList,
   PriceListItemInput,
@@ -52,14 +53,15 @@ describe("onboarding", () => {
         account(),
         Effect.gen(function* () {
           const ws = yield* Workspaces;
-          const owner = yield* ws.create({ name: "Kvitbit s.r.o." });
+          const owner = yield* ws.create(account(), { name: "Kvitbit s.r.o." });
           return yield* asCaller(
             owner,
             Effect.gen(function* () {
-              const current = yield* ws.current;
-              const contact = yield* Effect.flatMap(Contacts, (c) => c.fromIco(BUYER_ICO));
+              const current = yield* ws.current(owner);
+              const contact = yield* Effect.flatMap(Contacts, (c) => c.fromIco(owner, BUYER_ICO));
               const priceList = yield* PriceList;
               const item = yield* priceList.save(
+                owner,
                 PriceListItemInput.make({
                   name: "Konzultace",
                   unit: "h",
@@ -71,8 +73,10 @@ describe("onboarding", () => {
               const unitPrice = yield* Schema.decodeUnknownEffect(Schema.toType(Schema.BigDecimal))(
                 item["unitPrice"],
               );
-              const items = yield* priceList.list();
-              const found = yield* Effect.flatMap(Contacts, (c) => c.search({ text: "Odběratel" }));
+              const items = yield* priceList.list(owner);
+              const found = yield* Effect.flatMap(Contacts, (c) =>
+                c.search(owner, { text: "Odběratel" }),
+              );
               return { owner, current, contact, item, unitPrice, items, found };
             }),
           );
@@ -109,7 +113,7 @@ describe("EUR invoice on a weekend tax point", () => {
       await runCore(
         account(),
         Effect.gen(function* () {
-          const { owner, buyer } = yield* onboard("vat_payer");
+          const { owner, buyer } = yield* onboard(account(), "vat_payer");
           return yield* asCaller(
             owner,
             Effect.gen(function* () {
@@ -126,18 +130,19 @@ describe("EUR invoice on a weekend tax point", () => {
                 ],
                 ...extra,
               });
-              const eur = yield* docs.issue({ input: input() });
-              const second = yield* docs.issue({ input: input() });
+              const eur = yield* docs.issue(owner, { input: input() });
+              const second = yield* docs.issue(owner, { input: input() });
               const overridden = yield* docs.edit(
+                owner,
                 second.id,
                 { number: "2026-0003" },
                 second.revision,
               );
-              const next = yield* docs.issue({ input: input({ currency: CZK }) });
+              const next = yield* docs.issue(owner, { input: input({ currency: CZK }) });
               if (eur.number === null)
                 return yield* Effect.die("Expected a number on the EUR invoice");
               const duplicate = yield* Effect.flip(
-                docs.edit(next.id, { number: eur.number }, next.revision),
+                docs.edit(owner, next.id, { number: eur.number }, next.revision),
               );
               return { eur, second, overridden, next, duplicate };
             }),
@@ -171,21 +176,22 @@ describe("vat_payer advance flow", () => {
    */
   const advance = <A, E, R>(
     autoSend: boolean,
-    after: (proforma: DocumentView) => Effect.Effect<A, E, R>,
+    after: (owner: MemberCaller, proforma: DocumentView) => Effect.Effect<A, E, R>,
   ) =>
     Effect.gen(function* () {
-      const { owner, buyer } = yield* onboard("vat_payer");
+      const { owner, buyer } = yield* onboard(account(), "vat_payer");
       return yield* asCaller(
         owner,
         Effect.gen(function* () {
           const ws = yield* Workspaces;
-          const current = yield* ws.current;
+          const current = yield* ws.current(owner);
           yield* ws.updateSettings(
+            owner,
             { defaults: { paymentTaxDocumentAutoSend: autoSend } },
             current.revision,
           );
           const docs = yield* Documents;
-          const proforma = yield* docs.issue({
+          const proforma = yield* docs.issue(owner, {
             input: {
               kind: "proforma",
               contact: buyer,
@@ -194,11 +200,11 @@ describe("vat_payer advance flow", () => {
             },
           });
           const recorded = yield* Effect.flatMap(Payments, (p) =>
-            p.record({ target: { document: proforma.id } }),
+            p.record(owner, { target: { document: proforma.id } }),
           );
-          const ptd = yield* docs.get(EffectArray.getUnsafe(recorded.issued, 0).id);
+          const ptd = yield* docs.get(owner, EffectArray.getUnsafe(recorded.issued, 0).id);
           const started = yield* Effect.flatMap(StartedDeliveries, Ref.get);
-          return { proforma, recorded, ptd, started, after: yield* after(proforma) };
+          return { proforma, recorded, ptd, started, after: yield* after(owner, proforma) };
         }),
       );
     });
@@ -207,10 +213,10 @@ describe("vat_payer advance flow", () => {
     const result = ok(
       await runCore(
         account(),
-        advance(true, (advanceDocument) =>
+        advance(true, (owner, advanceDocument) =>
           Effect.gen(function* () {
             const docs = yield* Documents;
-            const finalInvoice = yield* docs.issueFinalInvoice(advanceDocument.id, {
+            const finalInvoice = yield* docs.issueFinalInvoice(owner, advanceDocument.id, {
               patch: {
                 lines: [
                   { description: "Vývoj", unitPrice: dec("1000") },
@@ -218,15 +224,15 @@ describe("vat_payer advance flow", () => {
                 ],
               },
             });
-            const creditNote = yield* docs.correct(finalInvoice.id, {
+            const creditNote = yield* docs.correct(owner, finalInvoice.id, {
               reason: "dobropis",
               lines: "full",
             });
             return {
-              proforma: yield* docs.get(advanceDocument.id),
+              proforma: yield* docs.get(owner, advanceDocument.id),
               finalInvoice,
               creditNote,
-              credited: yield* docs.get(finalInvoice.id),
+              credited: yield* docs.get(owner, finalInvoice.id),
             };
           }),
         ),

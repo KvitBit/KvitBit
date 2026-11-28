@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 /**
  * Payments (core-ports 4.5) through the `Payments` service on real layers: documents' payments
@@ -66,7 +67,9 @@ const docId = (d: DocumentView) => DocumentId.make(d.id);
 
 /** 2 x 1000 standard + 500 reduced: gross 2980 CZK. */
 const issueInvoice = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
-  Effect.flatMap(Documents, (d) => d.issue({ input: invoiceInput(extra) }));
+  Effect.flatMap(Documents, (d) =>
+    Effect.flatMap(TestCaller, (caller) => d.issue(caller, { input: invoiceInput(extra) })),
+  );
 const issueProforma = () => issueInvoice({ kind: "proforma" });
 /** Outside vat_payer: one line without VAT, gross 2980 CZK. */
 const issuePlainProforma = () =>
@@ -79,12 +82,14 @@ const pay = (document: DocumentId, amount?: string, extra: { paidOn?: IsoDate } 
   const target = { document };
   const input =
     amount === undefined ? { target, ...extra } : { target, amount: czk(amount), ...extra };
-  return Effect.flatMap(Payments, (payments) => payments.record(input));
+  return Effect.flatMap(Payments, (payments) =>
+    Effect.flatMap(TestCaller, (caller) => payments.record(caller, input)),
+  );
 };
 
 const settlementOf = (id: DocumentId) =>
   Effect.map(
-    Effect.flatMap(Documents, (d) => d.get(id)),
+    Effect.flatMap(Documents, (d) => Effect.flatMap(TestCaller, (caller) => d.get(caller, id))),
     (v) => v.settlement,
   );
 
@@ -97,7 +102,9 @@ describe("record on documents", () => {
           const first = yield* pay(inv.id, "1000");
           const rest = yield* pay(inv.id);
           const extra = yield* pay(inv.id, "1", { paidOn: IsoDate.make("2026-11-20") });
-          const list = yield* Effect.flatMap(Payments, (p) => p.listFor({ document: inv.id }));
+          const list = yield* Effect.flatMap(Payments, (p) =>
+            Effect.flatMap(TestCaller, (caller) => p.listFor(caller, { document: inv.id })),
+          );
           return { first, rest, extra, list, settlement: yield* settlementOf(inv.id) };
         }),
       }),
@@ -122,10 +129,14 @@ describe("record on documents", () => {
     const [currency, zero, negative, nothingDue] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const inv = yield* issueInvoice();
           const currencyResult = yield* Effect.flip(
-            p.record({ target: { document: inv.id }, amount: MoneyMath.make(dec("10"), EUR) }),
+            p.record(testCaller, {
+              target: { document: inv.id },
+              amount: MoneyMath.make(dec("10"), EUR),
+            }),
           );
           const zeroResult = yield* Effect.flip(pay(inv.id, "0"));
           const negativeResult = yield* Effect.flip(pay(inv.id, "-5"));
@@ -145,10 +156,11 @@ describe("record on documents", () => {
     const [draft, creditNote] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
-          const draftResult = yield* d.createDraft(invoiceInput());
+          const draftResult = yield* d.createDraft(testCaller, invoiceInput());
           const inv = yield* issueInvoice();
-          const cn = yield* d.correct(inv.id, { reason: "storno", lines: "full" });
+          const cn = yield* d.correct(testCaller, inv.id, { reason: "storno", lines: "full" });
           return [
             yield* Effect.flip(pay(draftResult.id, "10")),
             yield* Effect.flip(pay(cn.id, "10")),
@@ -164,13 +176,14 @@ describe("record on documents", () => {
     const [credited, cancelled, locked] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const a = yield* issueInvoice();
-          yield* d.correct(a.id, { reason: "storno", lines: "full" });
+          yield* d.correct(testCaller, a.id, { reason: "storno", lines: "full" });
           const b = yield* issueInvoice();
-          yield* d.cancel(b.id, { reason: "chyba" });
+          yield* d.cancel(testCaller, b.id, { reason: "chyba" });
           const c = yield* issueInvoice();
-          yield* d.lock(c.id);
+          yield* d.lock(testCaller, c.id);
           return [
             yield* Effect.flip(pay(a.id)),
             yield* Effect.flip(pay(b.id, "10")),
@@ -189,13 +202,14 @@ describe("record on documents", () => {
     const [fraction, huge, replayInvalid] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const inv = yield* issueInvoice();
           const fractionResult = yield* Effect.flip(pay(inv.id, "0.001"));
           const hugeResult = yield* Effect.flip(pay(inv.id, "10000000000000000"));
-          yield* p.record({ target: { document: inv.id }, amount: czk("10") }, key);
+          yield* p.record(testCaller, { target: { document: inv.id }, amount: czk("10") }, key);
           const replayInvalidResult = yield* Effect.flip(
-            p.record({ target: { document: inv.id }, amount: czk("0.001") }, key),
+            p.record(testCaller, { target: { document: inv.id }, amount: czk("0.001") }, key),
           );
           return [fractionResult, hugeResult, replayInvalidResult] as const;
         }),
@@ -219,11 +233,14 @@ describe("record on documents", () => {
     const [history, stale, payment] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const inv = yield* issueInvoice();
           const result = yield* pay(inv.id, "100");
-          const staleResult = yield* Effect.flip(d.edit(inv.id, { note: "x" }, inv.revision));
-          return [yield* d.history(inv.id), staleResult, view(result.payment)] as const;
+          const staleResult = yield* Effect.flip(
+            d.edit(testCaller, inv.id, { note: "x" }, inv.revision),
+          );
+          return [yield* d.history(testCaller, inv.id), staleResult, view(result.payment)] as const;
         }),
       }),
     );
@@ -250,19 +267,20 @@ describe("record on documents", () => {
     const [first, replay, mismatched, rows] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const inv = yield* issueInvoice();
           const input = { target: { document: inv.id }, amount: czk("500") };
-          const firstResult = yield* p.record(input, key);
-          const replayResult = yield* p.record(input, key);
+          const firstResult = yield* p.record(testCaller, input, key);
+          const replayResult = yield* p.record(testCaller, input, key);
           const mismatchedResult = yield* Effect.flip(
-            p.record({ ...input, amount: czk("501") }, key),
+            p.record(testCaller, { ...input, amount: czk("501") }, key),
           );
           return [
             firstResult,
             replayResult,
             mismatchedResult,
-            yield* p.listFor({ document: inv.id }),
+            yield* p.listFor(testCaller, { document: inv.id }),
           ] as const;
         }),
       }),
@@ -287,8 +305,8 @@ describe("authorization and tenancy", () => {
             Effect.all(
               {
                 record: Effect.exit(as(caller, pay(inv.id, "1"))),
-                remove: Effect.exit(as(caller, p.remove(id, "x"))),
-                list: Effect.exit(as(caller, p.listFor({ document: inv.id }))),
+                remove: Effect.exit(as(caller, p.remove(caller, id, "x"))),
+                list: Effect.exit(as(caller, p.listFor(caller, { document: inv.id }))),
               },
               { concurrency: 1 },
             );
@@ -343,10 +361,10 @@ describe("authorization and tenancy", () => {
             Effect.all(
               [
                 Effect.flip(pay(inv.id, "1")),
-                Effect.flip(p.listFor({ document: inv.id })),
-                Effect.flip(p.remove(id, "x")),
-                Effect.flip(p.record({ target: { expense: EXPENSE }, amount: czk("1") })),
-                Effect.flip(p.listFor({ expense: EXPENSE })),
+                Effect.flip(p.listFor(other, { document: inv.id })),
+                Effect.flip(p.remove(other, id, "x")),
+                Effect.flip(p.record(other, { target: { expense: EXPENSE }, amount: czk("1") })),
+                Effect.flip(p.listFor(other, { expense: EXPENSE })),
               ],
               { concurrency: 1 },
             ),
@@ -370,6 +388,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     const [result, rows, sent, history] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const pf = yield* issueProforma();
           const resultResult = yield* pay(pf.id, "1000");
@@ -377,12 +396,12 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
           const store = yield* CoreStore;
           const rowsResult = yield* store.transaction(repo.liveFor(WS, { document: pf.id }));
           const id = view(resultResult.payment).id;
-          yield* d.correct(docId(EffectArray.getUnsafe(resultResult.issued, 0)), {
+          yield* d.correct(testCaller, docId(EffectArray.getUnsafe(resultResult.issued, 0)), {
             reason: "x",
             lines: "full",
           });
-          yield* (yield* Payments).remove(id, "chyba");
-          const historyResult = yield* d.history(pf.id);
+          yield* (yield* Payments).remove(testCaller, id, "chyba");
+          const historyResult = yield* d.history(testCaller, pf.id);
           return [
             resultResult,
             rowsResult,
@@ -436,11 +455,12 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     const [failed, list, settlement] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const pf = yield* issueInvoice({ kind: "proforma", currency: EUR });
           // No CNB fixing on or before paidOn: the PTD's fx is unavailable.
           const failedResult = yield* Effect.flip(
-            p.record({
+            p.record(testCaller, {
               target: { document: pf.id },
               amount: MoneyMath.make(dec("10"), EUR),
               paidOn: IsoDate.make("2026-11-01"),
@@ -448,7 +468,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
           );
           return [
             failedResult,
-            yield* p.listFor({ document: pf.id }),
+            yield* p.listFor(testCaller, { document: pf.id }),
             yield* settlementOf(pf.id),
           ] as const;
         }),
@@ -464,6 +484,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     const [token, refused, illegal, sent, tokenHistory, refusedHistory, illegalHistory, list] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const f = yield* PaymentFixtures;
           yield* f.setAutoSend(WS, true);
@@ -486,10 +507,10 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
             refusedResult,
             illegalResult,
             yield* f.sent(WS),
-            yield* d.history(ptdOf(tokenResult)),
-            yield* d.history(ptdOf(refusedResult)),
-            yield* d.history(ptdOf(illegalResult)),
-            yield* (yield* Payments).listFor({ document: pf.id }),
+            yield* d.history(testCaller, ptdOf(tokenResult)),
+            yield* d.history(testCaller, ptdOf(refusedResult)),
+            yield* d.history(testCaller, ptdOf(illegalResult)),
+            yield* (yield* Payments).listFor(testCaller, { document: pf.id }),
           ] as const;
         }),
       }),
@@ -512,6 +533,7 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     const [missing, stale, invalid, linesInvalid, list, sent, ptds] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const f = yield* PaymentFixtures;
           yield* f.setAutoSend(WS, true);
           const pf = yield* issueProforma();
@@ -533,9 +555,9 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
             staleResult,
             invalidResult,
             linesInvalidResult,
-            yield* (yield* Payments).listFor({ document: pf.id }),
+            yield* (yield* Payments).listFor(testCaller, { document: pf.id }),
             yield* f.sent(WS),
-            yield* (yield* Documents).list({ kind: "payment_tax_document", limit: 10 }),
+            yield* (yield* Documents).list(testCaller, { kind: "payment_tax_document", limit: 10 }),
           ] as const;
         }),
       }),
@@ -554,13 +576,14 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     const [first, replay, sent] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const f = yield* PaymentFixtures;
           const p = yield* Payments;
           yield* f.setAutoSend(WS, true);
           const pf = yield* issueProforma();
           const input = { target: { document: pf.id }, amount: czk("100") };
-          const firstResult = yield* p.record(input, key);
-          const replayResult = yield* p.record(input, key);
+          const firstResult = yield* p.record(testCaller, input, key);
+          const replayResult = yield* p.record(testCaller, input, key);
           return [firstResult, replayResult, yield* f.sent(WS)] as const;
         }),
       }),
@@ -586,18 +609,19 @@ describe("Proformas: Payment Tax Documents (P2) and the Final Invoice (D8)", () 
     const [result, fi, finalSettlement, proformaList, fiList] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const p = yield* Payments;
           const pf = yield* issuePlainProforma();
           yield* pay(pf.id, "1000");
-          const fiResult = yield* d.issueFinalInvoice(pf.id);
+          const fiResult = yield* d.issueFinalInvoice(testCaller, pf.id);
           const resultResult = yield* pay(pf.id);
           return [
             resultResult,
             fiResult,
             yield* settlementOf(fiResult.id),
-            yield* p.listFor({ document: pf.id }),
-            yield* p.listFor({ document: fiResult.id }),
+            yield* p.listFor(testCaller, { document: pf.id }),
+            yield* p.listFor(testCaller, { document: fiResult.id }),
           ] as const;
         }),
         regimeA: "non_vat_payer",
@@ -619,23 +643,24 @@ describe("remove", () => {
     const [before, after, again, blank, history, list] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const d = yield* Documents;
           const inv = yield* issueInvoice();
           const paid = yield* pay(inv.id);
           const id = view(paid.payment).id;
           const beforeResult = yield* settlementOf(inv.id);
-          yield* p.remove(id, " duplicate import ");
+          yield* p.remove(testCaller, id, " duplicate import ");
           const afterResult = yield* settlementOf(inv.id);
-          const againResult = yield* Effect.exit(p.remove(id, "again"));
-          const blankResult = yield* Effect.flip(p.remove(id, "  "));
+          const againResult = yield* Effect.exit(p.remove(testCaller, id, "again"));
+          const blankResult = yield* Effect.flip(p.remove(testCaller, id, "  "));
           return [
             beforeResult,
             afterResult,
             againResult,
             blankResult,
-            yield* d.history(inv.id),
-            yield* p.listFor({ document: inv.id }),
+            yield* d.history(testCaller, inv.id),
+            yield* p.listFor(testCaller, { document: inv.id }),
           ] as const;
         }),
       }),
@@ -655,20 +680,22 @@ describe("remove", () => {
     const steps = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const p = yield* Payments;
-          const attempt = (idInput: PaymentId) => Effect.exit(p.remove(idInput, "chyba"));
+          const attempt = (idInput: PaymentId) =>
+            Effect.exit(Effect.flatMap(TestCaller, (caller) => p.remove(caller, idInput, "chyba")));
           const pf = yield* issueProforma();
           const paid = yield* pay(pf.id, "500");
           const id = view(paid.payment).id;
           const ptd = docId(EffectArray.getUnsafe(paid.issued, 0));
           const open = yield* attempt(id);
-          const fi = yield* d.issueFinalInvoice(pf.id);
-          yield* d.correct(ptd, { reason: "x", lines: "full" }).pipe(Effect.exit);
+          const fi = yield* d.issueFinalInvoice(testCaller, pf.id);
+          yield* d.correct(testCaller, ptd, { reason: "x", lines: "full" }).pipe(Effect.exit);
           const deducted = yield* attempt(id);
-          yield* d.correct(fi.id, { reason: "x", lines: "full" });
+          yield* d.correct(testCaller, fi.id, { reason: "x", lines: "full" });
           const ptdOpen = yield* attempt(id);
-          yield* d.correct(ptd, { reason: "x", lines: "full" });
+          yield* d.correct(testCaller, ptd, { reason: "x", lines: "full" });
           const done = yield* attempt(id);
           return [open, deducted, ptdOpen, done, yield* settlementOf(pf.id)] as const;
         }),
@@ -685,14 +712,15 @@ describe("remove", () => {
     const [blocked, released] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const p = yield* Payments;
           const pf = yield* issuePlainProforma();
           const id = view((yield* pay(pf.id, "500")).payment).id;
-          const fi = yield* d.issueFinalInvoice(pf.id);
-          const blockedResult = yield* Effect.exit(p.remove(id, "x"));
-          yield* d.cancel(fi.id, { reason: "storno" });
-          return [blockedResult, yield* Effect.exit(p.remove(id, "x"))] as const;
+          const fi = yield* d.issueFinalInvoice(testCaller, pf.id);
+          const blockedResult = yield* Effect.exit(p.remove(testCaller, id, "x"));
+          yield* d.cancel(testCaller, fi.id, { reason: "storno" });
+          return [blockedResult, yield* Effect.exit(p.remove(testCaller, id, "x"))] as const;
         }),
         regimeA: "non_vat_payer",
       }),
@@ -707,14 +735,21 @@ describe("expense targets", () => {
     const result = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const f = yield* PaymentFixtures;
           const store = yield* CoreStore;
           yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: CZK, gross: dec("1000") });
-          const partial = yield* p.record({ target: { expense: EXPENSE }, amount: czk("400") });
-          const rest = yield* p.record({ target: { expense: EXPENSE }, method: "card" });
-          const list = yield* p.listFor({ expense: EXPENSE });
-          yield* p.remove(view(rest.payment).id, "wrong card");
+          const partial = yield* p.record(testCaller, {
+            target: { expense: EXPENSE },
+            amount: czk("400"),
+          });
+          const rest = yield* p.record(testCaller, {
+            target: { expense: EXPENSE },
+            method: "card",
+          });
+          const list = yield* p.listFor(testCaller, { expense: EXPENSE });
+          yield* p.remove(testCaller, view(rest.payment).id, "wrong card");
           const afterRemove = yield* f.expense(WS, EXPENSE);
           const history = yield* store.audit.history(WS, { entity: "Expense", id: EXPENSE });
           return { partial, rest, list, afterRemove, history };
@@ -746,7 +781,12 @@ describe("expense targets", () => {
           const f = yield* PaymentFixtures;
           yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: KWD, gross: dec("10") });
           const record = (amount: string) =>
-            p.record({ target: { expense: EXPENSE }, amount: MoneyMath.make(dec(amount), KWD) });
+            Effect.flatMap(TestCaller, (caller) =>
+              p.record(caller, {
+                target: { expense: EXPENSE },
+                amount: MoneyMath.make(dec(amount), KWD),
+              }),
+            );
           return [yield* Effect.flip(record("1.001")), yield* record("1.01")] as const;
         }),
       }),
@@ -759,6 +799,7 @@ describe("expense targets", () => {
     const [incomplete, currency] = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const p = yield* Payments;
           const f = yield* PaymentFixtures;
           yield* f.putExpense({
@@ -775,8 +816,10 @@ describe("expense targets", () => {
             gross: dec("10"),
           });
           return [
-            yield* Effect.flip(p.record({ target: { expense: EXPENSE } })),
-            yield* Effect.flip(p.record({ target: { expense: EXPENSE_B }, amount: czk("1") })),
+            yield* Effect.flip(p.record(testCaller, { target: { expense: EXPENSE } })),
+            yield* Effect.flip(
+              p.record(testCaller, { target: { expense: EXPENSE_B }, amount: czk("1") }),
+            ),
           ] as const;
         }),
       }),
@@ -793,15 +836,20 @@ describe("reports read", () => {
     const rows = ok(
       await run({
         body: Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const f = yield* PaymentFixtures;
           const p = yield* Payments;
           yield* f.putExpense({ workspaceId: WS, id: EXPENSE, currency: CZK, gross: dec("1000") });
           const inv = yield* issueInvoice();
           yield* pay(inv.id, "10", { paidOn: IsoDate.make("2026-11-01") });
           const removed = yield* pay(inv.id, "20", { paidOn: IsoDate.make("2026-11-02") });
-          yield* p.remove(view(removed.payment).id, "x");
+          yield* p.remove(testCaller, view(removed.payment).id, "x");
           yield* pay(inv.id, "30", { paidOn: IsoDate.make("2026-10-31") });
-          yield* p.record({ target: { expense: EXPENSE }, amount: czk("5"), paidOn: TODAY });
+          yield* p.record(testCaller, {
+            target: { expense: EXPENSE },
+            amount: czk("5"),
+            paidOn: TODAY,
+          });
           const store = yield* CoreStore;
           const repo = yield* PaymentsRepo;
           const live = yield* store.transaction(

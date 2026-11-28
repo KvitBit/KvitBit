@@ -1,5 +1,5 @@
 /** `payments` group handlers (http-mcp-contracts 3.5.4): one Payments method per endpoint. */
-import { API_PREFIX, Api } from "@kvitbit/api-contract";
+import { API_PREFIX, Api, RequestCaller } from "@kvitbit/api-contract";
 import { Payments } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -15,24 +15,40 @@ export const PaymentsGroupLive = HttpApiBuilder.group(
     const payments = yield* Payments;
     return handlers
       .handle("record", ({ params, headers, payload }) =>
-        payments.record(payload, requestOptions(headers)).pipe(
-          Effect.map((result) => ({ ...result, payment: jsonizePayment(result.payment) })),
-          Effect.tap(({ payment }) => {
-            if (!(Predicate.hasProperty(payment, "id") && Predicate.isString(payment.id))) {
-              return Effect.void;
-            }
-            return setLocation(
-              `${API_PREFIX}/workspaces/${params.workspaceId}/payments/${payment.id}`,
-            );
-          }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          payments.record(caller, payload, requestOptions(headers)).pipe(
+            Effect.map((result) => ({ ...result, payment: jsonizePayment(result.payment) })),
+            Effect.tap(({ payment }) => {
+              if (!(Predicate.hasProperty(payment, "id") && Predicate.isString(payment.id))) {
+                return Effect.void;
+              }
+              return setLocation(
+                `${API_PREFIX}/workspaces/${params.workspaceId}/payments/${payment.id}`,
+              );
+            }),
+          ),
         ),
       )
-      .handle("remove", ({ params, payload }) => payments.remove(params.paymentId, payload.reason))
+      .handle("remove", ({ params, payload }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          payments.remove(caller, params.paymentId, payload.reason),
+        ),
+      )
       .handle("listForDocument", ({ params }) =>
-        Effect.map(payments.listFor({ document: params.documentId }), Arr.map(jsonizePayment)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(
+            payments.listFor(caller, { document: params.documentId }),
+            Arr.map(jsonizePayment),
+          ),
+        ),
       )
       .handle("listForExpense", ({ params }) =>
-        Effect.map(payments.listFor({ expense: params.expenseId }), Arr.map(jsonizePayment)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(
+            payments.listFor(caller, { expense: params.expenseId }),
+            Arr.map(jsonizePayment),
+          ),
+        ),
       );
   }),
 );

@@ -19,19 +19,14 @@
  */
 
 import type {
+  Caller,
   DeliveryId,
   IsoDate,
   IssueCode,
   ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import {
-  type Action,
-  type CoreError,
-  CurrentCaller,
-  Documents,
-  Forbidden,
-} from "@kvitbit/domain/contract";
+import { type Action, type CoreError, Documents, Forbidden } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
@@ -94,24 +89,28 @@ export class RecurringIssuance extends Context.Service<
   {
     /** Activity "issue" + "advance": exactly one document for the occurrence. */
     readonly issue: (
+      caller: Caller,
       scheduleId: ScheduleId,
       occurrence: IsoDate,
-    ) => Effect.Effect<IssueOutcome, StepError, CurrentCaller>;
+    ) => Effect.Effect<IssueOutcome, StepError>;
     /** Activity "enqueue-delivery": queues the issued document's email once, if autoSend. */
     readonly send: (
+      caller: Caller,
       scheduleId: ScheduleId,
       occurrence: IsoDate,
-    ) => Effect.Effect<SendOutcome, StepError, CurrentCaller>;
+    ) => Effect.Effect<SendOutcome, StepError>;
     /** The whole workflow body: issue, then send when the run is pending. Safe to rerun. */
     readonly run: (
+      caller: Caller,
       scheduleId: ScheduleId,
       occurrence: IsoDate,
-    ) => Effect.Effect<OccurrenceResult, StepError, CurrentCaller>;
+    ) => Effect.Effect<OccurrenceResult, StepError>;
     /** The sweep's catch-up cap: pauses the schedule with `schedule.missed_occurrences`. */
     readonly pauseMissed: (
+      caller: Caller,
       scheduleId: ScheduleId,
       occurrence: IsoDate,
-    ) => Effect.Effect<IssueOutcome, StepError, CurrentCaller>;
+    ) => Effect.Effect<IssueOutcome, StepError>;
     /** Cross-tenant: what this sweep tick does, at the current instant (Prague date). */
     readonly due: Effect.Effect<ReadonlyArray<SweepDecision>, StepError>;
     /**
@@ -133,7 +132,7 @@ export class RecurringIssuance extends Context.Service<
      * schedule here. One decision's failure is logged and does not stop the others.
      */
     readonly sweep: <E>(
-      start: (decision: SweepDecision) => Effect.Effect<void, E, CurrentCaller>,
+      start: (caller: Caller, decision: SweepDecision) => Effect.Effect<void, E>,
     ) => Effect.Effect<ReadonlyArray<SweepDecision>, StepError>;
   }
 >()("@kvitbit/core/modules/recurring/issuance/RecurringIssuance") {}
@@ -176,12 +175,17 @@ export const makeRecurringIssuance = Effect.gen(function* () {
   const today = Effect.map(Clock.currentTimeMillis, pragueDate);
 
   /** R4: only the System caller of this very occurrence's job. */
-  const authorizeJob = (action: Action, scheduleId: ScheduleId, occurrence: IsoDate) =>
-    Effect.flatMap(authorizeInWorkspace(action), ({ caller, workspaceId }) =>
-      caller._tag === "System" &&
-      caller.job._tag === "RecurringIssuance" &&
-      caller.job.scheduleId === scheduleId &&
-      caller.job.occurrence === occurrence
+  const authorizeJob = (
+    caller: Caller,
+    action: Action,
+    scheduleId: ScheduleId,
+    occurrence: IsoDate,
+  ) =>
+    Effect.flatMap(authorizeInWorkspace(caller, action), ({ caller: allowed, workspaceId }) =>
+      allowed._tag === "System" &&
+      allowed.job._tag === "RecurringIssuance" &&
+      allowed.job.scheduleId === scheduleId &&
+      allowed.job.occurrence === occurrence
         ? Effect.succeed(workspaceId)
         : Effect.fail(Forbidden.make({ action })),
     );
@@ -212,6 +216,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
   });
 
   const pauseSchedule = Effect.fn("pauseSchedule")(function* (
+    caller: Caller,
     schedule: ScheduleRow,
     reason: IssueCode | null,
     occurrence: IsoDate,
@@ -221,7 +226,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
       { ...schedule, pausedAt: yield* nowIso, pausedReason: reason, pausedError: error },
       schedule.revision,
     );
-    yield* appendAudit({
+    yield* appendAudit(caller, {
       workspaceId: schedule.workspaceId,
       subject: { entity: "Schedule", id: schedule.id },
       action: "schedule.pause",
@@ -234,11 +239,12 @@ export const makeRecurringIssuance = Effect.gen(function* () {
 
   /** The catch-up cap (core-ports 4.8): pause and record the occurrence as skipped_missed. */
   const pauseForMissed = Effect.fn("pauseForMissed")(function* (
+    caller: Caller,
     schedule: ScheduleRow,
     occurrence: IsoDate,
   ) {
     const reason = "schedule.missed_occurrences" as const;
-    yield* pauseSchedule(schedule, reason, occurrence);
+    yield* pauseSchedule(caller, schedule, reason, occurrence);
     const run = yield* upsertRun(schedule.workspaceId, schedule.id, occurrence, {
       outcome: "skipped_missed",
       documentId: null,
@@ -251,8 +257,8 @@ export const makeRecurringIssuance = Effect.gen(function* () {
   });
 
   const issue: RecurringIssuance["Service"]["issue"] = Effect.fn("issue")(
-    function* (scheduleId, occurrence) {
-      const workspaceId = yield* authorizeJob("document.issue", scheduleId, occurrence);
+    function* (caller, scheduleId, occurrence) {
+      const workspaceId = yield* authorizeJob(caller, "document.issue", scheduleId, occurrence);
       return yield* store.transaction(
         Effect.gen(function* () {
           const schedule = yield* repo.lockSchedule(workspaceId, scheduleId);
@@ -267,7 +273,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
           }
           // A workflow that started on time but runs past the cap pauses instead of issuing.
           if (isMissed(occurrence, day, schedule.catchUpThrough)) {
-            return yield* pauseForMissed(schedule, occurrence);
+            return yield* pauseForMissed(caller, schedule, occurrence);
           }
           const template = yield* repo.getTemplate(workspaceId, schedule.templateId);
           if (template.archivedAt !== null) return { _tag: "Skipped", reason: "archived" } as const;
@@ -282,7 +288,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
           const issued = yield* Effect.result(
             store
               .transaction(
-                Effect.tap(documents.issue({ input }), (issuedDocument) =>
+                Effect.tap(documents.issue(caller, { input }), (issuedDocument) =>
                   links.link(workspaceId, issuedDocument.id, { scheduleId, occurrence }),
                 ),
               )
@@ -292,7 +298,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
             const error = issued.failure;
             if (error._tag === "StoreUnavailable" || !pauses(error)) return yield* error;
             const reason = failureCode(error);
-            yield* pauseSchedule(schedule, reason, occurrence, failureError(error));
+            yield* pauseSchedule(caller, schedule, reason, occurrence, failureError(error));
             const run = yield* upsertRun(workspaceId, scheduleId, occurrence, {
               outcome: "failed",
               documentId: null,
@@ -328,8 +334,8 @@ export const makeRecurringIssuance = Effect.gen(function* () {
   );
 
   const send: RecurringIssuance["Service"]["send"] = Effect.fn("send")(
-    function* (scheduleId, occurrence) {
-      const workspaceId = yield* authorizeJob("document.send", scheduleId, occurrence);
+    function* (caller, scheduleId, occurrence) {
+      const workspaceId = yield* authorizeJob(caller, "document.send", scheduleId, occurrence);
       return yield* store.transaction(
         Effect.gen(function* () {
           const schedule = yield* repo.lockSchedule(workspaceId, scheduleId);
@@ -345,14 +351,16 @@ export const makeRecurringIssuance = Effect.gen(function* () {
           if (run.send !== "pending" || run.documentId === null) {
             return { _tag: "NotRequested" } as const;
           }
-          const sent = yield* Effect.result(store.transaction(documents.send(run.documentId)));
+          const sent = yield* Effect.result(
+            store.transaction(documents.send(caller, run.documentId)),
+          );
           if (Result.isFailure(sent)) {
             const error = sent.failure;
             if (error._tag === "StoreUnavailable" || !pauses(error)) return yield* error;
             const reason = failureCode(error);
             // The document stays issued; resume does not retry the send (send it manually).
             if (schedule.detachedAt === null && schedule.pausedAt === null) {
-              yield* pauseSchedule(schedule, reason, occurrence, failureError(error));
+              yield* pauseSchedule(caller, schedule, reason, occurrence, failureError(error));
             }
             const failed = yield* upsertRun(workspaceId, scheduleId, occurrence, {
               ...run,
@@ -377,18 +385,18 @@ export const makeRecurringIssuance = Effect.gen(function* () {
   );
 
   const run: RecurringIssuance["Service"]["run"] = Effect.fn("run")(
-    function* (scheduleId, occurrence) {
-      const issued = yield* issue(scheduleId, occurrence);
+    function* (caller, scheduleId, occurrence) {
+      const issued = yield* issue(caller, scheduleId, occurrence);
       if (issued._tag !== "Issued" || issued.run.send === "none") {
         return { issue: issued, send: null };
       }
-      return { issue: issued, send: yield* send(scheduleId, occurrence) };
+      return { issue: issued, send: yield* send(caller, scheduleId, occurrence) };
     },
   );
 
   const pauseMissed: RecurringIssuance["Service"]["pauseMissed"] = Effect.fn("pauseMissed")(
-    function* (scheduleId, occurrence) {
-      const workspaceId = yield* authorizeJob("document.issue", scheduleId, occurrence);
+    function* (caller, scheduleId, occurrence) {
+      const workspaceId = yield* authorizeJob(caller, "document.issue", scheduleId, occurrence);
       return yield* store.transaction(
         Effect.gen(function* () {
           const schedule = yield* repo.lockSchedule(workspaceId, scheduleId);
@@ -400,7 +408,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
           if (!isMissed(occurrence, day, schedule.catchUpThrough)) {
             return { _tag: "Skipped", reason: "not_missed" } as const;
           }
-          return yield* pauseForMissed(schedule, occurrence);
+          return yield* pauseForMissed(caller, schedule, occurrence);
         }),
       );
     },
@@ -430,7 +438,7 @@ export const makeRecurringIssuance = Effect.gen(function* () {
   }).pipe(orUnavailable);
 
   const sweep: RecurringIssuance["Service"]["sweep"] = Effect.fn("sweep")(function* <E>(
-    start: (decision: SweepDecision) => Effect.Effect<void, E, CurrentCaller>,
+    start: (caller: Caller, decision: SweepDecision) => Effect.Effect<void, E>,
   ) {
     const decisions = yield* due;
     yield* Effect.forEach(
@@ -441,12 +449,11 @@ export const makeRecurringIssuance = Effect.gen(function* () {
           scheduleId: decision.scheduleId,
           occurrence: decision.occurrence,
         });
-        const step: Effect.Effect<void, E | StepError, CurrentCaller> =
+        const step: Effect.Effect<void, E | StepError> =
           decision.action === "pause_missed"
-            ? Effect.asVoid(pauseMissed(decision.scheduleId, decision.occurrence))
-            : start(decision);
+            ? Effect.asVoid(pauseMissed(caller, decision.scheduleId, decision.occurrence))
+            : start(caller, decision);
         return step.pipe(
-          Effect.provideService(CurrentCaller, caller),
           // Interruption (shutdown, cron cancel) stops the tick; other failures are logged.
           Effect.catchCause((cause) =>
             Cause.hasInterrupts(cause)

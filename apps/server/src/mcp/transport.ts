@@ -15,7 +15,6 @@ import {
   MCP_SERVER_NAME,
   MCP_SUPPORTED_PROTOCOL_VERSIONS,
 } from "@kvitbit/api-contract";
-import { CurrentCaller } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as ByteSize from "effect/ByteSize";
 import * as Effect from "effect/Effect";
@@ -282,7 +281,6 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
             );
           }
           const result = yield* callTool(params["name"], params["arguments"], auth).pipe(
-            Effect.provideService(CurrentCaller, auth.caller),
             Effect.result,
           );
           if (result._tag === "Failure") {
@@ -323,10 +321,7 @@ export const handleMcpPost = Effect.fn("handleMcpPost")(
               responseHeaders,
             );
           }
-          const result = yield* readResource(params["uri"], auth.caller).pipe(
-            Effect.provideService(CurrentCaller, auth.caller),
-            Effect.result,
-          );
+          const result = yield* readResource(params["uri"], auth.caller).pipe(Effect.result);
           if (result._tag === "Failure") {
             const err = result.failure;
             if (err._tag === "ResourceInvalidParams") {

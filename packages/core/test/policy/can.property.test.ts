@@ -18,7 +18,6 @@ import type {
 } from "@kvitbit/domain/contract";
 import {
   Action as ActionSchema,
-  CurrentCaller,
   DeliveryId,
   DocumentId,
   ExportId,
@@ -608,9 +607,7 @@ describe("authorizeInWorkspace: a caller is only ever scoped to its own Workspac
     const mismatches: Array<string> = [];
     for (const caller of callers) {
       for (const action of ACTIONS) {
-        const result = outcomeOf(
-          Effect.provideService(authorizeInWorkspace(action), CurrentCaller, caller),
-        );
+        const result = outcomeOf(authorizeInWorkspace(caller, action));
         const inWorkspace = caller._tag === "Member" || caller._tag === "System";
         const expected = inWorkspace && can(caller, action);
         const label = `${caller._tag} ${action}`;

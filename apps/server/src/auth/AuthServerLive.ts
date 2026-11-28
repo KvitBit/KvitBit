@@ -7,7 +7,7 @@
 import { BotProtection } from "@kvitbit/adapters/altcha";
 import { type AuthConfig, generateId, makeEmailRateLimiter } from "@kvitbit/adapters/auth";
 import { type EmailTemplate, renderEmail } from "@kvitbit/adapters/templates/email";
-import { Caller, CurrentCaller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
+import { Caller, type Locale, UserId, Workspaces } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
 import { APIError } from "better-auth/api";
 import * as Arr from "effect/Array";
@@ -79,9 +79,7 @@ export const makeAuthServerLayer = (overrides: AuthServerOverrides = {}) =>
           locale: requestLocale(request),
           channel: "web",
         });
-        const list = yield* workspaces.listMine.pipe(
-          Effect.provideService(CurrentCaller, accountCaller),
-        );
+        const list = yield* workspaces.listMine(accountCaller);
         if (Arr.some(list, (workspace) => workspace.role === "owner")) {
           return yield* Effect.fail(
             new APIError("CONFLICT", {

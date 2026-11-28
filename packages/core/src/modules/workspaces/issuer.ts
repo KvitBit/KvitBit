@@ -8,13 +8,14 @@
 
 import type {
   BankAccountId,
+  Caller,
   CurrencyCode,
   IsoDate,
   NotFound,
   TaxRegime,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, NotFound as NotFoundError } from "@kvitbit/domain/contract";
+import { NotFound as NotFoundError } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -84,26 +85,25 @@ export class IssuerSnapshots extends Context.Service<
   IssuerSnapshots,
   {
     readonly forDocument: (
+      caller: Caller,
       workspaceId: WorkspaceId,
       on: IsoDate,
-    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
+    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable>;
   }
 >()("@kvitbit/core/modules/workspaces/issuer/IssuerSnapshots") {}
 
-/** Fails `NotFound{Workspace}` unless `workspaceId` is the current Member or System caller's. */
-const ownWorkspace = (workspaceId: WorkspaceId): Effect.Effect<void, NotFound, CurrentCaller> =>
-  Effect.flatMap(Effect.service(CurrentCaller), (caller) =>
-    (caller._tag === "Member" || caller._tag === "System") && caller.workspaceId === workspaceId
-      ? Effect.void
-      : Effect.fail(NotFoundError.make({ entity: "Workspace", id: workspaceId })),
-  );
+/** Fails `NotFound{Workspace}` unless `workspaceId` is the Member or System caller's. */
+const ownWorkspace = (caller: Caller, workspaceId: WorkspaceId): Effect.Effect<void, NotFound> =>
+  (caller._tag === "Member" || caller._tag === "System") && caller.workspaceId === workspaceId
+    ? Effect.void
+    : Effect.fail(NotFoundError.make({ entity: "Workspace", id: workspaceId }));
 
 export const IssuerSnapshotsLive: Layer.Layer<IssuerSnapshots, never, WorkspaceSnapshots> =
   Layer.effect(
     IssuerSnapshots,
     Effect.map(Effect.service(WorkspaceSnapshots), (snapshots) => ({
-      forDocument: (workspaceId, on) =>
-        Effect.andThen(ownWorkspace(workspaceId), snapshots.get(workspaceId, on)).pipe(
+      forDocument: (caller, workspaceId, on) =>
+        Effect.andThen(ownWorkspace(caller, workspaceId), snapshots.get(workspaceId, on)).pipe(
           Effect.map((s) => ({
             party: {
               workspaceId: s.workspaceId,

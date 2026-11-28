@@ -6,17 +6,17 @@
  *
  * `DocumentContacts` and `DocumentPriceList` are structurally identical to core-identity's
  * `ContactSnapshots.forDocument` and `PriceListItems.forLine` (board agreement #402); the
- * Issuing Entity shape is #407 as accepted in #414 and amended in #418 (it reads
- * `CurrentCaller`: a workspaceId other than the caller's is NotFound{Workspace}). Integration binds each with a one-line layer, e.g.
+ * Issuing Entity shape is #407 as accepted in #414 and amended in #418 (it checks the
+ * caller passed to it: a workspaceId other than the caller's is NotFound{Workspace}). Integration binds each with a one-line layer, e.g.
  * `Layer.effect(DocumentContacts, Effect.map(ContactSnapshots, (s) => DocumentContacts.of(s)))`.
  */
 import type {
   BankAccountId,
+  Caller,
   ContactDefaults,
   ContactId,
   ContactRole,
   CurrencyCode,
-  CurrentCaller,
   DocumentView,
   IsoDate,
   Locale,
@@ -129,9 +129,10 @@ export class DocumentIssuers extends Context.Service<
   DocumentIssuers,
   {
     readonly forDocument: (
+      caller: Caller,
       workspaceId: WorkspaceId,
       on: IsoDate,
-    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable, CurrentCaller>;
+    ) => Effect.Effect<IssuerForDocument, NotFound | StoreUnavailable>;
   }
 >()("@kvitbit/core/modules/documents/ports/DocumentIssuers") {}
 
@@ -149,6 +150,10 @@ export interface RenderOptions {
 export class DocumentRenderer extends Context.Service<
   DocumentRenderer,
   {
-    readonly render: (view: DocumentView, options: RenderOptions) => Effect.Effect<Uint8Array>;
+    readonly render: (
+      view: DocumentView,
+      options: RenderOptions,
+      workspaceId?: WorkspaceId,
+    ) => Effect.Effect<Uint8Array>;
   }
 >()("@kvitbit/core/modules/documents/ports/DocumentRenderer") {}

@@ -5,7 +5,7 @@ import {
   authTables,
   type BeforeHook,
 } from "@kvitbit/adapters/auth";
-import { Caller, CurrentCaller, InvitationToken, type Workspaces } from "@kvitbit/domain/contract";
+import { Caller, InvitationToken, type Workspaces } from "@kvitbit/domain/contract";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { APIError, createAuthMiddleware } from "better-auth/api";
@@ -61,25 +61,25 @@ const invitationSignUpHook = (
     if (token === undefined) {
       return yield* Effect.fail(new APIError("BAD_REQUEST", { code: "InvalidInvitation" }));
     }
-    const invitation = yield* workspaces.peekInvitation.pipe(
-      Effect.provideService(
-        CurrentCaller,
+    const invitation = yield* workspaces
+      .peekInvitation(
         Caller.invitationHolder({
           token,
           locale: acceptLanguageLocale(ctx.headers?.get("accept-language") ?? undefined) ?? "cs",
         }),
-      ),
-      Effect.provideService(Clock.Clock, clock),
-      Effect.mapError((error) =>
-        error._tag === "Unavailable"
-          ? new APIError(
-              "SERVICE_UNAVAILABLE",
-              { _tag: "Unavailable", code: "Unavailable" },
-              { "Retry-After": "5" },
-            )
-          : invitationNotFound(),
-      ),
-    );
+      )
+      .pipe(
+        Effect.provideService(Clock.Clock, clock),
+        Effect.mapError((error) =>
+          error._tag === "Unavailable"
+            ? new APIError(
+                "SERVICE_UNAVAILABLE",
+                { _tag: "Unavailable", code: "Unavailable" },
+                { "Retry-After": "5" },
+              )
+            : invitationNotFound(),
+        ),
+      );
     if (invitation.status !== "pending") return yield* Effect.fail(invitationNotFound());
     const email = Str.toLowerCase(invitation.email);
     if (!isString(body.value["email"]) || Str.toLowerCase(body.value["email"]) !== email) {

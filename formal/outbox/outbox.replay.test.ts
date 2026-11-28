@@ -30,6 +30,7 @@ import {
   DeliveriesRepo,
   DeliveryJobs,
   DocumentsModule,
+  deliveryJob,
   RecurringModule,
   RecurringRepo,
 } from "../../packages/core/src/index";
@@ -41,17 +42,12 @@ import {
   StartedDeliveries,
   TestCoreFakes,
 } from "../../packages/core/src/testing/index";
-import type {
-  CurrentCaller as CurrentCallerTag,
-  SystemCaller,
-  WorkspaceId,
-} from "../../packages/domain/src/contract";
+import type { MemberCaller, SystemCaller, WorkspaceId } from "../../packages/domain/src/contract";
 import {
   BankAccountInput,
   Caller,
   ContactId,
   Contacts,
-  CurrentCaller,
   type DeliveryId,
   Documents,
   IsoDate,
@@ -68,7 +64,8 @@ import type {
 import { EmailSender } from "../../packages/domain/src/ports";
 
 const { RecurringIssuance } = RecurringModule;
-const { claim, deliver, dispatch, giveUp, reconcileStaleDeliveries } = DocumentsModule;
+const { claim, deliver, dispatch, giveUp } = deliveryJob;
+const { reconcileStaleDeliveries } = DocumentsModule;
 
 const TODAY = IsoDate.make("2026-11-23");
 const NOW = Date.UTC(2026, 10, 23, 9, 0, 0);
@@ -131,6 +128,7 @@ const core = (options: { readonly crashInSend?: boolean; readonly loseStart?: bo
 
 interface World {
   readonly workspaceId: WorkspaceId;
+  readonly owner: MemberCaller;
   readonly templateId: TemplateId;
   readonly scheduleId: ScheduleId;
   /** The sealed System caller of TODAY's RecurringIssuance job, as the sweep hands it out. */
@@ -141,11 +139,10 @@ interface World {
 const captureJobCaller = Effect.flatMap(RecurringIssuance, (r) =>
   Effect.flatMap(Ref.make<SystemCaller | null>(null), (ref) =>
     Effect.flatMap(
-      r.sweep((decision) =>
+      r.sweep((caller, decision) =>
         decision.occurrence !== TODAY
           ? Effect.void
           : Effect.gen(function* () {
-              const caller = yield* CurrentCaller;
               if (caller._tag !== "System") return yield* Effect.die("expected a System caller");
               yield* Ref.set(ref, caller);
             }),
@@ -159,7 +156,7 @@ const captureJobCaller = Effect.flatMap(RecurringIssuance, (r) =>
   ),
 );
 
-type Services = Layer.Success<ReturnType<typeof core>> | CurrentCallerTag | CrashInSend;
+type Services = Layer.Success<ReturnType<typeof core>> | CrashInSend;
 
 /**
  * A vat_payer Workspace with a customer and a monthly autoSend schedule starting TODAY; `body`
@@ -173,108 +170,94 @@ const scenario = <A, E>(
   return Effect.runPromise(
     Effect.gen(function* () {
       yield* TestClock.setTime(NOW);
+      const account = Caller.account({
+        userId: UserId.make("01900000-0000-7000-8000-0000000000a1"),
+        email: "owner@example.cz",
+        locale: "cs",
+        channel: "web",
+      });
       const owner = yield* Effect.flatMap(Workspaces, (ws) =>
-        ws.create({ name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" }),
+        ws.create(account, { name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" }),
       );
-      return yield* Effect.provideService(
-        Effect.gen(function* () {
-          yield* Effect.flatMap(Workspaces, (ws) =>
-            ws.saveBankAccount(
-              BankAccountInput.make({ iban: "CZ65 0800 0000 1920 0014 5399", currency: "CZK" }),
-            ),
-          );
-          const customer = yield* Effect.flatMap(Contacts, (c) =>
-            c.save({
-              name: "Odběratel a.s.",
-              ico: "25596641",
-              dic: "CZ25596641",
-              address: { city: "Brno", country: "CZ" },
-              roles: ["customer"],
-              billingEmails: ["fakturace@odberatel.cz"],
-            }),
-          );
-          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
-            Effect.orDie,
-          );
-          const t = yield* Templates;
-          const created = yield* t.save({
-            name: "Monthly hosting",
-            kind: "invoice",
-            contact: contactId,
-            lines: [
-              {
-                description: "Hosting",
-                quantity: BigDecimal.fromStringUnsafe("1"),
-                unitPrice: BigDecimal.fromStringUnsafe("1250.50"),
-              },
-            ],
-            due: { inDays: 14 },
-          });
-          const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(created["id"]).pipe(
-            Effect.orDie,
-          );
-          const scheduled = yield* t.schedule(
-            templateId,
-            { every: { months: 1 }, startOn: TODAY, issueAs: "invoice", autoSend: true },
-            created.revision,
-          );
-          if (scheduled.schedule === null)
-            return yield* Effect.die("expected a recurring schedule");
-          const scheduleId = yield* Schema.decodeUnknownEffect(ScheduleId)(
-            scheduled.schedule["id"],
-          ).pipe(Effect.orDie);
-          const job = yield* captureJobCaller;
-          return yield* body({ workspaceId: owner.workspaceId, templateId, scheduleId, job });
+      yield* Effect.flatMap(Workspaces, (ws) =>
+        ws.saveBankAccount(
+          owner,
+          BankAccountInput.make({ iban: "CZ65 0800 0000 1920 0014 5399", currency: "CZK" }),
+        ),
+      );
+      const customer = yield* Effect.flatMap(Contacts, (c) =>
+        c.save(owner, {
+          name: "Odběratel a.s.",
+          ico: "25596641",
+          dic: "CZ25596641",
+          address: { city: "Brno", country: "CZ" },
+          roles: ["customer"],
+          billingEmails: ["fakturace@odberatel.cz"],
         }),
-        CurrentCaller,
+      );
+      const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
+        Effect.orDie,
+      );
+      const t = yield* Templates;
+      const created = yield* t.save(owner, {
+        name: "Monthly hosting",
+        kind: "invoice",
+        contact: contactId,
+        lines: [
+          {
+            description: "Hosting",
+            quantity: BigDecimal.fromStringUnsafe("1"),
+            unitPrice: BigDecimal.fromStringUnsafe("1250.50"),
+          },
+        ],
+        due: { inDays: 14 },
+      });
+      const templateId = yield* Schema.decodeUnknownEffect(TemplateId)(created["id"]).pipe(
+        Effect.orDie,
+      );
+      const scheduled = yield* t.schedule(
         owner,
+        templateId,
+        { every: { months: 1 }, startOn: TODAY, issueAs: "invoice", autoSend: true },
+        created.revision,
       );
-    }).pipe(
-      Effect.provideService(
-        CurrentCaller,
-        Caller.account({
-          userId: UserId.make("01900000-0000-7000-8000-0000000000a1"),
-          email: "owner@example.cz",
-          locale: "cs",
-          channel: "web",
-        }),
-      ),
-      Effect.provide(Layer.merge(layer, TestClock.layer())),
-    ),
+      if (scheduled.schedule === null) return yield* Effect.die("expected a recurring schedule");
+      const scheduleId = yield* Schema.decodeUnknownEffect(ScheduleId)(
+        scheduled.schedule["id"],
+      ).pipe(Effect.orDie);
+      const job = yield* captureJobCaller;
+      return yield* body({ workspaceId: owner.workspaceId, owner, templateId, scheduleId, job });
+    }).pipe(Effect.provide(Layer.merge(layer, TestClock.layer()))),
   );
 };
 
-/** Runs `effect` as the sealed System caller of TODAY's RecurringIssuance job. */
-const asJob = <A, E, R>(w: World, effect: Effect.Effect<A, E, R>) =>
-  Effect.provideService(effect, CurrentCaller, w.job);
-
 const runOccurrence = (w: World) =>
-  asJob(
-    w,
-    Effect.flatMap(RecurringIssuance, (r) => r.run(w.scheduleId, TODAY)),
-  );
+  Effect.flatMap(RecurringIssuance, (r) => r.run(w.job, w.scheduleId, TODAY));
 
 /** Issued invoices in the Workspace (OneDocumentPerOccurrence counts documents, not runs). */
-const invoices = Effect.map(
-  Effect.flatMap(Documents, (d) => d.list({ kind: "invoice" })),
-  (page) => page.items.length,
-);
+const invoices = (w: World) =>
+  Effect.map(
+    Effect.flatMap(Documents, (d) => d.list(w.owner, { kind: "invoice" })),
+    (page) => page.items.length,
+  );
 
 /** One RecurringSweep tick whose start runs the workflow body inline (as the sweep's caller). */
 const sweep = Effect.flatMap(RecurringIssuance, (r) =>
-  r.sweep((decision) => Effect.asVoid(r.run(decision.scheduleId, decision.occurrence))),
+  r.sweep((caller, decision) =>
+    Effect.asVoid(r.run(caller, decision.scheduleId, decision.occurrence)),
+  ),
 );
 
 const runs = (w: World) =>
   Effect.map(
-    Effect.flatMap(Templates, (t) => t.runs(w.templateId)),
+    Effect.flatMap(Templates, (t) => t.runs(w.owner, w.templateId)),
     (page) => page.items,
   );
 
 const nextOccurrence = (w: World) =>
   Effect.gen(function* () {
     const templates = yield* Templates;
-    const view = yield* templates.get(w.templateId);
+    const view = yield* templates.get(w.owner, w.templateId);
     if (view.schedule === null) return yield* Effect.die("expected a recurring schedule");
     return yield* Schema.decodeUnknownEffect(Schema.NullOr(IsoDate))(
       view.schedule["nextOccurrence"],
@@ -380,7 +363,7 @@ test("DupStart, IssueCommit and SendCommit replays: concurrent and repeated runs
         both,
         again,
         runs: all,
-        invoices: yield* invoices,
+        invoices: yield* invoices(w),
         rows: yield* Effect.flatMap(DeliveriesRepo, (repo) =>
           repo.byDocument(w.workspaceId, documentId),
         ),
@@ -406,7 +389,7 @@ test("SweepStart after the advance: a second tick the same day starts nothing", 
     Effect.gen(function* () {
       yield* runOccurrence(w);
       const tick = yield* sweep;
-      return { tick, runs: yield* runs(w), invoices: yield* invoices };
+      return { tick, runs: yield* runs(w), invoices: yield* invoices(w) };
     }),
   );
   expect(r.tick).toHaveLength(0);
@@ -420,9 +403,8 @@ test("CrashWorker after IssueCommit, ReconcileRecurring: pendingSends finds the 
   const r = await scenario((w) =>
     Effect.gen(function* () {
       // The process died after the issue transaction committed, before the send step.
-      const issued = yield* asJob(
-        w,
-        Effect.flatMap(RecurringIssuance, (ri) => ri.issue(w.scheduleId, TODAY)),
+      const issued = yield* Effect.flatMap(RecurringIssuance, (ri) =>
+        ri.issue(w.job, w.scheduleId, TODAY),
       );
       const startedBefore = yield* started;
       const pending = yield* pendingSends;

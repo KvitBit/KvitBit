@@ -4,7 +4,6 @@ import {
   ContactId,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
   Documents,
   ExportId,
   IsoDate,
@@ -15,6 +14,7 @@ import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+
 import { as, type Harness, makeHarness, type TestUser } from "../harness";
 
 let h: Harness;
@@ -46,14 +46,14 @@ beforeEach(async () => {
     Effect.gen(function* () {
       const contacts = yield* Contacts;
       const documents = yield* Documents;
-      const contact = yield* contacts.save({
+      const contact = yield* contacts.save(member, {
         name: "Odběratel a.s.",
         ico: "25596641",
         address: { city: "Brno", country: "CZ" },
         roles: ["customer"],
       });
       const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
-      yield* documents.issue({
+      yield* documents.issue(member, {
         input: {
           kind: "invoice",
           contact: contactId,
@@ -68,7 +68,7 @@ beforeEach(async () => {
           ],
         },
       });
-    }).pipe(Effect.provideService(CurrentCaller, member)),
+    }),
   );
 });
 

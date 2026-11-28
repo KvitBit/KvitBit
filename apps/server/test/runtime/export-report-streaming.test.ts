@@ -31,7 +31,7 @@ import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as WorkflowEngine from "effect/workflow/WorkflowEngine";
 import { DataExportWorkflow, makeWorkflowHandlersLayer } from "../../src/runtime/workflows";
-import { asCaller, runSqlCore } from "../persistence/conformance/sqlCore";
+import { runSqlCore } from "../persistence/conformance/sqlCore";
 
 test("exports canonical reporting bytes from bounded SQL pages after emitting its first ZIP header", async () => {
   // This fixture fits in the classic central directory, even if entry headers reserve ZIP64 sizes.
@@ -72,99 +72,91 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
     Layer.provideMerge(WorkflowEngine.layerMemory),
   );
 
-  const result = await runSqlCore(
-    Caller.account({ ...owner, channel: "web", locale: "cs" }),
-    Effect.gen(function* () {
+  const result = await runSqlCore({
+    effect: Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       const workspaces = yield* Workspaces;
-      const member = yield* workspaces.create({
-        name: "Report export fixture",
-        taxRegime: "vat_payer",
-        ico: "25596641",
-        dic: "CZ25596641",
-        address: { city: "Praha", country: "CZ" },
-      });
+      const member = yield* workspaces.create(
+        Caller.account({ ...owner, channel: "web", locale: "cs" }),
+        {
+          name: "Report export fixture",
+          taxRegime: "vat_payer",
+          ico: "25596641",
+          dic: "CZ25596641",
+          address: { city: "Praha", country: "CZ" },
+        },
+      );
       const { workspaceId } = member;
 
-      const { proformaId, paymentId, expenseId } = yield* asCaller(
-        member,
-        Effect.gen(function* () {
-          const contacts = yield* Contacts;
-          const documents = yield* Documents;
-          const payments = yield* Payments;
-          const expenses = yield* Expenses;
-          const contact = yield* contacts.save({
-            name: '=Kupující, "s.r.o."',
-            address: { city: "Brno", country: "CZ" },
-            roles: ["customer", "supplier"],
-          });
-          const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
-          const input = {
-            kind: "proforma",
-            contact: contactId,
-            issuedOn: date,
-            due: { inDays: 14 },
-            currency: czk,
-            lines: [
-              {
-                description: "Záloha",
-                quantity: BigDecimal.fromStringUnsafe("1"),
-                unitPrice: BigDecimal.fromStringUnsafe("10000.01"),
-                vat: "standard",
-              },
-            ],
-          } as const;
-          const proforma = yield* documents.issue({ input });
-          const issuedProformaId = DocumentId.make(proforma.id);
-          const { payment } = yield* payments.record({
-            target: { document: issuedProformaId },
-            amount: { amount: BigDecimal.fromStringUnsafe("12100.01"), currency: czk },
-            paidOn: date,
-            method: "bank_transfer",
-          });
-          const final = yield* documents.issueFinalInvoice(issuedProformaId, {
-            patch: { issuedOn: date, taxableSupplyOn: date },
-          });
-          yield* documents.correct(DocumentId.make(final.id), {
-            reason: "Sleva",
-            lines: "full",
-            correctedOn: date,
-          });
-          yield* documents.createDraft({ ...input, kind: "invoice" });
-          const expense = yield* expenses.record({
-            status: "complete",
-            supplier: { contact: contactId },
-            supplierDocumentNumber: '@Číslo; "doklad"',
-            issuedOn: date,
-            taxableSupplyOn: date,
-            currency: eur,
-            total: "121.01",
-            vat: [
-              {
-                treatment: "standard",
-                base: "100.01",
-                vat: "21",
-              },
-            ],
-            tags: ["z", "á", "a"],
-            deductibility: { partial: 73 },
-          });
-          const recordedExpenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense["id"]);
-          yield* expenses.record({ status: "incomplete" });
-          yield* expenses.attach(recordedExpenseId, {
-            name: "receipt.pdf",
-            contentType: "application/pdf",
-            bytes: Stream.make(new TextEncoder().encode("%PDF-test receipt")),
-          });
-          const { id: recordedPaymentId } = yield* Schema.decodeUnknownEffect(
-            Schema.Struct({ id: PaymentId }),
-          )(payment);
-          return {
-            proformaId: issuedProformaId,
-            paymentId: recordedPaymentId,
-            expenseId: recordedExpenseId,
-          };
-        }),
+      const contacts = yield* Contacts;
+      const documents = yield* Documents;
+      const payments = yield* Payments;
+      const expenses = yield* Expenses;
+      const contact = yield* contacts.save(member, {
+        name: '=Kupující, "s.r.o."',
+        address: { city: "Brno", country: "CZ" },
+        roles: ["customer", "supplier"],
+      });
+      const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
+      const input = {
+        kind: "proforma",
+        contact: contactId,
+        issuedOn: date,
+        due: { inDays: 14 },
+        currency: czk,
+        lines: [
+          {
+            description: "Záloha",
+            quantity: BigDecimal.fromStringUnsafe("1"),
+            unitPrice: BigDecimal.fromStringUnsafe("10000.01"),
+            vat: "standard",
+          },
+        ],
+      } as const;
+      const proforma = yield* documents.issue(member, { input });
+      const proformaId = DocumentId.make(proforma.id);
+      const { payment } = yield* payments.record(member, {
+        target: { document: proformaId },
+        amount: { amount: BigDecimal.fromStringUnsafe("12100.01"), currency: czk },
+        paidOn: date,
+        method: "bank_transfer",
+      });
+      const final = yield* documents.issueFinalInvoice(member, proformaId, {
+        patch: { issuedOn: date, taxableSupplyOn: date },
+      });
+      yield* documents.correct(member, DocumentId.make(final.id), {
+        reason: "Sleva",
+        lines: "full",
+        correctedOn: date,
+      });
+      yield* documents.createDraft(member, { ...input, kind: "invoice" });
+      const expense = yield* expenses.record(member, {
+        status: "complete",
+        supplier: { contact: contactId },
+        supplierDocumentNumber: '@Číslo; "doklad"',
+        issuedOn: date,
+        taxableSupplyOn: date,
+        currency: eur,
+        total: "121.01",
+        vat: [
+          {
+            treatment: "standard",
+            base: "100.01",
+            vat: "21",
+          },
+        ],
+        tags: ["z", "á", "a"],
+        deductibility: { partial: 73 },
+      });
+      const expenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense["id"]);
+      yield* expenses.record(member, { status: "incomplete" });
+      yield* expenses.attach(member, expenseId, {
+        name: "receipt.pdf",
+        contentType: "application/pdf",
+        bytes: Stream.make(new TextEncoder().encode("%PDF-test receipt")),
+      });
+      const { id: paymentId } = yield* Schema.decodeUnknownEffect(Schema.Struct({ id: PaymentId }))(
+        payment,
       );
 
       // Sort these rows before the original records so the proforma's linked documents
@@ -206,7 +198,7 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
       `;
       yield* sql`insert into exports (id, workspace_id) values (${exportId}, ${workspaceId})`;
 
-      const expectedFiles = yield* exportJob.reportingTables(workspaceId, exportId, "cs");
+      const expectedFiles = yield* exportJob.reportingTables(workspaceId, "cs");
       const source = yield* ReportsModule.ReportsSource;
       const jobs = yield* ReportsModule.ExportJobs;
       const blobs = yield* BlobStorage;
@@ -302,7 +294,7 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
       `;
       expect(pdfIds).toEqual(Arr.map(documentIds, ({ id }) => id));
     }),
-    {
+    options: {
       users: [owner],
       fixings: [
         {
@@ -318,6 +310,6 @@ test("exports canonical reporting bytes from bounded SQL pages after emitting it
         },
       ],
     },
-  );
+  });
   if (result._tag === "Failure") throw Cause.squash(result.cause);
 }, 30_000);

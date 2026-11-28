@@ -13,6 +13,7 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import { FxFixingCache } from "../../src";
 import { FixtureRates } from "../../src/testing";
+import { TestCaller } from "../helpers/callerContext";
 import { withoutStackTrace } from "../helpers/run";
 import {
   dec,
@@ -34,7 +35,9 @@ describe("FX fixings read through one shared cache", () => {
       await inWorkspace(({ customer, supplier }) =>
         Effect.gen(function* () {
           const rate = yield* Effect.flatMap(Reports, (rep) =>
-            rep.fxRate({ currency: EUR, on: TODAY }),
+            Effect.flatMap(TestCaller, (caller) =>
+              rep.fxRate(caller, { currency: EUR, on: TODAY }),
+            ),
           );
           yield* Ref.set((yield* FixtureRates).unavailable, true);
 
@@ -51,15 +54,21 @@ describe("FX fixings read through one shared cache", () => {
           });
           yield* payDocument({ document: docId(proforma), amount: "121", currency: EUR });
           const ptds = yield* Effect.flatMap(Documents, (d) =>
-            d.list({ kind: "payment_tax_document" }),
+            Effect.flatMap(TestCaller, (caller) =>
+              d.list(caller, { kind: "payment_tax_document" }),
+            ),
           );
           const flatMapResult = yield* Effect.flatMap(Expenses, (e) =>
-            e.record({ ...expenseInput(supplier), currency: "EUR" }),
+            Effect.flatMap(TestCaller, (caller) =>
+              e.record(caller, { ...expenseInput(supplier), currency: "EUR" }),
+            ),
           );
           const expense = expenseFields(flatMapResult);
           const uncached = yield* Effect.exit(
             Effect.flatMap(Reports, (rep) =>
-              rep.fxRate({ currency: EUR, on: IsoDate.make("2026-11-02") }),
+              Effect.flatMap(TestCaller, (caller) =>
+                rep.fxRate(caller, { currency: EUR, on: IsoDate.make("2026-11-02") }),
+              ),
             ),
           );
           return { rate, invoice, ptds, expense, uncached };
@@ -88,7 +97,9 @@ describe("FX fixings read through one shared cache", () => {
             lines: [{ description: "Služby", unitPrice: dec("100") }],
           };
           const before = yield* cache.get(TODAY);
-          const preview = yield* Effect.flatMap(Documents, (d) => d.preview(input));
+          const preview = yield* Effect.flatMap(Documents, (d) =>
+            Effect.flatMap(TestCaller, (caller) => d.preview(caller, input)),
+          );
           const afterPreview = yield* cache.get(TODAY);
           const invoice = yield* issueInvoice({
             contact: customer,

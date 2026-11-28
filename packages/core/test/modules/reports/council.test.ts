@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 /** Regression cases from the council review of the Reports module. */
 
@@ -5,7 +6,6 @@ import { describe, expect, test } from "bun:test";
 import type { TaxRegime } from "@kvitbit/domain/contract";
 import {
   CurrencyCode,
-  CurrentCaller,
   ExportId,
   Forbidden,
   Invalid,
@@ -303,7 +303,14 @@ describe("export start", () => {
         _tag: "DataExport",
         exportId: ExportId.make("01900000-0000-7000-8000-000000000e01"),
       }),
-      Effect.flatMap(Reports, (r) => r.startExport()).pipe(Effect.provide(racyLayer("unused"))),
+      Effect.flatMap(Reports, (r) =>
+        r.startExport(
+          system({
+            _tag: "DataExport",
+            exportId: ExportId.make("01900000-0000-7000-8000-000000000e01"),
+          }),
+        ),
+      ).pipe(Effect.provide(racyLayer("unused"))),
     );
     expect(exit.pipe(withoutStackTrace)).toEqual(
       Exit.fail(Forbidden.make({ action: "report.export" })),
@@ -314,8 +321,8 @@ describe("export start", () => {
     const body = Effect.gen(function* () {
       const r = yield* Reports;
       const job = yield* Effect.provideService(
-        r.startExport(),
-        CurrentCaller,
+        r.startExport(member("owner", { workspaceId: WORKSPACE_B, userId: USER_B })),
+        TestCaller,
         member("owner", { workspaceId: WORKSPACE_B, userId: USER_B }),
       );
       const store = yield* CoreStore;
@@ -333,7 +340,7 @@ describe("export start", () => {
   test("losing the start race to a finished job retries and starts a fresh one", async () => {
     const exit = await runTest(
       member("owner"),
-      Effect.flatMap(Reports, (r) => r.startExport()).pipe(
+      Effect.flatMap(Reports, (r) => r.startExport(member("owner"))).pipe(
         Effect.provide(racyLayer(ONE_RUNNING_EXPORT)),
       ),
     );
@@ -346,7 +353,7 @@ describe("export start", () => {
   test("contention that outlives every retry is Unavailable{database}, not a defect", async () => {
     const exit = await runTest(
       member("owner"),
-      Effect.flatMap(Reports, (r) => r.startExport()).pipe(
+      Effect.flatMap(Reports, (r) => r.startExport(member("owner"))).pipe(
         Effect.provide(racyLayer(ONE_RUNNING_EXPORT, 10)),
       ),
     );
@@ -358,7 +365,7 @@ describe("export start", () => {
   test("any other unique violation is a defect, not a silent success", async () => {
     const exit = await runTest(
       member("owner"),
-      Effect.flatMap(Reports, (r) => r.startExport()).pipe(
+      Effect.flatMap(Reports, (r) => r.startExport(member("owner"))).pipe(
         Effect.provide(racyLayer("exports_pkey")),
       ),
     );
@@ -371,7 +378,10 @@ describe("export start", () => {
     const exit = await runTest(
       member("owner"),
       Effect.flatMap(Reports, (r) =>
-        r.dashboard({ from: IsoDate.make("0000-01-01"), to: IsoDate.make("0000-05-01") }),
+        r.dashboard(member("owner"), {
+          from: IsoDate.make("0000-01-01"),
+          to: IsoDate.make("0000-05-01"),
+        }),
       ).pipe(Effect.provide(racyLayer(ONE_RUNNING_EXPORT))),
     );
     expect(exit.pipe(withoutStackTrace)).toEqual(

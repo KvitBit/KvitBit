@@ -8,7 +8,6 @@
  */
 import type {
   ContactId,
-  CurrentCaller,
   DocumentId,
   DocumentSettlement,
   DocumentView,
@@ -47,9 +46,13 @@ export class DocumentDeliveryReads extends Context.Service<
       workspaceId: WorkspaceId,
       id: DocumentId,
       context?: Pick<ViewContext, "language">,
-    ) => Effect.Effect<DeliveryDocument, NotFound | StoreUnavailable, CurrentCaller>;
+    ) => Effect.Effect<DeliveryDocument, NotFound | StoreUnavailable>;
     /** `DocumentRenderer` passthrough (PDF attachment, share page download). */
-    readonly render: (view: DocumentView, options: RenderOptions) => Effect.Effect<Uint8Array>;
+    readonly render: (
+      view: DocumentView,
+      options: RenderOptions,
+      workspaceId?: WorkspaceId,
+    ) => Effect.Effect<Uint8Array>;
   }
 >()("@kvitbit/core/modules/documents/delivery/DocumentDeliveryReads") {}
 
@@ -78,7 +81,7 @@ export const DocumentDeliveryReadsLive: Layer.Layer<
 > = Layer.effect(
   DocumentDeliveryReads,
   Effect.gen(function* () {
-    // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+    // Only the build dependencies: the build-time context may hold a RequestOutcome
     // or transaction frame, and providing them per call would override the caller's own.
     const buildContext = yield* Effect.context<DocumentsRepo>();
     const context = Context.pick(DocumentsRepo)(buildContext);
@@ -86,12 +89,12 @@ export const DocumentDeliveryReadsLive: Layer.Layer<
     return DocumentDeliveryReads.of({
       // The call site's context wins (its transaction frame).
       load: Effect.fn("DocumentDeliveryReads.load")((ws, id, ctx) =>
-        Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+        Effect.flatMap(Effect.context<never>(), (callSite) =>
           Effect.provideContext(load(ws, id, ctx), Context.merge(context, callSite)),
         ),
       ),
-      render: Effect.fn("DocumentDeliveryReads.render")((view, options) =>
-        renderer.render(view, options),
+      render: Effect.fn("DocumentDeliveryReads.render")((view, options, workspaceId) =>
+        renderer.render(view, options, workspaceId),
       ),
     });
   }),

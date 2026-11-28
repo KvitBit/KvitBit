@@ -26,8 +26,8 @@ import {
 import { Numbering } from "@kvitbit/core/engines";
 import {
   type AuditEntry,
+  type Caller,
   type CurrencyCode,
-  CurrentCaller,
   DeliveryId,
   type DocumentId,
   type DocumentRelation,
@@ -141,7 +141,7 @@ export class ExplicitPdfTemplate extends Context.Service<ExplicitPdfTemplate, bo
   "@kvitbit/server/projections/documents/ExplicitPdfTemplate",
 ) {}
 
-export const sha256HexSync = (value: string): string =>
+const sha256HexSync = (value: string): string =>
   new Bun.CryptoHasher("sha256").update(value).digest("hex");
 
 /**
@@ -480,19 +480,25 @@ export const documentPdfCacheKey = (params: {
 const toDbUnavailable = () => Unavailable.make({ dependency: "database" });
 
 const runKeyedProjection = <A extends object, E, R>(params: {
+  readonly caller: Caller;
   readonly method: string;
   readonly requestKey: string | undefined;
   readonly hasSqlRequestLog: boolean;
   readonly memoryReplays: Map<string, A>;
   readonly identityOf: (value: A) => string;
   readonly execute: Effect.Effect<A, E, R>;
-  readonly project: (
-    value: A,
-    wasReplayed: boolean,
-  ) => Effect.Effect<A, Unavailable, CurrentCaller>;
-}): Effect.Effect<A, E | Unavailable, R | CurrentCaller> => {
-  const { method, requestKey, hasSqlRequestLog, memoryReplays, identityOf, execute, project } =
-    params;
+  readonly project: (value: A, wasReplayed: boolean) => Effect.Effect<A, Unavailable>;
+}): Effect.Effect<A, E | Unavailable, R> => {
+  const {
+    caller,
+    method,
+    requestKey,
+    hasSqlRequestLog,
+    memoryReplays,
+    identityOf,
+    execute,
+    project,
+  } = params;
   if (requestKey === undefined) {
     return execute.pipe(Effect.flatMap((val) => project(val, false)));
   }
@@ -509,7 +515,6 @@ const runKeyedProjection = <A extends object, E, R>(params: {
       ? execute
       : Effect.provideService(execute, RequestOutcome, outcome);
     const wasReplayed = yield* outcome.replayed;
-    const caller = yield* CurrentCaller;
     const cacheKey =
       caller._tag === "Member"
         ? `${caller.workspaceId}:${method}:${requestKey}:${identityOf(raw)}`
@@ -528,12 +533,13 @@ const runKeyedProjection = <A extends object, E, R>(params: {
 };
 
 const projectMemberDocumentView = (
+  caller: Caller,
   view: DocumentView,
   documentsRepo: DocumentsRepo["Service"],
   coreStore: CoreStore["Service"],
   hasSqlRequestLog: boolean,
   wasReplayed = false,
-): Effect.Effect<DocumentView, Unavailable, CurrentCaller> =>
+): Effect.Effect<DocumentView, Unavailable> =>
   Effect.gen(function* () {
     if (
       view.paymentQr !== null ||
@@ -558,7 +564,6 @@ const projectMemberDocumentView = (
       // CoreStoreSql already persisted the complete projected result (including valid null).
       if (outcomeReplayed && hasSqlRequestLog) return view;
     }
-    const caller = yield* CurrentCaller;
     if (caller._tag !== "Member") {
       return enrichDocumentView(view, null);
     }
@@ -594,8 +599,15 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
         { readonly document: DocumentView; readonly creditNote: DocumentView | null }
       >();
 
-      const projectView = (view: DocumentView, wasReplayed = false) =>
-        projectMemberDocumentView(view, documentsRepo, coreStore, hasSqlRequestLog, wasReplayed);
+      const projectView = (caller: Caller, view: DocumentView, wasReplayed = false) =>
+        projectMemberDocumentView(
+          caller,
+          view,
+          documentsRepo,
+          coreStore,
+          hasSqlRequestLog,
+          wasReplayed,
+        );
 
       const viewIdentity = (v: DocumentView) => `${v.id}:${v.revision}`;
       const cancelIdentity = (res: {
@@ -606,100 +618,110 @@ const ProjectedDocumentsLive: Layer.Layer<Documents, never, Documents | CoreStor
 
       return Documents.of({
         ...baseDocuments,
-        preview: Effect.fn("Documents.preview")((input) =>
+        preview: Effect.fn("Documents.preview")((caller, input) =>
           baseDocuments
-            .preview(input)
+            .preview(caller, input)
             .pipe(Effect.map((view) => enrichDocumentView(view, input.variableSymbol ?? null))),
         ),
-        createDraft: Effect.fn("Documents.createDraft")((input, opts) =>
+        createDraft: Effect.fn("Documents.createDraft")((caller, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "createDraft",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
             identityOf: viewIdentity,
-            execute: baseDocuments.createDraft(input, opts),
-            project: projectView,
+            execute: baseDocuments.createDraft(caller, input, opts),
+            project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
           }),
         ),
-        issue: Effect.fn("Documents.issue")((from, opts) =>
+        issue: Effect.fn("Documents.issue")((caller, from, opts) =>
           runKeyedProjection({
+            caller,
             method: "issue",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
             identityOf: viewIdentity,
-            execute: baseDocuments.issue(from, opts),
-            project: projectView,
+            execute: baseDocuments.issue(caller, from, opts),
+            project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
           }),
         ),
-        edit: Effect.fn("Documents.edit")((id, patch, expectedRevision) =>
+        edit: Effect.fn("Documents.edit")((caller, id, patch, expectedRevision) =>
           baseDocuments
-            .edit(id, patch, expectedRevision)
-            .pipe(Effect.flatMap((v) => projectView(v))),
+            .edit(caller, id, patch, expectedRevision)
+            .pipe(Effect.flatMap((v) => projectView(caller, v))),
         ),
-        lock: Effect.fn("Documents.lock")((id) =>
-          baseDocuments.lock(id).pipe(Effect.flatMap((v) => projectView(v))),
+        lock: Effect.fn("Documents.lock")((caller, id) =>
+          baseDocuments.lock(caller, id).pipe(Effect.flatMap((v) => projectView(caller, v))),
         ),
-        unlock: Effect.fn("Documents.unlock")((id, reason) =>
-          baseDocuments.unlock(id, reason).pipe(Effect.flatMap((v) => projectView(v))),
+        unlock: Effect.fn("Documents.unlock")((caller, id, reason) =>
+          baseDocuments
+            .unlock(caller, id, reason)
+            .pipe(Effect.flatMap((v) => projectView(caller, v))),
         ),
-        cancel: Effect.fn("Documents.cancel")((id, input, opts) =>
+        cancel: Effect.fn("Documents.cancel")((caller, id, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "cancel",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryCancelReplays,
             identityOf: cancelIdentity,
-            execute: baseDocuments.cancel(id, input, opts),
+            execute: baseDocuments.cancel(caller, id, input, opts),
             project: Effect.fn("Documents.projectCancellation")(function* (res, wasReplayed) {
-              const document = yield* projectView(res.document, wasReplayed);
+              const document = yield* projectView(caller, res.document, wasReplayed);
               const creditNote =
-                res.creditNote === null ? null : yield* projectView(res.creditNote, wasReplayed);
+                res.creditNote === null
+                  ? null
+                  : yield* projectView(caller, res.creditNote, wasReplayed);
               return { document, creditNote };
             }),
           }),
         ),
-        correct: Effect.fn("Documents.correct")((id, input, opts) =>
+        correct: Effect.fn("Documents.correct")((caller, id, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "correct",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays: memoryViewReplays,
             identityOf: viewIdentity,
-            execute: baseDocuments.correct(id, input, opts),
-            project: projectView,
+            execute: baseDocuments.correct(caller, id, input, opts),
+            project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
           }),
         ),
-        issueFinalInvoice: Effect.fn("Documents.issueFinalInvoice")((proforma, input, opts) =>
-          runKeyedProjection({
-            method: "issueFinalInvoice",
-            requestKey: opts?.requestKey,
-            hasSqlRequestLog,
-            memoryReplays: memoryViewReplays,
-            identityOf: viewIdentity,
-            execute: baseDocuments.issueFinalInvoice(proforma, input, opts),
-            project: projectView,
-          }),
+        issueFinalInvoice: Effect.fn("Documents.issueFinalInvoice")(
+          (caller, proforma, input, opts) =>
+            runKeyedProjection({
+              caller,
+              method: "issueFinalInvoice",
+              requestKey: opts?.requestKey,
+              hasSqlRequestLog,
+              memoryReplays: memoryViewReplays,
+              identityOf: viewIdentity,
+              execute: baseDocuments.issueFinalInvoice(caller, proforma, input, opts),
+              project: (view, wasReplayed) => projectView(caller, view, wasReplayed),
+            }),
         ),
-        previewFinalInvoice: Effect.fn("Documents.previewFinalInvoice")((proforma, input) =>
+        previewFinalInvoice: Effect.fn("Documents.previewFinalInvoice")((caller, proforma, input) =>
           baseDocuments
-            .previewFinalInvoice(proforma, input)
+            .previewFinalInvoice(caller, proforma, input)
             .pipe(
               Effect.map((view) => enrichDocumentView(view, input?.patch?.variableSymbol ?? null)),
             ),
         ),
-        previewCorrection: Effect.fn("Documents.previewCorrection")((id, input) =>
+        previewCorrection: Effect.fn("Documents.previewCorrection")((caller, id, input) =>
           baseDocuments
-            .previewCorrection(id, input)
+            .previewCorrection(caller, id, input)
             .pipe(Effect.map((view) => enrichDocumentView(view, null))),
         ),
-        get: Effect.fn("Documents.get")((id) =>
-          baseDocuments.get(id).pipe(Effect.flatMap((v) => projectView(v))),
+        get: Effect.fn("Documents.get")((caller, id) =>
+          baseDocuments.get(caller, id).pipe(Effect.flatMap((v) => projectView(caller, v))),
         ),
-        pdf: Effect.fn("Documents.pdf")((id, opts) =>
+        pdf: Effect.fn("Documents.pdf")((caller, id, opts) =>
           baseDocuments
-            .pdf(id, opts)
+            .pdf(caller, id, opts)
             .pipe(Effect.provideService(ExplicitPdfTemplate, opts?.template !== undefined)),
         ),
       });
@@ -719,16 +741,18 @@ const ProjectedTemplatesLive: Layer.Layer<Templates, never, Templates | CoreStor
 
       return Templates.of({
         ...baseTemplates,
-        use: Effect.fn("Templates.use")((template, input, opts) =>
+        use: Effect.fn("Templates.use")((caller, template, input, opts) =>
           runKeyedProjection({
+            caller,
             method: "templates.use",
             requestKey: opts?.requestKey,
             hasSqlRequestLog,
             memoryReplays,
             identityOf: (v) => `${v.id}:${v.revision}`,
-            execute: baseTemplates.use(template, input, opts),
+            execute: baseTemplates.use(caller, template, input, opts),
             project: (view, wasReplayed) =>
               projectMemberDocumentView(
+                caller,
                 view,
                 documentsRepo,
                 coreStore,
@@ -755,29 +779,29 @@ const ProjectedPublicShareLinksLive: Layer.Layer<
 
     return PublicShareLinks.of({
       ...baseShareLinks,
-      open: baseShareLinks.open.pipe(
-        Effect.flatMap(
-          Effect.fn("PublicShareLinks.projectOpen")(function* (view) {
-            if (view.paymentQr !== null || view.status !== "issued") return view;
-            const caller = yield* CurrentCaller;
-            let storedVariableSymbol: string | null = null;
-            if (caller._tag === "ShareLinkVisitor") {
-              const tokenHash = sha256HexSync(caller.token);
-              const linkOpt = yield* coreStore
-                .transaction(shareLinksRepo.lockByTokenHash(tokenHash))
-                .pipe(Effect.mapError(toDbUnavailable));
-              if (Option.isSome(linkOpt)) {
-                storedVariableSymbol = yield* documentsRepo
-                  .get(linkOpt.value.workspaceId, linkOpt.value.documentId)
-                  .pipe(
-                    Effect.map((row) => row.variableSymbol),
-                    Effect.catchTag("NotFound", () => Effect.succeed(null)),
-                    Effect.mapError(toDbUnavailable),
-                  );
+      open: Effect.fn("PublicShareLinks.open")((caller) =>
+        baseShareLinks.open(caller).pipe(
+          Effect.flatMap(
+            Effect.fn("PublicShareLinks.projectOpen")(function* (view) {
+              if (view.paymentQr !== null || view.status !== "issued") return view;
+              let storedVariableSymbol: string | null = null;
+              if (caller._tag === "ShareLinkVisitor") {
+                const tokenHash = sha256HexSync(caller.token);
+                const linkOpt = yield* coreStore.transaction(
+                  shareLinksRepo.lockByTokenHash(tokenHash),
+                );
+                if (Option.isSome(linkOpt)) {
+                  storedVariableSymbol = yield* documentsRepo
+                    .get(linkOpt.value.workspaceId, linkOpt.value.documentId)
+                    .pipe(
+                      Effect.map((row) => row.variableSymbol),
+                      Effect.catchTag("NotFound", () => Effect.succeed(null)),
+                    );
+                }
               }
-            }
-            return enrichSharedDocumentView(view, storedVariableSymbol);
-          }),
+              return enrichSharedDocumentView(view, storedVariableSymbol);
+            }, Effect.mapError(toDbUnavailable)),
+          ),
         ),
       ),
     });

@@ -40,7 +40,6 @@ import {
   BankAccountId,
   ContactId,
   CurrencyCode,
-  CurrentCaller,
   Documents,
   IsoDate,
   UserId,
@@ -224,7 +223,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
     yield* numbering.ensureDefaults(WS, ["invoice"]);
     const series = yield* numbering.resolve(WS, "invoice");
     // A draft row for the reservation probe (number_reservations_document_fk); never numbered.
-    const probe = (yield* documents.createDraft(input("2026"))).id;
+    const probe = (yield* documents.createDraft(OWNER, input("2026"))).id;
 
     const model: ModelState = {
       counter: { "2026": 1, "2027": 1 },
@@ -236,7 +235,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
     const ids = new Map<string, DocumentId>();
     for (const s of steps) {
       if (s.op === "issue" && s.from === "draft" && !ids.has(s.doc)) {
-        ids.set(s.doc, (yield* documents.createDraft(input(s.period))).id);
+        ids.set(s.doc, (yield* documents.createDraft(OWNER, input(s.period))).id);
         model.docNum.set(s.doc, null);
         model.rev.set(s.doc, [1]);
       }
@@ -251,7 +250,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
     const stored = Effect.gen(function* () {
       const out = new Map<string, { number: string | null; revision: number }>();
       for (const [doc, id] of ids) {
-        const view = yield* documents.get(id);
+        const view = yield* documents.get(OWNER, id);
         out.set(doc, { number: view.number, revision: view.revision });
       }
       return out;
@@ -278,13 +277,14 @@ const replay = (steps: ReadonlyArray<Step>) =>
       const body =
         step.op === "issue"
           ? documents.issue(
+              OWNER,
               step.from === "draft" && id !== undefined
                 ? { draft: id, expectedRevision: expected }
                 : { input: input(step.period) },
             )
           : Effect.suspend(() => {
               if (id === undefined) return Effect.die(`no document ${step.doc}`);
-              return documents.edit(id, { number: step.number }, expected);
+              return documents.edit(OWNER, id, { number: step.number }, expected);
             });
       const crash = Effect.fail({ _tag: "Crash" as const });
       return store.transaction(step.crash === true ? Effect.tap(body, () => crash) : body).pipe(
@@ -416,7 +416,7 @@ const replay = (steps: ReadonlyArray<Step>) =>
       numbers: EffectRecord.fromEntries(EffectArray.map([...final], ([d, r]) => [d, r.number])),
       counters: yield* counters,
     };
-  }).pipe(Effect.provideService(CurrentCaller, OWNER), Effect.provide(World));
+  }).pipe(Effect.provide(World));
 
 const runReplay = (steps: ReadonlyArray<Step>) => Effect.runPromise(replay(steps));
 

@@ -3,7 +3,6 @@ import type { AttachmentView, Caller, ExpenseInput, ExpenseView } from "@kvitbit
 import {
   ContactId,
   CurrencyCode,
-  CurrentCaller,
   ExpenseId,
   Expenses,
   IsoDate,
@@ -24,6 +23,7 @@ import {
 } from "../../../src/modules/expenses";
 import { AttachResultFields } from "../../../src/modules/expenses/model";
 import { type InMemoryPortsLive, member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 
 const owner = member("owner");
 export const ownerB = member("owner", { workspaceId: WORKSPACE_B });
@@ -42,7 +42,7 @@ export const SUPPLIER_CONTACT_B = ContactId.make("01900000-0000-7000-8000-000000
 type ScenarioServices =
   | Layer.Success<typeof ExpensesTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 /** Runs an Expenses scenario on fresh in-memory ports with the EUR fixing and supplier Contacts. */
 export const scenarioWithLayer =
@@ -76,7 +76,7 @@ export const scenarioWithLayer =
 export const scenario = scenarioWithLayer(ExpensesTestLayer);
 
 /** Runs an Effect as another caller inside a scenario. */
-export const asCaller = (caller: Caller) => Effect.provideService(CurrentCaller, caller);
+export const asCaller = (caller: Caller) => Effect.provideService(TestCaller, caller);
 
 /** A valid complete CZK Expense: 100 + 21 % VAT. */
 export const czkInput = {
@@ -99,9 +99,12 @@ export const attachmentFields = (view: AttachmentView) => decodeAttachment(view)
 
 export const recordWithKey = (requestKey?: string) => (input: ExpenseInput) =>
   Effect.flatMap(Expenses, (expenses) =>
-    expenses.record(
-      input,
-      requestKey === undefined ? undefined : { requestKey: RequestKey.make(requestKey) },
+    Effect.flatMap(TestCaller, (caller) =>
+      expenses.record(
+        caller,
+        input,
+        requestKey === undefined ? undefined : { requestKey: RequestKey.make(requestKey) },
+      ),
     ),
   );
 

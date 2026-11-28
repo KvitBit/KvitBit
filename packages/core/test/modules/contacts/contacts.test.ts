@@ -1,11 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type {
-  Caller,
-  ContactDefaults,
-  ContactView,
-  CoreError,
-  CurrentCaller,
-} from "@kvitbit/domain/contract";
+import type { Caller, ContactDefaults, ContactView, CoreError } from "@kvitbit/domain/contract";
 import {
   ContactId,
   Contacts,
@@ -53,6 +47,7 @@ import {
   WORKSPACE_A,
   WORKSPACE_B,
 } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import {
   ACME_ICO,
   acmeRecord,
@@ -77,7 +72,7 @@ const run = <A, E>(
     | FakeCompanyRegistry
     | FakeContactSeries
     | CoreStore
-    | CurrentCaller
+    | TestCaller
   >,
 ) => runTest(caller, Effect.provide(effect, ContactsTestLayer), { registry });
 
@@ -85,12 +80,14 @@ const owner = member("owner");
 const view = (value: ContactView) =>
   Schema.decodeUnknownOption(ContactViewSchema)(value).pipe(Option.getOrThrow);
 const VAT_KEY = /vat/i;
-type SaveInput = Parameters<Contacts["Service"]["save"]>[0];
+type SaveInput = Parameters<Contacts["Service"]["save"]>[1];
 
 const saveAcme = (fields: Partial<ContactSaveFields> = {}) =>
-  Effect.flatMap(Contacts, (c) => c.save({ name: "Acme s.r.o.", ico: ACME_ICO, ...fields })).pipe(
-    Effect.map(view),
-  );
+  Effect.flatMap(Contacts, (c) =>
+    Effect.flatMap(TestCaller, (caller) =>
+      c.save(caller, { name: "Acme s.r.o.", ico: ACME_ICO, ...fields }),
+    ),
+  ).pipe(Effect.map(view));
 
 describe("Contacts.save", () => {
   test("creates a Contact with defaults filled and audits contact.save", async () => {
@@ -127,9 +124,10 @@ describe("Contacts.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const created = yield* saveAcme({ phone: "+420 111", note: "VIP" });
-        const saveResult = yield* contacts.save({
+        const saveResult = yield* contacts.save(testCaller, {
           id: created.id,
           expectedRevision: 1,
           note: null,
@@ -159,13 +157,16 @@ describe("Contacts.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const created = yield* saveAcme();
-        yield* contacts.save({ id: created.id, expectedRevision: 1, note: "x" });
+        yield* contacts.save(testCaller, { id: created.id, expectedRevision: 1, note: "x" });
         const stale = yield* Effect.flip(
-          contacts.save({ id: created.id, expectedRevision: 1, note: "y" }),
+          contacts.save(testCaller, { id: created.id, expectedRevision: 1, note: "y" }),
         );
-        const missing = yield* Effect.flip(contacts.save({ id: created.id, note: "y" }));
+        const missing = yield* Effect.flip(
+          contacts.save(testCaller, { id: created.id, note: "y" }),
+        );
         return { stale, missing };
       }),
     );
@@ -186,8 +187,9 @@ describe("Contacts.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const created = yield* saveAcme();
-        const saveResult = yield* (yield* Contacts).save({
+        const saveResult = yield* (yield* Contacts).save(testCaller, {
           id: created.id,
           expectedRevision: 1,
           name: "Acme s.r.o.",
@@ -221,6 +223,7 @@ describe("Contacts.save", () => {
         Effect.flatMap(Contacts, (contacts) => {
           // Exercise the runtime boundary with inputs that TypeScript callers would reject.
           const result: ReturnType<typeof contacts.save> = Reflect.apply(contacts.save, contacts, [
+            owner,
             input,
           ]);
           return result;
@@ -256,7 +259,9 @@ describe("Contacts.save", () => {
   test("malformed open fields are Invalid{request.malformed} at their path", async () => {
     const noName = await run(
       owner,
-      Effect.flatMap(Contacts, (c) => c.save({ ico: ACME_ICO })),
+      Effect.flatMap(Contacts, (c) =>
+        Effect.flatMap(TestCaller, (caller) => c.save(caller, { ico: ACME_ICO })),
+      ),
     );
     const noNameFailure = failureOf<unknown, CoreError>(noName);
     expect(noNameFailure).toMatchObject({
@@ -280,14 +285,15 @@ describe("Contacts.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const first = yield* saveAcme();
         const duplicate = yield* Effect.flip(saveAcme({ name: "Acme again" }));
         const other = yield* saveAcme({ name: "ČEZ", ico: CEZ_ICO });
         const moveOnto = yield* Effect.flip(
-          contacts.save({ id: other.id, expectedRevision: 1, ico: ACME_ICO }),
+          contacts.save(testCaller, { id: other.id, expectedRevision: 1, ico: ACME_ICO }),
         );
-        yield* contacts.archive(first.id);
+        yield* contacts.archive(testCaller, first.id);
         const second = yield* saveAcme({ name: "Acme reborn" });
         return { duplicate, moveOnto, second };
       }),
@@ -303,14 +309,17 @@ describe("Contacts.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const input = { name: "Acme s.r.o.", ico: ACME_ICO };
-        const saveResult = yield* contacts.save(input, { requestKey: key });
+        const saveResult = yield* contacts.save(testCaller, input, { requestKey: key });
         const first = view(saveResult);
-        const saveResult2 = yield* contacts.save(input, { requestKey: key });
+        const saveResult2 = yield* contacts.save(testCaller, input, { requestKey: key });
         const replay = view(saveResult2);
-        const mismatch = yield* Effect.flip(contacts.save({ name: "Other" }, { requestKey: key }));
-        const page = yield* contacts.search({});
+        const mismatch = yield* Effect.flip(
+          contacts.save(testCaller, { name: "Other" }, { requestKey: key }),
+        );
+        const page = yield* contacts.search(testCaller, {});
         return { first, replay, mismatch, count: page.items.length };
       }),
     );
@@ -331,12 +340,14 @@ describe("Contacts authorization and tenancy", () => {
         const exits = yield* as(caller)(
           Effect.all(
             {
-              get: Effect.exit(contacts.get(saved.id)),
-              search: Effect.exit(contacts.search({})),
-              save: Effect.exit(contacts.save({ id: saved.id, expectedRevision: 1, note: "n" })),
-              create: Effect.exit(contacts.save({ name: "New" })),
-              archive: Effect.exit(contacts.archive(saved.id)),
-              fromIco: Effect.exit(contacts.fromIco(ACME_ICO)),
+              get: Effect.exit(contacts.get(caller, saved.id)),
+              search: Effect.exit(contacts.search(caller, {})),
+              save: Effect.exit(
+                contacts.save(caller, { id: saved.id, expectedRevision: 1, note: "n" }),
+              ),
+              create: Effect.exit(contacts.save(caller, { name: "New" })),
+              archive: Effect.exit(contacts.archive(caller, saved.id)),
+              fromIco: Effect.exit(contacts.fromIco(caller, ACME_ICO)),
             },
             { concurrency: 1 },
           ),
@@ -421,11 +432,12 @@ describe("Contacts authorization and tenancy", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const input = { name: "Acme" };
-        yield* contacts.save(input, { requestKey: key });
+        yield* contacts.save(testCaller, input, { requestKey: key });
         return yield* contacts
-          .save(input, { requestKey: key })
+          .save(member("accountant"), input, { requestKey: key })
           .pipe(as(member("accountant")), Effect.flip);
       }),
     );
@@ -472,7 +484,7 @@ describe("Contacts authorization and tenancy", () => {
     const exit = await runTest(
       owner,
       Effect.provide(
-        Effect.flatMap(Contacts, (c) => c.fromIco(ACME_ICO)),
+        Effect.flatMap(Contacts, (c) => c.fromIco(owner, ACME_ICO)),
         layer,
       ),
       { registry },
@@ -500,7 +512,7 @@ describe("Contacts authorization and tenancy", () => {
       owner,
       Effect.provide(
         Effect.flatMap(Contacts, (c) =>
-          c.get(ContactId.make("01900000-0000-7000-8000-000000000099")),
+          c.get(owner, ContactId.make("01900000-0000-7000-8000-000000000099")),
         ),
         layer,
       ),
@@ -515,7 +527,10 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
-        const rawContact = yield* (yield* Contacts).fromIco(ACME_ICO, { role: "supplier" });
+        const testCaller = yield* TestCaller;
+        const rawContact = yield* (yield* Contacts).fromIco(testCaller, ACME_ICO, {
+          role: "supplier",
+        });
         const saved = view(rawContact);
         const entries = yield* history(WORKSPACE_A, { entity: "Contact", id: saved.id });
         return { rawContact, saved, entries };
@@ -540,14 +555,15 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const fake = yield* FakeCompanyRegistry;
         const manual = yield* saveAcme({ name: "Acme (manual)", phone: "+420 222" });
-        const fromIcoResult = yield* contacts.fromIco(ACME_ICO);
+        const fromIcoResult = yield* contacts.fromIco(testCaller, ACME_ICO);
         const first = view(fromIcoResult);
-        const fromIcoResult2 = yield* contacts.fromIco(ACME_ICO, { role: "supplier" });
+        const fromIcoResult2 = yield* contacts.fromIco(testCaller, ACME_ICO, { role: "supplier" });
         const second = view(fromIcoResult2);
-        const fromIcoResult3 = yield* contacts.fromIco(ACME_ICO, { role: "supplier" });
+        const fromIcoResult3 = yield* contacts.fromIco(testCaller, ACME_ICO, { role: "supplier" });
         const third = view(fromIcoResult3);
         const lookups = yield* Ref.get(fake.lookups);
         return { manual, first, second, third, lookups };
@@ -565,11 +581,12 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const fake = yield* FakeCompanyRegistry;
-        yield* contacts.fromIco(ACME_ICO);
+        yield* contacts.fromIco(testCaller, ACME_ICO);
         yield* TestClock.adjust(Duration.hours(25));
-        yield* contacts.fromIco(ACME_ICO);
+        yield* contacts.fromIco(testCaller, ACME_ICO);
         return yield* Ref.get(fake.lookups);
       }),
     );
@@ -581,7 +598,8 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
-        const error = yield* Effect.flip((yield* Contacts).fromIco(BAD_ICO));
+        const testCaller = yield* TestCaller;
+        const error = yield* Effect.flip((yield* Contacts).fromIco(testCaller, BAD_ICO));
         return { error, lookups: yield* Ref.get((yield* FakeCompanyRegistry).lookups) };
       }),
     );
@@ -594,10 +612,11 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         yield* Ref.set((yield* FakeCompanyRegistry).unavailable, true);
-        const error = yield* Effect.flip(contacts.fromIco(ACME_ICO));
-        return { error, page: yield* contacts.search({}) };
+        const error = yield* Effect.flip(contacts.fromIco(testCaller, ACME_ICO));
+        return { error, page: yield* contacts.search(testCaller, {}) };
       }),
     );
     const { error, page } = successOf(exit);
@@ -609,20 +628,21 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
-        const fromIcoResult = yield* contacts.fromIco(CEZ_ICO);
+        const fromIcoResult = yield* contacts.fromIco(testCaller, CEZ_ICO);
         const fresh = view(fromIcoResult);
-        yield* contacts.archive(fresh.id);
+        yield* contacts.archive(testCaller, fresh.id);
         const manual = yield* saveAcme({
           name: "Acme s.r.o.",
           dic: "CZ27074358",
           legalForm: "112",
           address: { street: "Hlavní 1", city: "Praha", postalCode: "11000", country: "CZ" },
         });
-        const fromIcoResult2 = yield* contacts.fromIco(ACME_ICO);
+        const fromIcoResult2 = yield* contacts.fromIco(testCaller, ACME_ICO);
         const refreshed = view(fromIcoResult2);
         const cezManual = yield* saveAcme({ name: "ČEZ", ico: CEZ_ICO, dic: "CZ45274649" });
-        const fromIcoResult3 = yield* contacts.fromIco(CEZ_ICO);
+        const fromIcoResult3 = yield* contacts.fromIco(testCaller, CEZ_ICO);
         const cez = view(fromIcoResult3);
         return { fresh, manual, refreshed, cezManual, cez };
       }),
@@ -639,7 +659,9 @@ describe("Contacts.fromIco", () => {
   test("an IČO the registry does not know is NotFound", async () => {
     const exit = await run(
       owner,
-      Effect.flatMap(Contacts, (c) => c.fromIco(UNKNOWN_ICO)),
+      Effect.flatMap(Contacts, (c) =>
+        Effect.flatMap(TestCaller, (caller) => c.fromIco(caller, UNKNOWN_ICO)),
+      ),
     );
     const failure = failureOf<unknown, CoreError>(exit);
     expect(failure).toMatchObject({ _tag: "NotFound", entity: "Contact", id: UNKNOWN_ICO });
@@ -649,13 +671,14 @@ describe("Contacts.fromIco", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
-        const fromIcoResult = yield* contacts.fromIco(ACME_ICO);
+        const fromIcoResult = yield* contacts.fromIco(testCaller, ACME_ICO);
         const old = view(fromIcoResult);
-        yield* contacts.archive(old.id);
-        const fromIcoResult2 = yield* contacts.fromIco(ACME_ICO);
+        yield* contacts.archive(testCaller, old.id);
+        const fromIcoResult2 = yield* contacts.fromIco(testCaller, ACME_ICO);
         const fresh = view(fromIcoResult2);
-        const archived = yield* contacts.get(old.id);
+        const archived = yield* contacts.get(testCaller, old.id);
         return { old: view(archived), fresh };
       }),
     );
@@ -670,11 +693,12 @@ describe("Contacts.archive and get", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         const saved = yield* saveAcme();
-        yield* contacts.archive(saved.id);
-        yield* contacts.archive(saved.id);
-        const archived = yield* contacts.get(saved.id);
+        yield* contacts.archive(testCaller, saved.id);
+        yield* contacts.archive(testCaller, saved.id);
+        const archived = yield* contacts.get(testCaller, saved.id);
         return {
           got: view(archived),
           entries: yield* history(WORKSPACE_A, { entity: "Contact", id: saved.id }),
@@ -691,10 +715,11 @@ describe("Contacts.archive and get", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         return [
-          yield* Effect.exit(contacts.get(id)),
-          yield* Effect.exit(contacts.archive(id)),
+          yield* Effect.exit(contacts.get(testCaller, id)),
+          yield* Effect.exit(contacts.archive(testCaller, id)),
         ] as const;
       }),
     );
@@ -707,8 +732,9 @@ describe("Contacts.archive and get", () => {
 
 describe("Contacts.search", () => {
   const seed = Effect.gen(function* () {
+    const testCaller = yield* TestCaller;
     const contacts = yield* Contacts;
-    const save = (fields: SaveInput) => Effect.map(contacts.save(fields), view);
+    const save = (fields: SaveInput) => Effect.map(contacts.save(testCaller, fields), view);
     const zluty = yield* save({ name: "Žluťoučký kůň s.r.o.", roles: ["supplier"] });
     const acme = yield* save({ name: "Acme s.r.o.", ico: ACME_ICO });
     const beta = yield* save({
@@ -717,7 +743,7 @@ describe("Contacts.search", () => {
       billingEmails: ["ucetni@beta.cz"],
     });
     const gone = yield* save({ name: "Archived Acme" });
-    yield* contacts.archive(gone.id);
+    yield* contacts.archive(testCaller, gone.id);
     return { zluty, acme, beta, gone };
   });
 
@@ -727,8 +753,10 @@ describe("Contacts.search", () => {
       Effect.gen(function* () {
         const contacts = yield* Contacts;
         yield* seed;
-        const names = (q: Parameters<Contacts["Service"]["search"]>[0]) =>
-          Effect.map(contacts.search(q), (p) => EffectArray.map(p.items, (c) => view(c).name));
+        const names = (q: Parameters<Contacts["Service"]["search"]>[1]) =>
+          Effect.map(contacts.search(owner, q), (p) =>
+            EffectArray.map(p.items, (c) => view(c).name),
+          );
         return {
           all: yield* names({}),
           zlutou: yield* names({ text: "zlutou" }),
@@ -754,20 +782,23 @@ describe("Contacts.search", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         for (let i = 0; i < 52; i++) {
-          yield* contacts.save({ name: `Firma ${EffectString.padStart(2, "0")(String(i))}` });
+          yield* contacts.save(testCaller, {
+            name: `Firma ${EffectString.padStart(2, "0")(String(i))}`,
+          });
         }
-        const first = yield* contacts.search({ text: "firma" });
+        const first = yield* contacts.search(testCaller, { text: "firma" });
         const nextQuery =
           first.nextCursor === null
             ? { text: "firma" }
             : { text: "firma", cursor: first.nextCursor };
-        const second = yield* contacts.search(nextQuery);
+        const second = yield* contacts.search(testCaller, nextQuery);
         const mismatch = yield* Effect.flip(
-          contacts.search({ text: "other", cursor: first.nextCursor ?? "" }),
+          contacts.search(testCaller, { text: "other", cursor: first.nextCursor ?? "" }),
         );
-        const garbage = yield* Effect.flip(contacts.search({ cursor: "%%%" }));
+        const garbage = yield* Effect.flip(contacts.search(testCaller, { cursor: "%%%" }));
         return { first, second, mismatch, garbage };
       }),
     );
@@ -791,13 +822,15 @@ describe("Contacts.search paging edges", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts; // the public tag takes `limit`
-        for (const name of ["A", "B", "C"]) yield* contacts.save({ name });
-        const one = yield* contacts.search({ limit: 1 });
-        const rest = yield* contacts.search({ limit: 2, cursor: one.nextCursor ?? "" });
+        for (const name of ["A", "B", "C"]) yield* contacts.save(testCaller, { name });
+        const one = yield* contacts.search(testCaller, { limit: 1 });
+        const rest = yield* contacts.search(testCaller, { limit: 2, cursor: one.nextCursor ?? "" });
         const bad = yield* Effect.forEach(
           [0, 101, 1.5],
-          (limit) => Effect.flip(contacts.search({ limit })),
+          (limit) =>
+            Effect.flip(Effect.flatMap(TestCaller, (caller) => contacts.search(caller, { limit }))),
           { concurrency: 1 },
         );
         return { one, rest, bad };
@@ -816,24 +849,29 @@ describe("Contacts.search paging edges", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
-        for (const name of ["A", "B", "C"]) yield* contacts.save({ name });
-        const first = yield* contacts.search({ limit: 2 });
+        for (const name of ["A", "B", "C"]) yield* contacts.save(testCaller, { name });
+        const first = yield* contacts.search(testCaller, { limit: 2 });
         const anchor = first.items[1];
         if (anchor === undefined || first.nextCursor === null) return yield* Effect.die("setup");
         // Any write to the anchor invalidates the cursor: a rename, and an edit that keeps the name.
-        yield* contacts.save({ id: view(anchor).id, expectedRevision: 1, name: "ZZ" });
-        const renamed = yield* Effect.flip(contacts.search({ limit: 2, cursor: first.nextCursor }));
-        const again = yield* contacts.search({ limit: 2 });
+        yield* contacts.save(testCaller, { id: view(anchor).id, expectedRevision: 1, name: "ZZ" });
+        const renamed = yield* Effect.flip(
+          contacts.search(testCaller, { limit: 2, cursor: first.nextCursor }),
+        );
+        const again = yield* contacts.search(testCaller, { limit: 2 });
         if (again.nextCursor === null) return yield* Effect.die("setup");
         const anchor2 = again.items[1];
         if (anchor2 === undefined) return yield* Effect.die("setup");
-        yield* contacts.save({
+        yield* contacts.save(testCaller, {
           id: view(anchor2).id,
           expectedRevision: anchor2.revision,
           note: "x",
         });
-        const touched = yield* Effect.flip(contacts.search({ limit: 2, cursor: again.nextCursor }));
+        const touched = yield* Effect.flip(
+          contacts.search(testCaller, { limit: 2, cursor: again.nextCursor }),
+        );
         return { renamed, touched };
       }),
     );
@@ -859,6 +897,7 @@ describe("Contact preferred series", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const contacts = yield* Contacts;
         yield* seedSeries([
           { workspaceId: WORKSPACE_A, id: mine, kind: "invoice" },
@@ -873,16 +912,16 @@ describe("Contact preferred series", () => {
         };
         const ok = yield* saveAcme({ defaults: { preferredSeriesByKind: { invoice: mine } } });
         const edit = yield* Effect.flip(
-          contacts.save({
+          contacts.save(testCaller, {
             id: ok.id,
             expectedRevision: 1,
             defaults: { preferredSeriesByKind: { invoice: theirs } },
           }),
         );
-        yield* contacts.save({ id: ok.id, expectedRevision: 1, note: "rev 2" });
+        yield* contacts.save(testCaller, { id: ok.id, expectedRevision: 1, note: "rev 2" });
         // Stale revision wins over the series rule (C2): checked first.
         const staleWithBadSeries = yield* Effect.flip(
-          contacts.save({
+          contacts.save(testCaller, {
             id: ok.id,
             expectedRevision: 1,
             defaults: { preferredSeriesByKind: { invoice: unknown } },
@@ -976,7 +1015,12 @@ describe("Contact overrides", () => {
       Effect.gen(function* () {
         const contacts = yield* Contacts;
         const save = (name: string, defaults?: ContactDefaults) =>
-          Effect.map(contacts.save(defaults === undefined ? { name } : { name, defaults }), view);
+          Effect.map(
+            Effect.flatMap(TestCaller, (caller) =>
+              contacts.save(caller, defaults === undefined ? { name } : { name, defaults }),
+            ),
+            view,
+          );
         return {
           inherit: yield* save("Inherit"),
           disabled: yield* save("Disabled", { reminderPolicy: { mode: "disabled" } }),
@@ -1011,10 +1055,11 @@ describe("Contact overrides", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const created = yield* saveAcme({
           defaults: { currency: CurrencyCode.make("EUR"), dueDays: 30 },
         });
-        const saveResult = yield* (yield* Contacts).save({
+        const saveResult = yield* (yield* Contacts).save(testCaller, {
           id: created.id,
           expectedRevision: 1,
           defaults: { dueDays: 10 },
@@ -1031,7 +1076,8 @@ describe("ContactSnapshots (Documents read port)", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
-        const fromIcoResult = yield* (yield* Contacts).fromIco(ACME_ICO);
+        const testCaller = yield* TestCaller;
+        const fromIcoResult = yield* (yield* Contacts).fromIco(testCaller, ACME_ICO);
         const saved = view(fromIcoResult);
         const snapshots = yield* ContactSnapshots;
         const forDocument = yield* as(member("owner", { scopes: ["documents:write"] }))(

@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 /**
  * `ReportsSourceLive` over the real module layers on in-memory ports: documents, payments and
  * expenses built through their services (an Expense payment row through `PaymentsRepo`).
@@ -7,7 +8,6 @@ import { describe, expect, test } from "bun:test";
 import type { DocumentView, ExpenseView } from "@kvitbit/domain/contract";
 import {
   CurrencyCode,
-  CurrentCaller,
   DocumentId,
   Documents,
   ExpenseId,
@@ -119,9 +119,7 @@ const run = <A, E>(
   body: Effect.Effect<
     A,
     E,
-    | Layer.Success<typeof layer>
-    | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-    | CurrentCaller
+    Layer.Success<typeof layer> | Layer.Success<ReturnType<typeof InMemoryPortsLive>> | TestCaller
   >,
 ) =>
   runTest(
@@ -156,10 +154,14 @@ const rateOf = (fx: StoredFx | null | undefined) =>
 
 const id = (v: DocumentView) => DocumentId.make(v.id);
 const issue = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
-  Effect.flatMap(Documents, (d) => d.issue({ input: invoiceInput(extra) }));
+  Effect.flatMap(Documents, (d) =>
+    Effect.flatMap(TestCaller, (caller) => d.issue(caller, { input: invoiceInput(extra) })),
+  );
 const pay = (document: DocumentId, amount: string, currency = CurrencyCode.make("CZK")) =>
   Effect.flatMap(Payments, (p) =>
-    p.record({ target: { document }, amount: MoneyMath.make(dec(amount), currency) }),
+    Effect.flatMap(TestCaller, (caller) =>
+      p.record(caller, { target: { document }, amount: MoneyMath.make(dec(amount), currency) }),
+    ),
   );
 const recordExpense = (input: Parameters<typeof record>[0]) =>
   Effect.map(record(input), (v: ExpenseView) => ExpenseId.make(fields(v).id));
@@ -178,7 +180,7 @@ const finalInvoiceWithUncoveredCash = Effect.gen(function* () {
   const d = yield* Documents;
   const store = yield* CoreStore;
   const seam = yield* DocumentPayments;
-  const caller = yield* CurrentCaller;
+  const caller = yield* TestCaller;
   const proforma = yield* issue({ kind: "proforma" });
   yield* pay(id(proforma), "1000");
   yield* store.transaction(
@@ -192,8 +194,8 @@ const finalInvoiceWithUncoveredCash = Effect.gen(function* () {
       ),
     ),
   );
-  const fi = yield* d.issueFinalInvoice(id(proforma));
-  const cn = yield* d.correct(id(fi), { reason: "storno", lines: "full" });
+  const fi = yield* d.issueFinalInvoice(caller, id(proforma));
+  const cn = yield* d.correct(caller, id(fi), { reason: "storno", lines: "full" });
   return { fi: id(fi), cn: id(cn) };
 });
 
@@ -214,8 +216,9 @@ describe("ReportsSourceLive", () => {
     const r = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
-          const draft = yield* d.createDraft(invoiceInput());
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
           const inv = yield* issue();
           yield* pay(id(inv), "1000");
           const early = yield* issue({
@@ -223,13 +226,13 @@ describe("ReportsSourceLive", () => {
             taxableSupplyOn: IsoDate.make("2026-10-31"),
           });
           const credited = yield* issue();
-          const cn = yield* d.correct(id(credited), { reason: "sleva", lines: "full" });
+          const cn = yield* d.correct(testCaller, id(credited), { reason: "sleva", lines: "full" });
           // Storno of a non-tax document: the Proforma itself becomes cancelled (D6).
           const cancelled = yield* issue({ kind: "proforma" });
-          yield* d.cancel(id(cancelled), { reason: "chyba" });
+          yield* d.cancel(testCaller, id(cancelled), { reason: "chyba" });
           const proforma = yield* issue({ kind: "proforma" });
           yield* pay(id(proforma), "2980");
-          const fi = yield* d.issueFinalInvoice(id(proforma));
+          const fi = yield* d.issueFinalInvoice(testCaller, id(proforma));
           // After the Final Invoice, a Proforma payment is stored against it (D8).
           const late = yield* pay(id(proforma), "10");
           const eur = yield* issue({
@@ -503,11 +506,14 @@ describe("ReportsSourceLive", () => {
       Effect.gen(function* () {
         yield* TestClock.setTime(TEST_NOW);
         const ws = yield* Workspaces;
-        const owner = yield* as(accountOf(OWNER), ws.create({ name: "Acme s.r.o." }));
+        const owner = yield* as(
+          accountOf(OWNER),
+          ws.create(accountOf(OWNER), { name: "Acme s.r.o." }),
+        );
         const change = IssuingEntityPatch.make({
           taxRegime: { regime: "vat_payer", effectiveFrom: "2027-01-01" },
         });
-        yield* as(owner, ws.updateIssuingEntity(change, 1));
+        yield* as(owner, ws.updateIssuingEntity(owner, change, 1));
         return {
           mine: yield* read((s) => s.taxRegimes(owner.workspaceId)),
           other: yield* read((s) => s.taxRegimes(WORKSPACE_B)),

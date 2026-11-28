@@ -62,13 +62,13 @@ describe("current, updateIssuingEntity, updateSettings", () => {
         const ws = yield* W;
         const s = yield* seed();
         for (const caller of [s.owner, s.admin, s.member, s.accountant]) {
-          const result = yield* as(caller)(ws.current);
+          const result = yield* as(caller)(ws.current(caller));
           const current = yield* workspaceView(result);
           expect(current.id).toBe(s.workspaceId);
         }
         for (const caller of [s.member, s.accountant]) {
           const updateSettingsFailure = yield* ws
-            .updateSettings({ name: "X" }, 1)
+            .updateSettings(caller, { name: "X" }, 1)
             .pipe(as(caller), failure);
           expect(updateSettingsFailure).toEqual(Forbidden.make({ action: "workspace.settings" }));
         }
@@ -82,19 +82,19 @@ describe("current, updateIssuingEntity, updateSettings", () => {
         const s = yield* seed();
         const patch = { name: "Acme a.s.", ico: "27082440", email: "fakturace@acme.cz" };
         const updateIssuingEntityResult = yield* as(s.admin)(
-          ws.updateIssuingEntity(IssuingEntityPatch.make(patch), 1),
+          ws.updateIssuingEntity(s.admin, IssuingEntityPatch.make(patch), 1),
         );
         const next = yield* workspaceView(updateIssuingEntityResult);
         expect(next.revision).toBe(2);
         expect(next.issuingEntity).toMatchObject({ name: "Acme a.s.", ico: "27082440" });
         const updateIssuingEntityFailure = yield* ws
-          .updateIssuingEntity(IssuingEntityPatch.make(patch), 1)
+          .updateIssuingEntity(s.admin, IssuingEntityPatch.make(patch), 1)
           .pipe(as(s.admin), failure);
         expect(updateIssuingEntityFailure).toEqual(
           Conflict.make({ reason: "revision_changed", currentRevision: 2 }),
         );
         const updateIssuingEntityFailure2 = yield* ws
-          .updateIssuingEntity(IssuingEntityPatch.make({ ico: "27082441" }), 2)
+          .updateIssuingEntity(s.admin, IssuingEntityPatch.make({ ico: "27082441" }), 2)
           .pipe(as(s.admin), failure);
         expect(updateIssuingEntityFailure2).toEqual(
           Invalid.make({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),
@@ -118,7 +118,7 @@ describe("current, updateIssuingEntity, updateSettings", () => {
         const s = yield* seed();
         const change = { taxRegime: { regime: "vat_payer", effectiveFrom: "2027-01-01" } };
         const updateIssuingEntityResult = yield* as(s.owner)(
-          ws.updateIssuingEntity(IssuingEntityPatch.make(change), 1),
+          ws.updateIssuingEntity(s.owner, IssuingEntityPatch.make(change), 1),
         );
         const next = yield* workspaceView(updateIssuingEntityResult);
         expect(next.taxRegime).toBe("non_vat_payer"); // today is 2026-11-23
@@ -132,7 +132,7 @@ describe("current, updateIssuingEntity, updateSettings", () => {
         expect((yield* snapshots.get(s.workspaceId, IsoDate.make("2027-01-01"))).taxRegime).toBe(
           "vat_payer",
         );
-        const series = yield* as(s.owner)(ws.listSeries);
+        const series = yield* as(s.owner)(ws.listSeries(s.owner));
         // Becoming a payer adds the Payment Tax Document series.
         const kinds = EffectArray.map(series, (x) => x.kind);
         expect(kinds).toContain("payment_tax_document");
@@ -140,7 +140,7 @@ describe("current, updateIssuingEntity, updateSettings", () => {
           taxRegime: { regime: "non_vat_payer", effectiveFrom: "2026-12-01" },
         };
         const updateIssuingEntityFailure = yield* ws
-          .updateIssuingEntity(IssuingEntityPatch.make(back), 2)
+          .updateIssuingEntity(s.owner, IssuingEntityPatch.make(back), 2)
           .pipe(as(s.owner), failure);
         expect(updateIssuingEntityFailure).toEqual(
           Invalid.make({
@@ -170,7 +170,7 @@ describe("current, updateIssuingEntity, updateSettings", () => {
             footerText: "Patička",
           },
         } satisfies WorkspaceSettingsPatch;
-        const updateSettingsResult = yield* as(s.admin)(ws.updateSettings(patch, 1));
+        const updateSettingsResult = yield* as(s.admin)(ws.updateSettings(s.admin, patch, 1));
         const next = yield* workspaceView(updateSettingsResult);
         expect(next.defaults).toMatchObject({
           dueDays: 30,
@@ -193,7 +193,9 @@ describe("current, updateIssuingEntity, updateSettings", () => {
           defaults: { dueDays: 1000 },
           reminderPolicy: { offsetsDays: [0] },
         };
-        const updateSettingsFailure = yield* ws.updateSettings(bad, 2).pipe(as(s.admin), failure);
+        const updateSettingsFailure = yield* ws
+          .updateSettings(s.admin, bad, 2)
+          .pipe(as(s.admin), failure);
         expect(updateSettingsFailure).toEqual(
           Invalid.make({
             issues: [
@@ -204,7 +206,9 @@ describe("current, updateIssuingEntity, updateSettings", () => {
             ],
           }),
         );
-        const updateSettingsFailure2 = yield* ws.updateSettings({}, 1).pipe(as(s.admin), failure);
+        const updateSettingsFailure2 = yield* ws
+          .updateSettings(s.admin, {}, 1)
+          .pipe(as(s.admin), failure);
         expect(updateSettingsFailure2).toEqual(
           Conflict.make({ reason: "revision_changed", currentRevision: 2 }),
         );
@@ -216,28 +220,30 @@ describe("current, updateIssuingEntity, updateSettings", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.updateSettings({ slug: WorkspaceSlug.make("acme-new") }, 1));
-        const other = yield* as(accountOf(OUTSIDER))(ws.create({ name: "Other" }));
+        yield* as(s.owner)(ws.updateSettings(s.owner, { slug: WorkspaceSlug.make("acme-new") }, 1));
+        const other = yield* as(accountOf(OUTSIDER))(
+          ws.create(accountOf(OUTSIDER), { name: "Other" }),
+        );
         const updateSettingsFailure = yield* ws
-          .updateSettings({ slug: WorkspaceSlug.make("acme-s-r-o") }, 1)
+          .updateSettings(other, { slug: WorkspaceSlug.make("acme-s-r-o") }, 1)
           .pipe(as(other), failure);
         expect(updateSettingsFailure).toEqual(
           Invalid.make({ issues: [{ path: ["slug"], code: "workspace.slug_taken" }] }),
         );
         const updateSettingsFailure2 = yield* ws
-          .updateSettings({ slug: WorkspaceSlug.make("acme-new") }, 1)
+          .updateSettings(other, { slug: WorkspaceSlug.make("acme-new") }, 1)
           .pipe(as(other), failure);
         expect(updateSettingsFailure2).toEqual(
           Invalid.make({ issues: [{ path: ["slug"], code: "workspace.slug_taken" }] }),
         );
         const updateSettingsResult = yield* as(s.owner)(
-          ws.updateSettings({ slug: WorkspaceSlug.make("acme-s-r-o") }, 2),
+          ws.updateSettings(s.owner, { slug: WorkspaceSlug.make("acme-s-r-o") }, 2),
         );
         // The owner can take the old slug back.
         expect(updateSettingsResult.slug).toBe(WorkspaceSlug.make("acme-s-r-o"));
         yield* TestClock.adjust("91 days");
         const updateSettingsResult2 = yield* as(other)(
-          ws.updateSettings({ slug: WorkspaceSlug.make("acme-new") }, 1),
+          ws.updateSettings(other, { slug: WorkspaceSlug.make("acme-new") }, 1),
         );
         expect(updateSettingsResult2.slug).toBe(WorkspaceSlug.make("acme-new"));
       }),
@@ -249,17 +255,21 @@ describe("current, updateIssuingEntity, updateSettings", () => {
         const ws = yield* W;
         const s = yield* seed();
         const fv = yield* as(s.admin)(
-          ws.configureSeries({ kind: "invoice", name: "FV", pattern: "FV-YY-NNN" }),
+          ws.configureSeries(s.admin, { kind: "invoice", name: "FV", pattern: "FV-YY-NNN" }),
         );
         expect(fv.isDefault).toBe(false);
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const rev = result.revision;
         const updateSettingsResult = yield* as(s.admin)(
-          ws.updateSettings({ defaults: { preferredSeriesByKind: { invoice: fv.id } } }, rev),
+          ws.updateSettings(
+            s.admin,
+            { defaults: { preferredSeriesByKind: { invoice: fv.id } } },
+            rev,
+          ),
         );
         const next = yield* workspaceView(updateSettingsResult);
         expect(next.defaults.preferredSeriesByKind.invoice).toBe(fv.id);
-        const series = yield* as(s.admin)(ws.listSeries);
+        const series = yield* as(s.admin)(ws.listSeries(s.admin));
         const invoices = EffectArray.filter(series, (x) => x.kind === "invoice");
         expect(
           EffectArray.map(
@@ -268,7 +278,11 @@ describe("current, updateIssuingEntity, updateSettings", () => {
           ),
         ).toEqual([fv.id]);
         const updateSettingsFailure = yield* ws
-          .updateSettings({ defaults: { preferredSeriesByKind: { proforma: fv.id } } }, rev + 1)
+          .updateSettings(
+            s.admin,
+            { defaults: { preferredSeriesByKind: { proforma: fv.id } } },
+            rev + 1,
+          )
           .pipe(as(s.admin), failure);
         expect(updateSettingsFailure).toEqual(
           Invalid.make({
@@ -291,7 +305,7 @@ describe("bank accounts", () => {
         const ws = yield* W;
         const s = yield* seed();
         const save = (input: (typeof BankAccountFields)["Encoded"]) =>
-          as(s.admin)(ws.saveBankAccount(BankAccountInput.make(input)));
+          as(s.admin)(ws.saveBankAccount(s.admin, BankAccountInput.make(input)));
         const result = yield* save({ iban: IBAN_CZ, currency: "CZK", name: "Hlavní" });
         const a = yield* bankAccountView(result);
         expect(a).toMatchObject({
@@ -311,7 +325,7 @@ describe("bank accounts", () => {
         expect(failureResult).toEqual(
           Invalid.make({ issues: [{ path: ["iban"], code: "request.malformed" }] }),
         );
-        const result4 = yield* as(s.member)(ws.current);
+        const result4 = yield* as(s.member)(ws.current(s.member));
         const current = yield* workspaceView(result4);
         expect(EffectArray.map(current.bankAccounts, (account) => account.id)).toEqual([
           a.id,
@@ -342,13 +356,13 @@ describe("bank accounts", () => {
         const s = yield* seed();
         const input = { iban: IBAN_CZ, currency: "CZK" };
         const first = yield* as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make(input), key("b1")),
+          ws.saveBankAccount(s.admin, BankAccountInput.make(input), key("b1")),
         );
         const saveBankAccountResult = yield* as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make(input), key("b1")),
+          ws.saveBankAccount(s.admin, BankAccountInput.make(input), key("b1")),
         );
         expect(saveBankAccountResult).toEqual(first);
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const current = yield* workspaceView(result);
         expect(current.bankAccounts.length).toBe(1);
       }),
@@ -362,14 +376,14 @@ describe("bank accounts", () => {
         const s = yield* seed();
         const save = (input: (typeof BankAccountFields)["Encoded"]) =>
           Effect.flatMap(
-            as(s.admin)(ws.saveBankAccount(BankAccountInput.make(input))),
+            as(s.admin)(ws.saveBankAccount(s.admin, BankAccountInput.make(input))),
             bankAccountView,
           );
         const a = yield* save({ iban: IBAN_CZ, currency: "CZK" });
         const b = yield* save({ iban: IBAN_CZ_2, currency: "CZK" });
         const eur = yield* save({ iban: IBAN_DE, currency: "EUR" });
         const remove = (id: BankAccountId, replacement?: BankAccountId) =>
-          as(s.admin)(ws.removeBankAccount(id, replacement));
+          as(s.admin)(ws.removeBankAccount(s.admin, id, replacement));
         const failureResult = yield* failure(remove(a.id));
         // a is the CZK default and b exists: in use.
         expect(failureResult).toEqual(
@@ -387,7 +401,7 @@ describe("bank accounts", () => {
         expect(getResult).toBe(2);
         const getResult2 = yield* refs.get(s.workspaceId, BankAccountId.make(a.id));
         expect(getResult2).toBe(0);
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const { bankAccounts } = yield* workspaceView(result);
         expect(EffectArray.map(bankAccounts, (account) => [account.id, account.isDefault])).toEqual(
           [
@@ -416,7 +430,7 @@ describe("Numbering Series configuration", () => {
         const ws = yield* W;
         const s = yield* seed();
         const created: NumberingSeriesView = yield* as(s.admin)(
-          ws.configureSeries({
+          ws.configureSeries(s.admin, {
             kind: "invoice",
             name: "Export",
             pattern: "EX-YYYY-NNN",
@@ -429,7 +443,7 @@ describe("Numbering Series configuration", () => {
           nextNumber: "EX-2026-005",
         });
         const configureSeriesFailure = yield* ws
-          .configureSeries({
+          .configureSeries(s.admin, {
             id: created.id,
             kind: "invoice",
             name: "Export",
@@ -449,14 +463,14 @@ describe("Numbering Series configuration", () => {
           }),
         );
         const configureSeriesFailure2 = yield* ws
-          .configureSeries({ kind: "invoice", name: "Bad", pattern: "YYYY" })
+          .configureSeries(s.admin, { kind: "invoice", name: "Bad", pattern: "YYYY" })
           .pipe(as(s.admin), failure);
         expect(configureSeriesFailure2).toBeInstanceOf(Invalid);
         const configureSeriesFailure3 = yield* ws
-          .configureSeries({ kind: "invoice", name: "X", pattern: "NNN" })
+          .configureSeries(s.accountant, { kind: "invoice", name: "X", pattern: "NNN" })
           .pipe(as(s.accountant), failure);
         expect(configureSeriesFailure3).toEqual(Forbidden.make({ action: "workspace.settings" }));
-        expect((yield* as(s.accountant)(ws.listSeries)).length).toBe(4);
+        expect((yield* as(s.accountant)(ws.listSeries(s.accountant))).length).toBe(4);
         expect((yield* history(s.workspaceId)).at(-1)?.action).toBe("workspace.series.configure");
       }),
     ));
@@ -467,10 +481,12 @@ describe("Numbering Series configuration", () => {
         const ws = yield* W;
         const s = yield* seed();
         const input = { kind: "proforma" as const, name: "ZF2", pattern: "ZF2-NNNN" };
-        const first = yield* as(s.admin)(ws.configureSeries(input, key("s1")));
-        const configureSeriesResult = yield* as(s.admin)(ws.configureSeries(input, key("s1")));
+        const first = yield* as(s.admin)(ws.configureSeries(s.admin, input, key("s1")));
+        const configureSeriesResult = yield* as(s.admin)(
+          ws.configureSeries(s.admin, input, key("s1")),
+        );
         expect(configureSeriesResult).toEqual(first);
-        const series = yield* as(s.admin)(ws.listSeries);
+        const series = yield* as(s.admin)(ws.listSeries(s.admin));
         expect(EffectArray.filter(series, (x) => x.kind === "proforma").length).toBe(2);
       }),
     ));
@@ -485,21 +501,23 @@ describe("branding images (W7) and preview", () => {
         const s = yield* seed();
         const bytes = png(1000);
         const ref = yield* as(s.admin)(
-          ws.setBrandingImage("logo", { contentType: "image/png", bytes: chunks(bytes) }),
+          ws.setBrandingImage(s.admin, "logo", { contentType: "image/png", bytes: chunks(bytes) }),
         );
         expect(ref).toMatchObject({ contentType: "image/png", bytes: 1000 });
         const keys: Array<string> = [...(yield* Ref.get(blobs.blobs)).keys()];
         expect(keys).toEqual([`branding/${s.workspaceId}/logo/${ref.sha256}`]);
-        const result = yield* as(s.member)(ws.current);
+        const result = yield* as(s.member)(ws.current(s.member));
         const current = yield* workspaceView(result);
         expect(current.branding.logo).toEqual(ref);
         expect(current.revision).toBe(2);
-        const download = yield* as(s.accountant)(ws.brandingImage("logo"));
+        const download = yield* as(s.accountant)(ws.brandingImage(s.accountant, "logo"));
         const got = yield* Stream.runCollect(download.bytes);
         expect(EffectArray.reduce(got, 0, (n, c) => n + c.byteLength)).toBe(1000);
         expect(download).toMatchObject({ filename: "logo.png", contentType: "image/png" });
-        yield* as(s.admin)(ws.removeBrandingImage("logo"));
-        const brandingImageFailure = yield* ws.brandingImage("logo").pipe(as(s.admin), failure);
+        yield* as(s.admin)(ws.removeBrandingImage(s.admin, "logo"));
+        const brandingImageFailure = yield* ws
+          .brandingImage(s.admin, "logo")
+          .pipe(as(s.admin), failure);
         expect(brandingImageFailure).toEqual(
           NotFound.make({ entity: "BrandingImage", id: "logo" }),
         );
@@ -515,7 +533,7 @@ describe("branding images (W7) and preview", () => {
         const blobs = yield* MemoryBlobStorage;
         const s = yield* seed();
         const set = (contentType: string, bytes: Uint8Array) =>
-          as(s.admin)(ws.setBrandingImage("stamp", { contentType, bytes: chunks(bytes) }));
+          as(s.admin)(ws.setBrandingImage(s.admin, "stamp", { contentType, bytes: chunks(bytes) }));
         const failureResult = yield* failure(set("image/gif", png()));
         expect(failureResult).toEqual(
           Invalid.make({
@@ -534,7 +552,7 @@ describe("branding images (W7) and preview", () => {
         const failureResult4 = yield* failure(set("image/png", png()));
         expect(failureResult4).toEqual(Unavailable.make({ dependency: "blob_storage" }));
         const removeBrandingImageFailure = yield* ws
-          .removeBrandingImage("stamp")
+          .removeBrandingImage(s.member, "stamp")
           .pipe(as(s.member), failure);
         expect(removeBrandingImageFailure).toEqual(
           Forbidden.make({ action: "workspace.settings" }),
@@ -549,7 +567,7 @@ describe("branding images (W7) and preview", () => {
         const s = yield* seed();
         const before = (yield* history(s.workspaceId)).length;
         const file = yield* as(s.admin)(
-          ws.previewBranding({
+          ws.previewBranding(s.admin, {
             branding: { accentColor: "#ABCDEF" },
             kind: "invoice",
             language: "en",
@@ -560,11 +578,11 @@ describe("branding images (W7) and preview", () => {
         );
         expect(body.branding.accentColor).toBe("#ABCDEF");
         expect(body.kind).toBe("invoice");
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         expect(result.branding.accentColor).not.toBe("#ABCDEF");
         expect((yield* history(s.workspaceId)).length).toBe(before);
         const previewBrandingFailure = yield* ws
-          .previewBranding({
+          .previewBranding(s.admin, {
             branding: { accentColor: "nope" },
             kind: "invoice",
             language: "cs",
@@ -588,24 +606,26 @@ describe("scope-limited API key callers (R1)", () => {
         const read = scoped(["workspace:read"])(s.admin);
         const write = scoped(["workspace:write"])(s.admin);
         const docs = scoped(["documents:write"])(s.admin);
-        const result = yield* as(read)(ws.current);
+        const result = yield* as(read)(ws.current(read));
         const current = yield* workspaceView(result);
         expect(current.id).toBe(s.workspaceId);
-        const updateSettingsFailure = yield* ws.updateSettings({}, 1).pipe(as(read), failure);
+        const updateSettingsFailure = yield* ws.updateSettings(read, {}, 1).pipe(as(read), failure);
         expect(updateSettingsFailure).toEqual(Forbidden.make({ action: "workspace.settings" }));
-        const failureResult = yield* ws.current.pipe(as(docs), failure);
+        const failureResult = yield* ws.current(docs).pipe(as(docs), failure);
         expect(failureResult).toEqual(Forbidden.make({ action: "workspace.read" }));
-        const failureResult2 = yield* ws.listSeries.pipe(as(docs), failure);
+        const failureResult2 = yield* ws.listSeries(docs).pipe(as(docs), failure);
         expect(failureResult2).toEqual(Forbidden.make({ action: "workspace.read" }));
-        const updateSettingsResult = yield* as(write)(ws.updateSettings({ name: "Acme 2" }, 1));
+        const updateSettingsResult = yield* as(write)(
+          ws.updateSettings(write, { name: "Acme 2" }, 1),
+        );
         const updated = yield* workspaceView(updateSettingsResult);
         expect(updated.name).toBe("Acme 2");
         const saveBankAccountFailure = yield* ws
-          .saveBankAccount(BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" }))
+          .saveBankAccount(read, BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" }))
           .pipe(as(read), failure);
         expect(saveBankAccountFailure).toEqual(Forbidden.make({ action: "workspace.settings" }));
         const closeFailure = yield* ws
-          .close("Acme 2")
+          .close(scoped(["workspace:read"])(s.owner), "Acme 2")
           .pipe(as(scoped(["workspace:read"])(s.owner)), failure);
         // An owner's token without workspace:write cannot close.
         expect(closeFailure).toEqual(Forbidden.make({ action: "workspace.close" }));
@@ -626,28 +646,30 @@ describe("close (W5)", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        const closeFailure = yield* ws.close("Acme s.r.o.").pipe(as(s.admin), failure);
+        const closeFailure = yield* ws.close(s.admin, "Acme s.r.o.").pipe(as(s.admin), failure);
         expect(closeFailure).toEqual(Forbidden.make({ action: "workspace.close" }));
-        const closeFailure2 = yield* ws.close("Acme").pipe(as(s.owner), failure);
+        const closeFailure2 = yield* ws.close(s.owner, "Acme").pipe(as(s.owner), failure);
         expect(closeFailure2).toEqual(
           Invalid.make({ issues: [{ path: ["confirmName"], code: "request.malformed" }] }),
         );
-        yield* as(s.owner)(ws.close("Acme s.r.o."));
-        const result = yield* as(s.member)(ws.current);
+        yield* as(s.owner)(ws.close(s.owner, "Acme s.r.o."));
+        const result = yield* as(s.member)(ws.current(s.member));
         const current = yield* workspaceView(result);
         expect(current.closed).toBe(true);
         const updateSettingsFailure = yield* ws
-          .updateSettings({ name: "X" }, current.revision)
+          .updateSettings(s.admin, { name: "X" }, current.revision)
           .pipe(as(s.admin), failure);
         expect(updateSettingsFailure).toEqual(Forbidden.make({ action: "workspace.settings" }));
         const inviteFailure = yield* ws
-          .invite("new@example.cz", "member")
+          .invite(s.admin, "new@example.cz", "member")
           .pipe(as(s.admin), failure);
         expect(inviteFailure).toEqual(Forbidden.make({ action: "member.invite" }));
-        const failureResult = yield* ws.leave.pipe(as(s.member), failure);
+        const failureResult = yield* ws.leave(s.member).pipe(as(s.member), failure);
         expect(failureResult).toEqual(Forbidden.make({ action: "member.leave" }));
-        expect((yield* as(s.member)(ws.members)).length).toBe(4);
-        expect((yield* as(accountOf(s.owner.userId))(ws.listMine))[0]?.closed).toBe(true);
+        expect((yield* as(s.member)(ws.members(s.member))).length).toBe(4);
+        expect(
+          (yield* as(accountOf(s.owner.userId))(ws.listMine(accountOf(s.owner.userId))))[0]?.closed,
+        ).toBe(true);
       }),
     ));
 });
@@ -660,33 +682,35 @@ describe("cross-workspace access is NotFound (R2)", () => {
         const a = yield* seed("Alpha");
         const b = yield* seed("Beta");
         const saveBankAccountResult = yield* as(b.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" })),
+          ws.saveBankAccount(b.admin, BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" })),
         );
         const account = yield* bankAccountView(saveBankAccountResult);
         const removeBankAccountFailure = yield* ws
-          .removeBankAccount(account.id)
+          .removeBankAccount(a.admin, account.id)
           .pipe(as(a.admin), failure);
         expect(removeBankAccountFailure).toEqual(
           NotFound.make({ entity: "BankAccount", id: account.id }),
         );
-        const series = yield* as(b.admin)(ws.listSeries);
+        const series = yield* as(b.admin)(ws.listSeries(b.admin));
         const target = series[0];
         if (target === undefined) throw new Error("no series");
         const configureSeriesFailure = yield* ws
-          .configureSeries({ id: target.id, kind: target.kind, name: "x", pattern: "NNN" })
+          .configureSeries(a.admin, { id: target.id, kind: target.kind, name: "x", pattern: "NNN" })
           .pipe(as(a.admin), failure);
         expect(configureSeriesFailure).toEqual(
           NotFound.make({ entity: "NumberingSeries", id: target.id }),
         );
-        const invitation = yield* as(b.admin)(ws.invite("x@example.cz", "member"));
+        const invitation = yield* as(b.admin)(ws.invite(b.admin, "x@example.cz", "member"));
         const revokeInvitationFailure = yield* ws
-          .revokeInvitation(invitation.id)
+          .revokeInvitation(a.admin, invitation.id)
           .pipe(as(a.admin), failure);
         expect(revokeInvitationFailure).toEqual(
           NotFound.make({ entity: "Invitation", id: invitation.id }),
         );
         yield* join(b.owner)(OUTSIDER, "member");
-        const setRoleFailure = yield* ws.setRole(OUTSIDER, null).pipe(as(a.owner), failure);
+        const setRoleFailure = yield* ws
+          .setRole(a.owner, OUTSIDER, null)
+          .pipe(as(a.owner), failure);
         expect(setRoleFailure).toEqual(NotFound.make({ entity: "Member", id: OUTSIDER }));
         const snapshots = yield* WorkspaceSnapshots;
         const bankAccountFailure = yield* failure(

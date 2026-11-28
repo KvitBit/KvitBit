@@ -1,3 +1,4 @@
+import { TestCaller } from "../../../helpers/callerContext";
 /** reconcileStaleDeliveries: the delivery half of OutboxReconcile (core-ports J1a). */
 
 import { describe, expect, test } from "bun:test";
@@ -26,8 +27,9 @@ const worker = system();
 const THRESHOLD = 120_000;
 
 const queued = Effect.gen(function* () {
+  const testCaller = yield* TestCaller;
   const id = yield* issueInvoice();
-  return (yield* (yield* Documents).send(id)).deliveryId;
+  return (yield* (yield* Documents).send(testCaller, id)).deliveryId;
 });
 const delivery = (id: DeliveryId, workspaceId: WorkspaceId = WORKSPACE_A) =>
   Effect.flatMap(DeliveriesRepo, (r) => r.get(workspaceId, id));
@@ -52,22 +54,23 @@ describe("reconcileStaleDeliveries (J1a)", () => {
           member("owner", { workspaceId: WORKSPACE_B }),
           Effect.gen(function* () {
             const d = yield* Documents;
-            const doc = yield* d.issue({
+            const doc = yield* d.issue(member("owner", { workspaceId: WORKSPACE_B }), {
               input: invoiceInput({
                 contact: B_BUYER,
                 lines: [{ description: "Služba", unitPrice: dec("100") }],
               }),
             });
-            return (yield* d.send(doc.id)).deliveryId;
+            return (yield* d.send(member("owner", { workspaceId: WORKSPACE_B }), doc.id))
+              .deliveryId;
           }),
         );
         yield* TestClock.adjust("30 seconds");
         // t0+60s: a job that died after claim (H3), and one that finished.
         const claimed = yield* queued;
-        const result = yield* as(worker, claim(WORKSPACE_A, claimed));
+        const result = yield* as(worker, claim(worker, WORKSPACE_A, claimed));
         expect(result).toBe("sending");
         const done = yield* queued;
-        const result2 = yield* as(worker, deliver(WORKSPACE_A, done));
+        const result2 = yield* as(worker, deliver(worker, WORKSPACE_A, done));
         expect(result2).toBe("sent");
         yield* clearStarted;
 
@@ -107,7 +110,7 @@ describe("reconcileStaleDeliveries (J1a)", () => {
     const exit = await run(
       Effect.gen(function* () {
         const id = yield* queued;
-        const result = yield* as(worker, claim(WORKSPACE_A, id));
+        const result = yield* as(worker, claim(worker, WORKSPACE_A, id));
         expect(result).toBe("sending");
         // The job's process dies here: claimed, provider never called.
         yield* TestClock.adjust("3 minutes");
@@ -116,7 +119,7 @@ describe("reconcileStaleDeliveries (J1a)", () => {
         expect(EffectArray.map(reconciled, (r) => r.deliveryId)).toEqual([id]);
         const started_1 = yield* started;
         expect(started_1).toEqual([{ workspaceId: WORKSPACE_A, deliveryId: id }]);
-        const result2 = yield* as(worker, deliver(WORKSPACE_A, id));
+        const result2 = yield* as(worker, deliver(worker, WORKSPACE_A, id));
         // The restarted DocumentDelivery job runs deliver.
         expect(result2).toBe("sent");
         const sentKeys_1 = yield* sentKeys;
@@ -135,14 +138,15 @@ describe("reconcileStaleDeliveries (J1a)", () => {
   test("a lost start for a document cancelled since is skipped by the restarted claim (J3)", async () => {
     const exit = await run(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
-        const proforma = yield* d.issue({ input: invoiceInput({ kind: "proforma" }) });
-        const { deliveryId } = yield* d.send(proforma.id);
-        yield* d.cancel(proforma.id, { reason: "chyba" });
+        const proforma = yield* d.issue(testCaller, { input: invoiceInput({ kind: "proforma" }) });
+        const { deliveryId } = yield* d.send(testCaller, proforma.id);
+        yield* d.cancel(testCaller, proforma.id, { reason: "chyba" });
         yield* TestClock.adjust("3 minutes");
         const reconciled = yield* reconcile;
         expect(EffectArray.map(reconciled, (r) => r.deliveryId)).toEqual([deliveryId]);
-        const result = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        const result = yield* as(worker, deliver(worker, WORKSPACE_A, deliveryId));
         expect(result).toBe("skipped");
         const attempts_1 = yield* attempts;
         expect(attempts_1).toBe(0);
@@ -156,17 +160,18 @@ describe("reconcileStaleDeliveries (J1a)", () => {
   test("a claimed delivery whose document was cancelled while its job was down is skipped (J3)", async () => {
     const exit = await run(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
-        const proforma = yield* d.issue({ input: invoiceInput({ kind: "proforma" }) });
-        const { deliveryId } = yield* d.send(proforma.id);
-        const result = yield* as(worker, claim(WORKSPACE_A, deliveryId));
+        const proforma = yield* d.issue(testCaller, { input: invoiceInput({ kind: "proforma" }) });
+        const { deliveryId } = yield* d.send(testCaller, proforma.id);
+        const result = yield* as(worker, claim(worker, WORKSPACE_A, deliveryId));
         expect(result).toBe("sending");
         // The job dies before the provider call; the proforma is cancelled meanwhile.
-        yield* d.cancel(proforma.id, { reason: "chyba" });
+        yield* d.cancel(testCaller, proforma.id, { reason: "chyba" });
         yield* TestClock.adjust("3 minutes");
         const reconciled = yield* reconcile;
         expect(EffectArray.map(reconciled, (r) => r.status)).toEqual(["sending"]);
-        const result2 = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        const result2 = yield* as(worker, deliver(worker, WORKSPACE_A, deliveryId));
         expect(result2).toBe("skipped");
         const result3 = yield* delivery(deliveryId);
         expect(result3).toMatchObject({ failure: "document_cancelled" });
@@ -183,11 +188,11 @@ describe("reconcileStaleDeliveries (J1a)", () => {
     const exit = await run(
       Effect.gen(function* () {
         const id = yield* queued;
-        const result = yield* as(worker, claim(WORKSPACE_A, id));
+        const result = yield* as(worker, claim(worker, WORKSPACE_A, id));
         expect(result).toBe("sending");
         yield* TestClock.adjust("100 seconds");
         yield* CaptureEmailSender.failNext("not_accepted");
-        yield* Effect.flip(as(worker, deliver(WORKSPACE_A, id)));
+        yield* Effect.flip(as(worker, deliver(worker, WORKSPACE_A, id)));
         // Claimed 160 s ago, but its last attempt was recorded 60 s ago.
         yield* TestClock.adjust("60 seconds");
         const reconcile_1 = yield* reconcile;

@@ -228,8 +228,6 @@ export interface SystemCaller {
 
 export type Caller = MemberCaller | AccountCaller | ShareLinkVisitorCaller | InvitationHolderCaller | SystemCaller
 
-export class CurrentCaller extends Context.Service<CurrentCaller, Caller>()("@kvitbit/domain/caller/CurrentCaller") {}
-
 /** Edge constructors. There is deliberately no constructor for System. */
 export const Caller: {
   readonly account: (a: Omit<AccountCaller, "_tag">) => AccountCaller
@@ -241,7 +239,7 @@ export const Caller: {
 
 Sealing works on two levels. The type cannot be satisfied outside core because `SystemSeal` is a `unique symbol` that no entry point exports. At runtime, `Policy` accepts a System caller only if it is the instance created by core's internal `systemCaller(...)` factory (a module-private `WeakSet` membership check), so a decoded or spread object fails with `Forbidden`. A lint rule bans deep imports into `@kvitbit/core/src/internal`.
 
-Every module method requires `CurrentCaller` in its `R` channel. Domain methods take no `workspaceId` parameter: the Workspace comes from the caller, so a caller cannot pass the wrong one.
+Every module method takes `caller: Caller` as its first argument. Workspace-scoped operations derive the Workspace from that caller. `Workspaces.enter` takes a Workspace ID to resolve membership when the caller first enters a Workspace.
 
 Replay signal. apps/server sets the `Idempotent-Replayed` header from a request-scoped service that core writes to when rule C3 returns a stored result. It is optional: core reads it with `Effect.serviceOption`, so it never appears in a method's `R` channel, and callers that do not provide it (MCP, tests, workflows) lose nothing.
 
@@ -259,15 +257,15 @@ export class RequestOutcome extends Context.Service<RequestOutcome, {
 ### 2.2 How edges build a caller
 
 1. A verified Better Auth session cookie, bearer token, or MCP OAuth 2.1 token gives a `UserId` and, for tokens, the granted scopes. Nothing in a `Caller` comes from the request body (auth never enters core).
-2. The edge provides `Caller.account(...)`.
-3. For Workspace routes it calls `Workspaces.enter(workspaceId, { scopes, channel, client })`, which loads the membership and returns a `MemberCaller`, or `NotFound` when the user is not a Member (the Workspace's existence is not revealed). `client` is the verified API Key or MCP grant, never request input; sessions pass none.
-4. The edge provides that `MemberCaller` for the rest of the request.
-5. Public share routes skip auth and provide `Caller.shareLinkVisitor({ token, visitor, locale, signedInUser? })`. `signedInUser` is set only from a verified session cookie that happens to be present.
-6. The invitation peek route skips auth and provides `Caller.invitationHolder({ token, locale })`. Accepting an invitation needs an `AccountCaller`.
+2. The edge builds an Account caller with `Caller.account(...)`.
+3. For Workspace routes it calls `Workspaces.enter(account, workspaceId, { scopes, channel, client })`, which loads the membership and returns a `MemberCaller`, or `NotFound` when the user is not a Member (the Workspace's existence is not revealed). `client` is the verified API Key or MCP grant, never request input; sessions pass none.
+4. The edge passes that `MemberCaller` to each Workspace-scoped operation for the request.
+5. Public share routes skip auth and use `Caller.shareLinkVisitor({ token, visitor, locale, signedInUser? })`. `signedInUser` is set only from a verified session cookie that happens to be present.
+6. The invitation peek route skips auth and uses `Caller.invitationHolder({ token, locale })`. Accepting an invitation needs an `AccountCaller`.
 
 ### 2.3 Actions and the policy table
 
-`Action` is a closed literal union in `/contract`. `can(caller, action): boolean` is pure and exported, so ui-port hides controls with the same table the core enforces. Core enforces it inside every module method through the internal `Policy` service; callers never check permissions themselves.
+`Action` is a closed literal union in `/contract`. `can(caller, action): boolean` is pure and exported, so ui-port hides controls with the same table the core enforces. Core enforces it inside every module method through the internal policy functions; callers never check permissions themselves.
 
 | Action group | owner | admin | member | accountant | Account | ShareLinkVisitor | InvitationHolder | System |
 |---|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
@@ -409,94 +407,94 @@ Owns the Workspace, its slug, Issuing Entity, Tax Regime, bank accounts, Numberi
 export class Workspaces extends Context.Service<Workspaces, {
   // Account caller
   /** Onboarding. Prefills the Issuing Entity from CompanyRegistry when ico is given. Caller becomes owner. */
-  readonly create: (input: NewWorkspace, opts?: RequestOptions) =>
-    Effect.Effect<MemberCaller, Invalid | Unavailable | Forbidden, CurrentCaller>
-  readonly listMine: Effect.Effect<ReadonlyArray<WorkspaceSummary>, Forbidden, CurrentCaller>
+  readonly create: (caller: Caller, input: NewWorkspace, opts?: RequestOptions) =>
+    Effect.Effect<MemberCaller, Invalid | Unavailable | Forbidden>
+  readonly listMine: (caller: Caller) => Effect.Effect<ReadonlyArray<WorkspaceSummary>, Forbidden>
   /** The only way to obtain a MemberCaller. NotFound when the user is not a Member. */
-  readonly enter: (workspace: WorkspaceId, opts: {
+  readonly enter: (caller: Caller, workspace: WorkspaceId, opts: {
     readonly scopes: MemberCaller["scopes"]
     readonly channel: Channel
     readonly client?: ClientRef // verified API Key or MCP grant; copied into MemberCaller.client and audit
-  }) => Effect.Effect<MemberCaller, NotFound | Forbidden, CurrentCaller>
-  readonly acceptInvitation: (token: InvitationToken) =>
-    Effect.Effect<MemberCaller, NotFound | Conflict | Forbidden, CurrentCaller>
+  }) => Effect.Effect<MemberCaller, NotFound | Forbidden>
+  readonly acceptInvitation: (caller: Caller, token: InvitationToken) =>
+    Effect.Effect<MemberCaller, NotFound | Conflict | Forbidden>
 
   // Account caller (registry.lookup) or Member caller (contact.read)
   /** Read-only CompanyRegistry lookup: checksum first, 24 h cache, nothing saved. NotFound when ARES has no record. */
-  readonly lookupCompany: (ico: string) =>
-    Effect.Effect<RegistryResult, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>
+  readonly lookupCompany: (caller: Caller, ico: string) =>
+    Effect.Effect<RegistryResult, Invalid | NotFound | Unavailable | Forbidden>
 
   // InvitationHolder caller
   /** What the invitation page shows before sign-up. Unknown tokens are NotFound; others show their status. */
-  readonly peekInvitation: Effect.Effect<InvitationPeek, NotFound, CurrentCaller>
+  readonly peekInvitation: (caller: Caller) => Effect.Effect<InvitationPeek, NotFound>
 
   // Member caller
-  readonly current: Effect.Effect<WorkspaceView, Forbidden, CurrentCaller>
-  readonly updateIssuingEntity: (patch: IssuingEntityPatch, expectedRevision: number) =>
-    Effect.Effect<WorkspaceView, Invalid | Conflict | Forbidden, CurrentCaller>
+  readonly current: (caller: Caller) => Effect.Effect<WorkspaceView, Forbidden>
+  readonly updateIssuingEntity: (caller: Caller, patch: IssuingEntityPatch, expectedRevision: number) =>
+    Effect.Effect<WorkspaceView, Invalid | Conflict | Forbidden>
   /** Defaults, slug, reminder policy and branding (fields of WorkspaceSettingsPatch). */
-  readonly updateSettings: (patch: WorkspaceSettingsPatch, expectedRevision: number) =>
-    Effect.Effect<WorkspaceView, Invalid | Conflict | Forbidden, CurrentCaller>
-  readonly saveBankAccount: (input: BankAccountInput & { readonly id?: BankAccountId }, opts?: RequestOptions) =>
-    Effect.Effect<BankAccountView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
+  readonly updateSettings: (caller: Caller, patch: WorkspaceSettingsPatch, expectedRevision: number) =>
+    Effect.Effect<WorkspaceView, Invalid | Conflict | Forbidden>
+  readonly saveBankAccount: (caller: Caller, input: BankAccountInput & { readonly id?: BankAccountId }, opts?: RequestOptions) =>
+    Effect.Effect<BankAccountView, Invalid | NotFound | Conflict | Forbidden>
   /**
    * Archives the account. Issued documents keep their snapshot. When drafts, Templates or a
    * currency default use it, `replacement` (same currency) takes its place in the same transaction;
    * without one the call fails Conflict{illegal_transition, bank_account.in_use}.
    */
-  readonly removeBankAccount: (id: BankAccountId, replacement?: BankAccountId) =>
-    Effect.Effect<void, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly configureSeries: (input: {
+  readonly removeBankAccount: (caller: Caller, id: BankAccountId, replacement?: BankAccountId) =>
+    Effect.Effect<void, Invalid | NotFound | Conflict | Forbidden>
+  readonly configureSeries: (caller: Caller, input: {
     readonly id?: NumberingSeriesId
     readonly kind: DocumentKind
     readonly name: string
     readonly pattern: string          // tokens: YYYY YY MM N…; e.g. "YYYY-NNNN", "FV-YY-NNN"
     readonly nextNumber?: number      // only raises the counter for the current period
     readonly isDefault?: boolean
-  }, opts?: RequestOptions) => Effect.Effect<NumberingSeriesView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly listSeries: Effect.Effect<ReadonlyArray<NumberingSeriesView>, Forbidden, CurrentCaller>
+  }, opts?: RequestOptions) => Effect.Effect<NumberingSeriesView, Invalid | NotFound | Conflict | Forbidden>
+  readonly listSeries: (caller: Caller) => Effect.Effect<ReadonlyArray<NumberingSeriesView>, Forbidden>
 
-  readonly setBrandingImage: (image: BrandingImage, file: {
+  readonly setBrandingImage: (caller: Caller, image: BrandingImage, file: {
     readonly contentType: string                // image/png or image/jpeg, at most 2 MB
     readonly bytes: Stream.Stream<Uint8Array>
-  }) => Effect.Effect<ImageRef, Invalid | Unavailable | Forbidden, CurrentCaller>
-  readonly brandingImage: (image: BrandingImage) =>
-    Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>
-  readonly removeBrandingImage: (image: BrandingImage) =>
-    Effect.Effect<void, Forbidden, CurrentCaller>
+  }) => Effect.Effect<ImageRef, Invalid | Unavailable | Forbidden>
+  readonly brandingImage: (caller: Caller, image: BrandingImage) =>
+    Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden>
+  readonly removeBrandingImage: (caller: Caller, image: BrandingImage) =>
+    Effect.Effect<void, Forbidden>
   /**
    * Renders a fixed sample document of `kind` with the current branding merged with `branding`,
    * through PdfRenderer. Persists nothing, allocates no number, writes no audit entry.
    */
-  readonly previewBranding: (input: { readonly branding: BrandingPatch; readonly kind: DocumentKind; readonly language: Locale }) =>
-    Effect.Effect<FileDownload, Invalid | Unavailable | Forbidden, CurrentCaller>
+  readonly previewBranding: (caller: Caller, input: { readonly branding: BrandingPatch; readonly kind: DocumentKind; readonly language: Locale }) =>
+    Effect.Effect<FileDownload, Invalid | Unavailable | Forbidden>
 
-  readonly members: Effect.Effect<ReadonlyArray<MemberView>, Forbidden, CurrentCaller>
+  readonly members: (caller: Caller) => Effect.Effect<ReadonlyArray<MemberView>, Forbidden>
   /** Pending and recently expired invitations (invitation.read). */
-  readonly invitations: Effect.Effect<ReadonlyArray<InvitationView>, Forbidden, CurrentCaller>
-  readonly invite: (email: string, role: Exclude<Role, "owner">, opts?: RequestOptions) =>
-    Effect.Effect<InvitationView, Invalid | Conflict | Forbidden, CurrentCaller>
+  readonly invitations: (caller: Caller) => Effect.Effect<ReadonlyArray<InvitationView>, Forbidden>
+  readonly invite: (caller: Caller, email: string, role: Exclude<Role, "owner">, opts?: RequestOptions) =>
+    Effect.Effect<InvitationView, Invalid | Conflict | Forbidden>
   /** Sends the email again and extends expiry by 7 days. Pending invitations only. */
-  readonly resendInvitation: (id: InvitationId) =>
-    Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly revokeInvitation: (id: InvitationId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
-  readonly setRole: (member: UserId, role: Exclude<Role, "owner"> | null /* null removes */) =>
-    Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
+  readonly resendInvitation: (caller: Caller, id: InvitationId) =>
+    Effect.Effect<void, NotFound | Conflict | Forbidden>
+  readonly revokeInvitation: (caller: Caller, id: InvitationId) => Effect.Effect<void, NotFound | Forbidden>
+  readonly setRole: (caller: Caller, member: UserId, role: Exclude<Role, "owner"> | null /* null removes */) =>
+    Effect.Effect<void, NotFound | Conflict | Forbidden>
   /** The caller leaves the Workspace. The owner must transfer ownership first (rule R3). */
-  readonly leave: Effect.Effect<void, Conflict | Forbidden, CurrentCaller>
-  readonly transferOwnership: (to: UserId) => Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
+  readonly leave: (caller: Caller) => Effect.Effect<void, Conflict | Forbidden>
+  readonly transferOwnership: (caller: Caller, to: UserId) => Effect.Effect<void, NotFound | Conflict | Forbidden>
   /** Makes the Workspace read-only. Purging is an operator task because of statutory retention. */
-  readonly close: (confirmName: string) => Effect.Effect<void, Invalid | Forbidden, CurrentCaller>
+  readonly close: (caller: Caller, confirmName: string) => Effect.Effect<void, Invalid | Forbidden>
 
   /**
    * Audit hook for credentials apps/server owns. The edge calls it after it creates or revokes
    * an API Key or MCP grant; core checks the matching apiKey.* or grant.* action and writes the entry.
    */
-  readonly recordAccessEvent: (event: {
+  readonly recordAccessEvent: (caller: Caller, event: {
     readonly action: "apiKey.create" | "apiKey.revoke" | "grant.create" | "grant.revoke"
     readonly subject: { readonly entity: "ApiKey" | "McpGrant"; readonly id: string; readonly name: string }
     readonly onBehalfOf?: UserId // the grant's Member, when an owner or admin revokes someone else's grant
-  }) => Effect.Effect<void, Forbidden, CurrentCaller>
+  }) => Effect.Effect<void, Forbidden>
 }>()("@kvitbit/domain/modules/workspaces") {}
 
 export const BrandingImage = Schema.Literals(["logo", "stamp"])
@@ -590,14 +588,14 @@ Audit: every method except reads, dry runs (`previewBranding`, `lookupCompany`, 
 ```ts
 export class Contacts extends Context.Service<Contacts, {
   /** IČO in, saved Contact out: checksum, CompanyRegistry lookup, cache, upsert by IČO. */
-  readonly fromIco: (ico: string, opts?: { readonly role?: "customer" | "supplier" }) =>
-    Effect.Effect<ContactView, Invalid | Unavailable | Forbidden, CurrentCaller>
-  readonly save: (input: ContactInput & { readonly id?: ContactId; readonly expectedRevision?: number }, opts?: RequestOptions) =>
-    Effect.Effect<ContactView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly archive: (id: ContactId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
-  readonly get: (id: ContactId) => Effect.Effect<ContactView, NotFound | Forbidden, CurrentCaller>
-  readonly search: (q: { readonly text?: string; readonly role?: "customer" | "supplier"; readonly cursor?: string }) =>
-    Effect.Effect<Page<ContactView>, Forbidden, CurrentCaller>
+  readonly fromIco: (caller: Caller, ico: string, opts?: { readonly role?: "customer" | "supplier" }) =>
+    Effect.Effect<ContactView, Invalid | Unavailable | Forbidden>
+  readonly save: (caller: Caller, input: ContactInput & { readonly id?: ContactId; readonly expectedRevision?: number }, opts?: RequestOptions) =>
+    Effect.Effect<ContactView, Invalid | NotFound | Conflict | Forbidden>
+  readonly archive: (caller: Caller, id: ContactId) => Effect.Effect<void, NotFound | Forbidden>
+  readonly get: (caller: Caller, id: ContactId) => Effect.Effect<ContactView, NotFound | Forbidden>
+  readonly search: (caller: Caller, q: { readonly text?: string; readonly role?: "customer" | "supplier"; readonly cursor?: string }) =>
+    Effect.Effect<Page<ContactView>, Forbidden>
 }>()("@kvitbit/domain/modules/contacts") {}
 ```
 
@@ -630,11 +628,11 @@ Audit: `save` and `archive`.
 
 ```ts
 export class PriceList extends Context.Service<PriceList, {
-  readonly save: (input: PriceListItemInput & { readonly id?: PriceListItemId; readonly expectedRevision?: number }, opts?: RequestOptions) =>
-    Effect.Effect<PriceListItemView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly archive: (id: PriceListItemId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
-  readonly list: (q?: { readonly text?: string; readonly includeArchived?: boolean }) =>
-    Effect.Effect<ReadonlyArray<PriceListItemView>, Forbidden, CurrentCaller>
+  readonly save: (caller: Caller, input: PriceListItemInput & { readonly id?: PriceListItemId; readonly expectedRevision?: number }, opts?: RequestOptions) =>
+    Effect.Effect<PriceListItemView, Invalid | NotFound | Conflict | Forbidden>
+  readonly archive: (caller: Caller, id: PriceListItemId) => Effect.Effect<void, NotFound | Forbidden>
+  readonly list: (caller: Caller, q?: { readonly text?: string; readonly includeArchived?: boolean }) =>
+    Effect.Effect<ReadonlyArray<PriceListItemView>, Forbidden>
 }>()("@kvitbit/domain/modules/contacts/PriceList") {}
 ```
 
@@ -706,55 +704,56 @@ export interface DocumentView {
 
 export class Documents extends Context.Service<Documents, {
   /** Live totals for an editor. Same code path as issue; nothing is stored or numbered. */
-  readonly preview: (input: DocumentInput) =>
-    Effect.Effect<DocumentView, Invalid | Unavailable | Forbidden, CurrentCaller>
-  readonly createDraft: (input: DocumentInput, opts?: RequestOptions) =>
-    Effect.Effect<DocumentView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>
+  readonly preview: (caller: Caller, input: DocumentInput) =>
+    Effect.Effect<DocumentView, Invalid | Unavailable | Forbidden>
+  readonly createDraft: (caller: Caller, input: DocumentInput, opts?: RequestOptions) =>
+    Effect.Effect<DocumentView, Invalid | NotFound | Unavailable | Forbidden>
   /** Drafts only. Hard delete. */
-  readonly discardDraft: (id: DocumentId, expectedRevision: number) =>
-    Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
+  readonly discardDraft: (caller: Caller, id: DocumentId, expectedRevision: number) =>
+    Effect.Effect<void, NotFound | Conflict | Forbidden>
   /** From an existing draft or straight from input. Assigns the number. */
   readonly issue: (
+    caller: Caller,
     from: { readonly draft: DocumentId; readonly expectedRevision: number } | { readonly input: DocumentInput },
     opts?: RequestOptions & { readonly send?: SendOptions },
-  ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>
+  ) => Effect.Effect<DocumentView, CoreError>
   /** Drafts and unlocked issued documents. Issued edits are audited field by field. */
-  readonly edit: (id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
-    Effect.Effect<DocumentView, CoreError, CurrentCaller>
-  readonly lock: (id: DocumentId) => Effect.Effect<DocumentView, NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly unlock: (id: DocumentId, reason: string) => Effect.Effect<DocumentView, NotFound | Conflict | Forbidden, CurrentCaller>
+  readonly edit: (caller: Caller, id: DocumentId, patch: DocumentPatch, expectedRevision: number) =>
+    Effect.Effect<DocumentView, CoreError>
+  readonly lock: (caller: Caller, id: DocumentId) => Effect.Effect<DocumentView, NotFound | Conflict | Forbidden>
+  readonly unlock: (caller: Caller, id: DocumentId, reason: string) => Effect.Effect<DocumentView, NotFound | Conflict | Forbidden>
   /** Void an issued document without deleting it (rule D6). */
-  readonly cancel: (id: DocumentId, input: { readonly reason: string; readonly on?: IsoDate }, opts?: RequestOptions) =>
-    Effect.Effect<{ readonly document: DocumentView; readonly creditNote: DocumentView | null }, CoreError, CurrentCaller>
+  readonly cancel: (caller: Caller, id: DocumentId, input: { readonly reason: string; readonly on?: IsoDate }, opts?: RequestOptions) =>
+    Effect.Effect<{ readonly document: DocumentView; readonly creditNote: DocumentView | null }, CoreError>
   /** Credit Note against an issued Invoice or Payment Tax Document. */
-  readonly correct: (id: DocumentId, input: CorrectionInput, opts?: RequestOptions) =>
-    Effect.Effect<DocumentView, CoreError, CurrentCaller>
+  readonly correct: (caller: Caller, id: DocumentId, input: CorrectionInput, opts?: RequestOptions) =>
+    Effect.Effect<DocumentView, CoreError>
   /** The Final Invoice for a paid Proforma, deducting the advance (§37a). Explicit; once per Proforma. */
-  readonly issueFinalInvoice: (proforma: DocumentId, input?: { readonly patch?: DocumentPatch }, opts?: RequestOptions) =>
-    Effect.Effect<DocumentView, CoreError, CurrentCaller>
+  readonly issueFinalInvoice: (caller: Caller, proforma: DocumentId, input?: { readonly patch?: DocumentPatch }, opts?: RequestOptions) =>
+    Effect.Effect<DocumentView, CoreError>
   /**
    * Queue email delivery. Never fails on provider outage. purpose "document" arms payment reminders
    * unless disabled; purpose "reminder" sends one manual reminder and never re-arms the schedule (rule D14).
    */
-  readonly send: (id: DocumentId, input?: SendOptions, opts?: RequestOptions) =>
-    Effect.Effect<{ readonly deliveryId: DeliveryId; readonly status: "queued" }, NotFound | Conflict | Invalid | Forbidden, CurrentCaller>
+  readonly send: (caller: Caller, id: DocumentId, input?: SendOptions, opts?: RequestOptions) =>
+    Effect.Effect<{ readonly deliveryId: DeliveryId; readonly status: "queued" }, NotFound | Conflict | Invalid | Forbidden>
 
   // Dry runs for MCP two-step confirmation (rule D15). Same code paths as the real call; nothing is stored.
   /** Recipients, language, subject and attachments that send(id, input) would use now. Checks document.send. */
-  readonly previewSend: (id: DocumentId, input?: SendOptions) =>
-    Effect.Effect<SendPreview, NotFound | Conflict | Invalid | Forbidden, CurrentCaller>
+  readonly previewSend: (caller: Caller, id: DocumentId, input?: SendOptions) =>
+    Effect.Effect<SendPreview, NotFound | Conflict | Invalid | Forbidden>
   /** The Final Invoice issueFinalInvoice would produce, with deductions, unnumbered. Checks document.finalInvoice. */
-  readonly previewFinalInvoice: (proforma: DocumentId, input?: { readonly patch?: DocumentPatch }) =>
-    Effect.Effect<DocumentView, CoreError, CurrentCaller>
+  readonly previewFinalInvoice: (caller: Caller, proforma: DocumentId, input?: { readonly patch?: DocumentPatch }) =>
+    Effect.Effect<DocumentView, CoreError>
   /** The Credit Note correct(id, input) would produce, unnumbered. Checks document.correct. */
-  readonly previewCorrection: (id: DocumentId, input: CorrectionInput) =>
-    Effect.Effect<DocumentView, CoreError, CurrentCaller>
+  readonly previewCorrection: (caller: Caller, id: DocumentId, input: CorrectionInput) =>
+    Effect.Effect<DocumentView, CoreError>
 
-  readonly pdf: (id: DocumentId, opts?: { readonly template?: PdfTemplate; readonly language?: Locale }) =>
-    Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>
-  readonly get: (id: DocumentId) => Effect.Effect<DocumentView, NotFound | Forbidden, CurrentCaller>
-  readonly list: (q: DocumentQuery) => Effect.Effect<Page<DocumentSummary>, Invalid | Forbidden, CurrentCaller>
-  readonly history: (id: DocumentId) => Effect.Effect<ReadonlyArray<AuditEntry>, NotFound | Forbidden, CurrentCaller>
+  readonly pdf: (caller: Caller, id: DocumentId, opts?: { readonly template?: PdfTemplate; readonly language?: Locale }) =>
+    Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden>
+  readonly get: (caller: Caller, id: DocumentId) => Effect.Effect<DocumentView, NotFound | Forbidden>
+  readonly list: (caller: Caller, q: DocumentQuery) => Effect.Effect<Page<DocumentSummary>, Invalid | Forbidden>
+  readonly history: (caller: Caller, id: DocumentId) => Effect.Effect<ReadonlyArray<AuditEntry>, NotFound | Forbidden>
 }>()("@kvitbit/domain/modules/documents") {}
 
 export interface CorrectionInput {
@@ -833,7 +832,7 @@ Audit: everything on issued documents (issue, edit with diff, number override, l
 ```ts
 export class Payments extends Context.Service<Payments, {
   /** Default amount = outstanding; default date = today. Applies statutory follow-ups. */
-  readonly record: (input: {
+  readonly record: (caller: Caller, input: {
     readonly target: { readonly document: DocumentId } | { readonly expense: ExpenseId }
     readonly amount?: Money
     readonly paidOn?: IsoDate
@@ -843,11 +842,11 @@ export class Payments extends Context.Service<Payments, {
     readonly payment: PaymentView
     readonly settlement: "partially_paid" | "paid" | "overpaid"
     readonly issued: ReadonlyArray<DocumentView> // the auto-issued Payment Tax Document, if any
-  }, CoreError, CurrentCaller>
-  readonly remove: (id: PaymentId, reason: string) =>
-    Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly listFor: (target: { readonly document: DocumentId } | { readonly expense: ExpenseId }) =>
-    Effect.Effect<ReadonlyArray<PaymentView>, NotFound | Forbidden, CurrentCaller>
+  }, CoreError>
+  readonly remove: (caller: Caller, id: PaymentId, reason: string) =>
+    Effect.Effect<void, NotFound | Conflict | Forbidden>
+  readonly listFor: (caller: Caller, target: { readonly document: DocumentId } | { readonly expense: ExpenseId }) =>
+    Effect.Effect<ReadonlyArray<PaymentView>, NotFound | Forbidden>
 }>()("@kvitbit/domain/modules/payments") {}
 ```
 
@@ -871,18 +870,18 @@ Serves both sides of a Public Share Link: Members manage it, visitors open it.
 export class PublicShareLinks extends Context.Service<PublicShareLinks, {
   // Member caller
   /** Idempotent: returns the active link if one exists. Issued documents only. */
-  readonly create: (id: DocumentId) => Effect.Effect<{ readonly url: string }, NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly revoke: (id: DocumentId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
+  readonly create: (caller: Caller, id: DocumentId) => Effect.Effect<{ readonly url: string }, NotFound | Conflict | Forbidden>
+  readonly revoke: (caller: Caller, id: DocumentId) => Effect.Effect<void, NotFound | Forbidden>
   /** View and download events for the document's links, newest first (share.read). */
-  readonly views: (id: DocumentId, page?: PageRequest) =>
-    Effect.Effect<Page<ShareViewEvent>, Invalid | NotFound | Forbidden, CurrentCaller>
+  readonly views: (caller: Caller, id: DocumentId, page?: PageRequest) =>
+    Effect.Effect<Page<ShareViewEvent>, Invalid | NotFound | Forbidden>
   // ShareLinkVisitor caller (token comes from the caller)
   /** Records a view (deduplicated per visitor per hour) and returns the recipient view. */
-  readonly open: Effect.Effect<SharedDocumentView, NotFound, CurrentCaller>
+  readonly open: (caller: Caller) => Effect.Effect<SharedDocumentView, NotFound>
   /** Records a download event. */
-  readonly pdf: (opts?: { readonly language?: Locale }) => Effect.Effect<FileDownload, NotFound | Unavailable, CurrentCaller>
+  readonly pdf: (caller: Caller, opts?: { readonly language?: Locale }) => Effect.Effect<FileDownload, NotFound | Unavailable>
   /** The issuing Workspace's logo for the page header; NotFound when it has none. */
-  readonly logo: Effect.Effect<FileDownload, NotFound | Unavailable, CurrentCaller>
+  readonly logo: (caller: Caller) => Effect.Effect<FileDownload, NotFound | Unavailable>
 }>()("@kvitbit/domain/modules/payments/PublicShareLinks") {}
 
 export const ShareViewEvent = Schema.Struct({
@@ -902,20 +901,20 @@ Audit: `create` and `revoke`.
 ```ts
 export class Expenses extends Context.Service<Expenses, {
   /** Supplier is a Contact or an IČO (resolved through Contacts.fromIco). */
-  readonly record: (input: ExpenseInput, opts?: RequestOptions) =>
-    Effect.Effect<ExpenseView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>
-  readonly edit: (id: ExpenseId, patch: ExpensePatch, expectedRevision: number) =>
-    Effect.Effect<ExpenseView, NotFound | Invalid | Conflict | Unavailable | Forbidden, CurrentCaller>
-  readonly remove: (id: ExpenseId, expectedRevision: number) =>
-    Effect.Effect<void, NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly attach: (id: ExpenseId, file: { readonly name: string; readonly contentType: string; readonly bytes: Stream.Stream<Uint8Array> }) =>
-    Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden, CurrentCaller>
-  readonly detach: (id: ExpenseId, attachment: AttachmentId) =>
-    Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
-  readonly attachment: (id: ExpenseId, attachment: AttachmentId) =>
-    Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>
-  readonly get: (id: ExpenseId) => Effect.Effect<ExpenseView, NotFound | Forbidden, CurrentCaller>
-  readonly list: (q: ExpenseQuery) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden, CurrentCaller>
+  readonly record: (caller: Caller, input: ExpenseInput, opts?: RequestOptions) =>
+    Effect.Effect<ExpenseView, Invalid | NotFound | Unavailable | Forbidden>
+  readonly edit: (caller: Caller, id: ExpenseId, patch: ExpensePatch, expectedRevision: number) =>
+    Effect.Effect<ExpenseView, NotFound | Invalid | Conflict | Unavailable | Forbidden>
+  readonly remove: (caller: Caller, id: ExpenseId, expectedRevision: number) =>
+    Effect.Effect<void, NotFound | Conflict | Forbidden>
+  readonly attach: (caller: Caller, id: ExpenseId, file: { readonly name: string; readonly contentType: string; readonly bytes: Stream.Stream<Uint8Array> }) =>
+    Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden>
+  readonly detach: (caller: Caller, id: ExpenseId, attachment: AttachmentId) =>
+    Effect.Effect<void, NotFound | Forbidden>
+  readonly attachment: (caller: Caller, id: ExpenseId, attachment: AttachmentId) =>
+    Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden>
+  readonly get: (caller: Caller, id: ExpenseId) => Effect.Effect<ExpenseView, NotFound | Forbidden>
+  readonly list: (caller: Caller, q: ExpenseQuery) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden>
 }>()("@kvitbit/domain/modules/expenses") {}
 
 // Fields this spec fixes; the rest of ExpenseInput (supplier, dates, VAT breakdown, category, tags) is unchanged.
@@ -934,27 +933,27 @@ Owns Invoice Templates and their Recurring Schedules.
 
 ```ts
 export class Templates extends Context.Service<Templates, {
-  readonly save: (input: TemplateInput & { readonly id?: TemplateId; readonly expectedRevision?: number }, opts?: RequestOptions) =>
-    Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
-  readonly archive: (id: TemplateId) => Effect.Effect<void, NotFound | Forbidden, CurrentCaller>
+  readonly save: (caller: Caller, input: TemplateInput & { readonly id?: TemplateId; readonly expectedRevision?: number }, opts?: RequestOptions) =>
+    Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Forbidden>
+  readonly archive: (caller: Caller, id: TemplateId) => Effect.Effect<void, NotFound | Forbidden>
   /** Attach, change, or detach (null) the Recurring Schedule. Durable once this returns. */
-  readonly schedule: (template: TemplateId, schedule: null | {
+  readonly schedule: (caller: Caller, template: TemplateId, schedule: null | {
     readonly every: { readonly weeks: number } | { readonly months: number } | { readonly years: number }
     readonly startOn: IsoDate
     readonly endOn?: IsoDate
     readonly issueAs: "invoice" | "proforma"
     readonly autoSend: boolean
-  }, expectedRevision: number) => Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Forbidden, CurrentCaller>
+  }, expectedRevision: number) => Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Forbidden>
   /** Clears a failure pause; the next sweep issues due occurrences. */
-  readonly resume: (template: TemplateId) => Effect.Effect<TemplateView, NotFound | Conflict | Forbidden, CurrentCaller>
+  readonly resume: (caller: Caller, template: TemplateId) => Effect.Effect<TemplateView, NotFound | Conflict | Forbidden>
   /** Manual use: delegates to Documents.createDraft or Documents.issue with template values as defaults. */
-  readonly use: (template: TemplateId, input?: { readonly as?: "draft" | "issued"; readonly patch?: DocumentPatch }, opts?: RequestOptions) =>
-    Effect.Effect<DocumentView, CoreError, CurrentCaller>
-  readonly get: (id: TemplateId) => Effect.Effect<TemplateView, NotFound | Forbidden, CurrentCaller>
-  readonly list: Effect.Effect<ReadonlyArray<TemplateView>, Forbidden, CurrentCaller>
+  readonly use: (caller: Caller, template: TemplateId, input?: { readonly as?: "draft" | "issued"; readonly patch?: DocumentPatch }, opts?: RequestOptions) =>
+    Effect.Effect<DocumentView, CoreError>
+  readonly get: (caller: Caller, id: TemplateId) => Effect.Effect<TemplateView, NotFound | Forbidden>
+  readonly list: (caller: Caller) => Effect.Effect<ReadonlyArray<TemplateView>, Forbidden>
   /** Run history of the template's Recurring Schedule, newest occurrence first. */
-  readonly runs: (template: TemplateId, page?: PageRequest) =>
-    Effect.Effect<Page<RecurringRunView>, Invalid | NotFound | Forbidden, CurrentCaller>
+  readonly runs: (caller: Caller, template: TemplateId, page?: PageRequest) =>
+    Effect.Effect<Page<RecurringRunView>, Invalid | NotFound | Forbidden>
 }>()("@kvitbit/domain/modules/expenses/Templates") {}
 
 // TemplateInput = DocumentInput without issuedOn/taxableSupplyOn plus name and a relative due (inDays).
@@ -977,23 +976,23 @@ Audit: `save`, `archive`, `schedule`, `resume`.
 
 ```ts
 export class Reports extends Context.Service<Reports, {
-  readonly run: (q: ReportQuery) => Effect.Effect<ReportView, Invalid | Forbidden, CurrentCaller>
-  readonly export: (q: ReportQuery, format: "csv" | "pdf") =>
-    Effect.Effect<FileDownload, Invalid | Forbidden, CurrentCaller>
+  readonly run: (caller: Caller, q: ReportQuery) => Effect.Effect<ReportView, Invalid | Forbidden>
+  readonly export: (caller: Caller, q: ReportQuery, format: "csv" | "pdf") =>
+    Effect.Effect<FileDownload, Invalid | Forbidden>
   /** Dashboard tiles and a 12-month cashflow series ending at period.to (report.run). */
-  readonly dashboard: (period: { readonly from: IsoDate; readonly to: IsoDate }) =>
-    Effect.Effect<DashboardView, Invalid | Forbidden, CurrentCaller>
+  readonly dashboard: (caller: Caller, period: { readonly from: IsoDate; readonly to: IsoDate }) =>
+    Effect.Effect<DashboardView, Invalid | Forbidden>
   /** CNB fixing for a currency on a date, through the fx_fixings cache (report.run). */
-  readonly fxRate: (q: { readonly currency: CurrencyCode; readonly on: IsoDate }) =>
-    Effect.Effect<FxRateView, Invalid | Unavailable | Forbidden, CurrentCaller>
+  readonly fxRate: (caller: Caller, q: { readonly currency: CurrencyCode; readonly on: IsoDate }) =>
+    Effect.Effect<FxRateView, Invalid | Unavailable | Forbidden>
 
   // Full data export (report.export): ZIP of document PDFs, Expense attachments and CSVs of every table.
   /** Starts the DataExport workflow. Returns the running job when one is already running. */
-  readonly startExport: (opts?: RequestOptions) => Effect.Effect<ExportJobView, Forbidden, CurrentCaller>
-  readonly getExport: (id: ExportId) => Effect.Effect<ExportJobView, NotFound | Forbidden, CurrentCaller>
+  readonly startExport: (caller: Caller, opts?: RequestOptions) => Effect.Effect<ExportJobView, Forbidden>
+  readonly getExport: (caller: Caller, id: ExportId) => Effect.Effect<ExportJobView, NotFound | Forbidden>
   /** The ZIP. Conflict{illegal_transition, export.not_ready} while running or failed; NotFound after expiry. */
-  readonly exportFile: (id: ExportId) =>
-    Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>
+  readonly exportFile: (caller: Caller, id: ExportId) =>
+    Effect.Effect<FileDownload, NotFound | Conflict | Unavailable | Forbidden>
 }>()("@kvitbit/domain/modules/reports") {}
 
 export const ReportKind = Schema.Literals(["revenue", "vat_summary", "receivables", "expenses", "profit", "cashflow"])
@@ -1464,7 +1463,7 @@ A separate package, `packages/api-contract`, defines the `HttpApi` with groups t
 | `Idempotency-Key` header | `RequestOptions.requestKey` |
 | `Idempotent-Replayed` response header | `RequestOutcome.replayed` (section 2.1) |
 | `If-Match: "<revision>"` / `ETag` | `expectedRevision` / `view.revision`. `If-Match` is required on revisioned writes (428 when missing), and the server maps `Conflict{revision_changed}` to `412 Precondition Failed` (RFC 9110 §13.1.1). 412 and 428 are HTTP-edge errors, not core errors. |
-| Auth middleware (session, bearer, API Key, OAuth) | provides `CurrentCaller` (section 2.2), with `client` for API Keys and MCP |
+| Auth middleware (session, bearer, API Key, OAuth) | passes the resolved `Caller` to each core method (section 2.2), with `client` for API Keys and MCP |
 | Error status | the `HttpApiSchema.status` on each error class |
 | `Accept-Language` | `MemberCaller.locale` (the account preference wins) |
 

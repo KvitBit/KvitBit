@@ -1,6 +1,7 @@
 /** Read methods: get, list, history, pdf. */
 
 import type {
+  Caller,
   DocumentQuery,
   FileDownload,
   Locale,
@@ -25,8 +26,8 @@ import { now, viewOf } from "./support";
 import { toSummary } from "./view";
 
 export const get = Effect.fn("get")(
-  function* (id: DocumentId) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.read");
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.read");
     const row = yield* (yield* DocumentsRepo).get(workspaceId, id);
     return yield* viewOf(row);
   },
@@ -49,8 +50,8 @@ const decodeCursor = Schema.decodeUnknownOption(ListCursor);
 const encodeCursor = Schema.encodeEffect(ListCursor);
 
 export const list = Effect.fn("list")(
-  function* (q: DocumentQuery & PageRequest) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.read");
+  function* (caller: Caller, q: DocumentQuery & PageRequest) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.read");
     const limit = q.limit ?? DEFAULT_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       return yield* pageIssue("limit", "request.malformed");
@@ -95,8 +96,8 @@ export const list = Effect.fn("list")(
 
 /** The document's audit entries in time order (drafts: create; issued: every change). */
 export const history = Effect.fn("history")(
-  function* (id: DocumentId) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.history");
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.history");
     yield* (yield* DocumentsRepo).get(workspaceId, id);
     return yield* (yield* CoreStore).audit.history(workspaceId, { entity: "Document", id });
   },
@@ -109,17 +110,22 @@ const filenameOf = (number: string | null, id: DocumentId) =>
 /** PDF of the current revision through `DocumentRenderer`; locked documents render too (D5). */
 export const pdf = Effect.fn("pdf")(
   function* (
+    caller: Caller,
     id: DocumentId,
     opts?: { readonly template?: PdfTemplate; readonly language?: Locale },
   ) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.pdf");
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.pdf");
     const row = yield* (yield* DocumentsRepo).get(workspaceId, id);
     const language = opts?.language ?? row.language;
     const view = yield* viewOf(row, { language });
-    const bytes = yield* (yield* DocumentRenderer).render(view, {
-      template: opts?.template ?? "classic",
-      language,
-    });
+    const bytes = yield* (yield* DocumentRenderer).render(
+      view,
+      {
+        template: opts?.template ?? "classic",
+        language,
+      },
+      workspaceId,
+    );
     return {
       filename: filenameOf(row.number, row.id),
       contentType: "application/pdf",

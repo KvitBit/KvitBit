@@ -50,14 +50,14 @@
  *               Proforma first (S4), links `final_invoice_for` once (`Conflict{duplicate}`).
  * - payments.ts PAYMENTS SEAM (stage 2, cd-payments; board #529), tag `DocumentPayments`
  *               (`DocumentPaymentsLive`), inside the caller's CoreStore transaction, no
- *               authorize, R = CurrentCaller, port failures raw (caller maps orUnavailable):
+ *               authorize, port failures raw (caller maps orUnavailable):
  *               lock(ws, id) -> PaymentTargets {requested, settleOn, proforma} (S4: the
  *                 Proforma first; a Proforma with a Final Invoice settles on the Invoice, D8);
- *               settle(ws, id, {amount, payments}, {action: payment.record|payment.remove,
+ *               settle(caller, ws, id, {amount, payments}, {action: payment.record|payment.remove,
  *                 reason?, details?}) -> Payable (stores paid total + count, credit-aware
  *                 settlement, revision bump, one audit entry on the Document); Payable carries
  *                 gross/credited/owed/paid/refundDue, regime, finalInvoice/proforma/taxDocuments;
- *               issuePaymentTaxDocument(ws, proforma, {amount, paidOn}) -> DocumentView | null
+ *               issuePaymentTaxDocument(caller, ws, proforma, {amount, paidOn}) -> DocumentView | null
  *                 (P2: null unless vat_payer on paidOn; VatMath.splitAdvance with the CNB
  *                 fixing for paidOn; PTD series counter after the Proforma lock);
  *               removalBlocked(ws, target, ptd | null) -> "final_invoice_deducts" |
@@ -65,7 +65,7 @@
  * - delivery.ts DELIVERY READ SEAM (stage 2, cd-delivery and share links; board #529), tag
  *               `DocumentDeliveryReads` (`DocumentDeliveryReadsLive`): load(ws, id, ctx?) ->
  *               {record, view, contactId, dueOn, reminders {choice, on}, settlement, overdue};
- *               render(view, options) (DocumentRenderer). send/previewSend stay `DocumentSender`.
+ *               render(view, options, workspaceId) (DocumentRenderer). send/previewSend stay `DocumentSender`.
  * - reports.ts  `reportFigures(record)` for the ReportsSource adapter (#384): full totals and
  *               the advance deduction buckets of a Final Invoice (or its Credit Note).
  * - deliveries/ `DocumentSenderLive` (send/previewSend), `DeliveriesRepo`, `DeliveryJobs` and the

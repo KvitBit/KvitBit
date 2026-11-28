@@ -30,7 +30,6 @@ import type { ContactView, MemberCaller } from "../../packages/domain/src/contra
 import {
   ContactId,
   Contacts,
-  CurrentCaller,
   NumberingSeriesId,
   RequestKey,
   UserId,
@@ -62,13 +61,13 @@ const asContact = (view: ContactView): Contact => {
 };
 
 /** One attempt: Contacts.save with its own RequestOutcome, so a replay is observable. */
-const attempt = (input: Parameters<Contacts["Service"]["save"]>[0], requestKey: RequestKey) =>
+const attempt = (input: Parameters<Contacts["Service"]["save"]>[1], requestKey: RequestKey) =>
   Effect.gen(function* () {
     const outcome = yield* makeRequestOutcome;
     const contacts = yield* Contacts;
     const exit = yield* Effect.exit(
       contacts
-        .save(input, { requestKey })
+        .save(owner, input, { requestKey })
         .pipe(Effect.map(asContact), Effect.provideService(RequestOutcome, outcome)),
     );
     return { exit, replayed: yield* outcome.replayed };
@@ -90,29 +89,31 @@ const failure = (e: { readonly exit: Exit.Exit<Contact, unknown> }): unknown => 
 
 /** The committed row: revision and name, read back through the service. */
 const current = (id: ContactId) =>
-  Effect.flatMap(Contacts, (c) => c.get(id)).pipe(Effect.map(asContact), Effect.orDie);
-const contactCount = Effect.flatMap(Contacts, (c) => c.search({})).pipe(
+  Effect.flatMap(Contacts, (c) => c.get(owner, id)).pipe(Effect.map(asContact), Effect.orDie);
+const contactCount = Effect.flatMap(Contacts, (c) => c.search(owner, {})).pipe(
   Effect.map((page) => page.items.length),
   Effect.orDie,
 );
 
 /** Fresh in-memory core with one Contact at revision 1 (the model's Init). */
 const run = <A, E>(
-  body: (seed: Contact) => Effect.Effect<A, E, Contacts | CurrentCaller | FakeContactSeries>,
+  body: (seed: Contact) => Effect.Effect<A, E, Contacts | FakeContactSeries>,
 ): Promise<A> =>
   Effect.runPromise(
     Effect.gen(function* () {
       yield* TestClock.setTime(Date.UTC(2026, 10, 23, 9, 0, 0));
       const view = yield* Effect.flatMap(Contacts, (contacts) =>
-        contacts.save({ name: "Acme s.r.o." }),
+        contacts.save(owner, { name: "Acme s.r.o." }),
       ).pipe(Effect.orDie);
       const seed = asContact(view);
       strictEqual(seed.revision, 1);
       return yield* body(seed);
     }).pipe(
-      Effect.provide(ContactsTestLayer),
-      Effect.provideService(CurrentCaller, owner),
-      Effect.provide(Layer.merge(InMemoryPortsLive(), TestClock.layer())),
+      Effect.provide(
+        ContactsTestLayer.pipe(
+          Layer.provideMerge(Layer.merge(InMemoryPortsLive(), TestClock.layer())),
+        ),
+      ),
     ),
   );
 

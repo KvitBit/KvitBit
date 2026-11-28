@@ -1,6 +1,5 @@
 /** Shared helpers for the Contacts and PriceList module tests. */
 import type { AuditEntry, Caller, WorkspaceId } from "@kvitbit/domain/contract";
-import { CurrentCaller } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -8,6 +7,7 @@ import * as Exit from "effect/Exit";
 import * as EffectFunction from "effect/Function";
 import * as Option from "effect/Option";
 import { CoreStore } from "../../../src/store/CoreStore";
+import { TestCaller } from "../../helpers/callerContext";
 
 export const ACME_ICO = "27074358";
 export const CEZ_ICO = "45274649";
@@ -39,8 +39,8 @@ export const registry = { [ACME_ICO]: acmeRecord, [CEZ_ICO]: cezRecord };
 /** Runs `effect` as another caller inside one test. */
 export const as =
   (caller: Caller) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, CurrentCaller>> =>
-    Effect.provideService(effect, CurrentCaller, caller);
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, TestCaller>> =>
+    Effect.provideService(effect, TestCaller, caller);
 
 /** The success value, failing the test with the cause otherwise. */
 export const successOf = <A, E>(exit: Exit.Exit<A, E>): A => {

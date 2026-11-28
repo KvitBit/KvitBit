@@ -1,7 +1,8 @@
+import { RequestCaller } from "@kvitbit/api-contract";
 /** `invitations` group handlers (http-mcp-contracts 3.5.1): anonymous peek (rate-limited) + session accept. */
 
 import { Api, RateLimited } from "@kvitbit/api-contract";
-import { Caller, CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
+import { Caller, Workspaces } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as HttpServerRequest from "effect/http/HttpServerRequest";
@@ -33,16 +34,15 @@ export const InvitationsGroupLive = HttpApiBuilder.group(
             token: params.token,
             locale: acceptLanguageLocale(request.headers["accept-language"]) ?? "cs",
           });
-          return yield* workspaces.peekInvitation.pipe(
-            Effect.provideService(CurrentCaller, caller),
-          );
+          return yield* workspaces.peekInvitation(caller);
         }),
       )
       .handle(
         "accept",
         Effect.fnUntraced(function* ({ params }) {
-          const member = yield* workspaces.acceptInvitation(params.token);
-          const mine = yield* workspaces.listMine;
+          const caller = yield* RequestCaller;
+          const member = yield* workspaces.acceptInvitation(caller, params.token);
+          const mine = yield* workspaces.listMine(caller);
           const summary = Option.getOrUndefined(
             Arr.findFirst(mine, (ws) => ws.id === member.workspaceId),
           );

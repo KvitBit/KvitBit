@@ -1,3 +1,4 @@
+import { TestCaller } from "../../../helpers/callerContext";
 /** Rule D16 automatic reminders: selection-time resolution, enqueue, claim re-check. */
 
 import { describe, expect, test } from "bun:test";
@@ -38,7 +39,7 @@ import { as, CZ_NO_DIC, contact, invoiceInput, present } from "../fixtures";
 const worker = system();
 const reminderJob = (documentId: DocumentId) => system({ _tag: "PaymentReminders", documentId });
 
-const select = (today: IsoDate) => as(worker, selectDueReminders(WORKSPACE_A, today));
+const select = (today: IsoDate) => as(worker, selectDueReminders(worker, WORKSPACE_A, today));
 
 /** Selects and enqueues the reminders due on `date` (clock moved there); returns their ids. */
 const sweep = (date: string) =>
@@ -50,7 +51,7 @@ const sweep = (date: string) =>
     for (const reminder of due) {
       const deliveryId = yield* as(
         reminderJob(reminder.documentId),
-        enqueueReminder(WORKSPACE_A, reminder),
+        enqueueReminder(reminderJob(reminder.documentId), WORKSPACE_A, reminder),
       );
       ids.push({ documentId: reminder.documentId, deliveryId, offset: reminder.offsetDays });
     }
@@ -72,9 +73,10 @@ const dueOn = (id: DocumentId) =>
 /** Moves an issued document's due date through Documents.edit (as the owner). */
 const moveDue = (id: DocumentId, on: string) =>
   Effect.gen(function* () {
+    const testCaller = yield* TestCaller;
     const d = yield* Documents;
-    const view = yield* d.get(id);
-    return yield* d.edit(id, { due: { on: IsoDate.make(on) } }, view.revision);
+    const view = yield* d.get(testCaller, id);
+    return yield* d.edit(testCaller, id, { due: { on: IsoDate.make(on) } }, view.revision);
   });
 
 // Fixture policy: Workspace reminders enabled, Proformas off, offsets [3, 10]; Invoices issued
@@ -84,10 +86,11 @@ describe("selection (D16, no stored schedule)", () => {
   test("only documents a send armed; steps follow dueOn + offsets; enqueue is idempotent", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const sent = yield* issueInvoice();
         yield* issueInvoice(); // never sent: no reminders
-        yield* d.send(sent);
+        yield* d.send(testCaller, sent);
         const result = yield* sweep("2026-12-09");
         expect(result).toEqual([]);
         const first = yield* sweep("2026-12-10");
@@ -106,7 +109,7 @@ describe("selection (D16, no stored schedule)", () => {
         expect(makeResult).toEqual([]);
         const again = yield* as(
           reminderJob(sent),
-          enqueueReminder(WORKSPACE_A, {
+          enqueueReminder(reminderJob(sent), WORKSPACE_A, {
             documentId: sent,
             dueOn: IsoDate.make("2026-12-07"),
             step: 0,
@@ -116,7 +119,7 @@ describe("selection (D16, no stored schedule)", () => {
           }),
         );
         expect(again).toBe(id);
-        const result2 = yield* as(worker, deliver(WORKSPACE_A, id));
+        const result2 = yield* as(worker, deliver(worker, WORKSPACE_A, id));
         expect(result2).toBe("sent");
         const firstReminderEmails = yield* reminderEmails;
         expect(firstReminderEmails).toHaveLength(1);
@@ -132,8 +135,9 @@ describe("selection (D16, no stored schedule)", () => {
   test("a late sweep sends the latest due step only; earlier missed steps are superseded", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const id = yield* issueInvoice();
-        yield* (yield* Documents).send(id);
+        yield* (yield* Documents).send(testCaller, id);
         const late = yield* sweep("2026-12-18");
         expect(EffectArray.map(late, (r) => r.offset)).toEqual([10]);
         const result = yield* sweep("2026-12-30");
@@ -146,15 +150,16 @@ describe("selection (D16, no stored schedule)", () => {
   test("paid, cancelled or reminders-off documents are not selected", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const paid = yield* issueInvoice();
         const off = yield* issueInvoice();
         const proforma = DocumentId.make(
-          (yield* d.issue({ input: invoiceInput({ kind: "proforma" }) })).id,
+          (yield* d.issue(testCaller, { input: invoiceInput({ kind: "proforma" }) })).id,
         );
-        yield* d.send(paid);
-        yield* d.send(off, { reminders: false });
-        yield* d.send(proforma); // Workspace: Proformas off (inherit)
+        yield* d.send(testCaller, paid);
+        yield* d.send(testCaller, off, { reminders: false });
+        yield* d.send(testCaller, proforma); // Workspace: Proformas off (inherit)
         yield* patchDocument(paid, { settlement: "paid" });
         const result = yield* sweep("2026-12-10");
         expect(result).toEqual([]);
@@ -168,18 +173,19 @@ describe("REQUIRED D16", () => {
   test("turning reminders off between queueing and sending skips the delivery", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice();
-        yield* d.send(id);
+        yield* d.send(testCaller, id);
         const [queued] = yield* sweep("2026-12-10");
         const deliveryId = present(queued?.deliveryId);
         expect((yield* (yield* DeliveriesRepo).get(WORKSPACE_A, deliveryId)).status).toBe("queued");
         // Reminders turned off on the document (a send with reminders: false stores "off").
-        yield* d.send(id, { reminders: false });
+        yield* d.send(testCaller, id, { reminders: false });
         const attemptsBefore = yield* Effect.flatMap(CaptureEmailSender, (c) =>
           Ref.get(c.attempts),
         );
-        const result = yield* as(worker, deliver(WORKSPACE_A, deliveryId));
+        const result = yield* as(worker, deliver(worker, WORKSPACE_A, deliveryId));
         expect(result).toBe("skipped");
         const getResult = yield* (yield* DeliveriesRepo).get(WORKSPACE_A, deliveryId);
         expect(getResult).toMatchObject({
@@ -198,11 +204,12 @@ describe("REQUIRED D16", () => {
   test("explicit vs inherited choice across a Contact policy change and a due-date edit", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const explicit = yield* issueInvoice();
         const inherited = yield* issueInvoice();
-        yield* d.send(explicit, { reminders: true });
-        yield* d.send(inherited);
+        yield* d.send(testCaller, explicit, { reminders: true });
+        yield* d.send(testCaller, inherited);
         // The Contact switches to disabled, then both due dates move to 2026-12-20.
         yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
         yield* moveDue(explicit, "2026-12-20");
@@ -244,11 +251,15 @@ describe("claim re-checks (J3, D16)", () => {
   test("a due-date change after queueing makes the queued step stale", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const id = yield* issueInvoice();
-        yield* (yield* Documents).send(id);
+        yield* (yield* Documents).send(testCaller, id);
         const [queued] = yield* sweep("2026-12-10");
         yield* moveDue(id, "2026-12-31");
-        const makeResult = yield* as(worker, claim(WORKSPACE_A, present(queued?.deliveryId)));
+        const makeResult = yield* as(
+          worker,
+          claim(worker, WORKSPACE_A, present(queued?.deliveryId)),
+        );
         expect(makeResult).toBe("skipped");
         expect(
           (yield* (yield* DeliveriesRepo).get(WORKSPACE_A, present(queued?.deliveryId))).failure,
@@ -261,11 +272,12 @@ describe("claim re-checks (J3, D16)", () => {
   test("an inherited choice is skipped once the Contact disables reminders; paid is skipped", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const a = yield* issueInvoice();
         const b = yield* issueInvoice();
-        yield* d.send(a);
-        yield* d.send(b);
+        yield* d.send(testCaller, a);
+        yield* d.send(testCaller, b);
         const queued = yield* sweep("2026-12-10");
         const of = (id: DocumentId) =>
           present(
@@ -273,11 +285,11 @@ describe("claim re-checks (J3, D16)", () => {
               ?.deliveryId,
           );
         yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
-        const result = yield* as(worker, claim(WORKSPACE_A, of(a)));
+        const result = yield* as(worker, claim(worker, WORKSPACE_A, of(a)));
         expect(result).toBe("skipped");
         yield* setContactDefaults({ reminderPolicy: { mode: "inherit" } });
         yield* patchDocument(b, { settlement: "paid" });
-        const result2 = yield* as(worker, claim(WORKSPACE_A, of(b)));
+        const result2 = yield* as(worker, claim(worker, WORKSPACE_A, of(b)));
         expect(result2).toBe("skipped");
         expect((yield* (yield* DeliveriesRepo).get(WORKSPACE_A, of(b))).failure).toBe(
           "document_settled",
@@ -290,11 +302,12 @@ describe("claim re-checks (J3, D16)", () => {
   test("the Workspace turning reminders off stops inherited reminders, not explicit ones", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const inherited = yield* issueInvoice();
         const explicit = yield* issueInvoice();
-        yield* d.send(inherited);
-        yield* d.send(explicit, { reminders: true });
+        yield* d.send(testCaller, inherited);
+        yield* d.send(testCaller, explicit, { reminders: true });
         yield* setWorkspaceReminders({ enabled: false, proformas: false, offsetsDays: [3, 10] });
         const due = yield* sweep("2026-12-10");
         expect(EffectArray.map(due, (r) => r.documentId)).toEqual([explicit]);
@@ -332,11 +345,12 @@ describe("resolution readings (overrides.ts resolveReminders)", () => {
   test("a custom Contact arms a sent Proforma end to end", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         yield* setContactDefaults({ reminderPolicy: { mode: "custom", offsetsDays: [1] } });
-        const proforma = yield* d.issue({ input: invoiceInput({ kind: "proforma" }) });
-        expect((yield* d.previewSend(proforma.id)).armsReminders).toBe(true);
-        yield* d.send(proforma.id);
+        const proforma = yield* d.issue(testCaller, { input: invoiceInput({ kind: "proforma" }) });
+        expect((yield* d.previewSend(testCaller, proforma.id)).armsReminders).toBe(true);
+        yield* d.send(testCaller, proforma.id);
         const due = yield* sweep("2026-12-08");
         expect(EffectArray.map(due, (r) => [r.documentId, r.offset])).toEqual([[proforma.id, 1]]);
       }),
@@ -349,11 +363,12 @@ describe("stored arm outcome and re-arm (D16, council terms)", () => {
   test("an inherited send under a disabled Contact stores remindersOn false; a policy change alone does not arm it, a due-date edit re-arms", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice();
         yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
-        expect((yield* d.previewSend(id)).armsReminders).toBe(false);
-        yield* d.send(id);
+        expect((yield* d.previewSend(testCaller, id)).armsReminders).toBe(false);
+        yield* d.send(testCaller, id);
         const repo = yield* DocumentsRepo;
         const getResult = yield* repo.get(WORKSPACE_A, id);
         expect(getResult).toMatchObject({
@@ -376,11 +391,12 @@ describe("stored arm outcome and re-arm (D16, council terms)", () => {
   test("changed offsets never backfill a reminder earlier than one already sent", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const id = yield* issueInvoice();
-        yield* (yield* Documents).send(id);
+        yield* (yield* Documents).send(testCaller, id);
         const [late] = yield* sweep("2026-12-17");
         expect(late?.offset).toBe(10);
-        yield* as(worker, deliver(WORKSPACE_A, present(late?.deliveryId)));
+        yield* as(worker, deliver(worker, WORKSPACE_A, present(late?.deliveryId)));
         yield* setWorkspaceReminders({ enabled: true, proformas: false, offsetsDays: [5] });
         const result = yield* sweep("2026-12-20");
         expect(result).toEqual([]);
@@ -392,18 +408,25 @@ describe("stored arm outcome and re-arm (D16, council terms)", () => {
   test("a step skipped before any attempt is released and can be queued again", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice();
-        yield* d.send(id);
+        yield* d.send(testCaller, id);
         const [first] = yield* sweep("2026-12-10");
-        yield* d.send(id, { reminders: false });
-        const makeResult = yield* as(worker, claim(WORKSPACE_A, present(first?.deliveryId)));
+        yield* d.send(testCaller, id, { reminders: false });
+        const makeResult = yield* as(
+          worker,
+          claim(worker, WORKSPACE_A, present(first?.deliveryId)),
+        );
         expect(makeResult).toBe("skipped");
-        yield* d.send(id, { reminders: true });
+        yield* d.send(testCaller, id, { reminders: true });
         const [again] = yield* sweep("2026-12-11");
         expect(again).toMatchObject({ documentId: id, offset: 3 });
         expect(again?.deliveryId).not.toBe(first?.deliveryId);
-        const makeResult2 = yield* as(worker, deliver(WORKSPACE_A, present(again?.deliveryId)));
+        const makeResult2 = yield* as(
+          worker,
+          deliver(worker, WORKSPACE_A, present(again?.deliveryId)),
+        );
         expect(makeResult2).toBe("sent");
       }),
     );
@@ -415,11 +438,12 @@ describe("latest send by sequence (council round)", () => {
   test("automatic reminders go to the latest send's recipients; a due-date edit re-arms from it", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice();
         yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
-        yield* d.send(id, { to: ["a@x.cz"] });
-        yield* d.send(id, { to: ["b@x.cz"] });
+        yield* d.send(testCaller, id, { to: ["a@x.cz"] });
+        yield* d.send(testCaller, id, { to: ["b@x.cz"] });
         yield* setContactDefaults({ reminderPolicy: { mode: "inherit" } });
         yield* moveDue(id, "2026-12-14");
         const [due] = yield* sweep("2026-12-17");
@@ -435,6 +459,7 @@ describe("review round 1 regressions", () => {
   test("after a buyer change, automatic reminders go to the new buyer, never the old one", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const f = yield* DocumentFixtures;
         yield* f.putContact(WORKSPACE_A, {
@@ -442,9 +467,9 @@ describe("review round 1 regressions", () => {
           billingEmails: ["novy@kupec.cz"],
         });
         const id = yield* issueInvoice();
-        yield* d.send(id, { to: ["stary@odberatel.cz"] });
-        const view = yield* d.get(id);
-        yield* d.edit(id, { contact: CZ_NO_DIC }, view.revision);
+        yield* d.send(testCaller, id, { to: ["stary@odberatel.cz"] });
+        const view = yield* d.get(testCaller, id);
+        yield* d.edit(testCaller, id, { contact: CZ_NO_DIC }, view.revision);
         const [due] = yield* sweep("2026-12-10");
         const row = yield* (yield* DeliveriesRepo).get(WORKSPACE_A, present(due?.deliveryId));
         expect(row.to).toEqual(["novy@kupec.cz"]);
@@ -456,20 +481,24 @@ describe("review round 1 regressions", () => {
   test("a reminder queued before reminders were turned off and on again is not revived", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice();
-        yield* d.send(id, { to: ["stary@odberatel.cz"] });
+        yield* d.send(testCaller, id, { to: ["stary@odberatel.cz"] });
         const [old] = yield* sweep("2026-12-10");
-        yield* d.send(id, { reminders: false });
-        yield* d.send(id, { reminders: true, to: ["novy@odberatel.cz"] });
+        yield* d.send(testCaller, id, { reminders: false });
+        yield* d.send(testCaller, id, { reminders: true, to: ["novy@odberatel.cz"] });
         const [fresh] = yield* sweep("2026-12-10");
         expect(fresh?.deliveryId).not.toBe(old?.deliveryId);
-        const makeResult = yield* as(worker, claim(WORKSPACE_A, present(old?.deliveryId)));
+        const makeResult = yield* as(worker, claim(worker, WORKSPACE_A, present(old?.deliveryId)));
         expect(makeResult).toBe("skipped");
         expect(
           (yield* (yield* DeliveriesRepo).get(WORKSPACE_A, present(old?.deliveryId))).failure,
         ).toBe("reminder_rearmed");
-        const makeResult2 = yield* as(worker, deliver(WORKSPACE_A, present(fresh?.deliveryId)));
+        const makeResult2 = yield* as(
+          worker,
+          deliver(worker, WORKSPACE_A, present(fresh?.deliveryId)),
+        );
         expect(makeResult2).toBe("sent");
         const emails = yield* reminderEmails;
         expect(EffectArray.map(emails, (e) => e.message.to)).toEqual([["novy@odberatel.cz"]]);
@@ -481,9 +510,10 @@ describe("review round 1 regressions", () => {
   test("reminder dates past 9999-12-31 are never due", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice({ due: { on: IsoDate.make("9999-12-31") } });
-        yield* d.send(id);
+        yield* d.send(testCaller, id);
         const result = yield* sweep("2026-12-10");
         expect(result).toEqual([]);
         expect(
@@ -503,17 +533,18 @@ describe("review round 2 regression", () => {
   test("a re-send after a due-date re-arm keeps the arm: the same reminder is not sent twice", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const d = yield* Documents;
         const id = yield* issueInvoice();
         yield* setContactDefaults({ reminderPolicy: { mode: "disabled" } });
-        yield* d.send(id);
+        yield* d.send(testCaller, id);
         yield* setContactDefaults({ reminderPolicy: { mode: "inherit" } });
         yield* moveDue(id, "2026-12-14");
         const [first] = yield* sweep("2026-12-17");
-        yield* as(worker, deliver(WORKSPACE_A, present(first?.deliveryId)));
+        yield* as(worker, deliver(worker, WORKSPACE_A, present(first?.deliveryId)));
         const reminderEmailsAfterResend = yield* reminderEmails;
         expect(reminderEmailsAfterResend).toHaveLength(1);
-        yield* d.send(id);
+        yield* d.send(testCaller, id);
         const result = yield* sweep("2026-12-17");
         expect(result).toEqual([]);
         const reminderEmails_1 = yield* reminderEmails;
@@ -528,11 +559,12 @@ describe("reconcile of a claimed reminder (J1a, J3, D16)", () => {
   test("a claimed reminder skipped on restart keeps its step: restored eligibility sends no second one", async () => {
     const exit = await deliveryScenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const id = yield* issueInvoice();
-        yield* (yield* Documents).send(id);
+        yield* (yield* Documents).send(testCaller, id);
         const [first] = yield* sweep("2026-12-10");
         const a = present(first?.deliveryId);
-        yield* as(worker, claim(WORKSPACE_A, a));
+        yield* as(worker, claim(worker, WORKSPACE_A, a));
         // The provider accepts, then the job dies before the attempt is recorded.
         const real = yield* EmailSender;
         const crash = yield* Effect.exit(
@@ -550,7 +582,7 @@ describe("reconcile of a claimed reminder (J1a, J3, D16)", () => {
         yield* TestClock.adjust("3 minutes");
         const reconciled = yield* reconcileStaleDeliveries(120_000);
         expect(EffectArray.map(reconciled, (r) => r.deliveryId)).toContain(a);
-        const result = yield* as(worker, deliver(WORKSPACE_A, a));
+        const result = yield* as(worker, deliver(worker, WORKSPACE_A, a));
         expect(result).toBe("skipped");
         const repo = yield* DeliveriesRepo;
         const getResult = yield* repo.get(WORKSPACE_A, a);

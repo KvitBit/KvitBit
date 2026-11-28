@@ -1,7 +1,7 @@
+import { TestCaller } from "../helpers/callerContext";
 /** DocumentView.share and .deliveries through DocumentActivityLive, and empty without it. */
 
 import { describe, expect, test } from "bun:test";
-import type { CurrentCaller } from "@kvitbit/domain/contract";
 import {
   DeliveryId,
   DocumentId,
@@ -58,26 +58,27 @@ const series = Effect.flatMap(CoreStore, (store) =>
 
 /** Issues, sends and shares an invoice, visits the link once; returns the views read back. */
 const flow = Effect.gen(function* () {
+  const testCaller = yield* TestCaller;
   const docs = yield* Documents;
   const links = yield* PublicShareLinks;
-  const draft = yield* docs.createDraft(invoiceInput());
-  const issued = yield* docs.issue({ input: invoiceInput() });
+  const draft = yield* docs.createDraft(testCaller, invoiceInput());
+  const issued = yield* docs.issue(testCaller, { input: invoiceInput() });
   const id = DocumentId.make(issued.id);
-  const sent = yield* docs.send(id);
-  const { url } = yield* links.create(id);
+  const sent = yield* docs.send(testCaller, id);
+  const { url } = yield* links.create(testCaller, id);
   const token = ShareToken.make(EffectString.slice("https://share.test/s/".length)(url));
   yield* as(
     shareVisitor({ token }),
-    Effect.flatMap(PublicShareLinks, (s) => s.open),
+    Effect.flatMap(PublicShareLinks, (s) => s.open(shareVisitor({ token }))),
   );
   return {
     url,
     sent,
-    draft: yield* docs.get(draft.id),
-    got: yield* docs.get(id),
+    draft: yield* docs.get(testCaller, draft.id),
+    got: yield* docs.get(testCaller, id),
     // A write result is never enriched (rule C3): it is what a keyed replay returns.
-    locked: yield* docs.lock(id),
-    revoked: yield* Effect.andThen(links.revoke(id), docs.get(id)),
+    locked: yield* docs.lock(testCaller, id),
+    revoked: yield* Effect.andThen(links.revoke(testCaller, id), docs.get(testCaller, id)),
   };
 });
 
@@ -85,7 +86,7 @@ const flow = Effect.gen(function* () {
 type FlowServices =
   | Layer.Success<typeof base>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 const runWith = <A, E>(layer: typeof base, body: Effect.Effect<A, E, FlowServices>) =>
   runTest(
@@ -133,22 +134,28 @@ describe("DocumentView.share and .deliveries", () => {
  * what was stored (delivery rows, the request-log result), rendered, and returned to the owner.
  */
 const storedFlow = Effect.gen(function* () {
+  const testCaller = yield* TestCaller;
   const docs = yield* Documents;
   const links = yield* PublicShareLinks;
-  const issued = yield* docs.issue({ input: invoiceInput() });
+  const issued = yield* docs.issue(testCaller, { input: invoiceInput() });
   const id = DocumentId.make(issued.id);
-  const { url } = yield* links.create(id);
+  const { url } = yield* links.create(testCaller, id);
   const token = EffectString.slice("https://share.test/s/".length)(url);
-  const first = yield* docs.send(id);
-  const second = yield* docs.send(id);
+  const first = yield* docs.send(testCaller, id);
+  const second = yield* docs.send(testCaller, id);
   yield* as(
     shareVisitor({ token: ShareToken.make(token) }),
-    Effect.flatMap(PublicShareLinks, (s) => Effect.andThen(s.open, s.pdf())),
+    Effect.flatMap(PublicShareLinks, (s) =>
+      Effect.andThen(
+        s.open(shareVisitor({ token: ShareToken.make(token) })),
+        s.pdf(shareVisitor({ token: ShareToken.make(token) })),
+      ),
+    ),
   );
-  yield* docs.pdf(id);
+  yield* docs.pdf(testCaller, id);
   const requestKey = RequestKey.make("cancel-after-share");
-  const cancelled = yield* docs.cancel(id, { reason: "duplicate" }, { requestKey });
-  const replayed = yield* docs.cancel(id, { reason: "duplicate" }, { requestKey });
+  const cancelled = yield* docs.cancel(testCaller, id, { reason: "duplicate" }, { requestKey });
+  const replayed = yield* docs.cancel(testCaller, id, { reason: "duplicate" }, { requestKey });
   const store = yield* CoreStore;
   const claim = yield* store.transaction(
     store.requestLog.claim(
@@ -172,7 +179,7 @@ const storedFlow = Effect.gen(function* () {
     renders: yield* Ref.get(fixtures.renders),
     cancelled,
     replayed,
-    got: yield* docs.get(id),
+    got: yield* docs.get(testCaller, id),
   };
 });
 

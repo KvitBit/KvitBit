@@ -1,13 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { strictEqual } from "node:assert/strict";
 import { DocumentFixtures } from "@kvitbit/core/testing";
-import {
-  ContactId,
-  Contacts,
-  CurrentCaller,
-  type MemberCaller,
-  Workspaces,
-} from "@kvitbit/domain/contract";
+import { ContactId, Contacts, type MemberCaller, Workspaces } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
@@ -16,6 +10,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Str from "effect/String";
 import * as TestClock from "effect/testing/TestClock";
+
 import { deviceFromUserAgent } from "../../../src/http/groups/publicShare";
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
@@ -108,13 +103,13 @@ describe("shareLinks and publicShare groups", () => {
     docsBase = `/api/v1/workspaces/${member.workspaceId}/documents`;
     const contact = await h.run(
       Effect.flatMap(Contacts, (c) =>
-        c.save({
+        c.save(member, {
           name: "Klient s.r.o.",
           ico: "25596641",
           address: { city: "Praha", country: "CZ" },
           roles: ["customer"],
         }),
-      ).pipe(Effect.provideService(CurrentCaller, member)),
+      ),
     );
     contactId = Schema.decodeUnknownEffect(ContactId)(contact["id"]).pipe(Effect.runSync);
   });
@@ -257,11 +252,11 @@ describe("shareLinks and publicShare groups", () => {
     // Upload a logo via Workspaces.setBrandingImage
     await h.run(
       Effect.flatMap(Workspaces, (w) =>
-        w.setBrandingImage("logo", {
+        w.setBrandingImage(member, "logo", {
           contentType: "image/png",
           bytes: Stream.make(TINY_PNG),
         }),
-      ).pipe(Effect.provideService(CurrentCaller, member)),
+      ),
     );
 
     const logoRes = await h.fetch(`/api/v1/share/${token}/logo`);

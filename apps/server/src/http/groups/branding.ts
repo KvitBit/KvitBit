@@ -4,6 +4,7 @@ import {
   BRANDING_IMAGE_MAX_BYTES,
   type BrandingView,
   PayloadTooLarge,
+  RequestCaller,
   type ResolvedTheme,
 } from "@kvitbit/api-contract";
 import {
@@ -77,31 +78,42 @@ export const BrandingGroupLive = HttpApiBuilder.group(
     const workspaces = yield* Workspaces;
     return handlers
       .handle("getBranding", () =>
-        Effect.flatMap(workspaces.current, (view) => toBrandingView(view)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.flatMap(workspaces.current(caller), (view) => toBrandingView(view)),
+        ),
       )
       .handle("updateBranding", ({ headers, payload }) =>
-        withRevision(
-          headers["if-match"],
-          Effect.fnUntraced(function* (expectedRevision) {
-            const preResolved =
-              payload.theme === undefined
-                ? undefined
-                : payload.theme === null
-                  ? null
-                  : yield* resolveTheme(payload.theme);
-            const view = yield* workspaces.updateSettings({ branding: payload }, expectedRevision);
-            return yield* toBrandingView(view, preResolved);
-          }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(
+            headers["if-match"],
+            Effect.fnUntraced(function* (expectedRevision) {
+              const preResolved =
+                payload.theme === undefined
+                  ? undefined
+                  : payload.theme === null
+                    ? null
+                    : yield* resolveTheme(payload.theme);
+              const view = yield* workspaces.updateSettings(
+                caller,
+                { branding: payload },
+                expectedRevision,
+              );
+              return yield* toBrandingView(view, preResolved);
+            }),
+          ),
         ),
       )
       .handle("previewPdf", ({ payload }) =>
-        Effect.map(workspaces.previewBranding(payload), (file) =>
-          downloadResponse({ disposition: "inline" })(file),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(workspaces.previewBranding(caller, payload), (file) =>
+            downloadResponse({ disposition: "inline" })(file),
+          ),
         ),
       )
       .handle(
         "putImage",
         Effect.fnUntraced(function* ({ params, payload }) {
+          const caller = yield* RequestCaller;
           let uploaded: ImageRef | undefined;
           yield* Stream.runForEach(
             payload,
@@ -115,7 +127,7 @@ export const BrandingGroupLive = HttpApiBuilder.group(
                 Stream.catch((err) => Stream.die(new MultipartStreamDefect(err))),
               );
               uploaded = yield* workspaces
-                .setBrandingImage(params.image, { contentType: part.contentType, bytes })
+                .setBrandingImage(caller, params.image, { contentType: part.contentType, bytes })
                 .pipe(
                   Effect.catchDefect((defect) =>
                     defect instanceof MultipartStreamDefect
@@ -140,8 +152,9 @@ export const BrandingGroupLive = HttpApiBuilder.group(
       .handle(
         "getImage",
         Effect.fnUntraced(function* ({ params }) {
-          const file = yield* workspaces.brandingImage(params.image);
-          const view = yield* workspaces.current;
+          const caller = yield* RequestCaller;
+          const file = yield* workspaces.brandingImage(caller, params.image);
+          const view = yield* workspaces.current(caller);
           const ref = view.branding[params.image];
           return downloadResponse({
             etag: ref === null ? undefined : `"${ref.sha256}"`,
@@ -149,6 +162,10 @@ export const BrandingGroupLive = HttpApiBuilder.group(
           })(ref === null ? file : { ...file, sizeBytes: ref.bytes });
         }),
       )
-      .handle("removeImage", ({ params }) => workspaces.removeBrandingImage(params.image));
+      .handle("removeImage", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.removeBrandingImage(caller, params.image),
+        ),
+      );
   }),
 );

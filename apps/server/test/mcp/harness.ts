@@ -8,7 +8,6 @@ import { ALL_SCOPES, type Principal, READ_SCOPES, Unauthorized } from "@kvitbit/
 import type { TestCoreOptions } from "@kvitbit/core/testing";
 import {
   Caller,
-  CurrentCaller,
   type Locale,
   type NewWorkspace,
   type Scope,
@@ -303,13 +302,11 @@ export const makeMcpHarness = (options: McpHarnessOptions = {}) => {
       Effect.gen(function* () {
         yield* seedUser(user);
         const ws = yield* Workspaces;
-        return yield* ws.create(input);
-      }).pipe(
-        Effect.provideService(
-          CurrentCaller,
+        return yield* ws.create(
           Caller.account({ userId: user.id, email: user.email, locale: "en", channel: "web" }),
-        ),
-      ),
+          input,
+        );
+      }),
     );
 
   const addGrant = (

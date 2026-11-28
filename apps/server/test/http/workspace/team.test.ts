@@ -3,7 +3,6 @@ import { InvitationTokens } from "@kvitbit/core";
 import { CaptureInvitationDelivery } from "@kvitbit/core/testing";
 import {
   Caller,
-  CurrentCaller,
   type InvitationId,
   InvitationToken,
   InvitationView,
@@ -20,6 +19,7 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
+
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
@@ -61,13 +61,11 @@ const acceptInvitation = (user: TestUser, invitationId: InvitationId) =>
       const ws = yield* Workspaces;
       const tokens = yield* InvitationTokens;
       const token = yield* tokens.token(invitationId, 0);
-      yield* ws.acceptInvitation(InvitationToken.make(token));
-    }).pipe(
-      Effect.provideService(
-        CurrentCaller,
+      yield* ws.acceptInvitation(
         Caller.account({ userId: user.id, email: user.email, locale: "cs", channel: "web" }),
-      ),
-    ),
+        InvitationToken.make(token),
+      );
+    }),
   );
 
 /** Seeds an API key and an OAuth grant (with access/refresh tokens) for `user` in PGlite. */

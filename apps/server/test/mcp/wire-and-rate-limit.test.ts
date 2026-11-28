@@ -3,7 +3,6 @@ import {
   ContactId,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
   ExpenseId,
   IsoDate,
   PriceList,
@@ -20,6 +19,7 @@ import * as EffectRecord from "effect/Record";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as TestClock from "effect/testing/TestClock";
+
 import { makeMcpHarness } from "./harness";
 
 setDefaultTimeout(30_000);
@@ -260,13 +260,14 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
     const contactId = await h.run(
       Effect.gen(function* () {
         const contacts = yield* Contacts;
-        const created = yield* contacts.save({
+        const created = yield* contacts.save(ws, {
           name: "ACME Wire s.r.o.",
           roles: ["customer", "supplier"],
           address: { city: "Prague", country: "CZ" },
         });
         const priceList = yield* PriceList;
         yield* priceList.save(
+          ws,
           PriceListItemInput.make({
             name: "Consulting Day",
             unit: "day",
@@ -277,7 +278,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
         );
         const id = yield* Schema.decodeUnknownEffect(ContactId)(created["id"]);
         const templates = yield* Templates;
-        yield* templates.save({
+        yield* templates.save(ws, {
           name: "Monthly Retainer",
           kind: "invoice",
           contact: id,
@@ -293,7 +294,7 @@ describe("MCP wire-codec output encoding and per-grant rate limiting", () => {
           ],
         });
         return id;
-      }).pipe(Effect.provideService(CurrentCaller, ws)),
+      }),
     );
 
     // Fetch declared outputSchemas from tools/list.

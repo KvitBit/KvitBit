@@ -2,7 +2,7 @@
  * Request-key retry safety (rule C3). Run the policy check first (rule R1a), then wrap the
  * method body:
  *
- *   yield* authorizeInWorkspace("document.draft")
+ *   yield* authorizeInWorkspace(caller, "document.draft")
  *   return yield* withIdempotency({ scope, key: opts?.requestKey, method: "Documents.createDraft",
  *     payload: { schema: DocumentInput, value: input }, result: DocumentView }, body)
  */

@@ -1,3 +1,4 @@
+import { RequestCaller } from "@kvitbit/api-contract";
 /** `workspace` group handlers (http-mcp-contracts 3.5.3): Issuing Entity, settings, bank accounts, numbering series and close. */
 
 import { API_PREFIX, Api } from "@kvitbit/api-contract";
@@ -35,48 +36,73 @@ export const WorkspaceGroupLive = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const workspaces = yield* Workspaces;
     return handlers
-      .handle("current", () => workspaces.current)
+      .handle("current", () => Effect.flatMap(RequestCaller, workspaces.current))
       .handle("updateIssuingEntity", ({ headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          workspaces.updateIssuingEntity(payload, expectedRevision),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            workspaces.updateIssuingEntity(caller, payload, expectedRevision),
+          ),
         ),
       )
       .handle("updateSettings", ({ headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          workspaces.updateSettings(payload, expectedRevision),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            workspaces.updateSettings(caller, payload, expectedRevision),
+          ),
         ),
       )
       .handle("listBankAccounts", () =>
-        Effect.map(workspaces.current, (view) =>
-          Arr.isArray(view["bankAccounts"])
-            ? Arr.map(view["bankAccounts"], (account) => BankAccountView.make(account))
-            : [],
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(workspaces.current(caller), (view) =>
+            Arr.isArray(view["bankAccounts"])
+              ? Arr.map(view["bankAccounts"], (account) => BankAccountView.make(account))
+              : [],
+          ),
         ),
       )
       .handle("createBankAccount", ({ params, headers, payload }) =>
-        Effect.tap(workspaces.saveBankAccount(payload, requestOptions(headers)), (view) => {
-          const id = bankAccountIdOf(view);
-          if (id === undefined) return Effect.void;
-          return setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/bank-accounts/${id}`);
-        }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.tap(
+            workspaces.saveBankAccount(caller, payload, requestOptions(headers)),
+            (view) => {
+              const id = bankAccountIdOf(view);
+              if (id === undefined) return Effect.void;
+              return setLocation(
+                `${API_PREFIX}/workspaces/${params.workspaceId}/bank-accounts/${id}`,
+              );
+            },
+          ),
+        ),
       )
       .handle("updateBankAccount", ({ params, payload }) =>
-        workspaces.saveBankAccount(bankAccountWithId(payload, params.bankAccountId)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.saveBankAccount(caller, bankAccountWithId(payload, params.bankAccountId)),
+        ),
       )
       .handle("removeBankAccount", ({ params, query }) =>
-        workspaces.removeBankAccount(params.bankAccountId, query.replacement),
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.removeBankAccount(caller, params.bankAccountId, query.replacement),
+        ),
       )
-      .handle("listSeries", () => workspaces.listSeries)
+      .handle("listSeries", () => Effect.flatMap(RequestCaller, workspaces.listSeries))
       .handle("createSeries", ({ params, headers, payload }) =>
-        Effect.tap(workspaces.configureSeries(payload, requestOptions(headers)), (view) =>
-          setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/numbering-series/${view.id}`),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.tap(workspaces.configureSeries(caller, payload, requestOptions(headers)), (view) =>
+            setLocation(
+              `${API_PREFIX}/workspaces/${params.workspaceId}/numbering-series/${view.id}`,
+            ),
+          ),
         ),
       )
       .handle("updateSeries", ({ params, payload }) =>
-        workspaces.configureSeries({ ...payload, id: params.seriesId }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.configureSeries(caller, { ...payload, id: params.seriesId }),
+        ),
       )
       .handle("close", ({ payload }) =>
-        Effect.andThen(requireFreshSession, workspaces.close(payload.confirmName)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.andThen(requireFreshSession, workspaces.close(caller, payload.confirmName)),
+        ),
       );
   }),
 );

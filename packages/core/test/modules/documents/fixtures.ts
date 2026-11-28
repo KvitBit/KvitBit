@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 /** Seed data and runners for the Documents tests (real layers on in-memory ports). */
 
 import type {
@@ -12,7 +13,6 @@ import {
   BankAccountId,
   ContactId,
   CurrencyCode,
-  CurrentCaller,
   IsoDate,
   NumberingSeriesId,
   PriceListItemId,
@@ -208,7 +208,7 @@ export const seed: {
 export type Services =
   | Layer.Success<typeof DocumentsTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 interface ScenarioOptions {
   readonly caller?: Caller;
@@ -242,11 +242,11 @@ export const scenario: {
 export const as: {
   <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-  ): (caller: Caller) => Effect.Effect<A, E, Exclude<R, CurrentCaller>>;
+  ): (caller: Caller) => Effect.Effect<A, E, Exclude<R, TestCaller>>;
   <A, E, R>(
     caller: Caller,
     effect: Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E, Exclude<R, CurrentCaller>>;
+  ): Effect.Effect<A, E, Exclude<R, TestCaller>>;
 } = Fn.dual(2, <A, E, R>(caller: Caller, effect: Effect.Effect<A, E, R>) =>
-  Effect.provideService(effect, CurrentCaller, caller),
+  Effect.provideService(effect, TestCaller, caller),
 );

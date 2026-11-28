@@ -12,6 +12,7 @@
  */
 
 import type {
+  Caller,
   CorrectionInput,
   DocumentId,
   IsoDate,
@@ -29,7 +30,6 @@ import {
 import * as EffectArray from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
-import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import { VatMath } from "../../engines/vat";
@@ -320,8 +320,8 @@ const CorrectPayload = Schema.Struct({
 
 /** Credit Note against an issued Invoice or Payment Tax Document (rule D7). */
 export const correct = Effect.fn("correct")(
-  function* (id: DocumentId, input: CorrectionInput, opts?: RequestOptions) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.correct");
+  function* (caller: Caller, id: DocumentId, input: CorrectionInput, opts?: RequestOptions) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.correct");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -342,13 +342,13 @@ export const correct = Effect.fn("correct")(
         const { today } = yield* now;
         const { row: original, deductedBy } = yield* loadForCredit(workspaceId, id, true);
         const { reason, correctedOn, credit } = yield* plan(original, deductedBy, input, today);
-        const { original: updated, creditNote } = yield* issueCreditNote(original, {
+        const { original: updated, creditNote } = yield* issueCreditNote(caller, original, {
           reason,
           issuedOn: today,
           correctedOn,
           credit,
         });
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.correct",
@@ -367,9 +367,9 @@ export const correct = Effect.fn("correct")(
 );
 
 /** The Credit Note `correct(id, input)` would issue, unnumbered; nothing is stored. */
-const previewCorrectionImpl = Effect.fnUntraced(
-  function* (id: DocumentId, input: CorrectionInput) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.correct");
+export const previewCorrection = Effect.fnUntraced(
+  function* (caller: Caller, id: DocumentId, input: CorrectionInput) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.correct");
 
     const { today, at } = yield* now;
     const { row: original, deductedBy } = yield* loadForCredit(workspaceId, id, false);
@@ -405,7 +405,3 @@ const previewCorrectionImpl = Effect.fnUntraced(
   fxDryRun,
   orUnavailable,
 );
-export const previewCorrection: {
-  (input: CorrectionInput): (id: DocumentId) => ReturnType<typeof previewCorrectionImpl>;
-  (id: DocumentId, input: CorrectionInput): ReturnType<typeof previewCorrectionImpl>;
-} = Fn.dual(2, previewCorrectionImpl);

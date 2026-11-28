@@ -7,7 +7,6 @@ import {
   ContactId,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
   DocumentId,
   Documents,
   ExpenseId,
@@ -116,7 +115,7 @@ const setupSeededWorkspace = async () => {
       const templates = yield* Templates;
       const expenses = yield* Expenses;
 
-      const supplierContact = yield* contacts.save({
+      const supplierContact = yield* contacts.save(ownerCaller, {
         name: "Office Depot s.r.o.",
         ico: "45274649",
         address: { city: "Praha", country: "CZ" },
@@ -125,6 +124,7 @@ const setupSeededWorkspace = async () => {
       const supplierContactId = yield* Schema.decodeUnknownEffect(ContactId)(supplierContact["id"]);
 
       yield* ws.saveBankAccount(
+        ownerCaller,
         BankAccountInput.make({
           name: "Main CZK",
           currency: CurrencyCode.make("CZK"),
@@ -135,6 +135,7 @@ const setupSeededWorkspace = async () => {
       );
 
       yield* priceList.save(
+        ownerCaller,
         PriceListItemInput.make({
           name: "Consulting hour",
           unit: "hod",
@@ -144,7 +145,7 @@ const setupSeededWorkspace = async () => {
         }),
       );
 
-      const expense = yield* expenses.record({
+      const expense = yield* expenses.record(ownerCaller, {
         status: "complete",
         supplier: { contact: supplierContactId },
         issuedOn: IsoDate.make("2026-11-10"),
@@ -156,14 +157,14 @@ const setupSeededWorkspace = async () => {
       });
       const expenseId = yield* Schema.decodeUnknownEffect(ExpenseId)(expense["id"]);
 
-      const attachment = yield* expenses.attach(expenseId, {
+      const attachment = yield* expenses.attach(ownerCaller, expenseId, {
         name: "receipt.pdf",
         contentType: "application/pdf",
         bytes: Stream.make(new TextEncoder().encode("%PDF-1.4 receipt")),
       });
       const { id: attachmentId } = yield* Schema.decodeUnknownEffect(IdField)(attachment);
 
-      const template = yield* templates.save({
+      const template = yield* templates.save(ownerCaller, {
         name: "Monthly Retainer",
         kind: "invoice",
         contact: supplierContactId,
@@ -181,7 +182,7 @@ const setupSeededWorkspace = async () => {
       const { id: templateId } = yield* Schema.decodeUnknownEffect(IdField)(template);
 
       return { supplierContactId, expenseId, attachmentId, templateId };
-    }).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+    }),
   );
 
   const rw = h.addReadWriteGrant(owner, ownerCaller.workspaceId, "en");
@@ -470,8 +471,8 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     await h.run(
       Effect.gen(function* () {
         const shareLinks = yield* PublicShareLinks;
-        return yield* shareLinks.create(issuedDoc.id);
-      }).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+        return yield* shareLinks.create(ownerCaller, issuedDoc.id);
+      }),
     );
     const shareRes = await h.callTool(rw.token, "get_share_link", { documentId: issuedDoc.id });
     expect(shareRes.result?.isError).toBe(false);
@@ -677,7 +678,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     const { h, rw, ownerCaller, seeded } = await setupSeededWorkspace();
     const proforma = await h.run(
       Effect.flatMap(Documents, (documents) =>
-        documents.issue({
+        documents.issue(ownerCaller, {
           input: {
             kind: "proforma",
             contact: seeded.supplierContactId,
@@ -690,7 +691,7 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
             ],
           },
         }),
-      ).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+      ),
     );
     const settled = await h.callTool(rw.token, "settle_proforma", {
       proformaId: proforma.id,
@@ -1009,8 +1010,8 @@ describe("MCP 28 tools, 9 resources, two-step confirmation, and scope enforcemen
     await h.run(
       Effect.gen(function* () {
         const docs = yield* Documents;
-        return yield* docs.edit(doc.id, { note: "Concurrent edit" }, doc.revision);
-      }).pipe(Effect.provideService(CurrentCaller, ownerCaller)),
+        return yield* docs.edit(ownerCaller, doc.id, { note: "Concurrent edit" }, doc.revision);
+      }),
     );
 
     const staleConfirm = await h.callTool(rw.token, "send_document", {

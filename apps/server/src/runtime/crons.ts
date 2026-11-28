@@ -61,7 +61,7 @@ export const makeCronHandlers = (options: CronHandlerOptions = {}) => {
   const recurringSweep = Effect.gen(function* () {
     const svc = yield* RecurringModule.RecurringIssuance;
     const engine = yield* WorkflowEngine.WorkflowEngine;
-    yield* svc.sweep((decision) =>
+    yield* svc.sweep((_caller, decision) =>
       RecurringIssuanceWorkflow.execute(
         {
           workspaceId: decision.workspaceId,

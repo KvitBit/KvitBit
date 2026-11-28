@@ -3,7 +3,7 @@
  * Dependencies are captured when the layer is built; the call site's context (caller,
  * transaction frame) wins, so nested calls join an enclosing transaction.
  */
-import type { CurrentCaller } from "@kvitbit/domain/contract";
+
 import { PublicShareLinks } from "@kvitbit/domain/contract";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -27,7 +27,7 @@ export type PublicShareLinksDeps =
   | ShareWorkspaces;
 
 const make = Effect.gen(function* () {
-  // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+  // Only the build dependencies: the build-time context may hold a RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
   const buildContext = yield* Effect.context<PublicShareLinksDeps>();
   const context = Context.pick(
@@ -39,17 +39,17 @@ const make = Effect.gen(function* () {
     ShareLinkKeys,
     ShareWorkspaces,
   )(buildContext);
-  const run = <A, E>(effect: Effect.Effect<A, E, PublicShareLinksDeps | CurrentCaller>) =>
-    Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, PublicShareLinksDeps>) =>
+    Effect.flatMap(Effect.context<never>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
   return PublicShareLinks.of({
-    create: Effect.fn("PublicShareLinks.create")((id) => run(create(id))),
-    revoke: Effect.fn("PublicShareLinks.revoke")((id) => run(revoke(id))),
-    views: Effect.fn("PublicShareLinks.views")((id, page) => run(views(id, page))),
-    open: run(open),
-    pdf: Effect.fn("PublicShareLinks.pdf")((opts) => run(pdf(opts))),
-    logo: run(logo),
+    create: Effect.fn("PublicShareLinks.create")((caller, id) => run(create(caller, id))),
+    revoke: Effect.fn("PublicShareLinks.revoke")((caller, id) => run(revoke(caller, id))),
+    views: Effect.fn("PublicShareLinks.views")((caller, id, page) => run(views(caller, id, page))),
+    open: Effect.fn("PublicShareLinks.open")((caller) => run(open(caller))),
+    pdf: Effect.fn("PublicShareLinks.pdf")((caller, opts) => run(pdf(caller, opts))),
+    logo: Effect.fn("PublicShareLinks.logo")((caller) => run(logo(caller))),
   });
 });
 

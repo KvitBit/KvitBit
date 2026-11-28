@@ -30,6 +30,7 @@ import {
 } from "../../../src/modules/expenses";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { MemoryBlobStorage, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 import {
   asCaller,
@@ -73,14 +74,15 @@ describe("attachments", () => {
     const digest = await sha256("%PDF-1.7 receipt");
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const attachResult = yield* s.attach(id, pdf());
+        const attachResult = yield* s.attach(testCaller, id, pdf());
         const att = yield* attachmentFields(attachResult);
-        const getResult = yield* s.get(id);
+        const getResult = yield* s.get(testCaller, id);
         const view = fields(getResult);
-        const download = yield* s.attachment(id, att.id);
+        const download = yield* s.attachment(testCaller, id, att.id);
         const text = yield* collect(download.bytes);
         const blobs = yield* Ref.get((yield* MemoryBlobStorage).blobs);
         const store = yield* CoreStore;
@@ -119,15 +121,16 @@ describe("attachments", () => {
   test("attach is idempotent by content hash: same bytes return the same attachment, one blob", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const attachResult = yield* s.attach(id, pdf());
+        const attachResult = yield* s.attach(testCaller, id, pdf());
         const first = yield* attachmentFields(attachResult);
-        const attachResult2 = yield* s.attach(id, { ...pdf(), name: "again.pdf" });
+        const attachResult2 = yield* s.attach(testCaller, id, { ...pdf(), name: "again.pdf" });
         const second = yield* attachmentFields(attachResult2);
         const blobs = yield* Ref.get((yield* MemoryBlobStorage).blobs);
-        const view = yield* s.get(id);
+        const view = yield* s.get(testCaller, id);
         return {
           same: first.id === second.id,
           blobs: blobs.size,
@@ -146,29 +149,30 @@ describe("attachments", () => {
     ).pipe(Layer.provideMerge(FakeExpenseSuppliers), Layer.provideMerge(ExpensesRepoMemory));
     const exit = await scenarioWithLayer(layer)(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
         const big = yield* Effect.exit(
-          s.attach(id, {
+          s.attach(testCaller, id, {
             ...pdf(),
             bytes: Stream.make(new TextEncoder().encode("%PDF-"), new Uint8Array(25)),
           }),
         );
         const exe = yield* Effect.exit(
-          s.attach(id, {
+          s.attach(testCaller, id, {
             name: "x.exe",
             contentType: "application/x-msdownload",
             bytes: bytesOf("MZ"),
           }),
         );
-        const attachResult = yield* s.attach(id, {
+        const attachResult = yield* s.attach(testCaller, id, {
           name: "IMG.HEIC",
           contentType: "Image/HEIC; charset=binary",
           bytes: Stream.make(HEIC_HEAD),
         });
         const heic = yield* attachmentFields(attachResult);
-        const view = yield* s.get(id);
+        const view = yield* s.get(testCaller, id);
         return {
           big,
           exe,
@@ -198,14 +202,21 @@ describe("attachments", () => {
   test("magic bytes: a spoofed or empty upload is attachment.type_rejected and stores no blob", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
         const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
-        const spoofed = yield* Effect.exit(s.attach(id, { ...pdf(), bytes: Stream.make(png) }));
-        const empty = yield* Effect.exit(s.attach(id, { ...pdf(), bytes: Stream.empty }));
-        const short = yield* Effect.exit(s.attach(id, { ...pdf(), bytes: bytesOf("%PD") }));
-        const attachResult = yield* s.attach(id, {
+        const spoofed = yield* Effect.exit(
+          s.attach(testCaller, id, { ...pdf(), bytes: Stream.make(png) }),
+        );
+        const empty = yield* Effect.exit(
+          s.attach(testCaller, id, { ...pdf(), bytes: Stream.empty }),
+        );
+        const short = yield* Effect.exit(
+          s.attach(testCaller, id, { ...pdf(), bytes: bytesOf("%PD") }),
+        );
+        const attachResult = yield* s.attach(testCaller, id, {
           name: "p.png",
           contentType: "image/png",
           bytes: Stream.make(png),
@@ -234,14 +245,15 @@ describe("attachments", () => {
   test("attach returns the Expense revision after it", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const attachResult = yield* s.attach(id, pdf());
+        const attachResult = yield* s.attach(testCaller, id, pdf());
         const att = yield* attachmentFields(attachResult);
-        const attachResult2 = yield* s.attach(id, pdf());
+        const attachResult2 = yield* s.attach(testCaller, id, pdf());
         const again = yield* attachmentFields(attachResult2);
-        const view = yield* s.get(id);
+        const view = yield* s.get(testCaller, id);
         return [att.expenseRevision, again.expenseRevision, fields(view).revision];
       }),
     );
@@ -251,12 +263,13 @@ describe("attachments", () => {
   test("blob storage down is Unavailable{blob_storage} and leaves no attachment", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
         yield* Ref.set((yield* MemoryBlobStorage).unavailable, true);
-        const down = yield* Effect.exit(s.attach(id, pdf()));
-        const view = yield* s.get(id);
+        const down = yield* Effect.exit(s.attach(testCaller, id, pdf()));
+        const view = yield* s.get(testCaller, id);
         return { down: down.pipe(withoutStackTrace), attached: fields(view).attachments.length };
       }),
     );
@@ -271,22 +284,23 @@ describe("attachments", () => {
   test("detach removes the row, then the blob; another Expense's attachment is NotFound", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const a = expenseId(result);
         const result2 = yield* record({ status: "incomplete" });
         const b = expenseId(result2);
         const s = yield* Expenses;
-        const attachResult = yield* s.attach(a, pdf());
+        const attachResult = yield* s.attach(testCaller, a, pdf());
         const { id: attachmentId } = yield* attachmentFields(attachResult);
-        const wrongExpense = yield* Effect.exit(s.detach(b, attachmentId));
-        const wrongRead = yield* Effect.exit(s.attachment(b, attachmentId));
-        yield* s.detach(a, attachmentId);
+        const wrongExpense = yield* Effect.exit(s.detach(testCaller, b, attachmentId));
+        const wrongRead = yield* Effect.exit(s.attachment(testCaller, b, attachmentId));
+        yield* s.detach(testCaller, a, attachmentId);
         // Detach is idempotent by state (C6): a retry succeeds, with no second audit entry.
-        const again = yield* Effect.exit(s.detach(a, attachmentId));
+        const again = yield* Effect.exit(s.detach(testCaller, a, attachmentId));
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id: a });
         const blobs = yield* Ref.get((yield* MemoryBlobStorage).blobs);
-        const getResult = yield* s.get(a);
+        const getResult = yield* s.get(testCaller, a);
         const view = fields(getResult);
         return {
           wrongExpense,
@@ -315,13 +329,14 @@ describe("attachments", () => {
   test("a row whose blob is gone reads as Unavailable{blob_storage}", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const attachResult = yield* s.attach(id, pdf());
+        const attachResult = yield* s.attach(testCaller, id, pdf());
         const { id: attachmentId } = yield* attachmentFields(attachResult);
         yield* Ref.set((yield* MemoryBlobStorage).blobs, new Map<BlobKey, never>());
-        return yield* Effect.exit(s.attachment(id, attachmentId));
+        return yield* Effect.exit(s.attachment(testCaller, id, attachmentId));
       }),
     );
     expect(exit).toEqual(
@@ -335,7 +350,7 @@ describe("attachments", () => {
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const foreign = yield* s.attach(id, pdf()).pipe(asCaller(ownerB), Effect.exit);
+        const foreign = yield* s.attach(ownerB, id, pdf()).pipe(asCaller(ownerB), Effect.exit);
         const blobs = yield* Ref.get((yield* MemoryBlobStorage).blobs);
         return { foreign, blobs: blobs.size, id };
       }),
@@ -356,6 +371,7 @@ describe("ExpensePayables (Payments seam)", () => {
   test("lock reads the payable; settle stores the paid state and derives the settlement", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record(czkInput);
         const id = expenseId(result);
         const payables = yield* ExpensePayables;
@@ -369,7 +385,7 @@ describe("ExpensePayables (Payments seam)", () => {
         const over = yield* inTx(
           payables.settle(WORKSPACE_A, id, { amount: czk("150"), payments: 3 }),
         );
-        const getResult = yield* (yield* Expenses).get(id);
+        const getResult = yield* (yield* Expenses).get(testCaller, id);
         const view = fields(getResult);
         return { before, partial, paid, over, payment: view.payment, revision: view.revision };
       }),
@@ -398,19 +414,20 @@ describe("ExpensePayables (Payments seam)", () => {
   test("an Expense with payments cannot be removed, change currency or become incomplete", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record(czkInput);
         const id = expenseId(result);
         const payables = yield* ExpensePayables;
         yield* inTx(payables.settle(WORKSPACE_A, id, { amount: czk("21"), payments: 1 }));
         const s = yield* Expenses;
-        const remove = yield* Effect.exit(s.remove(id, 2));
+        const remove = yield* Effect.exit(s.remove(testCaller, id, 2));
         const currency = yield* Effect.exit(
-          s.edit(id, { currency: "EUR", taxableSupplyOn: "2026-11-22" }, 2),
+          s.edit(testCaller, id, { currency: "EUR", taxableSupplyOn: "2026-11-22" }, 2),
         );
-        const incomplete = yield* Effect.exit(s.edit(id, { status: "incomplete" }, 2));
+        const incomplete = yield* Effect.exit(s.edit(testCaller, id, { status: "incomplete" }, 2));
         // Removing the last Payment unblocks removal.
         yield* inTx(payables.settle(WORKSPACE_A, id, { amount: czk("0"), payments: 0 }));
-        const removed = yield* Effect.exit(s.remove(id, 3));
+        const removed = yield* Effect.exit(s.remove(testCaller, id, 3));
         return { remove, currency, incomplete, removed };
       }),
     );
@@ -431,6 +448,7 @@ describe("ExpensePayables (Payments seam)", () => {
   test("lock: another Workspace's or a removed Expense is NotFound; incomplete shows its status", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const payables = yield* ExpensePayables;
         const s = yield* Expenses;
         const result = yield* record(czkInput);
@@ -439,7 +457,7 @@ describe("ExpensePayables (Payments seam)", () => {
         const draft = expenseId(result2);
         const foreign = yield* payables.lock(WORKSPACE_B, id).pipe(inTx, Effect.exit);
         const incomplete = yield* inTx(payables.lock(WORKSPACE_A, draft));
-        yield* s.remove(id, 1);
+        yield* s.remove(testCaller, id, 1);
         const removed = yield* payables.lock(WORKSPACE_A, id).pipe(inTx, Effect.exit);
         const settleRemoved = yield* payables
           .settle(WORKSPACE_A, id, { amount: czk("1"), payments: 1 })
@@ -467,6 +485,7 @@ describe("ExpenseRecords (Reports seam)", () => {
   test("complete Expenses by issuedOn or taxPoint; incomplete and removed left out and counted", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const s = yield* Expenses;
         const result = yield* record(czkInput);
         const nov = expenseId(result); // issued 11-20, tax point 11-19
@@ -478,7 +497,7 @@ describe("ExpenseRecords (Reports seam)", () => {
         const dec = expenseId(result2);
         const result3 = yield* record(czkInput);
         const gone = expenseId(result3);
-        yield* s.remove(gone, 1);
+        yield* s.remove(testCaller, gone, 1);
         yield* record({ status: "incomplete", issuedOn: "2026-11-20" });
         yield* record({ ...czkInput, supplier: { manual: { name: "B supplier" } } }).pipe(
           asCaller(ownerB),

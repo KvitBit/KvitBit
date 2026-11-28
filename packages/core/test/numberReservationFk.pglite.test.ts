@@ -1,3 +1,4 @@
+import { TestCaller } from "./helpers/callerContext";
 /**
  * `number_reservations_document_fk` (not deferrable) against the committed migration on PGlite.
  * Each flow runs on the real core over the in-memory store while a recorder logs, in order,
@@ -9,7 +10,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { PGlite } from "@electric-sql/pglite";
 import type { DocumentId } from "@kvitbit/domain/contract";
-import { CurrentCaller, Documents, IsoDate } from "@kvitbit/domain/contract";
+import { Documents, IsoDate } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
@@ -73,7 +74,7 @@ const TODAY = IsoDate.make("2026-11-23");
 
 /** Runs `flow` on the real core and returns the recorded statements of its last transaction. */
 const record = async <A, E>(
-  flow: Effect.Effect<A, E, CurrentCaller | Documents | DocumentPayments | CoreStore>,
+  flow: Effect.Effect<A, E, TestCaller | Documents | DocumentPayments | CoreStore>,
 ): Promise<ReadonlyArray<Event>> => {
   const log: Array<Event> = [];
   const exit = await runTest(
@@ -178,14 +179,18 @@ afterAll(async () => {
 });
 
 const issue = (kind: "invoice" | "proforma") =>
-  Effect.flatMap(Documents, (documents) => documents.issue({ input: invoiceInput({ kind }) }));
+  Effect.flatMap(Documents, (documents) =>
+    Effect.flatMap(TestCaller, (caller) =>
+      documents.issue(caller, { input: invoiceInput({ kind }) }),
+    ),
+  );
 
 /** Records the payment on the Proforma and issues its PTD, as `Payments.record` does. */
 const payInFull = (id: DocumentId, amount: BigDecimal.BigDecimal) =>
   Effect.gen(function* () {
     const store = yield* CoreStore;
     const seam = yield* DocumentPayments;
-    const caller = yield* CurrentCaller;
+    const caller = yield* TestCaller;
     return yield* store.transaction(
       Effect.gen(function* () {
         const on = (yield* seam.lock(WORKSPACE_A, id)).settleOn;
@@ -210,7 +215,11 @@ const flows = [
     name: "Credit Note",
     kind: "credit_note",
     run: Effect.flatMap(issue("invoice"), (original) =>
-      Effect.flatMap(Documents, (d) => d.correct(original.id, { reason: "sleva", lines: "full" })),
+      Effect.flatMap(Documents, (d) =>
+        Effect.flatMap(TestCaller, (caller) =>
+          d.correct(caller, original.id, { reason: "sleva", lines: "full" }),
+        ),
+      ),
     ),
   },
   {
@@ -224,7 +233,9 @@ const flows = [
     run: Effect.flatMap(issue("proforma"), (p) =>
       Effect.andThen(
         payInFull(p.id, p.totals.gross.amount),
-        Effect.flatMap(Documents, (d) => d.issueFinalInvoice(p.id)),
+        Effect.flatMap(Documents, (d) =>
+          Effect.flatMap(TestCaller, (caller) => d.issueFinalInvoice(caller, p.id)),
+        ),
       ),
     ),
   },

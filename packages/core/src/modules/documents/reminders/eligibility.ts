@@ -13,7 +13,7 @@
  *   queued under the old one is skipped at claim and the new arm queues its own.
  */
 
-import type { DeliveryId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
+import type { Caller, DeliveryId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
@@ -72,11 +72,12 @@ export const isArmed: {
 
 /** Whether `record` is armed and remindable now, with its live reminders for `dueOn`. */
 export const reminderState = Effect.fn("reminderState")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   record: DocumentRecord,
   today: IsoDate,
 ) {
-  const effective = yield* effectiveReminders(workspaceId, record, today);
+  const effective = yield* effectiveReminders(caller, workspaceId, record, today);
   const deliveries = yield* (yield* DeliveriesRepo).byDocument(workspaceId, record.id);
   const arm = EffectArray.filter(deliveries, (d) => d.arms).at(-1)?.sequence ?? 0;
   const live = EffectArray.filter(

@@ -6,7 +6,7 @@ import * as Schema from "effect/Schema";
 import type * as Stream from "effect/Stream";
 import * as Struct from "effect/Struct";
 import { IssueCode } from "../action";
-import type { CurrentCaller } from "../caller";
+import type { Caller } from "../caller";
 import type { Conflict, CoreError, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { AttachmentId, ExpenseId, TemplateId } from "../ids";
 import { DeliveryId, DocumentId } from "../ids";
@@ -50,54 +50,53 @@ export type ExpenseQuery = typeof ExpenseQuery.Type;
 export const AttachmentView = Schema.Unknown.pipe(Schema.brand("AttachmentView"));
 export type AttachmentView = typeof AttachmentView.Type;
 
-// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Expenses extends Context.Service<
   Expenses,
   {
     /** Supplier is a Contact or an IČO (resolved through Contacts.fromIco). */
     readonly record: (
+      caller: Caller,
       input: ExpenseInput,
       opts?: RequestOptions,
-    ) => Effect.Effect<
-      ExpenseView,
-      Invalid | NotFound | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<ExpenseView, Invalid | NotFound | Conflict | Unavailable | Forbidden>;
     readonly edit: (
+      caller: Caller,
       id: ExpenseId,
       patch: ExpensePatch,
       expectedRevision: number,
-    ) => Effect.Effect<
-      ExpenseView,
-      NotFound | Invalid | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<ExpenseView, NotFound | Invalid | Conflict | Unavailable | Forbidden>;
     readonly remove: (
+      caller: Caller,
       id: ExpenseId,
       expectedRevision: number,
-    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Conflict | Unavailable | Forbidden>;
     readonly attach: (
+      caller: Caller,
       id: ExpenseId,
       file: {
         readonly name: string;
         readonly contentType: string;
         readonly bytes: Stream.Stream<Uint8Array>;
       },
-    ) => Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden>;
     readonly detach: (
+      caller: Caller,
       id: ExpenseId,
       attachment: AttachmentId,
-    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden>;
     readonly attachment: (
+      caller: Caller,
       id: ExpenseId,
       attachment: AttachmentId,
-    ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden>;
     readonly get: (
+      caller: Caller,
       id: ExpenseId,
-    ) => Effect.Effect<ExpenseView, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ExpenseView, NotFound | Unavailable | Forbidden>;
     readonly list: (
+      caller: Caller,
       q: ExpenseQuery,
-    ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Unavailable | Forbidden>;
   }
 >()("@kvitbit/domain/modules/expenses") {}
 
@@ -142,57 +141,49 @@ export const RecurringRunView = Schema.Struct({
 export type RecurringRunView = typeof RecurringRunView.Type;
 
 /** Owns Invoice Templates and their Recurring Schedules. */
-// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Templates extends Context.Service<
   Templates,
   {
     readonly save: (
+      caller: Caller,
       input: TemplateInput & { readonly id?: TemplateId; readonly expectedRevision?: number },
       opts?: RequestOptions,
-    ) => Effect.Effect<
-      TemplateView,
-      Invalid | NotFound | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Unavailable | Forbidden>;
     readonly archive: (
+      caller: Caller,
       id: TemplateId,
-    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden>;
     /** Attach, change, or detach (null) the Recurring Schedule. Durable once this returns. */
     readonly schedule: (
+      caller: Caller,
       template: TemplateId,
       schedule: TemplateSchedule | null,
       expectedRevision: number,
-    ) => Effect.Effect<
-      TemplateView,
-      Invalid | NotFound | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<TemplateView, Invalid | NotFound | Conflict | Unavailable | Forbidden>;
     /** Clears a failure pause; the next sweep issues due occurrences. */
     readonly resume: (
+      caller: Caller,
       template: TemplateId,
-    ) => Effect.Effect<TemplateView, NotFound | Conflict | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<TemplateView, NotFound | Conflict | Unavailable | Forbidden>;
     /** Manual use: delegates to Documents.createDraft or Documents.issue with template values as defaults. */
     readonly use: (
+      caller: Caller,
       template: TemplateId,
       input?: { readonly as?: "draft" | "issued"; readonly patch?: DocumentPatch },
       opts?: RequestOptions,
-    ) => Effect.Effect<DocumentView, CoreError, CurrentCaller>;
+    ) => Effect.Effect<DocumentView, CoreError>;
     readonly get: (
+      caller: Caller,
       id: TemplateId,
-    ) => Effect.Effect<TemplateView, NotFound | Unavailable | Forbidden, CurrentCaller>;
-    readonly list: Effect.Effect<
-      ReadonlyArray<TemplateView>,
-      Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<TemplateView, NotFound | Unavailable | Forbidden>;
+    readonly list: (
+      caller: Caller,
+    ) => Effect.Effect<ReadonlyArray<TemplateView>, Unavailable | Forbidden>;
     /** Run history of the template's Recurring Schedule, newest occurrence first. */
     readonly runs: (
+      caller: Caller,
       template: TemplateId,
       page?: PageRequest,
-    ) => Effect.Effect<
-      Page<RecurringRunView>,
-      Invalid | NotFound | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<Page<RecurringRunView>, Invalid | NotFound | Unavailable | Forbidden>;
   }
 >()("@kvitbit/domain/modules/expenses/Templates") {}

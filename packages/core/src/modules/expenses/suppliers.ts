@@ -15,7 +15,7 @@ import type {
   Unavailable,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, NotFound } from "@kvitbit/domain/contract";
+import { NotFound } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -64,7 +64,7 @@ export const FakeExpenseSuppliers: Layer.Layer<ExpenseSuppliers | FakeSupplierDi
         action: "contact.read" | "contact.write",
         match: (c: FakeSupplier) => boolean,
       ) {
-        yield* authorize(action).pipe(Effect.provideService(CurrentCaller, caller));
+        yield* authorize(caller, action);
         const ws = caller._tag === "Member" || caller._tag === "System" ? caller.workspaceId : null;
         const value = yield* Ref.get(dir.contacts);
         return Option.getOrUndefined(

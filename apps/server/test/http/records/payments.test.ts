@@ -3,7 +3,6 @@ import { strictEqual } from "node:assert/strict";
 import {
   ContactId,
   Contacts,
-  CurrentCaller,
   type DocumentId,
   Documents,
   IsoDate,
@@ -14,6 +13,7 @@ import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
+
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
 
 const decodeIds = Fn.flow(
@@ -44,14 +44,14 @@ beforeEach(async () => {
     Effect.gen(function* () {
       const contacts = yield* Contacts;
       const documents = yield* Documents;
-      const contact = yield* contacts.save({
+      const contact = yield* contacts.save(member, {
         name: "Odběratel a.s.",
         ico: "25596641",
         address: { city: "Brno", country: "CZ" },
         roles: ["customer", "supplier"],
       });
       const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
-      const doc = yield* documents.issue({
+      const doc = yield* documents.issue(member, {
         input: {
           kind: "invoice",
           contact: contactId,
@@ -67,7 +67,7 @@ beforeEach(async () => {
         },
       });
       return { contactId, documentId: doc.id };
-    }).pipe(Effect.provideService(CurrentCaller, member)),
+    }),
   );
   documentId = seeded.documentId;
 

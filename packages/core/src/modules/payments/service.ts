@@ -21,7 +21,6 @@ import type {
 } from "@kvitbit/domain/contract";
 import {
   Conflict,
-  type CurrentCaller,
   Invalid,
   MoneyMath,
   PaymentId as PaymentIdSchema,
@@ -186,8 +185,8 @@ const taxDocumentFor = Effect.fn("taxDocumentFor")(function* (
 const isRecipientIssue = (issue: Invalid["issues"][number]) => issue.path[0] === "to";
 
 /** A skipped auto-send, recorded on the PTD so the gap is visible in its history. */
-const skipped = (workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
-  appendAudit({
+const skipped = (caller: Caller, workspaceId: WorkspaceId, ptd: DocumentId, reason: string) =>
+  appendAudit(caller, {
     workspaceId,
     subject: { entity: "Document", id: ptd },
     action: "payment.autoSendSkipped",
@@ -209,9 +208,10 @@ const autoSend = Effect.fn("autoSend")(function* (
   ptdId: DocumentId,
   ptd: DocumentView,
 ) {
-  if (!(yield* (yield* PaymentSettings).autoSendPaymentTaxDocument(workspaceId))) return ptd;
+  if (!(yield* (yield* PaymentSettings).autoSendPaymentTaxDocument(caller, workspaceId)))
+    return ptd;
   if (!can(caller, "document.send")) {
-    yield* skipped(workspaceId, ptdId, "caller_cannot_send");
+    yield* skipped(caller, workspaceId, ptdId, "caller_cannot_send");
     return ptd;
   }
   const store = yield* CoreStore;
@@ -224,12 +224,16 @@ const autoSend = Effect.fn("autoSend")(function* (
     Effect.catchTags({
       Conflict: (e) =>
         e.reason === "illegal_transition"
-          ? Effect.as(skipped(workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`), false)
+          ? Effect.as(
+              skipped(caller, workspaceId, ptdId, `Conflict:${e.detail ?? e.reason}`),
+              false,
+            )
           : Effect.fail(e),
       Invalid: (e) =>
         e.issues.length > 0 && EffectArray.every(e.issues, isRecipientIssue)
           ? Effect.as(
               skipped(
+                caller,
                 workspaceId,
                 ptdId,
                 `Invalid:${EffectArray.join(
@@ -299,6 +303,7 @@ const recordOnDocument = Effect.fn("recordOnDocument")(function* (
 
 /** Audit on the Expense subject: Expenses' paid state is not audited by ExpensePayables. */
 const auditExpense = (
+  caller: Caller,
   workspaceId: WorkspaceId,
   id: ExpenseId,
   before: {
@@ -316,7 +321,7 @@ const auditExpense = (
   payment: AuditEntry["changes"][number],
   reason: string | null,
 ) =>
-  appendAudit({
+  appendAudit(caller, {
     workspaceId,
     subject: { entity: "Expense", id },
     action,
@@ -335,6 +340,7 @@ const auditExpense = (
   });
 
 const recordOnExpense = Effect.fn("recordOnExpense")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   id: ExpenseId,
   input: RecordPaymentInput,
@@ -366,6 +372,7 @@ const recordOnExpense = Effect.fn("recordOnExpense")(function* (
     payments: paid.payments,
   });
   yield* auditExpense(
+    caller,
     workspaceId,
     id,
     { ...expense, paid: paidBefore },
@@ -382,8 +389,11 @@ const recordOnExpense = Effect.fn("recordOnExpense")(function* (
 });
 
 export const record = Effect.fn("record")(
-  function* (input: RecordPaymentInput, opts?: RequestOptions) {
-    const { caller, workspaceId } = yield* authorizeInWorkspace("payment.write");
+  function* (caller: Caller, input: RecordPaymentInput, opts?: RequestOptions) {
+    const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+      caller,
+      "payment.write",
+    );
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -395,8 +405,8 @@ export const record = Effect.fn("record")(
       Effect.gen(function* () {
         const target = input.target;
         return "document" in target
-          ? yield* recordOnDocument(caller, workspaceId, target.document, input)
-          : yield* recordOnExpense(workspaceId, target.expense, input);
+          ? yield* recordOnDocument(workspaceCaller, workspaceId, target.document, input)
+          : yield* recordOnExpense(workspaceCaller, workspaceId, target.expense, input);
       }),
     );
   },
@@ -408,8 +418,11 @@ export const record = Effect.fn("record")(
  * P3: blocked while a Final Invoice deducts the advance or its PTD is not fully credited.
  */
 export const remove = Effect.fn("remove")(
-  function* (id: PaymentId, reason: string) {
-    const { caller, workspaceId } = yield* authorizeInWorkspace("payment.write");
+  function* (caller: Caller, id: PaymentId, reason: string) {
+    const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+      caller,
+      "payment.write",
+    );
     const why = EffectString.trim(reason);
     if (why === "") return yield* malformed("reason", "required");
     const store = yield* CoreStore;
@@ -436,7 +449,7 @@ export const remove = Effect.fn("remove")(
             .update({ ...row, removedAt: at, updatedAt: at }, row.revision)
             .pipe(Effect.catchTags({ Conflict: Effect.die, UniqueViolation: Effect.die }));
           const value_1 = yield* repo.liveFor(workspaceId, { document: documentId });
-          yield* seam.settle(caller, workspaceId, documentId, paidOf(value_1), {
+          yield* seam.settle(workspaceCaller, workspaceId, documentId, paidOf(value_1), {
             action: "payment.remove",
             reason: why,
             details: [
@@ -464,6 +477,7 @@ export const remove = Effect.fn("remove")(
           payments: paid.payments,
         });
         yield* auditExpense(
+          caller,
           workspaceId,
           expenseId,
           { ...expense, paid: expense.paid?.amount ?? ZERO },
@@ -480,8 +494,8 @@ export const remove = Effect.fn("remove")(
 
 /** Live payments of a target, oldest first. Another Workspace's target is NotFound. */
 export const listFor = Effect.fn("listFor")(
-  function* (target: PaymentTarget) {
-    const { workspaceId } = yield* authorizeInWorkspace("payment.read");
+  function* (caller: Caller, target: PaymentTarget) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "payment.read");
     const store = yield* CoreStore;
     const repo = yield* PaymentsRepo;
     return yield* store.transaction(
@@ -502,7 +516,7 @@ export const listFor = Effect.fn("listFor")(
 );
 
 const make = Effect.gen(function* () {
-  // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+  // Only the build dependencies: the build-time context may hold a RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
   const buildContext = yield* Effect.context<PaymentsDeps>();
   const context = Context.pick(
@@ -516,14 +530,14 @@ const make = Effect.gen(function* () {
     PaymentSettings,
   )(buildContext);
   // The call site's context wins: its caller, RequestOutcome and CoreStore transaction frame.
-  const run = <A, E>(effect: Effect.Effect<A, E, PaymentsDeps | CurrentCaller>) =>
-    Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, PaymentsDeps>) =>
+    Effect.flatMap(Effect.context<never>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
   return Payments.of({
-    record: Effect.fn("Payments.record")((input, opts) => run(record(input, opts))),
-    remove: Effect.fn("Payments.remove")((id, reason) => run(remove(id, reason))),
-    listFor: Effect.fn("Payments.listFor")((target) => run(listFor(target))),
+    record: Effect.fn("Payments.record")((caller, input, opts) => run(record(caller, input, opts))),
+    remove: Effect.fn("Payments.remove")((caller, id, reason) => run(remove(caller, id, reason))),
+    listFor: Effect.fn("Payments.listFor")((caller, target) => run(listFor(caller, target))),
   });
 });
 

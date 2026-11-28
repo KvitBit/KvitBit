@@ -39,7 +39,7 @@ const forbidden = (
  * - Leave: a scoped token without `members:write` is `Forbidden{member.leave}` first; then the
  *   owner cannot leave (`Conflict{illegal_transition, member.owner_cannot_leave}`, R3). The
  *   owner never holds `member.leave`, so `Workspaces.leave` authorizes through this guard, not
- *   through a preceding `authorize("member.leave")`.
+ *   through a preceding `authorize(caller, "member.leave")`.
  * - Any change that makes or touches an `admin` also needs `member.manageAdmins` (R1c).
  */
 export const checkMembershipChange: {

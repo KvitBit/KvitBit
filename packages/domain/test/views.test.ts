@@ -271,7 +271,7 @@ describe("SharedDocumentView is a closed recipient projection", () => {
 
 describe("Documents.list takes filter and paging", () => {
   test("cursor and limit are part of the port input", () => {
-    type ListInput = Parameters<Documents["Service"]["list"]>[0];
+    type ListInput = Parameters<Documents["Service"]["list"]>[1];
     const next: ListInput = { kind: "invoice", cursor: "c2", limit: 20 };
     expect(next.cursor).toBe("c2");
     expect(next.limit).toBe(20);

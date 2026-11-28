@@ -1,5 +1,5 @@
 /** `documents` group handlers (http-mcp-contracts 3.4 & 3.5.4): one Documents method per endpoint. */
-import { API_PREFIX, Api } from "@kvitbit/api-contract";
+import { API_PREFIX, Api, RequestCaller } from "@kvitbit/api-contract";
 import { Documents } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -22,96 +22,137 @@ export const DocumentsGroupLive = HttpApiBuilder.group(
     const documents = yield* Documents;
     return handlers
       .handle("list", ({ query }) =>
-        Effect.map(documents.list(compact(query)), jsonizeDocumentPage),
-      )
-      .handle("preview", ({ payload }) =>
-        Effect.map(documents.preview(payload), jsonizeDocumentView),
-      )
-      .handle("createDraft", ({ params, headers, payload }) =>
-        documents.createDraft(payload, requestOptions(headers)).pipe(
-          Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
-          Effect.map(jsonizeDocumentView),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(documents.list(caller, compact(query)), jsonizeDocumentPage),
         ),
       )
-      .handle("issueFromInput", ({ params, headers, payload }) =>
-        documents
-          .issue(
-            { input: payload.input },
-            {
-              ...requestOptions(headers),
-              ...compact({ send: payload.send }),
-            },
-          )
-          .pipe(
+      .handle("preview", ({ payload }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(documents.preview(caller, payload), jsonizeDocumentView),
+        ),
+      )
+      .handle("createDraft", ({ params, headers, payload }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          documents.createDraft(caller, payload, requestOptions(headers)).pipe(
             Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
             Effect.map(jsonizeDocumentView),
           ),
+        ),
+      )
+      .handle("issueFromInput", ({ params, headers, payload }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          documents
+            .issue(
+              caller,
+              { input: payload.input },
+              {
+                ...requestOptions(headers),
+                ...compact({ send: payload.send }),
+              },
+            )
+            .pipe(
+              Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+              Effect.map(jsonizeDocumentView),
+            ),
+        ),
       )
       .handle("get", ({ params }) =>
-        Effect.map(documents.get(params.documentId), jsonizeDocumentView),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(documents.get(caller, params.documentId), jsonizeDocumentView),
+        ),
       )
       .handle("edit", ({ params, headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          documents.edit(params.documentId, payload, expectedRevision),
-        ).pipe(Effect.map(jsonizeDocumentView)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            documents.edit(caller, params.documentId, payload, expectedRevision),
+          ).pipe(Effect.map(jsonizeDocumentView)),
+        ),
       )
       .handle("discardDraft", ({ params, headers }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          documents.discardDraft(params.documentId, expectedRevision),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            documents.discardDraft(caller, params.documentId, expectedRevision),
+          ),
         ),
       )
       .handle("issueDraft", ({ params, headers, payload }) =>
-        withRevision(headers["if-match"], (expectedRevision) =>
-          documents.issue(
-            { draft: params.documentId, expectedRevision },
-            {
-              ...requestOptions(headers),
-              ...compact({ send: payload.send }),
-            },
-          ),
-        ).pipe(Effect.map(jsonizeDocumentView)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withRevision(headers["if-match"], (expectedRevision) =>
+            documents.issue(
+              caller,
+              { draft: params.documentId, expectedRevision },
+              {
+                ...requestOptions(headers),
+                ...compact({ send: payload.send }),
+              },
+            ),
+          ).pipe(Effect.map(jsonizeDocumentView)),
+        ),
       )
       .handle("lock", ({ params }) =>
-        Effect.map(documents.lock(params.documentId), jsonizeDocumentView),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(documents.lock(caller, params.documentId), jsonizeDocumentView),
+        ),
       )
       .handle("unlock", ({ params, payload }) =>
-        Effect.map(documents.unlock(params.documentId, payload.reason), jsonizeDocumentView),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(
+            documents.unlock(caller, params.documentId, payload.reason),
+            jsonizeDocumentView,
+          ),
+        ),
       )
       .handle("cancel", ({ params, headers, payload }) =>
-        Effect.map(
-          documents.cancel(params.documentId, payload, requestOptions(headers)),
-          (result) => ({
-            document: jsonizeDocumentView(result.document),
-            creditNote: result.creditNote === null ? null : jsonizeDocumentView(result.creditNote),
-          }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(
+            documents.cancel(caller, params.documentId, payload, requestOptions(headers)),
+            (result) => ({
+              document: jsonizeDocumentView(result.document),
+              creditNote:
+                result.creditNote === null ? null : jsonizeDocumentView(result.creditNote),
+            }),
+          ),
         ),
       )
       .handle("correct", ({ params, headers, payload }) =>
-        documents.correct(params.documentId, payload, requestOptions(headers)).pipe(
-          Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
-          Effect.map(jsonizeDocumentView),
+        Effect.flatMap(RequestCaller, (caller) =>
+          documents.correct(caller, params.documentId, payload, requestOptions(headers)).pipe(
+            Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+            Effect.map(jsonizeDocumentView),
+          ),
         ),
       )
       .handle("issueFinalInvoice", ({ params, headers, payload }) =>
-        documents.issueFinalInvoice(params.documentId, payload, requestOptions(headers)).pipe(
-          Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
-          Effect.map(jsonizeDocumentView),
+        Effect.flatMap(RequestCaller, (caller) =>
+          documents
+            .issueFinalInvoice(caller, params.documentId, payload, requestOptions(headers))
+            .pipe(
+              Effect.tap((view) => setLocation(documentLocation(params.workspaceId, view.id))),
+              Effect.map(jsonizeDocumentView),
+            ),
         ),
       )
       .handle("send", ({ params, headers, payload }) =>
-        documents.send(params.documentId, payload, requestOptions(headers)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          documents.send(caller, params.documentId, payload, requestOptions(headers)),
+        ),
       )
       .handle("pdf", ({ params, query }) =>
-        Effect.map(
-          documents.pdf(
-            params.documentId,
-            compact({ template: query.template, language: query.language }),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(
+            documents.pdf(
+              caller,
+              params.documentId,
+              compact({ template: query.template, language: query.language }),
+            ),
+            downloadResponse({ disposition: query.disposition }),
           ),
-          downloadResponse({ disposition: query.disposition }),
         ),
       )
       .handle("history", ({ params }) =>
-        Effect.map(documents.history(params.documentId), jsonizeAuditEntries),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.map(documents.history(caller, params.documentId), jsonizeAuditEntries),
+        ),
       );
   }),
 );

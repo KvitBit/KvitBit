@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 /** Regressions for review round 1 on 0fbe8de. */
 
 import { describe, expect, test } from "bun:test";
@@ -94,6 +95,7 @@ describe("HEIC brands and streaming", () => {
     expect(box.length).toBe(68);
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
@@ -102,14 +104,18 @@ describe("HEIC brands and streaming", () => {
         const chunks = Array.from({ length: Math.ceil(bytes.length / 5) }, (_, i) =>
           bytes.subarray(i * 5, i * 5 + 5),
         );
-        const att = yield* s.attach(id, {
+        const att = yield* s.attach(testCaller, id, {
           name: "IMG.HEIC",
           contentType: "image/heic",
           bytes: Stream.fromIterable(chunks),
         });
         const notHeic = ftyp("mif1", ...Array.from({ length: 13 }, () => "mif1"));
         const rejected = yield* Effect.exit(
-          s.attach(id, { name: "x.heic", contentType: "image/heic", bytes: Stream.make(notHeic) }),
+          s.attach(testCaller, id, {
+            name: "x.heic",
+            contentType: "image/heic",
+            bytes: Stream.make(notHeic),
+          }),
         );
         const attachment = yield* attachmentFields(att);
         return {
@@ -139,6 +145,7 @@ describe("size limit vs type sniffing", () => {
     );
     const exit = await scenarioWithLayer(layer)(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
@@ -149,13 +156,13 @@ describe("size limit vs type sniffing", () => {
         });
         // Same layout with no HEIC brand anywhere: still too_large, not type_rejected.
         const plain = ftyp("mif1", "mif1", "mif1", "mif1", "mif1");
-        const plainWhole = yield* Effect.exit(s.attach(id, file(Stream.make(plain))));
+        const plainWhole = yield* Effect.exit(s.attach(testCaller, id, file(Stream.make(plain))));
         const plainSplit = yield* Effect.exit(
-          s.attach(id, file(Stream.make(plain.subarray(0, 28), plain.subarray(28)))),
+          s.attach(testCaller, id, file(Stream.make(plain.subarray(0, 28), plain.subarray(28)))),
         );
-        const whole = yield* Effect.exit(s.attach(id, file(Stream.make(box))));
+        const whole = yield* Effect.exit(s.attach(testCaller, id, file(Stream.make(box))));
         const split = yield* Effect.exit(
-          s.attach(id, file(Stream.make(box.subarray(0, 28), box.subarray(28)))),
+          s.attach(testCaller, id, file(Stream.make(box.subarray(0, 28), box.subarray(28)))),
         );
         // A mismatch proven within the limit stays a type rejection, whole or split.
         const pdfLike = Uint8Array.from([
@@ -163,10 +170,13 @@ describe("size limit vs type sniffing", () => {
           ...new Uint8Array(27),
         ]);
         const spoofWhole = yield* Effect.exit(
-          s.attach(id, { ...file(Stream.make(pdfLike)), contentType: "application/pdf" }),
+          s.attach(testCaller, id, {
+            ...file(Stream.make(pdfLike)),
+            contentType: "application/pdf",
+          }),
         );
         const spoofSplit = yield* Effect.exit(
-          s.attach(id, {
+          s.attach(testCaller, id, {
             ...file(Stream.make(pdfLike.subarray(0, 3), pdfLike.subarray(3))),
             contentType: "application/pdf",
           }),
@@ -203,10 +213,11 @@ describe("list", () => {
   test("rows carry the currency; a cursor with a malformed id is request.malformed", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         yield* record({ ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-22" });
         const s = yield* Expenses;
-        const page = yield* s.list({});
-        const forged = yield* Effect.exit(s.list({ cursor: btoa('["all",""]') }));
+        const page = yield* s.list(testCaller, {});
+        const forged = yield* Effect.exit(s.list(testCaller, { cursor: btoa('["all",""]') }));
         return {
           currency: EffectArray.map(page.items, (i) => decodeSummary(i).currency),
           forged,
@@ -270,6 +281,7 @@ describe("edit and the supplier upsert", () => {
     );
     const exit = await scenarioWithLayer(layer)(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ ...czkInput, supplier: { manual: { name: "Typed" } } });
         const id = expenseId(result);
         const s = yield* Expenses;
@@ -286,13 +298,14 @@ describe("edit and the supplier upsert", () => {
         // Fails inside the transaction, after the supplier upsert ran (paid Expense keeps CZK).
         const failed = yield* Effect.exit(
           s.edit(
+            testCaller,
             id,
             { currency: "EUR", taxableSupplyOn: "2026-11-22", supplier: { ico: "11111111" } },
             2,
           ),
         );
         const afterFailed = (yield* contacts.listGlobal()).length;
-        const editResult = yield* s.edit(id, { supplier: { ico: "22222222" } }, 2);
+        const editResult = yield* s.edit(testCaller, id, { supplier: { ico: "22222222" } }, 2);
         const ok = fields(editResult);
         const savedContacts = yield* contacts.listGlobal();
         const afterOk = EffectArray.map(savedContacts, (c) => c.ico);
@@ -332,6 +345,7 @@ describe("attach and an uncertain commit", () => {
     );
     const exit = await scenarioWithLayer(layer)(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
@@ -342,10 +356,10 @@ describe("attach and an uncertain commit", () => {
           bytes: bytesOf(`%PDF-${text}`),
         });
         yield* Ref.set(mode, "store_down");
-        const down = yield* Effect.exit(s.attach(id, file("a")));
+        const down = yield* Effect.exit(s.attach(testCaller, id, file("a")));
         const keptAfterDown = (yield* Ref.get(blobs)).size;
         yield* Ref.set(mode, "gone");
-        const gone = yield* Effect.exit(s.attach(id, file("b")));
+        const gone = yield* Effect.exit(s.attach(testCaller, id, file("b")));
         const afterGone = (yield* Ref.get(blobs)).size;
         return { down: Exit.isFailure(down), keptAfterDown, gone: Exit.isFailure(gone), afterGone };
       }),

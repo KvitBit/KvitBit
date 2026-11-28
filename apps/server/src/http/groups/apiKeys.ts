@@ -1,3 +1,4 @@
+import { RequestCaller } from "@kvitbit/api-contract";
 /**
  * `apiKeys` group handlers (http-mcp-contracts 2.2 & 3.5.3): list, create and revoke
  * Workspace `kvb_` API keys in `auth.apikey`.
@@ -15,14 +16,7 @@ import {
   CurrentPrincipal,
   expandAccess,
 } from "@kvitbit/api-contract";
-import {
-  Caller,
-  CurrentCaller,
-  Invalid,
-  NotFound,
-  UserId,
-  Workspaces,
-} from "@kvitbit/domain/contract";
+import { Caller, Invalid, NotFound, UserId, Workspaces } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -137,24 +131,18 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(
           const creatorName = yield* dbUnavailable(
             Effect.gen(function* () {
               yield* sql`select id from workspaces where id = ${caller.workspaceId} for update`;
-              const current = yield* workspaces
-                .enter(caller.workspaceId, {
-                  scopes: caller.scopes,
-                  channel: caller.channel,
-                })
-                .pipe(
-                  Effect.provideService(
-                    CurrentCaller,
-                    Caller.account({
-                      userId: principal.userId,
-                      email: principal.email,
-                      locale: principal.locale,
-                      channel: principal.channel,
-                    }),
-                  ),
-                );
+              const account = Caller.account({
+                userId: principal.userId,
+                email: principal.email,
+                locale: principal.locale,
+                channel: principal.channel,
+              });
+              const current = yield* workspaces.enter(account, caller.workspaceId, {
+                scopes: caller.scopes,
+                channel: caller.channel,
+              });
               yield* authorizeMember("apiKey.manage").pipe(
-                Effect.provideService(CurrentCaller, current),
+                Effect.provideService(RequestCaller, current),
               );
               yield* enforceRoleScopeCap(current.role, granted.scopes, "apiKey.manage");
               const inserted = yield* sql<{ creator_name: string | null }>`
@@ -202,7 +190,7 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(
                   from ins
                   left join auth."user" u on u.id = ins.created_by
                 `;
-              yield* workspaces.recordAccessEvent({
+              yield* workspaces.recordAccessEvent(caller, {
                 action: "apiKey.create",
                 subject: { entity: "ApiKey", id: issued.keyId, name: trimmedName },
               });
@@ -247,7 +235,7 @@ export const ApiKeysGroupLive = HttpApiBuilder.group(
                 if (row === undefined) {
                   return yield* NotFound.make({ entity: "ApiKey", id: params.keyId });
                 }
-                yield* workspaces.recordAccessEvent({
+                yield* workspaces.recordAccessEvent(caller, {
                   action: "apiKey.revoke",
                   subject: { entity: "ApiKey", id: row.id, name: row.name ?? "" },
                 });

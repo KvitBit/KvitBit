@@ -1,4 +1,5 @@
 import type {
+  Caller,
   FileDownload,
   Locale,
   SharedDocumentView,
@@ -41,9 +42,10 @@ const unknownToken = NotFound.make({ entity: "ShareLink", id: "token" });
  * store access, and derives the lookup hash. Only the current key version is valid.
  */
 const visitorToken = Effect.fn("visitorToken")(function* (
+  requestedBy: Caller,
   action: "share.open" | "share.pdf" | "share.logo",
 ) {
-  const caller = yield* authorize(action);
+  const caller = yield* authorize(requestedBy, action);
   if (caller._tag !== "ShareLinkVisitor") return yield* Forbidden.make({ action });
   if (tokenVersion(caller.token) !== (yield* ShareLinkKeys).version) {
     return yield* unknownToken;
@@ -168,8 +170,8 @@ const sharedView = Effect.fn("sharedView")(function* (
 });
 
 /** Records a view (unless the viewer is a Member of the issuer) and returns the recipient view. */
-export const open = Effect.gen(function* () {
-  const { caller, tokenHash } = yield* visitorToken("share.open");
+export const open = Effect.fn("open")(function* (requestedBy: Caller) {
+  const { caller, tokenHash } = yield* visitorToken(requestedBy, "share.open");
   const keys = yield* ShareLinkKeys;
   return yield* (yield* CoreStore).transaction(
     Effect.gen(function* () {
@@ -180,7 +182,7 @@ export const open = Effect.gen(function* () {
       return yield* sharedView(document, link, keys.pdfUrl(caller.token), issuer);
     }),
   );
-}).pipe(orUnavailable);
+}, orUnavailable);
 
 const filenameOf = (number: string | null) =>
   `${EffectString.replace(/[^\p{L}\p{N}._-]+/gu, "-")(number ?? "document")}.pdf`;
@@ -189,8 +191,11 @@ const filenameOf = (number: string | null) =>
  * Renders the PDF, then records a download (unless the viewer is a Member of the issuer) in
  * a short transaction that re-checks the link: a failure before the bytes exist records nothing.
  */
-const renderPdf = Effect.fn("pdf")(function* (opts?: { readonly language?: Locale }) {
-  const { caller, tokenHash } = yield* visitorToken("share.pdf");
+export const pdf = Effect.fn("pdf")(function* (
+  requestedBy: Caller,
+  opts?: { readonly language?: Locale },
+) {
+  const { caller, tokenHash } = yield* visitorToken(requestedBy, "share.pdf");
   const store = yield* CoreStore;
   const { document, link, issuer } = yield* store.transaction(
     Effect.gen(function* () {
@@ -200,10 +205,14 @@ const renderPdf = Effect.fn("pdf")(function* (opts?: { readonly language?: Local
     }),
   );
   const branding = yield* (yield* ShareWorkspaces).branding(link.workspaceId);
-  const bytes = yield* (yield* DocumentDeliveryReads).render(document.view, {
-    template: branding.pdfTemplate,
-    language: opts?.language ?? document.record.language,
-  });
+  const bytes = yield* (yield* DocumentDeliveryReads).render(
+    document.view,
+    {
+      template: branding.pdfTemplate,
+      language: opts?.language ?? document.record.language,
+    },
+    link.workspaceId,
+  );
   if (!issuer) {
     yield* store.transaction(
       Effect.gen(function* () {
@@ -220,17 +229,15 @@ const renderPdf = Effect.fn("pdf")(function* (opts?: { readonly language?: Local
     contentType: "application/pdf",
     bytes: Stream.make(bytes),
   } satisfies FileDownload;
-});
-
-export const pdf = (opts?: { readonly language?: Locale }) => renderPdf(opts).pipe(orUnavailable);
+}, orUnavailable);
 
 /** The issuing Workspace's logo; `NotFound` when it has none. Records nothing. */
-export const logo = Effect.gen(function* () {
-  const { tokenHash } = yield* visitorToken("share.logo");
+export const logo = Effect.fn("logo")(function* (caller: Caller) {
+  const { tokenHash } = yield* visitorToken(caller, "share.logo");
   const link = yield* (yield* CoreStore).transaction(activeLink(tokenHash));
   const found = yield* (yield* ShareWorkspaces).logo(link.workspaceId);
   if (Option.isNone(found)) {
     return yield* NotFound.make({ entity: "ShareLink", id: "logo" });
   }
   return found.value;
-}).pipe(orUnavailable);
+}, orUnavailable);

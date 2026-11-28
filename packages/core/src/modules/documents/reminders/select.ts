@@ -7,7 +7,7 @@
  * The DocumentDelivery claim re-checks once more before dispatch.
  */
 
-import type { DocumentId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
+import type { Caller, DocumentId, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -36,11 +36,12 @@ const PAGE = 200;
 
 /** The step `record` owes on `today`, or null (not armed or remindable, nothing due, covered). */
 export const dueReminderOf = Effect.fn("dueReminderOf")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   record: DocumentRecord,
   today: IsoDate,
 ) {
-  const state = yield* reminderState(workspaceId, record, today);
+  const state = yield* reminderState(caller, workspaceId, record, today);
   if (state.block !== null) return null;
   const step = dueStep(record.dueOn, state.effective, today);
   if (step === null) return null;
@@ -58,7 +59,7 @@ export const dueReminderOf = Effect.fn("dueReminderOf")(function* (
 
 /** Every reminder due on `today` in the Workspace (the sweep a PaymentReminders cron runs). */
 export const selectDueReminders = Effect.fn("selectDueReminders")(
-  function* (workspaceId: WorkspaceId, today: IsoDate) {
+  function* (caller: Caller, workspaceId: WorkspaceId, today: IsoDate) {
     const repo = yield* DocumentsRepo;
     const due: Array<DueReminder> = [];
     let after: readonly [IsoDate, DocumentId] | undefined;
@@ -69,7 +70,7 @@ export const selectDueReminders = Effect.fn("selectDueReminders")(
         after === undefined ? { limit: PAGE } : { after, limit: PAGE },
       );
       for (const record of page.rows) {
-        const reminder = yield* dueReminderOf(workspaceId, record, today);
+        const reminder = yield* dueReminderOf(caller, workspaceId, record, today);
         if (reminder !== null) due.push(reminder);
       }
       const last = page.rows.at(-1);
@@ -86,7 +87,7 @@ export const selectDueReminders = Effect.fn("selectDueReminders")(
  * longer applies. The job starts after commit.
  */
 export const enqueueReminder = Effect.fn("enqueueReminder")(
-  function* (workspaceId: WorkspaceId, reminder: DueReminder) {
+  function* (caller: Caller, workspaceId: WorkspaceId, reminder: DueReminder) {
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -95,7 +96,7 @@ export const enqueueReminder = Effect.fn("enqueueReminder")(
         const { today } = yield* now;
         const existing = yield* deliveries.reminderStep(workspaceId, reminder);
         if (Option.isSome(existing)) return existing.value.id;
-        const current = yield* dueReminderOf(workspaceId, record, today);
+        const current = yield* dueReminderOf(caller, workspaceId, record, today);
         if (
           current === null ||
           current.dueOn !== reminder.dueOn ||
@@ -104,7 +105,7 @@ export const enqueueReminder = Effect.fn("enqueueReminder")(
         ) {
           return null;
         }
-        const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
+        const issuer = yield* (yield* DocumentIssuers).forDocument(caller, workspaceId, today);
         const value_1 = yield* deliveries.byDocument(workspaceId, record.id);
         // Recipients: those the document was last sent to while it had its current buyer, else
         // the current Contact's billing emails (a buyer change never reuses the old buyer's).
@@ -116,6 +117,7 @@ export const enqueueReminder = Effect.fn("enqueueReminder")(
                 .billingEmails;
         if (to.length === 0) return null;
         const delivery = yield* queueDelivery(
+          caller,
           workspaceId,
           {
             record,

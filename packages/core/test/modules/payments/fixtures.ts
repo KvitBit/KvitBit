@@ -1,5 +1,5 @@
 /** Runners for the Payments tests: `PaymentsTestLayer` on in-memory ports, documents seeded. */
-import type { Caller, CurrentCaller, TaxRegime } from "@kvitbit/domain/contract";
+import type { Caller, TaxRegime } from "@kvitbit/domain/contract";
 import type { CnbFixing } from "@kvitbit/domain/ports";
 import * as Effect from "effect/Effect";
 import type * as Exit from "effect/Exit";
@@ -9,12 +9,13 @@ import { PaymentsTestLayer } from "../../../src/modules/payments";
 import { CoreStore } from "../../../src/store/CoreStore";
 import type { InMemoryPortsLive } from "../../../src/testing";
 import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import type { TestCaller } from "../../helpers/callerContext";
 import { seed } from "../documents/fixtures";
 
 export type Services =
   | Layer.Success<typeof PaymentsTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 const series = Effect.flatMap(CoreStore, (store) =>
   store.transaction(

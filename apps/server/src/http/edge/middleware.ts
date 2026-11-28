@@ -1,3 +1,4 @@
+import { RequestCaller } from "@kvitbit/api-contract";
 /**
  * The HttpApi middleware of `@kvitbit/api-contract` security.ts (http-mcp-contracts 2.3):
  * Authentication, EdgeGuard, SessionOnly, WorkspaceMember and ShareLinkVisitor. SchemaErrors
@@ -22,7 +23,6 @@ import {
 import {
   Caller,
   type ClientRef,
-  CurrentCaller,
   NotFound,
   ShareToken,
   VisitorHash,
@@ -80,7 +80,7 @@ const AuthenticationLive = Layer.effect(
       const principal = yield* resolver.fromApiRequest(headersRequest(request, config.appOrigin));
       return yield* handler.pipe(
         Effect.provideService(CurrentPrincipal, principal),
-        Effect.provideService(CurrentCaller, principalCaller(principal)),
+        Effect.provideService(RequestCaller, principalCaller(principal)),
       );
     });
     return Authentication.of({
@@ -246,11 +246,13 @@ const WorkspaceMemberLive = Layer.effect(
           scopes: c._tag === "Session" ? ("all" as const) : c.scopes,
           channel: principal.channel,
         };
+        const account = yield* RequestCaller;
         const member = yield* workspaces.enter(
+          account,
           workspaceId.value,
           client === undefined ? enterOptions : { ...enterOptions, client },
         );
-        return yield* Effect.provideService(handler, CurrentCaller, member);
+        return yield* Effect.provideService(handler, RequestCaller, member);
       }),
     );
   }),
@@ -306,7 +308,7 @@ const ShareLinkVisitorLive = Layer.effect(
         const caller = Caller.shareLinkVisitor(
           Option.isSome(signedIn) ? { ...visitor, signedInUser: signedIn.value.userId } : visitor,
         );
-        return yield* Effect.provideService(handler, CurrentCaller, caller);
+        return yield* Effect.provideService(handler, RequestCaller, caller);
       }),
     );
   }),

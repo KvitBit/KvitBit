@@ -14,8 +14,8 @@
  */
 
 import {
+  type Caller,
   Channel,
-  type CurrentCaller,
   Forbidden,
   Invalid,
   Locale,
@@ -69,6 +69,11 @@ export const Principal = Schema.Struct({
   locale: Locale, // account preference, else Accept-Language, else "cs"
 });
 export type Principal = typeof Principal.Type;
+
+/** Caller resolved by HTTP middleware for the current request. */
+export class RequestCaller extends Context.Service<RequestCaller, Caller>()(
+  "@kvitbit/api-contract/security/RequestCaller",
+) {}
 
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()(
   "@kvitbit/api-contract/security/CurrentPrincipal",
@@ -152,7 +157,7 @@ export const schemaErrorToInvalid = Effect.fn(function* (error: HttpApiError.Htt
  */
 export class Authentication extends HttpApiMiddleware.Service<
   Authentication,
-  { provides: CurrentPrincipal | CurrentCaller }
+  { provides: CurrentPrincipal | RequestCaller }
 >()("kvitbit/edge/Authentication", {
   error: Unauthorized.schema,
   security: {
@@ -172,10 +177,10 @@ export class EdgeGuard extends HttpApiMiddleware.Service<
   error: [OriginRejected.schema, RateLimited.schema, PayloadTooLarge.schema],
 }) {}
 
-/** Replaces CurrentCaller with the MemberCaller from Workspaces.enter. Needs Authentication. */
+/** Replaces RequestCaller with the MemberCaller from Workspaces.enter. Needs Authentication. */
 export class WorkspaceMember extends HttpApiMiddleware.Service<
   WorkspaceMember,
-  { provides: CurrentCaller; requires: CurrentPrincipal | CurrentCaller }
+  { provides: RequestCaller; requires: CurrentPrincipal | RequestCaller }
 >()("kvitbit/edge/WorkspaceMember", {
   error: [NotFound.schema, Unavailable.schema, Forbidden.schema],
 }) {}
@@ -191,7 +196,7 @@ export class SessionOnly extends HttpApiMiddleware.Service<
 /** Public Share Link visitor. Provides Caller.shareLinkVisitor from the {token} path segment. */
 export class ShareLinkVisitor extends HttpApiMiddleware.Service<
   ShareLinkVisitor,
-  { provides: CurrentCaller }
+  { provides: RequestCaller }
 >()("kvitbit/edge/ShareLinkVisitor", {
   error: RateLimited.schema,
 }) {}

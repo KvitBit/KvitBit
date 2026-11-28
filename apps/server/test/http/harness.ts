@@ -18,7 +18,6 @@ import { ApiKeyId, type Principal, SESSION_COOKIE, Unauthorized } from "@kvitbit
 import { TestCore, type TestCoreOptions } from "@kvitbit/core/testing";
 import {
   Caller,
-  CurrentCaller,
   type NewWorkspace,
   Scope,
   UserId,
@@ -37,6 +36,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as TestClock from "effect/testing/TestClock";
+
 import {
   AuthServerLive,
   type AuthServerOverrides,
@@ -195,13 +195,11 @@ export const makeHarness = (options: HarnessOptions = {}) => {
     runtime.runPromise(
       Effect.gen(function* () {
         const ws = yield* Workspaces;
-        return yield* ws.create(input);
-      }).pipe(
-        Effect.provideService(
-          CurrentCaller,
+        return yield* ws.create(
           Caller.account({ userId: user.id, email: user.email, locale: "cs", channel: "web" }),
-        ),
-      ),
+          input,
+        );
+      }),
     );
 
   const dispose = () => web.dispose().then(() => runtime.dispose());

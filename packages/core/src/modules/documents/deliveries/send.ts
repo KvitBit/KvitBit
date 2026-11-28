@@ -7,6 +7,7 @@
 
 import type {
   AuditEntry,
+  Caller,
   DeliveryPurpose,
   DocumentId,
   DocumentKind,
@@ -138,6 +139,7 @@ export interface SendPlan {
 }
 
 export const plan = Effect.fn("plan")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   record: DocumentRecord,
   input: SendOptions = {},
@@ -155,13 +157,13 @@ export const plan = Effect.fn("plan")(function* (
   const to = yield* recipientsOf(workspaceId, record, input.to);
   const language = input.language ?? record.language;
   const { today } = yield* now;
-  const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
+  const issuer = yield* (yield* DocumentIssuers).forDocument(caller, workspaceId, today);
   const choice = purpose === "document" ? choiceOf(input.reminders) : null;
   const armsReminders =
     choice === null
       ? false
       : record.kind === "invoice" || record.kind === "proforma"
-        ? (yield* effectiveReminders(workspaceId, record, today, choice)).arms
+        ? (yield* effectiveReminders(caller, workspaceId, record, today, choice)).arms
         : false;
   return {
     record,
@@ -191,6 +193,7 @@ export const previewOf = (p: SendPlan): SendPreview => ({
  * Shared by `send` and the automatic reminder enqueue.
  */
 export const queueDelivery = Effect.fn("queueDelivery")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   p: Omit<SendPlan, "choice" | "armsReminders">,
   reminder: ReminderStepRecord | null,
@@ -246,7 +249,7 @@ export const queueDelivery = Effect.fn("queueDelivery")(function* (
     ),
   );
   if (taken !== null) return taken;
-  yield* appendAudit({
+  yield* appendAudit(caller, {
     workspaceId,
     subject: { entity: "Document", id: p.record.id },
     action: "document.send",
@@ -289,8 +292,8 @@ export const SendResultCodec = Schema.Struct({
  * board #399); a `requestKey` makes it replay-safe (C3) when it is the outermost call.
  */
 export const send = Effect.fn("send")(
-  function* (id: DocumentId, input?: SendOptions, opts?: RequestOptions) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.send");
+  function* (caller: Caller, id: DocumentId, input?: SendOptions, opts?: RequestOptions) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.send");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -305,7 +308,7 @@ export const send = Effect.fn("send")(
       Effect.gen(function* () {
         const repo = yield* DocumentsRepo;
         const locked = yield* repo.lock(workspaceId, id);
-        const p = yield* plan(workspaceId, locked, input);
+        const p = yield* plan(caller, workspaceId, locked, input);
         let record = locked;
         const changes: Array<AuditEntry["changes"][number]> = [];
         if (p.choice !== null) {
@@ -335,7 +338,14 @@ export const send = Effect.fn("send")(
           const previous = yield* deliveryRepo.byDocument(workspaceId, locked.id);
           newArm = !isArmed(locked, previous);
         }
-        const delivery = yield* queueDelivery(workspaceId, { ...p, record }, null, changes, newArm);
+        const delivery = yield* queueDelivery(
+          caller,
+          workspaceId,
+          { ...p, record },
+          null,
+          changes,
+          newArm,
+        );
         return { deliveryId: delivery.id, status: "queued" as const };
       }),
     );
@@ -345,10 +355,10 @@ export const send = Effect.fn("send")(
 
 /** Dry run of `send` (D15): same policy check and plan, nothing stored. */
 export const previewSend = Effect.fn("previewSend")(
-  function* (id: DocumentId, input?: SendOptions) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.send");
+  function* (caller: Caller, id: DocumentId, input?: SendOptions) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.send");
     const record = yield* (yield* DocumentsRepo).get(workspaceId, id);
-    const value_1 = yield* plan(workspaceId, record, input);
+    const value_1 = yield* plan(caller, workspaceId, record, input);
     return previewOf(value_1);
   },
   (_) => fxDryRun(_),

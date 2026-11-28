@@ -24,17 +24,19 @@ describe("IssuerSnapshots.forDocument", () => {
         const s = yield* seed();
         yield* as(s.admin)(
           ws.saveBankAccount(
+            s.admin,
             BankAccountInput.make({ iban: "CZ6508000000192000145399", currency: "CZK" }),
           ),
         );
         yield* as(s.admin)(
           ws.saveBankAccount(
+            s.admin,
             BankAccountInput.make({ iban: "DE89370400440532013000", currency: "EUR" }),
           ),
         );
         const ws_ = WorkspaceId.make(s.workspaceId);
         const today = IsoDate.make("2026-11-23");
-        const issuer = yield* as(s.member)(issuers.forDocument(ws_, today));
+        const issuer = yield* as(s.member)(issuers.forDocument(s.member, ws_, today));
         expect(issuer.party).toMatchObject({ workspaceId: s.workspaceId, name: "Acme s.r.o." });
         expect(issuer.regime).toBe("non_vat_payer");
         expect(
@@ -45,30 +47,32 @@ describe("IssuerSnapshots.forDocument", () => {
         ]);
         expect(issuer.billing.seriesByKind.invoice).toBeDefined();
         // A System caller of the same Workspace (e.g. recurring issuance) reads it too.
-        const sys = yield* as(system(undefined, ws_))(issuers.forDocument(ws_, today));
+        const sys = yield* as(system(undefined, ws_))(
+          issuers.forDocument(system(undefined, ws_), ws_, today),
+        );
         expect(sys.party.name).toBe("Acme s.r.o.");
         // An existing other Workspace is NotFound for this caller, and vice versa (R2).
         const b = yield* seed("Beta s.r.o.");
         const wsB = WorkspaceId.make(b.workspaceId);
         const forDocumentFailure = yield* issuers
-          .forDocument(wsB, today)
+          .forDocument(s.member, wsB, today)
           .pipe(as(s.member), failure);
         expect(forDocumentFailure).toEqual(NotFound.make({ entity: "Workspace", id: wsB }));
         const forDocumentFailure2 = yield* issuers
-          .forDocument(wsB, today)
+          .forDocument(system(undefined, ws_), wsB, today)
           .pipe(as(system(undefined, ws_)), failure);
         expect(forDocumentFailure2).toEqual(NotFound.make({ entity: "Workspace", id: wsB }));
-        expect((yield* as(b.owner)(issuers.forDocument(wsB, today))).party.name).toBe(
+        expect((yield* as(b.owner)(issuers.forDocument(b.owner, wsB, today))).party.name).toBe(
           "Beta s.r.o.",
         );
         // A missing Workspace (caller scoped to it, no row) is NotFound, not a defect.
         const missing = WorkspaceId.make("019a0000-0000-7000-8000-000000000000");
         const forDocumentFailure3 = yield* issuers
-          .forDocument(missing, today)
+          .forDocument(system(undefined, missing), missing, today)
           .pipe(as(system(undefined, missing)), failure);
         expect(forDocumentFailure3).toEqual(NotFound.make({ entity: "Workspace", id: missing }));
         const forDocumentFailure4 = yield* issuers
-          .forDocument(ws_, today)
+          .forDocument(accountOf(OWNER), ws_, today)
           .pipe(as(accountOf(OWNER)), failure);
         // Callers without a Workspace never read one.
         expect(forDocumentFailure4).toEqual(NotFound.make({ entity: "Workspace", id: ws_ }));

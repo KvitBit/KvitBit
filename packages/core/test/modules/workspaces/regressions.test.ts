@@ -73,11 +73,11 @@ describe("R1/R1c: the actor's stored role decides under the workspace lock", () 
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.transferOwnership(ADMIN));
-        const closeFailure = yield* ws.close("Acme s.r.o.").pipe(as(s.owner), failure);
+        yield* as(s.owner)(ws.transferOwnership(s.owner, ADMIN));
+        const closeFailure = yield* ws.close(s.owner, "Acme s.r.o.").pipe(as(s.owner), failure);
         // s.owner still says role "owner": a request admitted before the transfer.
         expect(closeFailure).toEqual(forbidden("workspace.close"));
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const current = yield* workspaceView(result);
         expect(current.closed).toBe(false);
       }),
@@ -88,24 +88,24 @@ describe("R1/R1c: the actor's stored role decides under the workspace lock", () 
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        const pending = yield* as(s.admin)(ws.invite("new@example.com", "member"));
-        yield* as(s.owner)(ws.setRole(ADMIN, "member"));
-        const setRoleFailure = yield* ws.setRole(MEMBER, null).pipe(as(s.admin), failure);
+        const pending = yield* as(s.admin)(ws.invite(s.admin, "new@example.com", "member"));
+        yield* as(s.owner)(ws.setRole(s.owner, ADMIN, "member"));
+        const setRoleFailure = yield* ws.setRole(s.admin, MEMBER, null).pipe(as(s.admin), failure);
         expect(setRoleFailure).toEqual(forbidden("member.setRole"));
         const inviteFailure = yield* ws
-          .invite("other@example.com", "member")
+          .invite(s.admin, "other@example.com", "member")
           .pipe(as(s.admin), failure);
         expect(inviteFailure).toEqual(forbidden("member.invite"));
         const revokeInvitationFailure = yield* ws
-          .revokeInvitation(pending.id)
+          .revokeInvitation(s.admin, pending.id)
           .pipe(as(s.admin), failure);
         expect(revokeInvitationFailure).toEqual(forbidden("member.invite"));
         yield* TestClock.adjust("2 minutes");
         const resendInvitationFailure = yield* ws
-          .resendInvitation(pending.id)
+          .resendInvitation(s.admin, pending.id)
           .pipe(as(s.admin), failure);
         expect(resendInvitationFailure).toEqual(forbidden("member.invite"));
-        const members = yield* as(s.owner)(ws.members);
+        const members = yield* as(s.owner)(ws.members(s.owner));
         const roles = EffectArray.map(members, (m) => m.role);
         expect(roles).toContain("member");
       }),
@@ -116,9 +116,9 @@ describe("R1/R1c: the actor's stored role decides under the workspace lock", () 
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.setRole(ADMIN, null));
+        yield* as(s.owner)(ws.setRole(s.owner, ADMIN, null));
         const inviteFailure = yield* ws
-          .invite("x@example.com", "member")
+          .invite(s.admin, "x@example.com", "member")
           .pipe(as(s.admin), failure);
         expect(inviteFailure).toEqual(forbidden("member.invite"));
       }),
@@ -136,7 +136,7 @@ describe("W2: the baseline Tax Regime period is never replaced", () => {
         expect(before).toBe("non_vat_payer");
         const change = { taxRegime: { regime: "vat_payer", effectiveFrom: "2026-11-23" } };
         const updateIssuingEntityResult = yield* as(s.owner)(
-          ws.updateIssuingEntity(IssuingEntityPatch.make(change), 1),
+          ws.updateIssuingEntity(s.owner, IssuingEntityPatch.make(change), 1),
         );
         const next = yield* workspaceView(updateIssuingEntityResult);
         expect(next.taxRegime).toBe("vat_payer");
@@ -150,7 +150,7 @@ describe("W2: the baseline Tax Regime period is never replaced", () => {
         // A second change on the same date replaces the non-first period only.
         const back = { taxRegime: { regime: "non_vat_payer", effectiveFrom: "2026-11-23" } };
         const updateIssuingEntityResult2 = yield* as(s.owner)(
-          ws.updateIssuingEntity(IssuingEntityPatch.make(back), next.revision),
+          ws.updateIssuingEntity(s.owner, IssuingEntityPatch.make(back), next.revision),
         );
         const again = yield* workspaceView(updateIssuingEntityResult2);
         expect(again.taxRegimeHistory).toEqual([
@@ -167,11 +167,11 @@ describe("bank accounts", () => {
     const s = yield* seed();
     const save = (input: (typeof BankAccountFields)["Encoded"]) =>
       Effect.flatMap(
-        as(s.admin)(ws.saveBankAccount(BankAccountInput.make(input))),
+        as(s.admin)(ws.saveBankAccount(s.admin, BankAccountInput.make(input))),
         bankAccountView,
       );
     const remove = (id: BankAccountId, replacement?: BankAccountId) =>
-      as(s.admin)(ws.removeBankAccount(id, replacement));
+      as(s.admin)(ws.removeBankAccount(s.admin, id, replacement));
     return { ws, s, save, remove };
   });
 
@@ -193,7 +193,7 @@ describe("bank accounts", () => {
         expect(getResult).toBe(2);
         const getResult2 = yield* refs.get(s.workspaceId, b.id);
         expect(getResult2).toBe(0);
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const current = yield* workspaceView(result);
         const ids = EffectArray.map(current.bankAccounts, (account) => account.id);
         expect(ids).toEqual([a.id, b.id]);
@@ -216,9 +216,11 @@ describe("bank accounts", () => {
     scenario(
       Effect.gen(function* () {
         const { ws, save, remove } = yield* setup;
-        const other = yield* as(accountOf(OUTSIDER))(ws.create({ name: "Jiná s.r.o." }));
+        const other = yield* as(accountOf(OUTSIDER))(
+          ws.create(accountOf(OUTSIDER), { name: "Jiná s.r.o." }),
+        );
         const saveBankAccountResult = yield* as(other)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" })),
+          ws.saveBankAccount(other, BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" })),
         );
         const foreign = yield* bankAccountView(saveBankAccountResult);
         const a = yield* save({ iban: IBAN_CZ, currency: "CZK" });
@@ -252,6 +254,7 @@ describe("bank accounts", () => {
         const edit = (name: string, k?: string) =>
           as(s.admin)(
             ws.saveBankAccount(
+              s.admin,
               BankAccountInput.make({ id: a.id, iban: IBAN_CZ, currency: "CZK", name }),
               k === undefined ? undefined : key(k),
             ),
@@ -261,7 +264,7 @@ describe("bank accounts", () => {
         const result = yield* edit("První", "k1");
         const repeated = yield* bankAccountView(result);
         expect(repeated.name).toBe("První");
-        const result2 = yield* as(s.admin)(ws.current);
+        const result2 = yield* as(s.admin)(ws.current(s.admin));
         const current = yield* workspaceView(result2);
         const stored = current.bankAccounts[0];
         expect(stored).toMatchObject({ name: "První", revision: repeated.revision });
@@ -276,17 +279,17 @@ describe("C3: a committed create replays without the registry", () => {
         const ws = yield* W;
         const registry = yield* FakeCompanyRegistry;
         const creator = accountOf(OUTSIDER);
-        const first = yield* as(creator)(ws.create({ ico: ICO }, key("c1")));
+        const first = yield* as(creator)(ws.create(creator, { ico: ICO }, key("c1")));
         yield* Ref.set(registry.unavailable, true);
         // A fresh lookup cache, as on another server instance.
         const fresh = yield* makeWorkspaces.pipe(Effect.provide(Layer.fresh(RegistryLookup.layer)));
         const lookups = (yield* Ref.get(registry.lookups)).length;
-        const replay = yield* as(creator)(fresh.create({ ico: ICO }, key("c1")));
+        const replay = yield* as(creator)(fresh.create(creator, { ico: ICO }, key("c1")));
         // The replay resolved before any registry call.
         expect((yield* Ref.get(registry.lookups)).length).toBe(lookups);
         expect(replay).toEqual(first);
         const createFailure = yield* fresh
-          .create({ ico: ICO }, key("c2"))
+          .create(creator, { ico: ICO }, key("c2"))
           .pipe(as(creator), failure);
         expect(createFailure).toEqual(Unavailable.make({ dependency: "company_registry" }));
       }),
@@ -299,17 +302,25 @@ describe("W5/R1a: a closed Workspace returns no cached write result", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        const invite = as(s.admin)(ws.invite("new@example.com", "member", key("i1")));
+        const invite = as(s.admin)(ws.invite(s.admin, "new@example.com", "member", key("i1")));
         const bank = as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" }), key("b1")),
+          ws.saveBankAccount(
+            s.admin,
+            BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" }),
+            key("b1"),
+          ),
         );
         const series = as(s.admin)(
-          ws.configureSeries({ kind: "invoice", name: "FV", pattern: "FV-YY-NNN" }, key("s1")),
+          ws.configureSeries(
+            s.admin,
+            { kind: "invoice", name: "FV", pattern: "FV-YY-NNN" },
+            key("s1"),
+          ),
         );
         yield* invite;
         yield* bank;
         yield* series;
-        yield* as(s.owner)(ws.close("Acme s.r.o."));
+        yield* as(s.owner)(ws.close(s.owner, "Acme s.r.o."));
         const failureResult = yield* failure(invite);
         expect(failureResult).toEqual(forbidden("member.invite"));
         const failureResult2 = yield* failure(bank);
@@ -331,7 +342,7 @@ describe("C6: recordAccessEvent", () => {
           subject: { entity: "ApiKey" as const, id: "cred-9", name: "CI" },
         };
         yield* Effect.all(
-          Array.from({ length: 4 }, () => as(s.admin)(ws.recordAccessEvent(event))),
+          Array.from({ length: 4 }, () => as(s.admin)(ws.recordAccessEvent(s.admin, event))),
           { concurrency: "unbounded" },
         );
         const entries = yield* historyOf({ entity: "ApiKey", id: "cred-9" })(s.workspaceId);
@@ -346,22 +357,28 @@ describe("C6: member removal and ownership transfer retries", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.admin)(ws.setRole(MEMBER, null));
-        yield* as(s.admin)(ws.setRole(MEMBER, null));
+        yield* as(s.admin)(ws.setRole(s.admin, MEMBER, null));
+        yield* as(s.admin)(ws.setRole(s.admin, MEMBER, null));
         const entries = yield* history(s.workspaceId);
         const removals = EffectArray.filter(entries, (e) => e.action === "member.remove");
         expect(removals.length).toBe(1);
-        const setRoleFailure = yield* ws.setRole(OUTSIDER, null).pipe(as(s.admin), failure);
+        const setRoleFailure = yield* ws
+          .setRole(s.admin, OUTSIDER, null)
+          .pipe(as(s.admin), failure);
         expect(setRoleFailure).toEqual(NotFound.make({ entity: "Member", id: OUTSIDER }));
-        const setRoleFailure2 = yield* ws.setRole(MEMBER, "admin").pipe(as(s.admin), failure);
+        const setRoleFailure2 = yield* ws
+          .setRole(s.admin, MEMBER, "admin")
+          .pipe(as(s.admin), failure);
         expect(setRoleFailure2).toEqual(NotFound.make({ entity: "Member", id: MEMBER }));
         // Removed members are invisible to reads and to enter.
         const ids = () =>
-          Effect.map(as(s.admin)(ws.members), (all) => EffectArray.map(all, (m) => m.userId));
+          Effect.map(as(s.admin)(ws.members(s.admin)), (all) =>
+            EffectArray.map(all, (m) => m.userId),
+          );
         const result = yield* ids();
         expect(result).not.toContain(MEMBER);
         const enterFailure = yield* ws
-          .enter(s.workspaceId, { scopes: "all", channel: "web" })
+          .enter(accountOf(MEMBER), s.workspaceId, { scopes: "all", channel: "web" })
           .pipe(as(accountOf(MEMBER)), failure);
         expect(enterFailure).toEqual(NotFound.make({ entity: "Workspace", id: s.workspaceId }));
         // Rejoining reactivates the same row with the invited role.
@@ -370,8 +387,8 @@ describe("C6: member removal and ownership transfer retries", () => {
         const result2 = yield* ids();
         expect(result2).toContain(MEMBER);
         // A member removed later can be removed again by its new role's rules.
-        yield* as(s.admin)(ws.setRole(MEMBER, null));
-        yield* as(s.admin)(ws.setRole(MEMBER, null));
+        yield* as(s.admin)(ws.setRole(s.admin, MEMBER, null));
+        yield* as(s.admin)(ws.setRole(s.admin, MEMBER, null));
       }),
     ));
 
@@ -380,9 +397,9 @@ describe("C6: member removal and ownership transfer retries", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.accountant)(ws.leave);
-        yield* as(s.accountant)(ws.leave);
-        yield* as(s.admin)(ws.setRole(ACCOUNTANT, null));
+        yield* as(s.accountant)(ws.leave(s.accountant));
+        yield* as(s.accountant)(ws.leave(s.accountant));
+        yield* as(s.admin)(ws.setRole(s.admin, ACCOUNTANT, null));
         const entries = yield* history(s.workspaceId);
         const actions = EffectArray.map(entries, (e) => e.action);
         expect(EffectArray.filter(actions, (a) => a === "member.leave").length).toBe(1);
@@ -395,8 +412,8 @@ describe("C6: member removal and ownership transfer retries", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.transferOwnership(ADMIN));
-        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        yield* as(s.owner)(ws.transferOwnership(s.owner, ADMIN));
+        yield* as(s.owner)(ws.transferOwnership(s.owner, ADMIN));
         const entries = yield* history(s.workspaceId);
         const transfers = EffectArray.filter(
           entries,
@@ -404,13 +421,15 @@ describe("C6: member removal and ownership transfer retries", () => {
         );
         expect(transfers.length).toBe(1);
         const transferOwnershipFailure = yield* ws
-          .transferOwnership(MEMBER)
+          .transferOwnership(s.owner, MEMBER)
           .pipe(as(s.owner), failure);
         expect(transferOwnershipFailure).toEqual(forbidden("workspace.transferOwnership"));
         // Once the new owner transfers on, the old retry is no longer recognized.
-        yield* as({ ...s.admin, role: "owner" })(ws.transferOwnership(MEMBER));
+        yield* as({ ...s.admin, role: "owner" })(
+          ws.transferOwnership({ ...s.admin, role: "owner" }, MEMBER),
+        );
         const transferOwnershipFailure2 = yield* ws
-          .transferOwnership(ADMIN)
+          .transferOwnership(s.owner, ADMIN)
           .pipe(as(s.owner), failure);
         expect(transferOwnershipFailure2).toEqual(forbidden("workspace.transferOwnership"));
       }),
@@ -423,7 +442,7 @@ describe("C6/W3: configureSeries", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        const series = yield* as(s.admin)(ws.listSeries);
+        const series = yield* as(s.admin)(ws.listSeries(s.admin));
         const invoice = Option.getOrUndefined(
           EffectArray.findFirst(series, (x) => x.kind === "invoice"),
         );
@@ -431,6 +450,7 @@ describe("C6/W3: configureSeries", () => {
         const edit = (name: string, k?: string) =>
           as(s.admin)(
             ws.configureSeries(
+              s.admin,
               { id: invoice.id, kind: "invoice", name, pattern: invoice.pattern },
               k === undefined ? undefined : key(k),
             ),
@@ -438,7 +458,7 @@ describe("C6/W3: configureSeries", () => {
         yield* edit("První", "k1");
         yield* edit("Druhá");
         expect((yield* edit("První", "k1")).name).toBe("První");
-        const updatedSeries = yield* as(s.admin)(ws.listSeries);
+        const updatedSeries = yield* as(s.admin)(ws.listSeries(s.admin));
         const stored = Option.getOrUndefined(
           EffectArray.findFirst(updatedSeries, (x) => x.id === invoice.id),
         );
@@ -456,7 +476,12 @@ describe("C6/W3: configureSeries", () => {
         });
         for (const nextNumber of [1.5, 0, -3]) {
           const configureSeriesFailure = yield* ws
-            .configureSeries({ kind: "invoice", name: "FV", pattern: "FV-NNN", nextNumber })
+            .configureSeries(s.admin, {
+              kind: "invoice",
+              name: "FV",
+              pattern: "FV-NNN",
+              nextNumber,
+            })
             .pipe(as(s.admin), failure);
           expect(configureSeriesFailure).toEqual(malformed);
         }
@@ -473,7 +498,12 @@ describe("C6/W3: configureSeries", () => {
         );
         expect(transactionFailure).toEqual(malformed);
         const ok = yield* as(s.admin)(
-          ws.configureSeries({ kind: "invoice", name: "FV", pattern: "FV-NNN", nextNumber: 7 }),
+          ws.configureSeries(s.admin, {
+            kind: "invoice",
+            name: "FV",
+            pattern: "FV-NNN",
+            nextNumber: 7,
+          }),
         );
         expect(ok.nextCounter).toBe(7);
       }),
@@ -486,8 +516,10 @@ describe("W6: a generated slug lost to a concurrent create retries the next suff
       Effect.gen(function* () {
         const ws = yield* W;
         const repo = yield* WorkspacesRepo;
-        const first = yield* as(accountOf(OUTSIDER))(ws.create({ name: "Acme" }));
-        const result = yield* as(first)(ws.current);
+        const first = yield* as(accountOf(OUTSIDER))(
+          ws.create(accountOf(OUTSIDER), { name: "Acme" }),
+        );
+        const result = yield* as(first)(ws.current(first));
         const taken = result.slug;
         // A repository whose slug read misses the committed row, as a concurrent create would.
         const stale = yield* makeWorkspaces.pipe(
@@ -497,11 +529,13 @@ describe("W6: a generated slug lost to a concurrent create retries the next suff
               slug === taken ? Effect.succeedNone : repo.findWorkspaceBySlug(slug),
           }),
         );
-        const second = yield* as(accountOf(ADMIN))(stale.create({ name: "Acme" }));
-        const result2 = yield* as(second)(ws.current);
+        const second = yield* as(accountOf(ADMIN))(
+          stale.create(accountOf(ADMIN), { name: "Acme" }),
+        );
+        const result2 = yield* as(second)(ws.current(second));
         expect(result2.slug).toBe(WorkspaceSlug.make(`${taken}-2`));
         const createFailure = yield* stale
-          .create({ name: "Acme", slug: taken })
+          .create(accountOf(MEMBER), { name: "Acme", slug: taken })
           .pipe(as(accountOf(MEMBER)), failure);
         expect(createFailure).toEqual(
           Invalid.make({ issues: [{ path: ["slug"], code: "workspace.slug_taken" }] }),
@@ -519,7 +553,7 @@ describe("J1: a successful start stamps workflowStartedAt for its epoch", () => 
         const s = yield* seed();
         const row = (id: InvitationId) => repo.getInvitation(s.workspaceId, id);
         // The plain fake: stamped once the invite returns (after commit).
-        const plain = yield* as(s.admin)(ws.invite("plain@example.com", "member"));
+        const plain = yield* as(s.admin)(ws.invite(s.admin, "plain@example.com", "member"));
         expect((yield* row(plain.id)).workflowStartedAt).toBe("2026-11-23T09:00:00.000Z");
 
         const started = [yield* Deferred.make<void>(), yield* Deferred.make<void>()] as const;
@@ -537,10 +571,10 @@ describe("J1: a successful start stamps workflowStartedAt for its epoch", () => 
           }),
         );
         const invite = yield* gated
-          .invite("late@example.com", "member")
+          .invite(s.admin, "late@example.com", "member")
           .pipe(as(s.admin), Effect.forkChild);
         yield* Deferred.await(started[0]);
-        const invitations = yield* as(s.admin)(ws.invitations);
+        const invitations = yield* as(s.admin)(ws.invitations(s.admin));
         const pending = Option.getOrUndefined(
           EffectArray.findFirst(invitations, (i) => i.email === "late@example.com"),
         );
@@ -548,7 +582,7 @@ describe("J1: a successful start stamps workflowStartedAt for its epoch", () => 
         expect((yield* row(pending.id)).workflowStartedAt).toBeNull();
         yield* TestClock.adjust("2 minutes");
         const resend = yield* gated
-          .resendInvitation(pending.id)
+          .resendInvitation(s.admin, pending.id)
           .pipe(as(s.admin), Effect.forkChild);
         yield* Deferred.await(started[1]);
         expect((yield* row(pending.id)).sendEpoch).toBe(1);
@@ -577,7 +611,7 @@ describe("W7: the image signature is checked as soon as the header arrives", () 
           const s = yield* seed();
           const bytes = Stream.concat(Stream.succeed(badHeader), rest);
           const setBrandingImageFailure = yield* ws
-            .setBrandingImage("logo", { contentType: "image/png", bytes })
+            .setBrandingImage(s.admin, "logo", { contentType: "image/png", bytes })
             .pipe(as(s.admin), failure);
           expect(setBrandingImageFailure).toEqual(
             Invalid.make({ issues: [{ path: ["file"], code: "branding.image_type_rejected" }] }),
@@ -595,7 +629,7 @@ describe("W7: the image signature is checked as soon as the header arrives", () 
         png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
         const bytes = Stream.fromIterable([png.slice(0, 3), png.slice(3, 9), png.slice(9)]);
         const ref = yield* as(s.admin)(
-          ws.setBrandingImage("logo", { contentType: "image/png", bytes }),
+          ws.setBrandingImage(s.admin, "logo", { contentType: "image/png", bytes }),
         );
         expect(ref).toMatchObject({ contentType: "image/png", bytes: 64 });
       }),
@@ -608,14 +642,14 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        const adminInvite = as(s.owner)(ws.invite("boss@example.com", "admin", key("a1")));
+        const adminInvite = as(s.owner)(ws.invite(s.owner, "boss@example.com", "admin", key("a1")));
         yield* adminInvite;
-        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        yield* as(s.owner)(ws.transferOwnership(s.owner, ADMIN));
         const failureResult = yield* failure(adminInvite);
         // The former owner is now admin: may not manage admins, even on a replay.
         expect(failureResult).toEqual(forbidden("member.manageAdmins"));
         // Still an admin: a member invitation (fresh key) is allowed.
-        yield* as(s.owner)(ws.invite("m@example.com", "member", key("m1")));
+        yield* as(s.owner)(ws.invite(s.owner, "m@example.com", "member", key("m1")));
       }),
     ));
 
@@ -625,25 +659,29 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
         const ws = yield* W;
         const s = yield* seed();
         const bank = as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" }), key("b1")),
+          ws.saveBankAccount(
+            s.admin,
+            BankAccountInput.make({ iban: IBAN_CZ, currency: "CZK" }),
+            key("b1"),
+          ),
         );
         yield* bank;
-        yield* as(s.owner)(ws.setRole(ADMIN, "member"));
-        const result = yield* as(s.owner)(ws.current);
+        yield* as(s.owner)(ws.setRole(s.owner, ADMIN, "member"));
+        const result = yield* as(s.owner)(ws.current(s.owner));
         const revision = result.revision;
         const settings = forbidden("workspace.settings");
         const failureResult = yield* failure(bank);
         expect(failureResult).toEqual(settings);
         const saveBankAccountFailure = yield* ws
-          .saveBankAccount(BankAccountInput.make({ iban: IBAN_DE, currency: "EUR" }))
+          .saveBankAccount(s.admin, BankAccountInput.make({ iban: IBAN_DE, currency: "EUR" }))
           .pipe(as(s.admin), failure);
         expect(saveBankAccountFailure).toEqual(settings);
         const configureSeriesFailure = yield* ws
-          .configureSeries({ kind: "invoice", name: "FV", pattern: "FV-NNN" })
+          .configureSeries(s.admin, { kind: "invoice", name: "FV", pattern: "FV-NNN" })
           .pipe(as(s.admin), failure);
         expect(configureSeriesFailure).toEqual(settings);
         const updateSettingsFailure = yield* ws
-          .updateSettings({ dueDays: 30 }, revision)
+          .updateSettings(s.admin, { dueDays: 30 }, revision)
           .pipe(as(s.admin), failure);
         expect(updateSettingsFailure).toEqual(settings);
       }),
@@ -654,18 +692,18 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        yield* as(s.owner)(ws.transferOwnership(s.owner, ADMIN));
         const reentered = yield* as(accountOf(s.owner.userId))(
-          ws.enter(s.workspaceId, { scopes: "all", channel: "web" }),
+          ws.enter(accountOf(s.owner.userId), s.workspaceId, { scopes: "all", channel: "web" }),
         );
         expect(reentered.role).toBe("admin");
-        yield* as(reentered)(ws.transferOwnership(ADMIN));
+        yield* as(reentered)(ws.transferOwnership(reentered, ADMIN));
         const transferOwnershipFailure = yield* ws
-          .transferOwnership(MEMBER)
+          .transferOwnership(reentered, MEMBER)
           .pipe(as(reentered), failure);
         expect(transferOwnershipFailure).toEqual(forbidden("workspace.transferOwnership"));
         const transferOwnershipFailure2 = yield* ws
-          .transferOwnership(MEMBER)
+          .transferOwnership(s.member, MEMBER)
           .pipe(as(s.member), failure);
         expect(transferOwnershipFailure2).toEqual(forbidden("workspace.transferOwnership"));
         const entries = yield* history(s.workspaceId);
@@ -682,16 +720,23 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.close("Acme s.r.o."));
+        yield* as(s.owner)(ws.close(s.owner, "Acme s.r.o."));
         const configureSeriesFailure = yield* ws
-          .configureSeries({ kind: "invoice", name: "FV", pattern: "FV-NNN", nextNumber: 0 })
+          .configureSeries(s.admin, {
+            kind: "invoice",
+            name: "FV",
+            pattern: "FV-NNN",
+            nextNumber: 0,
+          })
           .pipe(as(s.admin), failure);
         expect(configureSeriesFailure).toEqual(forbidden("workspace.settings"));
         const saveBankAccountFailure = yield* ws
-          .saveBankAccount(BankAccountInput.make({ iban: "nope", currency: "CZK" }))
+          .saveBankAccount(s.admin, BankAccountInput.make({ iban: "nope", currency: "CZK" }))
           .pipe(as(s.admin), failure);
         expect(saveBankAccountFailure).toEqual(forbidden("workspace.settings"));
-        const inviteFailure = yield* ws.invite("not-an-email", "member").pipe(as(s.admin), failure);
+        const inviteFailure = yield* ws
+          .invite(s.admin, "not-an-email", "member")
+          .pipe(as(s.admin), failure);
         expect(inviteFailure).toEqual(forbidden("member.invite"));
       }),
     ));
@@ -710,7 +755,9 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
         const malformed = Invalid.make({
           issues: [{ path: ["nextNumber"], code: "request.malformed" }],
         });
-        const configureSeriesFailure = yield* ws.configureSeries(input).pipe(as(s.admin), failure);
+        const configureSeriesFailure = yield* ws
+          .configureSeries(s.admin, input)
+          .pipe(as(s.admin), failure);
         expect(configureSeriesFailure).toEqual(malformed);
         const port = yield* WorkspaceSeries;
         const store = yield* CoreStore;
@@ -731,7 +778,7 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
           Stream.never,
         );
         const setBrandingImageFailure = yield* ws
-          .setBrandingImage("logo", { contentType: "image/jpeg", bytes })
+          .setBrandingImage(s.admin, "logo", { contentType: "image/jpeg", bytes })
           .pipe(as(s.admin), failure);
         expect(setBrandingImageFailure).toEqual(
           Invalid.make({ issues: [{ path: ["file"], code: "branding.image_type_rejected" }] }),
@@ -762,7 +809,7 @@ describe("round 2: stale callers, closed precedence, safe counters, owned chunks
           Stream.fromEffect(Effect.sync(() => buffer.fill(0xaa))),
         );
         const ref = yield* as(s.admin)(
-          ws.setBrandingImage("logo", { contentType: "image/png", bytes }),
+          ws.setBrandingImage(s.admin, "logo", { contentType: "image/png", bytes }),
         );
         expect(ref).toMatchObject({ bytes: 32, sha256: yield* sha256Hex(expected) });
       }),
@@ -775,13 +822,13 @@ describe("round 3: transfer needs the caller's own role; access before revision"
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        yield* as(s.owner)(ws.transferOwnership(ADMIN));
+        yield* as(s.owner)(ws.transferOwnership(s.owner, ADMIN));
         const transferOwnershipFailure = yield* ws
-          .transferOwnership(MEMBER)
+          .transferOwnership(s.admin, MEMBER)
           .pipe(as(s.admin), failure);
         // s.admin entered as admin; ADMIN is the stored owner now.
         expect(transferOwnershipFailure).toEqual(forbidden("workspace.transferOwnership"));
-        const members = yield* as(s.member)(ws.members);
+        const members = yield* as(s.member)(ws.members(s.member));
         const roles = new Map(EffectArray.map(members, (m) => [m.userId, m.role]));
         expect(roles.get(ADMIN)).toBe("owner");
         expect(roles.get(MEMBER)).toBe("member");
@@ -802,30 +849,30 @@ describe("round 3: transfer needs the caller's own role; access before revision"
         const settings = { dueDays: 30 };
         const entity = { name: "Acme a.s." };
         // An authorized caller with a stale revision still gets the C2 conflict.
-        yield* as(s.owner)(ws.updateSettings({ dueDays: 21 }, 1));
+        yield* as(s.owner)(ws.updateSettings(s.owner, { dueDays: 21 }, 1));
         const updateSettingsFailure = yield* ws
-          .updateSettings(settings, 1)
+          .updateSettings(s.admin, settings, 1)
           .pipe(as(s.admin), failure);
         expect(updateSettingsFailure).toEqual(
           Conflict.make({ reason: "revision_changed", currentRevision: 2 }),
         );
-        yield* as(s.owner)(ws.setRole(ADMIN, null));
+        yield* as(s.owner)(ws.setRole(s.owner, ADMIN, null));
         const denied = forbidden("workspace.settings");
         const updateSettingsFailure2 = yield* ws
-          .updateSettings(settings, 1)
+          .updateSettings(s.admin, settings, 1)
           .pipe(as(s.admin), failure);
         expect(updateSettingsFailure2).toEqual(denied);
         const updateIssuingEntityFailure = yield* ws
-          .updateIssuingEntity(IssuingEntityPatch.make(entity), 1)
+          .updateIssuingEntity(s.admin, IssuingEntityPatch.make(entity), 1)
           .pipe(as(s.admin), failure);
         expect(updateIssuingEntityFailure).toEqual(denied);
-        yield* as(s.owner)(ws.close("Acme s.r.o."));
+        yield* as(s.owner)(ws.close(s.owner, "Acme s.r.o."));
         const updateSettingsFailure3 = yield* ws
-          .updateSettings(settings, 1)
+          .updateSettings(s.owner, settings, 1)
           .pipe(as(s.owner), failure);
         expect(updateSettingsFailure3).toEqual(denied);
         const updateIssuingEntityFailure2 = yield* ws
-          .updateIssuingEntity(IssuingEntityPatch.make(entity), 1)
+          .updateIssuingEntity(s.owner, IssuingEntityPatch.make(entity), 1)
           .pipe(as(s.owner), failure);
         expect(updateIssuingEntityFailure2).toEqual(denied);
       }),

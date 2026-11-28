@@ -1,3 +1,4 @@
+import { RequestCaller } from "@kvitbit/api-contract";
 /** `publicShare` group handlers (http-mcp-contracts 3.4 & 3.5.1): visitor side of PublicShareLinks. */
 
 import { Api } from "@kvitbit/api-contract";
@@ -63,15 +64,22 @@ export const PublicShareGroupLive = HttpApiBuilder.group(
     const shareLinks = yield* PublicShareLinks;
     return handlers
       .handle("open", () =>
-        withVisitorDevice(Effect.map(shareLinks.open, jsonizeSharedDocumentView)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withVisitorDevice(Effect.map(shareLinks.open(caller), jsonizeSharedDocumentView)),
+        ),
       )
       .handle("pdf", ({ query }) =>
-        withVisitorDevice(Effect.map(shareLinks.pdf(compact(query)), (file) => fileDownload(file))),
+        Effect.flatMap(RequestCaller, (caller) =>
+          withVisitorDevice(
+            Effect.map(shareLinks.pdf(caller, compact(query)), (file) => fileDownload(file)),
+          ),
+        ),
       )
       .handle(
         "logo",
         Effect.fnUntraced(function* () {
-          const file = yield* shareLinks.logo;
+          const caller = yield* RequestCaller;
+          const file = yield* shareLinks.logo(caller);
           const chunks = yield* Stream.runCollect(file.bytes).pipe(
             Effect.mapError(() => Unavailable.make({ dependency: "blob_storage" })),
           );

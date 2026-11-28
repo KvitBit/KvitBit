@@ -1,5 +1,5 @@
 import type {
-  CurrentCaller,
+  Caller,
   Forbidden,
   Invalid,
   NotFound,
@@ -45,6 +45,7 @@ import { PriceListRepo } from "./repo";
 /** The PriceList methods with the errors the spec gives them (see `PriceListLive`). */
 export interface PriceListImpl {
   readonly save: (
+    caller: Caller,
     input: PriceListItemInput & {
       readonly id?: PriceListItemId;
       readonly expectedRevision?: number;
@@ -52,16 +53,19 @@ export interface PriceListImpl {
     opts?: RequestOptions,
   ) => Effect.Effect<
     PriceListItemViewData,
-    Invalid | NotFound | Conflict | Forbidden | Unavailable,
-    CurrentCaller
+    Invalid | NotFound | Conflict | Forbidden | Unavailable
   >;
   readonly archive: (
+    caller: Caller,
     id: PriceListItemId,
-  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable, CurrentCaller>;
-  readonly list: (q?: {
-    readonly text?: string;
-    readonly includeArchived?: boolean;
-  }) => Effect.Effect<ReadonlyArray<PriceListItemViewData>, Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable>;
+  readonly list: (
+    caller: Caller,
+    q?: {
+      readonly text?: string;
+      readonly includeArchived?: boolean;
+    },
+  ) => Effect.Effect<ReadonlyArray<PriceListItemViewData>, Forbidden | Unavailable>;
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -161,8 +165,8 @@ export const makePriceList: Effect.Effect<
 
   const impl: PriceListImpl = {
     save: Effect.fn("save")(
-      function* (input, opts) {
-        const { workspaceId } = yield* authorizeInWorkspace("priceList.write");
+      function* (caller: Caller, input, opts) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "priceList.write");
         // The whole input, strictly: unknown fields, a malformed id or revision are Invalid.
         const { id, expectedRevision, ...fields } = yield* decodeInput(
           PriceListItemSaveInput,
@@ -193,8 +197,8 @@ export const makePriceList: Effect.Effect<
     ),
 
     archive: Effect.fn("archive")(
-      function* (id) {
-        const { workspaceId } = yield* authorizeInWorkspace("priceList.write");
+      function* (caller: Caller, id) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "priceList.write");
         yield* store.transaction(
           Effect.gen(function* () {
             // Idempotent by state (rule C6).
@@ -212,8 +216,8 @@ export const makePriceList: Effect.Effect<
     ),
 
     list: Effect.fn("list")(
-      function* (q) {
-        const { workspaceId } = yield* authorizeInWorkspace("priceList.read");
+      function* (caller: Caller, q) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "priceList.read");
         const rows = yield* repo.list(workspaceId, {
           text: q?.text,
           includeArchived: q?.includeArchived ?? false,

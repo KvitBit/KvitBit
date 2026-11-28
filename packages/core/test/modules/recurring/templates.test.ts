@@ -18,6 +18,7 @@ import * as Exit from "effect/Exit";
 import * as Option from "effect/Option";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 import { as, DocumentsStub, ok, scenario, templateInput, templateView } from "./fixtures";
 
@@ -29,7 +30,9 @@ const MONTHLY: TemplateSchedule = {
   autoSend: false,
 };
 
-const create = Effect.flatMap(Templates, (t) => t.save(templateInput()));
+const create = Effect.flatMap(Templates, (t) =>
+  Effect.flatMap(TestCaller, (caller) => t.save(caller, templateInput())),
+);
 
 describe("Templates.save", () => {
   test("creates a template at revision 1 and audits it", async () => {
@@ -56,18 +59,24 @@ describe("Templates.save", () => {
     const exit = await scenario(member("member"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("member"), templateInput());
         const created = yield* templateView(saveResult);
-        const saveResult2 = yield* t.save({
+        const saveResult2 = yield* t.save(member("member"), {
           ...templateInput({ name: "Hosting" }),
           id: created.id,
           expectedRevision: 1,
         });
         const updated = yield* templateView(saveResult2);
         const stale = yield* Effect.exit(
-          t.save({ ...templateInput({ name: "Other" }), id: created.id, expectedRevision: 1 }),
+          t.save(member("member"), {
+            ...templateInput({ name: "Other" }),
+            id: created.id,
+            expectedRevision: 1,
+          }),
         );
-        const missing = yield* Effect.exit(t.save({ ...templateInput(), id: created.id }));
+        const missing = yield* Effect.exit(
+          t.save(member("member"), { ...templateInput(), id: created.id }),
+        );
         return { updated, stale, missing };
       }),
     );
@@ -86,8 +95,10 @@ describe("Templates.save", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const name = yield* Effect.exit(t.save(templateInput({ name: "  " })));
-        const due = yield* Effect.exit(t.save(templateInput({ due: { inDays: -1 } })));
+        const name = yield* Effect.exit(t.save(member("owner"), templateInput({ name: "  " })));
+        const due = yield* Effect.exit(
+          t.save(member("owner"), templateInput({ due: { inDays: -1 } })),
+        );
         return { name, due };
       }),
     );
@@ -110,14 +121,14 @@ describe("Templates.save", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput(), { requestKey: KEY });
+        const saveResult = yield* t.save(member("owner"), templateInput(), { requestKey: KEY });
         const first = yield* templateView(saveResult);
-        const saveResult2 = yield* t.save(templateInput(), { requestKey: KEY });
+        const saveResult2 = yield* t.save(member("owner"), templateInput(), { requestKey: KEY });
         const replay = yield* templateView(saveResult2);
         const mismatch = yield* Effect.exit(
-          t.save(templateInput({ name: "Else" }), { requestKey: KEY }),
+          t.save(member("owner"), templateInput({ name: "Else" }), { requestKey: KEY }),
         );
-        const all = yield* t.list;
+        const all = yield* t.list(member("owner"));
         return { first, replay, mismatch, count: all.length };
       }),
     );
@@ -139,19 +150,23 @@ describe("Templates authorization", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const created = yield* templateView(saveResult);
         const id = TemplateId.make(created.id);
         const accountant = member("accountant");
         const readToken = member("owner", { scopes: ["templates:read"] });
         const docsToken = member("owner", { scopes: ["documents:write"] });
         return {
-          accountantGet: yield* t.get(id).pipe(as(accountant), Effect.exit),
-          accountantSave: yield* t.save(templateInput()).pipe(as(accountant), Effect.exit),
-          accountantSchedule: yield* t.schedule(id, MONTHLY, 1).pipe(as(accountant), Effect.exit),
-          tokenList: yield* t.list.pipe(as(readToken), Effect.exit),
-          tokenArchive: yield* t.archive(id).pipe(as(readToken), Effect.exit),
-          docsTokenGet: yield* t.get(id).pipe(as(docsToken), Effect.exit),
+          accountantGet: yield* t.get(accountant, id).pipe(as(accountant), Effect.exit),
+          accountantSave: yield* t
+            .save(accountant, templateInput())
+            .pipe(as(accountant), Effect.exit),
+          accountantSchedule: yield* t
+            .schedule(accountant, id, MONTHLY, 1)
+            .pipe(as(accountant), Effect.exit),
+          tokenList: yield* t.list(readToken).pipe(as(readToken), Effect.exit),
+          tokenArchive: yield* t.archive(readToken, id).pipe(as(readToken), Effect.exit),
+          docsTokenGet: yield* t.get(docsToken, id).pipe(as(docsToken), Effect.exit),
         };
       }),
     );
@@ -176,20 +191,19 @@ describe("Templates authorization", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
         const job = system({
           _tag: "RecurringIssuance",
           scheduleId: ScheduleId.make("01900000-0000-7000-8000-00000000e001"),
           occurrence: IsoDate.make("2026-11-23"),
         });
-        const run = as(job);
         return {
-          save: yield* t.save(templateInput()).pipe(run, Effect.exit),
-          schedule: yield* t.schedule(id, MONTHLY, 1).pipe(run, Effect.exit),
-          resume: yield* t.resume(id).pipe(run, Effect.exit),
-          archive: yield* t.archive(id).pipe(run, Effect.exit),
-          use: yield* t.use(id, { as: "issued" }).pipe(run, Effect.exit),
+          save: yield* t.save(job, templateInput()).pipe(Effect.exit),
+          schedule: yield* t.schedule(job, id, MONTHLY, 1).pipe(Effect.exit),
+          resume: yield* t.resume(job, id).pipe(Effect.exit),
+          archive: yield* t.archive(job, id).pipe(Effect.exit),
+          use: yield* t.use(job, id, { as: "issued" }).pipe(Effect.exit),
         };
       }),
     );
@@ -215,19 +229,19 @@ describe("Templates authorization", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
-        const other = as(member("owner", { workspaceId: WORKSPACE_B }));
+        const other = member("owner", { workspaceId: WORKSPACE_B });
         return {
           id,
           results: [
-            yield* t.get(id).pipe(other, Effect.exit),
-            yield* t.save({ ...templateInput(), id, expectedRevision: 1 }).pipe(other, Effect.exit),
-            yield* t.archive(id).pipe(other, Effect.exit),
-            yield* t.schedule(id, MONTHLY, 1).pipe(other, Effect.exit),
-            yield* t.resume(id).pipe(other, Effect.exit),
-            yield* t.use(id).pipe(other, Effect.exit),
-            yield* t.runs(id).pipe(other, Effect.exit),
+            yield* t.get(other, id).pipe(Effect.exit),
+            yield* t.save(other, { ...templateInput(), id, expectedRevision: 1 }).pipe(Effect.exit),
+            yield* t.archive(other, id).pipe(Effect.exit),
+            yield* t.schedule(other, id, MONTHLY, 1).pipe(Effect.exit),
+            yield* t.resume(other, id).pipe(Effect.exit),
+            yield* t.use(other, id).pipe(Effect.exit),
+            yield* t.runs(other, id).pipe(Effect.exit),
           ],
         };
       }),
@@ -245,18 +259,18 @@ describe("Templates.archive", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
-        yield* t.schedule(id, MONTHLY, 1);
-        yield* t.archive(id);
-        yield* t.archive(id); // idempotent by state (C6)
-        const getResult = yield* t.get(id);
+        yield* t.schedule(member("owner"), id, MONTHLY, 1);
+        yield* t.archive(member("owner"), id);
+        yield* t.archive(member("owner"), id); // idempotent by state (C6)
+        const getResult = yield* t.get(member("owner"), id);
         const got = yield* templateView(getResult);
-        const listed = yield* t.list;
+        const listed = yield* t.list(member("owner"));
         const edit = yield* Effect.exit(
-          t.save({ ...templateInput(), id, expectedRevision: got.revision }),
+          t.save(member("owner"), { ...templateInput(), id, expectedRevision: got.revision }),
         );
-        const use = yield* Effect.exit(t.use(id));
+        const use = yield* Effect.exit(t.use(member("owner"), id));
         return { got, listed, edit, use };
       }),
     );
@@ -278,14 +292,16 @@ describe("Templates.use", () => {
     const exit = await scenario(member("member"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("member"), templateInput());
         const id = (yield* templateView(saveResult)).id;
-        const draft = yield* t.use(id);
-        const issued = yield* t.use(id, {
+        const draft = yield* t.use(member("member"), id);
+        const issued = yield* t.use(member("member"), id, {
           as: "issued",
           patch: { issuedOn: IsoDate.make("2026-11-20"), note: "Thanks" },
         });
-        const numberPatch = yield* Effect.exit(t.use(id, { patch: { number: "X-1" } }));
+        const numberPatch = yield* Effect.exit(
+          t.use(member("member"), id, { patch: { number: "X-1" } }),
+        );
         const stub = yield* DocumentsStub;
         const docs = yield* stub.documents(WORKSPACE_A);
         return { draft, issued, numberPatch, docs };

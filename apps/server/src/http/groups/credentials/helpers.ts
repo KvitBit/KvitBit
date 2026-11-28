@@ -8,11 +8,11 @@ import {
   type GrantedAccess,
   normalizeScopes,
   READ_SCOPES,
+  RequestCaller,
 } from "@kvitbit/api-contract";
 import { can } from "@kvitbit/core";
 import {
   type Action,
-  CurrentCaller,
   Forbidden,
   type MemberCaller,
   type Role,
@@ -27,9 +27,9 @@ import * as Schema from "effect/Schema";
 import * as SqlError from "effect/sql/SqlError";
 
 /** Extracts the `MemberCaller` provided by `WorkspaceMember` middleware. */
-export const requireMemberCaller: Effect.Effect<MemberCaller, never, CurrentCaller> =
+export const requireMemberCaller: Effect.Effect<MemberCaller, never, RequestCaller> =
   Effect.filterOrElse(
-    CurrentCaller,
+    RequestCaller,
     (caller): caller is MemberCaller => caller._tag === "Member",
     (caller) => Effect.die(new Error(`Expected MemberCaller, got ${caller._tag}`)),
   );
@@ -37,7 +37,7 @@ export const requireMemberCaller: Effect.Effect<MemberCaller, never, CurrentCall
 /** Authorizes a core policy `Action` on the current `MemberCaller`. */
 export const authorizeMember = (
   action: Action,
-): Effect.Effect<MemberCaller, Forbidden, CurrentCaller> =>
+): Effect.Effect<MemberCaller, Forbidden, RequestCaller> =>
   Effect.filterOrFail(
     requireMemberCaller,
     (caller) => can(caller, action),

@@ -37,6 +37,7 @@ import {
 import { sha256Hex } from "../../../src/shared/hash";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, runTest, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 import {
   as,
@@ -63,10 +64,11 @@ const MONTHLY: TemplateSchedule = {
 /** Creates a template with `schedule` attached; returns its ids. */
 const setup = (schedule: TemplateSchedule, input: TemplateInput = templateInput()) =>
   Effect.gen(function* () {
+    const testCaller = yield* TestCaller;
     const t = yield* Templates;
-    const saveResult = yield* t.save(input);
+    const saveResult = yield* t.save(testCaller, input);
     const created = yield* templateView(saveResult);
-    const scheduleResult = yield* t.schedule(created.id, schedule, 1);
+    const scheduleResult = yield* t.schedule(testCaller, created.id, schedule, 1);
     const scheduled = yield* templateView(scheduleResult);
     if (scheduled.schedule === null) return yield* Effect.die("Expected an attached schedule");
     return { templateId: created.id, scheduleId: scheduled.schedule.id };
@@ -74,21 +76,27 @@ const setup = (schedule: TemplateSchedule, input: TemplateInput = templateInput(
 
 const runOccurrence = (scheduleId: ScheduleId, occurrence: IsoDate) =>
   as(job(scheduleId)(occurrence))(
-    Effect.flatMap(RecurringIssuance, (r) => r.run(scheduleId, occurrence)),
+    Effect.flatMap(RecurringIssuance, (r) =>
+      r.run(job(scheduleId)(occurrence), scheduleId, occurrence),
+    ),
   );
 
 /** One sweep tick whose `start` runs the workflow body inline. */
 const sweep = Effect.flatMap(RecurringIssuance, (r) =>
-  r.sweep((decision) => Effect.asVoid(r.run(decision.scheduleId, decision.occurrence))),
+  r.sweep((caller, decision) =>
+    Effect.asVoid(r.run(caller, decision.scheduleId, decision.occurrence)),
+  ),
 );
 
 const getTemplate = (id: TemplateId) =>
   Templates.pipe(
-    Effect.flatMap((t) => t.get(id)),
+    Effect.flatMap((t) => Effect.flatMap(TestCaller, (caller) => t.get(caller, id))),
     Effect.flatMap(templateView),
   );
 const runsOf = (id: TemplateId, page?: { cursor?: string; limit?: number }) =>
-  Effect.flatMap(Templates, (t) => t.runs(id, page));
+  Effect.flatMap(Templates, (t) =>
+    Effect.flatMap(TestCaller, (caller) => t.runs(caller, id, page)),
+  );
 const documents = Effect.flatMap(DocumentsStub, (s) => s.documents(WORKSPACE_A));
 const deliveries = Effect.flatMap(DocumentsStub, (s) => s.deliveries(WORKSPACE_A));
 
@@ -97,17 +105,23 @@ describe("Templates.schedule", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
         // Simulate malformed data reaching the scheduler without a transport decoder.
         const invalidDate = IsoDate.make("2026-02-30", { disableChecks: true });
         const invalidKind = { ...MONTHLY };
         Reflect.set(invalidKind, "issueAs", "credit_note");
         return [
-          yield* Effect.exit(t.schedule(id, { ...MONTHLY, every: { months: 0 } }, 1)),
-          yield* Effect.exit(t.schedule(id, { ...MONTHLY, endOn: d("2026-11-01") }, 1)),
-          yield* Effect.exit(t.schedule(id, { ...MONTHLY, startOn: invalidDate }, 1)),
-          yield* Effect.exit(t.schedule(id, invalidKind, 1)),
+          yield* Effect.exit(
+            t.schedule(member("owner"), id, { ...MONTHLY, every: { months: 0 } }, 1),
+          ),
+          yield* Effect.exit(
+            t.schedule(member("owner"), id, { ...MONTHLY, endOn: d("2026-11-01") }, 1),
+          ),
+          yield* Effect.exit(
+            t.schedule(member("owner"), id, { ...MONTHLY, startOn: invalidDate }, 1),
+          ),
+          yield* Effect.exit(t.schedule(member("owner"), id, invalidKind, 1)),
         ];
       }),
     );
@@ -124,12 +138,17 @@ describe("Templates.schedule", () => {
     const exit = await scenario(member("member"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("member"), templateInput());
         const id = (yield* templateView(saveResult)).id;
-        const scheduleResult = yield* t.schedule(id, { ...MONTHLY, startOn: d("2026-01-31") }, 1);
+        const scheduleResult = yield* t.schedule(
+          member("member"),
+          id,
+          { ...MONTHLY, startOn: d("2026-01-31") },
+          1,
+        );
         const attached = yield* templateView(scheduleResult);
-        const stale = yield* Effect.exit(t.schedule(id, null, 1));
-        const scheduleResult2 = yield* t.schedule(id, null, 2);
+        const stale = yield* Effect.exit(t.schedule(member("member"), id, null, 1));
+        const scheduleResult2 = yield* t.schedule(member("member"), id, null, 2);
         const detached = yield* templateView(scheduleResult2);
         return { attached, stale, detached };
       }),
@@ -149,12 +168,12 @@ describe("Templates.schedule", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const bare = (yield* templateView(saveResult)).id;
         const { templateId } = yield* setup(MONTHLY);
-        const resumeResult = yield* t.resume(templateId);
+        const resumeResult = yield* t.resume(member("owner"), templateId);
         const running = yield* templateView(resumeResult);
-        const none = yield* Effect.exit(t.resume(bare));
+        const none = yield* Effect.exit(t.resume(member("owner"), bare));
         return { running, none };
       }),
     );
@@ -285,7 +304,9 @@ describe("RecurringIssuance: exactly once", () => {
         const occurrence = d("2026-11-23");
         // The workflow died after the "issue" Activity committed.
         const issuedOnly = yield* as(job(scheduleId)(occurrence))(
-          Effect.flatMap(RecurringIssuance, (issuance) => issuance.issue(scheduleId, occurrence)),
+          Effect.flatMap(RecurringIssuance, (issuance) =>
+            issuance.issue(job(scheduleId)(occurrence), scheduleId, occurrence),
+          ),
         );
         const pendingRuns = yield* runsOf(templateId);
         const resumed = yield* runOccurrence(scheduleId, occurrence);
@@ -356,7 +377,9 @@ describe("RecurringIssuance: failures pause the schedule", () => {
         const paused = yield* getTemplate(templateId);
         const failedRuns = yield* runsOf(templateId);
         const whilePaused = yield* sweep;
-        const resumed = yield* Effect.flatMap(Templates, (t) => t.resume(templateId));
+        const resumed = yield* Effect.flatMap(Templates, (t) =>
+          t.resume(member("owner"), templateId),
+        );
         yield* sweep;
         return {
           paused,
@@ -465,18 +488,22 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
         // `late`: 2026-11-01 is exactly 7 days late; pause `missed` by hand via the cap later.
         const onTime = yield* as(job(late.scheduleId)(d("2026-11-01")))(
           Effect.flatMap(RecurringIssuance, (issuance) =>
-            issuance.run(late.scheduleId, d("2026-11-01")),
+            issuance.run(job(late.scheduleId)(d("2026-11-01")), late.scheduleId, d("2026-11-01")),
           ),
         );
         yield* at("2026-11-23T09:00:00Z");
         const capped = yield* as(job(missed.scheduleId)(d("2026-11-01")))(
           Effect.flatMap(RecurringIssuance, (issuance) =>
-            issuance.pauseMissed(missed.scheduleId, d("2026-11-01")),
+            issuance.pauseMissed(
+              job(missed.scheduleId)(d("2026-11-01")),
+              missed.scheduleId,
+              d("2026-11-01"),
+            ),
           ),
         );
         const pausedView = yield* getTemplate(missed.templateId);
         const cappedRuns = yield* runsOf(missed.templateId);
-        yield* Effect.flatMap(Templates, (t) => t.resume(missed.templateId));
+        yield* Effect.flatMap(Templates, (t) => t.resume(member("owner"), missed.templateId));
         const ticks: Array<ReadonlyArray<SweepDecision>> = [];
         for (let i = 0; i < 5; i++) {
           const decisions = yield* sweep;
@@ -590,6 +617,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
         const t = yield* Templates;
         const current = yield* getTemplate(templateId);
         const scheduleResult = yield* t.schedule(
+          member("owner"),
           templateId,
           { ...MONTHLY, issueAs: "proforma" },
           current.revision,
@@ -611,7 +639,7 @@ describe("RecurringSweep: due occurrences on the Prague calendar", () => {
       Effect.gen(function* () {
         const { templateId, scheduleId } = yield* setup(MONTHLY);
         const stale = yield* runOccurrence(scheduleId, d("2026-10-23"));
-        yield* Effect.flatMap(Templates, (t) => t.schedule(templateId, null, 2));
+        yield* Effect.flatMap(Templates, (t) => t.schedule(member("owner"), templateId, null, 2));
         const detached = yield* runOccurrence(scheduleId, d("2026-11-23"));
         return { stale, detached, docs: yield* documents };
       }),
@@ -632,15 +660,17 @@ describe("RecurringIssuance authorization (R4, R5)", () => {
         const occurrence = d("2026-11-23");
         return {
           scheduleId,
-          memberIssue: yield* Effect.exit(r.issue(scheduleId, occurrence)),
-          memberSend: yield* Effect.exit(r.send(scheduleId, occurrence)),
-          memberPause: yield* Effect.exit(r.pauseMissed(scheduleId, occurrence)),
-          otherJob: yield* r.issue(scheduleId, occurrence).pipe(as(system()), Effect.exit),
+          memberIssue: yield* Effect.exit(r.issue(member("owner"), scheduleId, occurrence)),
+          memberSend: yield* Effect.exit(r.send(member("owner"), scheduleId, occurrence)),
+          memberPause: yield* Effect.exit(r.pauseMissed(member("owner"), scheduleId, occurrence)),
+          otherJob: yield* r
+            .issue(system(), scheduleId, occurrence)
+            .pipe(as(system()), Effect.exit),
           otherOccurrence: yield* r
-            .issue(scheduleId, occurrence)
+            .issue(job(scheduleId)(d("2026-12-23")), scheduleId, occurrence)
             .pipe(as(job(scheduleId)(d("2026-12-23"))), Effect.exit),
           otherWorkspace: yield* r
-            .issue(scheduleId, occurrence)
+            .issue(job(scheduleId)(occurrence, WORKSPACE_B), scheduleId, occurrence)
             .pipe(as(job(scheduleId)(occurrence, WORKSPACE_B)), Effect.exit),
           docs: yield* documents,
         };
@@ -775,7 +805,9 @@ describe("council follow-ups", () => {
       Effect.gen(function* () {
         const { scheduleId } = yield* setup({ ...MONTHLY, autoSend: true });
         const r = yield* RecurringIssuance;
-        yield* as(job(scheduleId)(d("2026-11-23")))(r.issue(scheduleId, d("2026-11-23")));
+        yield* as(job(scheduleId)(d("2026-11-23")))(
+          r.issue(job(scheduleId)(d("2026-11-23")), scheduleId, d("2026-11-23")),
+        );
         const fresh = yield* r.pendingSends(60_000);
         yield* TestClock.adjust(120_000);
         const stale = yield* r.pendingSends(60_000);
@@ -808,12 +840,14 @@ describe("council follow-ups", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
         return {
-          accountant: yield* t.use(id).pipe(as(member("accountant")), Effect.exit),
+          accountant: yield* t
+            .use(member("accountant"), id)
+            .pipe(as(member("accountant")), Effect.exit),
           readToken: yield* t
-            .use(id, { as: "issued" })
+            .use(member("owner", { scopes: ["templates:read"] }), id, { as: "issued" })
             .pipe(as(member("owner", { scopes: ["templates:read"] })), Effect.exit),
         };
       }),
@@ -835,9 +869,14 @@ describe("review round 1 regressions", () => {
         const t = yield* Templates;
         const { templateId } = yield* setup(MONTHLY);
         yield* sweep;
-        const scheduleResult = yield* t.schedule(templateId, null, 2);
+        const scheduleResult = yield* t.schedule(member("owner"), templateId, null, 2);
         const detached = yield* templateView(scheduleResult);
-        const scheduleResult2 = yield* t.schedule(templateId, MONTHLY, detached.revision);
+        const scheduleResult2 = yield* t.schedule(
+          member("owner"),
+          templateId,
+          MONTHLY,
+          detached.revision,
+        );
         const reattached = yield* templateView(scheduleResult2);
         const tick = yield* sweep;
         return { reattached, tick, docs: yield* documents };
@@ -857,12 +896,22 @@ describe("review round 1 regressions", () => {
         const { templateId } = yield* setup(weekly);
         yield* at("2026-11-30T08:00:00Z");
         const blocked = yield* Effect.exit(
-          t.schedule(templateId, { ...MONTHLY, issueAs: "proforma", autoSend: true }, 2),
+          t.schedule(
+            member("owner"),
+            templateId,
+            { ...MONTHLY, issueAs: "proforma", autoSend: true },
+            2,
+          ),
         );
         // The due backlog issues under the rule and settings it was due under.
         yield* sweep;
         yield* sweep;
-        const scheduleResult = yield* t.schedule(templateId, { ...weekly, autoSend: true }, 2);
+        const scheduleResult = yield* t.schedule(
+          member("owner"),
+          templateId,
+          { ...weekly, autoSend: true },
+          2,
+        );
         const sendOn = yield* templateView(scheduleResult);
         return { blocked, sendOn, docs: yield* documents, sent: yield* deliveries };
       }),
@@ -884,14 +933,14 @@ describe("review round 1 regressions", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
         const bad = { ...MONTHLY, every: { months: 0 } };
         return {
           id,
-          stale: yield* Effect.exit(t.schedule(id, bad, 7)),
+          stale: yield* Effect.exit(t.schedule(member("owner"), id, bad, 7)),
           foreign: yield* t
-            .schedule(id, bad, 1)
+            .schedule(member("owner", { workspaceId: WORKSPACE_B }), id, bad, 1)
             .pipe(as(member("owner", { workspaceId: WORKSPACE_B })), Effect.exit),
         };
       }),
@@ -910,12 +959,12 @@ describe("review round 1 regressions", () => {
     const exit = await scenario(member("owner"))(
       Effect.gen(function* () {
         const t = yield* Templates;
-        const saveResult = yield* t.save(templateInput());
+        const saveResult = yield* t.save(member("owner"), templateInput());
         const id = (yield* templateView(saveResult)).id;
-        const first = yield* t.use(id, {}, { requestKey: KEY });
+        const first = yield* t.use(member("owner"), id, {}, { requestKey: KEY });
         const docs = yield* Documents;
-        yield* docs.discardDraft(first.id, first.revision);
-        const replay = yield* t.use(id, {}, { requestKey: KEY });
+        yield* docs.discardDraft(member("owner"), first.id, first.revision);
+        const replay = yield* t.use(member("owner"), id, {}, { requestKey: KEY });
         const legacyKey = RequestKey.make("req-use-legacy");
         const store = yield* CoreStore;
         const scope = { _tag: "Workspace", workspaceId: WORKSPACE_A } as const;
@@ -945,9 +994,9 @@ describe("review round 1 regressions", () => {
             }),
           ),
         );
-        const legacy = yield* t.use(id, undefined, { requestKey: legacyKey });
+        const legacy = yield* t.use(member("owner"), id, undefined, { requestKey: legacyKey });
         const mismatch = yield* Effect.exit(
-          t.use(id, { patch: { note: "x" } }, { requestKey: KEY }),
+          t.use(member("owner"), id, { patch: { note: "x" } }, { requestKey: KEY }),
         );
         return { first, replay, legacy, mismatch, left: yield* documents };
       }),

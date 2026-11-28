@@ -50,7 +50,6 @@ import {
   Conflict,
   Contacts,
   type CoreError,
-  type CurrentCaller,
   type DocumentPatch,
   Documents,
   type DocumentView,
@@ -396,15 +395,15 @@ export const callTool = Effect.fn("callTool")(function* (
   const executeTool = (): Effect.Effect<
     McpToolCallResult,
     ToolInvalidParams | CoreError,
-    McpToolServices | CurrentCaller | RequestOutcome
+    McpToolServices | RequestOutcome
   > => {
     switch (def.name) {
       case "get_workspace":
         return Effect.gen(function* () {
           yield* decodeArgs(NoArgs, normalizedInput);
           const ws = yield* Workspaces;
-          const workspace = yield* ws.current;
-          const series = yield* ws.listSeries;
+          const workspace = yield* ws.current(caller);
+          const series = yield* ws.listSeries(caller);
           return yield* okResult(
             "get_workspace",
             `Workspace ${workspace["name"]} (${series.length} numbering series).`,
@@ -419,7 +418,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(ListDocumentsArgs, normalizedInput);
           const documents = yield* Documents;
-          const page = yield* documents.list(args);
+          const page = yield* documents.list(caller, args);
           return yield* okResult("list_documents", `Listed ${page.items.length} document(s).`, {
             ...page,
             items: Arr.map(page.items, jsonizeOpenValue),
@@ -430,7 +429,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(DocumentIdArgs, normalizedInput);
           const documents = yield* Documents;
-          const document = yield* documents.get(args.documentId);
+          const document = yield* documents.get(caller, args.documentId);
           return yield* okResult(
             "get_document",
             `Document ${document.number ?? document.id} (${document.kind}, ${document.status}).`,
@@ -442,7 +441,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(DocumentIdArgs, normalizedInput);
           const documents = yield* Documents;
-          const items = yield* documents.history(args.documentId);
+          const items = yield* documents.history(caller, args.documentId);
           return yield* okResult(
             "get_document_history",
             `Document history (${items.length} entries).`,
@@ -460,7 +459,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(GetDocumentPdfArgs, normalizedInput);
           const documents = yield* Documents;
-          const download = yield* documents.pdf(args.documentId, {
+          const download = yield* documents.pdf(caller, args.documentId, {
             ...(args.template !== undefined ? { template: args.template } : undefined),
             ...(args.language !== undefined ? { language: args.language } : undefined),
           });
@@ -502,7 +501,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(ListPaymentsArgs, normalizedInput);
           const payments = yield* Payments;
-          const items = yield* payments.listFor(args.target);
+          const items = yield* payments.listFor(caller, args.target);
           return yield* okResult("list_payments", `Listed ${items.length} payment(s).`, {
             items: Arr.map(items, jsonizeOpenValue),
           });
@@ -512,7 +511,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           yield* decodeArgs(NoArgs, normalizedInput);
           const templates = yield* Templates;
-          const items = yield* templates.list;
+          const items = yield* templates.list(caller);
           return yield* okResult(
             "list_invoice_templates",
             `Listed ${items.length} invoice template(s).`,
@@ -524,7 +523,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(ListExpensesArgs, normalizedInput);
           const expenses = yield* Expenses;
-          const page = yield* expenses.list(args);
+          const page = yield* expenses.list(caller, args);
           return yield* okResult("list_expenses", `Listed ${page.items.length} expense(s).`, {
             ...page,
             items: Arr.map(page.items, jsonizeOpenValue),
@@ -535,7 +534,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(GetExpenseArgs, normalizedInput);
           const expenses = yield* Expenses;
-          const expense = yield* expenses.get(args.expenseId);
+          const expense = yield* expenses.get(caller, args.expenseId);
           return yield* okResult("get_expense", `Expense ${args.expenseId} (${expense.status}).`, {
             expense: jsonizeOpenValue(expense),
           });
@@ -545,7 +544,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(ListContactsArgs, normalizedInput);
           const contacts = yield* Contacts;
-          const page = yield* contacts.search({
+          const page = yield* contacts.search(caller, {
             ...(args.cursor === undefined ? undefined : { cursor: args.cursor }),
             ...(args.limit === undefined ? undefined : { limit: args.limit }),
             ...(args.text === undefined ? undefined : { text: args.text }),
@@ -562,7 +561,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const args = yield* decodeArgs(LookupAresArgs, normalizedInput);
           yield* requireActions(caller, ["contact.read"]);
           const ws = yield* Workspaces;
-          const result = yield* ws.lookupCompany(args.ico);
+          const result = yield* ws.lookupCompany(caller, args.ico);
           return yield* okResult(
             "lookup_ares",
             `ARES lookup for IČO ${args.ico} completed.`,
@@ -574,7 +573,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(ListPriceListItemsArgs, normalizedInput);
           const priceList = yield* PriceList;
-          const items = yield* priceList.list({
+          const items = yield* priceList.list(caller, {
             ...(args.text === undefined ? undefined : { text: args.text }),
             ...(args.includeArchived === undefined
               ? undefined
@@ -594,7 +593,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const args = yield* decodeArgs(DocumentIdArgs, normalizedInput);
           yield* requireActions(caller, ["share.read"]);
           const documents = yield* Documents;
-          const doc = yield* documents.get(args.documentId);
+          const doc = yield* documents.get(caller, args.documentId);
           return yield* okResult(
             "get_share_link",
             doc.share !== null
@@ -609,7 +608,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const args = yield* decodeArgs(GetReportArgs, normalizedInput);
           const reports = yield* Reports;
           const report = reportKindFromMcp(args.report);
-          const data = yield* reports.run({
+          const data = yield* reports.run(caller, {
             report,
             period: { from: args.from, to: args.to },
             ...(args.groupBy !== undefined ? { groupBy: args.groupBy } : undefined),
@@ -626,7 +625,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(GetFxRateArgs, normalizedInput);
           const reports = yield* Reports;
-          const fx = yield* reports.fxRate({ currency: args.currency, on: args.on });
+          const fx = yield* reports.fxRate(caller, { currency: args.currency, on: args.on });
           return yield* okResult("get_fx_rate", `FX rate for ${args.currency} on ${args.on}.`, fx);
         });
 
@@ -636,6 +635,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const { idempotencyKey, ...input } = args;
           const documents = yield* Documents;
           const document = yield* documents.createDraft(
+            caller,
             input,
             idempotencyKey !== undefined
               ? { requestKey: mcpRequestKey(grant.grantId, idempotencyKey) }
@@ -653,11 +653,16 @@ export const callTool = Effect.fn("callTool")(function* (
           const args = yield* decodeArgs(UpdateDraftArgs, normalizedInput);
           yield* requireActions(caller, ["document.edit"]);
           const documents = yield* Documents;
-          const existing = yield* documents.get(args.documentId);
+          const existing = yield* documents.get(caller, args.documentId);
           if (existing.status !== "draft") {
             return yield* Conflict.make({ reason: "illegal_transition" });
           }
-          const document = yield* documents.edit(args.documentId, args.patch, args.revision);
+          const document = yield* documents.edit(
+            caller,
+            args.documentId,
+            args.patch,
+            args.revision,
+          );
           return yield* okResult(
             "update_draft",
             `Updated draft ${document.id} (rev ${document.revision}).`,
@@ -675,10 +680,12 @@ export const callTool = Effect.fn("callTool")(function* (
           const contact =
             args.ico !== undefined
               ? yield* contacts.fromIco(
+                  caller,
                   args.ico,
                   args.role !== undefined ? { role: args.role } : undefined,
                 )
               : yield* contacts.save(
+                  caller,
                   {
                     ...args.contact,
                     ...(args.contactId !== undefined && args.revision !== undefined
@@ -699,6 +706,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const args = yield* decodeArgs(RecordExpenseArgs, normalizedInput);
           const expenses = yield* Expenses;
           const expense = yield* expenses.record(
+            caller,
             args.expense,
             args.idempotencyKey !== undefined
               ? { requestKey: mcpRequestKey(grant.grantId, args.idempotencyKey) }
@@ -717,6 +725,7 @@ export const callTool = Effect.fn("callTool")(function* (
           const { idempotencyKey, ...input } = args;
           const payments = yield* Payments;
           const result = yield* payments.record(
+            caller,
             input,
             idempotencyKey !== undefined
               ? { requestKey: mcpRequestKey(grant.grantId, idempotencyKey) }
@@ -738,12 +747,13 @@ export const callTool = Effect.fn("callTool")(function* (
           const args = yield* decodeArgs(SettleProformaArgs, normalizedInput);
           yield* requireActions(caller, ["payment.write"]);
           const documents = yield* Documents;
-          const proforma = yield* documents.get(args.proformaId);
+          const proforma = yield* documents.get(caller, args.proformaId);
           if (proforma.kind !== "proforma") {
             return yield* Conflict.make({ reason: "illegal_transition" });
           }
           const payments = yield* Payments;
           const result = yield* payments.record(
+            caller,
             {
               target: { document: args.proformaId },
               ...(args.amount !== undefined ? { amount: args.amount } : undefined),
@@ -769,7 +779,7 @@ export const callTool = Effect.fn("callTool")(function* (
         return Effect.gen(function* () {
           const args = yield* decodeArgs(LockDocumentArgs, normalizedInput);
           const documents = yield* Documents;
-          const document = yield* documents.lock(args.documentId);
+          const document = yield* documents.lock(caller, args.documentId);
           return yield* okResult(
             "lock_document",
             `Locked document ${document.number ?? document.id}.`,
@@ -788,6 +798,7 @@ export const callTool = Effect.fn("callTool")(function* (
               return yield* confirmationRequiredError();
             }
             const document = yield* templates.use(
+              caller,
               args.templateId,
               {
                 as: "draft",
@@ -814,10 +825,10 @@ export const callTool = Effect.fn("callTool")(function* (
               caller,
               requiredActions("create_from_template", { as: "issued" }),
             );
-            const template = yield* templates.get(args.templateId);
+            const template = yield* templates.get(caller, args.templateId);
             const input = yield* templatePreviewInput(template, args.patch);
             const documents = yield* Documents;
-            const previewDoc = yield* documents.preview(input);
+            const previewDoc = yield* documents.preview(caller, input);
             const summary = documentSummaryOf(previewDoc);
             const minted = yield* mint("create_from_template", template.revision);
             const templateName = template["name"];
@@ -838,6 +849,7 @@ export const callTool = Effect.fn("callTool")(function* (
             { table: "templates", id: args.templateId },
             (requestKey) =>
               templates.use(
+                caller,
                 args.templateId,
                 {
                   as: "issued",
@@ -865,7 +877,7 @@ export const callTool = Effect.fn("callTool")(function* (
             let previewDoc: DocumentView;
             let subjectRevision: number | null;
             if ("draft" in args.from) {
-              const draft = yield* documents.get(args.from.draft);
+              const draft = yield* documents.get(caller, args.from.draft);
               if (draft.revision !== args.from.revision) {
                 return yield* Conflict.make({
                   reason: "revision_changed",
@@ -875,7 +887,7 @@ export const callTool = Effect.fn("callTool")(function* (
               previewDoc = draft;
               subjectRevision = draft.revision;
             } else {
-              previewDoc = yield* documents.preview(args.from.input);
+              previewDoc = yield* documents.preview(caller, args.from.input);
               subjectRevision = null;
             }
             const minted = yield* mint("issue_document", subjectRevision);
@@ -909,6 +921,7 @@ export const callTool = Effect.fn("callTool")(function* (
             undefined,
             (requestKey) =>
               documents.issue(
+                caller,
                 "draft" in args.from
                   ? { draft: args.from.draft, expectedRevision: args.from.revision }
                   : { input: args.from.input },
@@ -941,8 +954,8 @@ export const callTool = Effect.fn("callTool")(function* (
 
           if (step === "preview") {
             yield* requireActions(caller, requiredActions("send_document", {}));
-            const doc = yield* documents.get(args.documentId);
-            const sendPreview = yield* documents.previewSend(args.documentId, sendOptions);
+            const doc = yield* documents.get(caller, args.documentId);
+            const sendPreview = yield* documents.previewSend(caller, args.documentId, sendOptions);
             const minted = yield* mint("send_document", doc.revision);
             const confirmation = buildConfirmationRequired({
               action: "send_document",
@@ -963,7 +976,7 @@ export const callTool = Effect.fn("callTool")(function* (
             "send_document",
             args.confirmationToken,
             { table: "documents", id: args.documentId },
-            (requestKey) => documents.send(args.documentId, sendOptions, { requestKey }),
+            (requestKey) => documents.send(caller, args.documentId, sendOptions, { requestKey }),
           );
           return yield* okResult("send_document", `Queued email delivery ${delivery.deliveryId}.`, {
             _tag: "Confirmed",
@@ -985,8 +998,8 @@ export const callTool = Effect.fn("callTool")(function* (
 
           if (step === "preview") {
             yield* requireActions(caller, requiredActions("send_reminder", {}));
-            const doc = yield* documents.get(args.documentId);
-            const sendPreview = yield* documents.previewSend(args.documentId, sendOptions);
+            const doc = yield* documents.get(caller, args.documentId);
+            const sendPreview = yield* documents.previewSend(caller, args.documentId, sendOptions);
             const minted = yield* mint("send_reminder", doc.revision);
             const confirmation = buildConfirmationRequired({
               action: "send_reminder",
@@ -1007,7 +1020,7 @@ export const callTool = Effect.fn("callTool")(function* (
             "send_reminder",
             args.confirmationToken,
             { table: "documents", id: args.documentId },
-            (requestKey) => documents.send(args.documentId, sendOptions, { requestKey }),
+            (requestKey) => documents.send(caller, args.documentId, sendOptions, { requestKey }),
           );
           return yield* okResult(
             "send_reminder",
@@ -1030,8 +1043,8 @@ export const callTool = Effect.fn("callTool")(function* (
 
           if (step === "preview") {
             yield* requireActions(caller, requiredActions("create_final_invoice", {}));
-            const proforma = yield* documents.get(args.proformaId);
-            const previewDoc = yield* documents.previewFinalInvoice(args.proformaId, input);
+            const proforma = yield* documents.get(caller, args.proformaId);
+            const previewDoc = yield* documents.previewFinalInvoice(caller, args.proformaId, input);
             const minted = yield* mint("create_final_invoice", proforma.revision);
             const summary = documentSummaryOf(previewDoc);
             const confirmation = buildConfirmationRequired({
@@ -1049,7 +1062,8 @@ export const callTool = Effect.fn("callTool")(function* (
             "create_final_invoice",
             args.confirmationToken,
             { table: "documents", id: args.proformaId },
-            (requestKey) => documents.issueFinalInvoice(args.proformaId, input, { requestKey }),
+            (requestKey) =>
+              documents.issueFinalInvoice(caller, args.proformaId, input, { requestKey }),
           );
           return yield* confirmedDocument(
             "create_final_invoice",
@@ -1073,8 +1087,12 @@ export const callTool = Effect.fn("callTool")(function* (
 
           if (step === "preview") {
             yield* requireActions(caller, requiredActions("create_credit_note", {}));
-            const source = yield* documents.get(args.documentId);
-            const previewDoc = yield* documents.previewCorrection(args.documentId, correctionInput);
+            const source = yield* documents.get(caller, args.documentId);
+            const previewDoc = yield* documents.previewCorrection(
+              caller,
+              args.documentId,
+              correctionInput,
+            );
             const minted = yield* mint("create_credit_note", source.revision);
             const summary = documentSummaryOf(previewDoc);
             const confirmation = buildConfirmationRequired({
@@ -1092,7 +1110,8 @@ export const callTool = Effect.fn("callTool")(function* (
             "create_credit_note",
             args.confirmationToken,
             { table: "documents", id: args.documentId },
-            (requestKey) => documents.correct(args.documentId, correctionInput, { requestKey }),
+            (requestKey) =>
+              documents.correct(caller, args.documentId, correctionInput, { requestKey }),
           );
           return yield* confirmedDocument(
             "create_credit_note",

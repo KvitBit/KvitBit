@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { ATTACHMENT_MAX_BYTES } from "@kvitbit/api-contract";
-import { Contacts, CurrentCaller, type MemberCaller } from "@kvitbit/domain/contract";
+import { Contacts, type MemberCaller } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
+
 import { as, type Harness, json, makeHarness, type TestUser } from "../harness";
 
 const decodeExpensePage = Fn.flow(
@@ -59,13 +60,13 @@ beforeEach(async () => {
   const contact = await h.run(
     Effect.gen(function* () {
       const contacts = yield* Contacts;
-      return yield* contacts.save({
+      return yield* contacts.save(member, {
         name: "Dodavatel s.r.o.",
         ico: "25596641",
         address: { city: "Praha", country: "CZ" },
         roles: ["supplier"],
       });
-    }).pipe(Effect.provideService(CurrentCaller, member)),
+    }),
   );
   supplierId = Schema.decodeUnknownEffect(Schema.String)(contact["id"]).pipe(Effect.runSync);
 });

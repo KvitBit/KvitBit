@@ -52,6 +52,7 @@ describe("create replay", () => {
         const ws = yield* W;
         const createFailure = yield* ws
           .create(
+            accountOf(OWNER),
             { name: "X", slug: WorkspaceSlug.make("Bad Slug", { disableChecks: true }) },
             key("c1"),
           )
@@ -66,13 +67,14 @@ describe("create replay", () => {
     scenario(
       Effect.gen(function* () {
         const ws = yield* W;
-        const create = () => as(accountOf(OWNER))(ws.create({ name: "Second" }, key("c2")));
+        const create = () =>
+          as(accountOf(OWNER))(ws.create(accountOf(OWNER), { name: "Second" }, key("c2")));
         const owner = yield* create();
         yield* join(owner)(MEMBER, "member");
-        yield* as(owner)(ws.transferOwnership(MEMBER));
+        yield* as(owner)(ws.transferOwnership(owner, MEMBER));
         expect((yield* create()).role).toBe("admin");
         const formerOwner = { ...owner, role: "admin" as const };
-        yield* as(formerOwner)(ws.leave);
+        yield* as(formerOwner)(ws.leave(formerOwner));
         const failureResult = yield* failure(create());
         expect(failureResult).toEqual(Forbidden.make({ action: "workspace.enter" }));
       }),
@@ -87,16 +89,19 @@ describe("idempotent by state (C6)", () => {
         const s = yield* seed();
         // The first CZK account is the currency default (always in use); remove the second.
         yield* as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN, currency: "CZK" })),
+          ws.saveBankAccount(s.admin, BankAccountInput.make({ iban: IBAN, currency: "CZK" })),
         );
         const saveBankAccountResult = yield* as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN, currency: "CZK", name: "Druhý" })),
+          ws.saveBankAccount(
+            s.admin,
+            BankAccountInput.make({ iban: IBAN, currency: "CZK", name: "Druhý" }),
+          ),
         );
         const account = yield* bankAccountView(saveBankAccountResult);
-        yield* as(s.admin)(ws.removeBankAccount(account.id));
-        yield* as(s.admin)(ws.removeBankAccount(account.id));
-        yield* as(s.owner)(ws.close("Acme s.r.o."));
-        yield* as(s.owner)(ws.close("Acme s.r.o."));
+        yield* as(s.admin)(ws.removeBankAccount(s.admin, account.id));
+        yield* as(s.admin)(ws.removeBankAccount(s.admin, account.id));
+        yield* as(s.owner)(ws.close(s.owner, "Acme s.r.o."));
+        yield* as(s.owner)(ws.close(s.owner, "Acme s.r.o."));
         const entries = yield* history(s.workspaceId);
         const actions = EffectArray.map(entries, (e) => e.action);
         expect(EffectArray.filter(actions, (a) => a === "workspace.close").length).toBe(1);
@@ -113,14 +118,17 @@ describe("idempotent by state (C6)", () => {
         const s = yield* seed();
         const set = () =>
           as(s.admin)(
-            ws.setBrandingImage("logo", { contentType: "image/png", bytes: Stream.succeed(png()) }),
+            ws.setBrandingImage(s.admin, "logo", {
+              contentType: "image/png",
+              bytes: Stream.succeed(png()),
+            }),
           );
         const first = yield* set();
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const revision = result.revision;
         const result2 = yield* set();
         expect(result2).toEqual(first);
-        const result3 = yield* as(s.admin)(ws.current);
+        const result3 = yield* as(s.admin)(ws.current(s.admin));
         expect(result3.revision).toBe(revision);
       }),
     ));
@@ -132,7 +140,7 @@ describe("idempotent by state (C6)", () => {
         const s = yield* seed();
         const save = (input: (typeof BankAccountFields)["Encoded"]) =>
           Effect.flatMap(
-            as(s.admin)(ws.saveBankAccount(BankAccountInput.make(input))),
+            as(s.admin)(ws.saveBankAccount(s.admin, BankAccountInput.make(input))),
             bankAccountView,
           );
         const a = yield* save({ iban: IBAN, currency: "CZK", name: "Hlavní", bic: "GIBACZPX" });
@@ -151,19 +159,25 @@ describe("idempotent by state (C6)", () => {
         const refs = yield* BankAccountReferencesFake;
         const s = yield* seed();
         const saveBankAccountResult = yield* as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ iban: IBAN, currency: "CZK" })),
+          ws.saveBankAccount(s.admin, BankAccountInput.make({ iban: IBAN, currency: "CZK" })),
         );
         const a = yield* bankAccountView(saveBankAccountResult);
         yield* refs.set(s.workspaceId, BankAccountId.make(a.id), 1);
         const saveBankAccountFailure = yield* ws
-          .saveBankAccount(BankAccountInput.make({ id: a.id, iban: IBAN, currency: "EUR" }))
+          .saveBankAccount(
+            s.admin,
+            BankAccountInput.make({ id: a.id, iban: IBAN, currency: "EUR" }),
+          )
           .pipe(as(s.admin), failure);
         expect(saveBankAccountFailure).toEqual(
           Conflict.make({ reason: "illegal_transition", detail: "bank_account.in_use" }),
         );
         yield* refs.set(s.workspaceId, BankAccountId.make(a.id), 0);
         const saveBankAccountResult2 = yield* as(s.admin)(
-          ws.saveBankAccount(BankAccountInput.make({ id: a.id, iban: IBAN, currency: "EUR" })),
+          ws.saveBankAccount(
+            s.admin,
+            BankAccountInput.make({ id: a.id, iban: IBAN, currency: "EUR" }),
+          ),
         );
         const moved = yield* bankAccountView(saveBankAccountResult2);
         expect(moved).toMatchObject({ currency: "EUR", isDefault: true });
@@ -176,15 +190,20 @@ describe("idempotent by state (C6)", () => {
         const ws = yield* W;
         const s = yield* seed();
         const series = yield* as(s.admin)(
-          ws.configureSeries({ kind: "invoice", name: "EX", pattern: "EX-NNN" }),
+          ws.configureSeries(s.admin, { kind: "invoice", name: "EX", pattern: "EX-NNN" }),
         );
-        const result = yield* as(s.admin)(ws.current);
+        const result = yield* as(s.admin)(ws.current(s.admin));
         const revision = result.revision;
         const again = yield* as(s.admin)(
-          ws.configureSeries({ id: series.id, kind: "invoice", name: "EX", pattern: "EX-NNN" }),
+          ws.configureSeries(s.admin, {
+            id: series.id,
+            kind: "invoice",
+            name: "EX",
+            pattern: "EX-NNN",
+          }),
         );
         expect(again).toEqual(series);
-        const result2 = yield* as(s.admin)(ws.current);
+        const result2 = yield* as(s.admin)(ws.current(s.admin));
         expect(result2.revision).toBe(revision);
       }),
     ));
@@ -197,7 +216,7 @@ describe("theme validation", () => {
         const ws = yield* W;
         const s = yield* seed();
         const update = (theme: ThemeSource) =>
-          as(s.admin)(ws.updateSettings({ branding: { theme } }, 1));
+          as(s.admin)(ws.updateSettings(s.admin, { branding: { theme } }, 1));
         const issue = (error: Effect.Error<ReturnType<typeof update>>) =>
           error._tag === "Invalid" ? error.issues[0]?.code : undefined;
         const code = (theme: ThemeSource) => update(theme).pipe(failure, Effect.map(issue));
@@ -214,7 +233,7 @@ describe("theme validation", () => {
         const invalidPreset: ReturnType<typeof ws.updateSettings> = Reflect.apply(
           ws.updateSettings,
           ws,
-          [{ branding: { theme: { _tag: "Preset", id: "neon" } } }, 1],
+          [s.admin, { branding: { theme: { _tag: "Preset", id: "neon" } } }, 1],
         );
         const presetFailure = yield* invalidPreset.pipe(as(s.admin), failure);
         const presetIssue = issue(presetFailure);
@@ -233,9 +252,11 @@ describe("store outages", () => {
         const repo = yield* WorkspacesRepo;
         const broken = { ...repo, lockWorkspace: () => Effect.fail(StoreUnavailable.make({})) };
         const ws = yield* Effect.provideService(makeWorkspaces, WorkspacesRepo, broken);
-        const closeFailure = yield* ws.close("Acme s.r.o.").pipe(as(s.owner), failure);
+        const closeFailure = yield* ws.close(s.owner, "Acme s.r.o.").pipe(as(s.owner), failure);
         expect(closeFailure).toEqual(Unavailable.make({ dependency: "database" }));
-        const inviteFailure = yield* ws.invite("x@example.cz", "member").pipe(as(s.admin), failure);
+        const inviteFailure = yield* ws
+          .invite(s.admin, "x@example.cz", "member")
+          .pipe(as(s.admin), failure);
         expect(inviteFailure).toEqual(Unavailable.make({ dependency: "database" }));
       }),
     ));

@@ -24,6 +24,7 @@ import {
 } from "../../../src/modules/documents";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { member, WORKSPACE_B } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import {
   as,
   B_BUYER,
@@ -60,12 +61,13 @@ describe("createDraft", () => {
     const [view, got, history] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const documentView = yield* docs.createDraft(invoiceInput());
+          const documentView = yield* docs.createDraft(testCaller, invoiceInput());
           return [
             documentView,
-            yield* docs.get(documentView.id),
-            yield* docs.history(documentView.id),
+            yield* docs.get(testCaller, documentView.id),
+            yield* docs.history(testCaller, documentView.id),
           ] as const;
         }),
       ),
@@ -101,6 +103,7 @@ describe("createDraft", () => {
     const view = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const f = yield* DocumentFixtures;
           yield* f.putContact(
             member("owner").workspaceId,
@@ -109,8 +112,11 @@ describe("createDraft", () => {
             }),
           );
           const docs = yield* Documents;
-          const a = yield* docs.createDraft(invoiceInput());
-          const b = yield* docs.createDraft(invoiceInput({ due: { inDays: 7 }, note: "Document" }));
+          const a = yield* docs.createDraft(testCaller, invoiceInput());
+          const b = yield* docs.createDraft(
+            testCaller,
+            invoiceInput({ due: { inDays: 7 }, note: "Document" }),
+          );
           return [a, b] as const;
         }),
         { billingA: { defaultNote: "Workspace", paymentMethod: "card" } },
@@ -123,13 +129,20 @@ describe("createDraft", () => {
     const repoRows = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const f = yield* DocumentFixtures;
           yield* f.putContact(
             member("owner").workspaceId,
             contact(CZ_BUYER, { defaults: { language: "en", defaultNote: "Contact" } }),
           );
-          const created = yield* (yield* Documents).createDraft(invoiceInput({ note: "Document" }));
-          const plain = yield* (yield* Documents).createDraft(invoiceInput({ contact: CZ_NO_DIC }));
+          const created = yield* (yield* Documents).createDraft(
+            testCaller,
+            invoiceInput({ note: "Document" }),
+          );
+          const plain = yield* (yield* Documents).createDraft(
+            testCaller,
+            invoiceInput({ contact: CZ_NO_DIC }),
+          );
           const repo = yield* DocumentsRepo;
           return [
             yield* repo.get(member("owner").workspaceId, created.id),
@@ -146,7 +159,9 @@ describe("createDraft", () => {
   test("a due date before the issue date is Invalid", async () => {
     const exit = await Documents.pipe(
       Effect.flatMap((d) =>
-        d.createDraft(invoiceInput({ due: { on: IsoDate.make("2026-11-01") } })),
+        Effect.flatMap(TestCaller, (caller) =>
+          d.createDraft(caller, invoiceInput({ due: { on: IsoDate.make("2026-11-01") } })),
+        ),
       ),
       Effect.flip,
       present,
@@ -163,6 +178,7 @@ describe("createDraft", () => {
     const view = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           yield* (yield* DocumentFixtures).putItem(member("owner").workspaceId, {
             id: ITEM,
             name: "Hodina",
@@ -175,6 +191,7 @@ describe("createDraft", () => {
             revision: 1,
           });
           return yield* (yield* Documents).createDraft(
+            testCaller,
             invoiceInput({ lines: [{ item: ITEM, quantity: dec("3") }] }),
           );
         }),
@@ -195,13 +212,23 @@ describe("createDraft", () => {
     const [first, second, mismatch, all] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const firstResult = yield* docs.createDraft(invoiceInput(), { requestKey: key });
-          const secondResult = yield* docs.createDraft(invoiceInput(), { requestKey: key });
+          const firstResult = yield* docs.createDraft(testCaller, invoiceInput(), {
+            requestKey: key,
+          });
+          const secondResult = yield* docs.createDraft(testCaller, invoiceInput(), {
+            requestKey: key,
+          });
           const mismatchResult = yield* Effect.flip(
-            docs.createDraft(invoiceInput({ note: "other" }), { requestKey: key }),
+            docs.createDraft(testCaller, invoiceInput({ note: "other" }), { requestKey: key }),
           );
-          return [firstResult, secondResult, mismatchResult, yield* docs.list({})] as const;
+          return [
+            firstResult,
+            secondResult,
+            mismatchResult,
+            yield* docs.list(testCaller, {}),
+          ] as const;
         }),
       ),
     );
@@ -216,14 +243,18 @@ describe("nesting", () => {
     const [failed, listed] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const store = yield* CoreStore;
           const failedResult = yield* Effect.flip(
             store.transaction(
-              Effect.andThen(docs.createDraft(invoiceInput()), Effect.fail("abort" as const)),
+              Effect.andThen(
+                docs.createDraft(testCaller, invoiceInput()),
+                Effect.fail("abort" as const),
+              ),
             ),
           );
-          return [failedResult, (yield* docs.list({})).items.length] as const;
+          return [failedResult, (yield* docs.list(testCaller, {})).items.length] as const;
         }),
       ),
     );
@@ -236,19 +267,20 @@ describe("authorization and tenancy", () => {
   test("accountants and read-only tokens cannot draft; they can read", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const docs = yield* Documents;
-        const view = yield* docs.createDraft(invoiceInput());
+        const view = yield* docs.createDraft(testCaller, invoiceInput());
         const accountant = member("accountant");
         const reader = member("member", { scopes: ["documents:read"] });
         return [
-          yield* Effect.flip(as(accountant, docs.createDraft(invoiceInput()))),
-          yield* Effect.flip(as(reader, docs.createDraft(invoiceInput()))),
-          yield* Effect.flip(as(accountant, docs.edit(view.id, { note: "x" }, 1))),
-          yield* Effect.flip(as(accountant, docs.discardDraft(view.id, 1))),
-          yield* Effect.flip(as(accountant, docs.preview(invoiceInput()))),
-          (yield* as(accountant, docs.get(view.id))).id === view.id,
-          (yield* as(reader, docs.list({}))).items.length,
-          (yield* as(reader, docs.history(view.id))).length,
+          yield* Effect.flip(as(accountant, docs.createDraft(accountant, invoiceInput()))),
+          yield* Effect.flip(as(reader, docs.createDraft(reader, invoiceInput()))),
+          yield* Effect.flip(as(accountant, docs.edit(accountant, view.id, { note: "x" }, 1))),
+          yield* Effect.flip(as(accountant, docs.discardDraft(accountant, view.id, 1))),
+          yield* Effect.flip(as(accountant, docs.preview(accountant, invoiceInput()))),
+          (yield* as(accountant, docs.get(accountant, view.id))).id === view.id,
+          (yield* as(reader, docs.list(reader, {}))).items.length,
+          (yield* as(reader, docs.history(reader, view.id))).length,
         ] as const;
       }),
     );
@@ -266,16 +298,17 @@ describe("authorization and tenancy", () => {
     const [contactMiss, getMiss, editMiss, discardMiss, pdfMiss, historyMiss, listed] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput());
+          const view = yield* docs.createDraft(testCaller, invoiceInput());
           return [
-            yield* Effect.flip(docs.createDraft(invoiceInput({ contact: B_BUYER }))),
-            yield* Effect.flip(as(otherMember, docs.get(view.id))),
-            yield* Effect.flip(as(otherMember, docs.edit(view.id, { note: "x" }, 1))),
-            yield* Effect.flip(as(otherMember, docs.discardDraft(view.id, 1))),
-            yield* Effect.flip(as(otherMember, docs.pdf(view.id))),
-            yield* Effect.flip(as(otherMember, docs.history(view.id))),
-            (yield* as(otherMember, docs.list({}))).items.length,
+            yield* Effect.flip(docs.createDraft(testCaller, invoiceInput({ contact: B_BUYER }))),
+            yield* Effect.flip(as(otherMember, docs.get(otherMember, view.id))),
+            yield* Effect.flip(as(otherMember, docs.edit(otherMember, view.id, { note: "x" }, 1))),
+            yield* Effect.flip(as(otherMember, docs.discardDraft(otherMember, view.id, 1))),
+            yield* Effect.flip(as(otherMember, docs.pdf(otherMember, view.id))),
+            yield* Effect.flip(as(otherMember, docs.history(otherMember, view.id))),
+            (yield* as(otherMember, docs.list(otherMember, {}))).items.length,
           ] as const;
         }),
       ),
@@ -291,11 +324,12 @@ describe("authorization and tenancy", () => {
     const [miss, view, listed] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           return [
-            yield* Effect.flip(docs.preview(invoiceInput({ contact: B_BUYER }))),
-            yield* docs.preview(invoiceInput()),
-            (yield* docs.list({})).items.length,
+            yield* Effect.flip(docs.preview(testCaller, invoiceInput({ contact: B_BUYER }))),
+            yield* docs.preview(testCaller, invoiceInput()),
+            (yield* docs.list(testCaller, {})).items.length,
           ] as const;
         }),
       ),
@@ -312,11 +346,14 @@ describe("VAT regimes (rule D9)", () => {
     const view = ok(
       await scenario(
         Effect.flatMap(Documents, (d) =>
-          d.createDraft(
-            invoiceInput({
-              contact: DE_BUYER,
-              lines: [{ description: "Vývoj", unitPrice: dec("1000") }],
-            }),
+          Effect.flatMap(TestCaller, (caller) =>
+            d.createDraft(
+              caller,
+              invoiceInput({
+                contact: DE_BUYER,
+                lines: [{ description: "Vývoj", unitPrice: dec("1000") }],
+              }),
+            ),
           ),
         ),
       ),
@@ -332,11 +369,14 @@ describe("VAT regimes (rule D9)", () => {
     const err = ok(
       await Documents.pipe(
         Effect.flatMap((d) =>
-          d.createDraft(
-            invoiceInput({
-              contact: CZ_NO_DIC,
-              lines: [{ description: "Stavba", unitPrice: dec("1"), vat: "reverse_charge" }],
-            }),
+          Effect.flatMap(TestCaller, (caller) =>
+            d.createDraft(
+              caller,
+              invoiceInput({
+                contact: CZ_NO_DIC,
+                lines: [{ description: "Stavba", unitPrice: dec("1"), vat: "reverse_charge" }],
+              }),
+            ),
           ),
         ),
         Effect.flip,
@@ -354,11 +394,13 @@ describe("VAT regimes (rule D9)", () => {
     const [view, err] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const documentView = yield* docs.createDraft(
+            testCaller,
             invoiceInput({ lines: [{ description: "Služba", unitPrice: dec("1000") }] }),
           );
-          const failure = yield* Effect.flip(docs.createDraft(invoiceInput()));
+          const failure = yield* Effect.flip(docs.createDraft(testCaller, invoiceInput()));
           return [documentView, failure] as const;
         }),
         { regimeA: "non_vat_payer" },
@@ -378,11 +420,13 @@ describe("VAT regimes (rule D9)", () => {
     const [domestic, eu, rejected] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const one = [{ description: "Služba", unitPrice: dec("100") }] as const;
           return [
-            yield* docs.createDraft(invoiceInput({ lines: one })),
+            yield* docs.createDraft(testCaller, invoiceInput({ lines: one })),
             yield* docs.createDraft(
+              testCaller,
               invoiceInput({
                 contact: DE_BUYER,
                 lines: [{ description: "Služba", unitPrice: dec("100"), vat: "reverse_charge" }],
@@ -390,6 +434,7 @@ describe("VAT regimes (rule D9)", () => {
             ),
             yield* Effect.flip(
               docs.createDraft(
+                testCaller,
                 invoiceInput({
                   lines: [{ description: "Služba", unitPrice: dec("100"), vat: "reverse_charge" }],
                 }),
@@ -409,7 +454,11 @@ describe("VAT regimes (rule D9)", () => {
   test("a Proforma is never a tax document; its tax point defaults to issuedOn", async () => {
     const view = ok(
       await scenario(
-        Effect.flatMap(Documents, (d) => d.createDraft(invoiceInput({ kind: "proforma" }))),
+        Effect.flatMap(Documents, (d) =>
+          Effect.flatMap(TestCaller, (caller) =>
+            d.createDraft(caller, invoiceInput({ kind: "proforma" })),
+          ),
+        ),
       ),
     );
     expect(view.taxDocument).toBe(false);
@@ -429,7 +478,9 @@ describe("FX (rule D11)", () => {
   test("takes the CNB fixing carried back to the tax point and shows CZK VAT per bucket", async () => {
     const view = ok(
       await scenario(
-        Effect.flatMap(Documents, (d) => d.createDraft(eurInput)),
+        Effect.flatMap(Documents, (d) =>
+          Effect.flatMap(TestCaller, (caller) => d.createDraft(caller, eurInput)),
+        ),
         { fixings },
       ),
     );
@@ -451,12 +502,18 @@ describe("FX (rule D11)", () => {
     const [manual, back] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const manualResult = yield* docs.createDraft({
+          const manualResult = yield* docs.createDraft(testCaller, {
             ...eurInput,
             fx: { manual: { rate: dec("24.5"), quantity: 1 } },
           });
-          const backResult = yield* docs.edit(manualResult.id, { fx: null }, manualResult.revision);
+          const backResult = yield* docs.edit(
+            testCaller,
+            manualResult.id,
+            { fx: null },
+            manualResult.revision,
+          );
           return [manualResult, backResult] as const;
         }),
         { fixings },
@@ -477,16 +534,26 @@ describe("FX (rule D11)", () => {
     const [czk, bad, missing] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           return [
             yield* Effect.flip(
-              docs.createDraft(invoiceInput({ fx: { manual: { rate: dec("1"), quantity: 1 } } })),
+              docs.createDraft(
+                testCaller,
+                invoiceInput({ fx: { manual: { rate: dec("1"), quantity: 1 } } }),
+              ),
             ),
             yield* Effect.flip(
-              docs.createDraft({ ...eurInput, fx: { manual: { rate: dec("0"), quantity: 1 } } }),
+              docs.createDraft(testCaller, {
+                ...eurInput,
+                fx: { manual: { rate: dec("0"), quantity: 1 } },
+              }),
             ),
             yield* Effect.flip(
-              docs.createDraft({ ...eurInput, taxableSupplyOn: IsoDate.make("2026-11-01") }),
+              docs.createDraft(testCaller, {
+                ...eurInput,
+                taxableSupplyOn: IsoDate.make("2026-11-01"),
+              }),
             ),
           ] as const;
         }),
@@ -504,14 +571,18 @@ describe("edit and discard of drafts", () => {
     const [edited, stale, czkAccount] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput());
+          const view = yield* docs.createDraft(testCaller, invoiceInput());
           const editedResult = yield* docs.edit(
+            testCaller,
             view.id,
             { lines: [{ description: "Jiné", unitPrice: dec("100") }], contact: DE_BUYER },
             1,
           );
-          const staleResult = yield* Effect.flip(docs.edit(view.id, { note: "late" }, 1));
+          const staleResult = yield* Effect.flip(
+            docs.edit(testCaller, view.id, { note: "late" }, 1),
+          );
           return [
             editedResult,
             staleResult,
@@ -532,9 +603,10 @@ describe("edit and discard of drafts", () => {
     const err = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput());
-          return yield* Effect.flip(docs.edit(view.id, { number: "2026-0001" }, 1));
+          const view = yield* docs.createDraft(testCaller, invoiceInput());
+          return yield* Effect.flip(docs.edit(testCaller, view.id, { number: "2026-0001" }, 1));
         }),
       ),
     );
@@ -545,24 +617,29 @@ describe("edit and discard of drafts", () => {
     const [gone, stale, issuedDiscard, cancelledEdit, history] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
           const ws = member("owner").workspaceId;
-          const a = yield* docs.createDraft(invoiceInput());
-          const staleResult2 = yield* Effect.flip(docs.discardDraft(a.id, 7));
-          yield* docs.discardDraft(a.id, 1);
-          const removedDocument = yield* Effect.flip(docs.get(a.id));
-          const b = yield* docs.createDraft(invoiceInput());
+          const a = yield* docs.createDraft(testCaller, invoiceInput());
+          const staleResult2 = yield* Effect.flip(docs.discardDraft(testCaller, a.id, 7));
+          yield* docs.discardDraft(testCaller, a.id, 1);
+          const removedDocument = yield* Effect.flip(docs.get(testCaller, a.id));
+          const b = yield* docs.createDraft(testCaller, invoiceInput());
           const row = yield* repo.get(ws, b.id);
           const issued = yield* store.transaction(
             repo.update({ ...row, status: "issued", number: "2026-0001" }, 1),
           );
-          const issuedDiscardResult = yield* Effect.flip(docs.discardDraft(b.id, issued.revision));
-          const c = yield* docs.createDraft(invoiceInput());
+          const issuedDiscardResult = yield* Effect.flip(
+            docs.discardDraft(testCaller, b.id, issued.revision),
+          );
+          const c = yield* docs.createDraft(testCaller, invoiceInput());
           const cRow = yield* repo.get(ws, c.id);
           yield* store.transaction(repo.update({ ...cRow, status: "cancelled", locked: true }, 1));
-          const cancelledEditResult = yield* Effect.flip(docs.edit(c.id, { note: "x" }, 2));
+          const cancelledEditResult = yield* Effect.flip(
+            docs.edit(testCaller, c.id, { note: "x" }, 2),
+          );
           const historyResult = yield* store.audit.history(ws, { entity: "Document", id: a.id });
           return [
             removedDocument,
@@ -590,29 +667,42 @@ describe("list and pdf", () => {
     const [invoices, page1, page2, mismatch, byText] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          yield* docs.createDraft(invoiceInput({ issuedOn: IsoDate.make("2026-11-01") }));
           yield* docs.createDraft(
+            testCaller,
+            invoiceInput({ issuedOn: IsoDate.make("2026-11-01") }),
+          );
+          yield* docs.createDraft(
+            testCaller,
             invoiceInput({ issuedOn: IsoDate.make("2026-11-02"), kind: "proforma" }),
           );
           yield* docs.createDraft(
+            testCaller,
             invoiceInput({
               issuedOn: IsoDate.make("2026-11-03"),
               contact: DE_BUYER,
               lines: [{ description: "x", unitPrice: dec("1") }],
             }),
           );
-          const invoicesResult = yield* docs.list({ kind: "invoice" });
-          const firstPage = yield* docs.list({ kind: "invoice", limit: 1 });
-          const secondPage = yield* docs.list({
+          const invoicesResult = yield* docs.list(testCaller, { kind: "invoice" });
+          const firstPage = yield* docs.list(testCaller, { kind: "invoice", limit: 1 });
+          const secondPage = yield* docs.list(testCaller, {
             kind: "invoice",
             limit: 1,
             cursor: firstPage.nextCursor ?? "",
           });
           const mismatchResult = yield* Effect.flip(
-            docs.list({ kind: "proforma", limit: 1, cursor: firstPage.nextCursor ?? "" }),
+            docs.list(testCaller, {
+              kind: "proforma",
+              limit: 1,
+              cursor: firstPage.nextCursor ?? "",
+            }),
           );
-          const byTextResult = yield* docs.list({ text: "ODBĚRATEL", contact: CZ_BUYER });
+          const byTextResult = yield* docs.list(testCaller, {
+            text: "ODBĚRATEL",
+            contact: CZ_BUYER,
+          });
           return [invoicesResult, firstPage, secondPage, mismatchResult, byTextResult] as const;
         }),
       ),
@@ -635,9 +725,12 @@ describe("list and pdf", () => {
     const [view, download, bytes, renders] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const documentView = yield* docs.createDraft(invoiceInput());
-          const downloadResult = yield* docs.pdf(documentView.id, { template: "modern_minimal" });
+          const documentView = yield* docs.createDraft(testCaller, invoiceInput());
+          const downloadResult = yield* docs.pdf(testCaller, documentView.id, {
+            template: "modern_minimal",
+          });
           const chunks = yield* Stream.runCollect(downloadResult.bytes);
           const rendersResult = yield* Ref.get((yield* DocumentFixtures).renders);
           return [documentView, downloadResult, Array.from(chunks), rendersResult] as const;

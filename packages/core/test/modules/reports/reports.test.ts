@@ -3,7 +3,6 @@ import type { Caller, CoreError, ReportKind, ReportView } from "@kvitbit/domain/
 import {
   Conflict,
   CurrencyCode,
-  CurrentCaller,
   ExpenseId,
   ExportId,
   Forbidden,
@@ -49,13 +48,14 @@ import {
   WORKSPACE_A,
   WORKSPACE_B,
 } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 import { bucket, d, docId, document, EUR, expense, fx, payment, s } from "./fixtures";
 
 type Services =
   | Layer.Success<typeof ReportsTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 /** Runs `body` as `caller` on fresh in-memory ports plus the Reports test layer. */
 const run = <A, E>(
@@ -73,7 +73,7 @@ const revenueView = (value: ReportView) =>
 const errorOf = (exit: Exit.Exit<unknown, CoreError>) =>
   Exit.isFailure(exit) && exit.cause.pipe(Cause.findErrorOption, Option.getOrUndefined);
 const NOV = { from: IsoDate.make("2026-11-01"), to: IsoDate.make("2026-11-30") };
-const as = (caller: Caller) => Effect.provideService(CurrentCaller, caller);
+const as = (caller: Caller) => Effect.provideService(TestCaller, caller);
 
 const seedBoth = Effect.gen(function* () {
   const fake = yield* ReportsSourceFake;
@@ -107,7 +107,9 @@ const bodyText = (bytes: Stream.Stream<Uint8Array>) =>
   );
 
 describe("authorization", () => {
-  const runReport = Effect.flatMap(Reports, (r) => r.run({ report: "revenue", period: NOV }));
+  const runReport = Effect.flatMap(Reports, (r) =>
+    Effect.flatMap(TestCaller, (caller) => r.run(caller, { report: "revenue", period: NOV })),
+  );
 
   test.each(["owner", "admin", "member", "accountant"] as const)(
     "%s may run reports",
@@ -131,11 +133,23 @@ describe("authorization", () => {
     const all = Effect.flatMap(Reports, (r) =>
       Effect.all(
         [
-          Effect.exit(r.export({ report: "revenue", period: NOV }, "csv")),
-          Effect.exit(r.startExport()),
-          Effect.exit(r.dashboard(NOV)),
-          Effect.exit(r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-02") })),
-          Effect.exit(r.getExport(ExportId.make("01900000-0000-7000-8000-000000000999"))),
+          Effect.exit(
+            Effect.flatMap(TestCaller, (caller) =>
+              r.export(caller, { report: "revenue", period: NOV }, "csv"),
+            ),
+          ),
+          Effect.exit(Effect.flatMap(TestCaller, (caller) => r.startExport(caller))),
+          Effect.exit(Effect.flatMap(TestCaller, (caller) => r.dashboard(caller, NOV))),
+          Effect.exit(
+            Effect.flatMap(TestCaller, (caller) =>
+              r.fxRate(caller, { currency: EUR, on: IsoDate.make("2026-11-02") }),
+            ),
+          ),
+          Effect.exit(
+            Effect.flatMap(TestCaller, (caller) =>
+              r.getExport(caller, ExportId.make("01900000-0000-7000-8000-000000000999")),
+            ),
+          ),
         ],
         { concurrency: 1 },
       ),
@@ -152,7 +166,7 @@ describe("authorization", () => {
     }
     const scoped = await run(
       member("member", { scopes: ["documents:read"] }),
-      Effect.flatMap(Reports, (r) => r.startExport()),
+      Effect.flatMap(Reports, (r) => Effect.flatMap(TestCaller, (caller) => r.startExport(caller))),
     );
     expect(scoped.pipe(withoutStackTrace)).toEqual(
       Exit.fail(Forbidden.make({ action: "report.export" })),
@@ -167,7 +181,9 @@ describe("authorization", () => {
       }),
       Effect.andThen(
         seedBoth,
-        Effect.flatMap(Reports, (r) => r.run({ report: "revenue", period: NOV })),
+        Effect.flatMap(Reports, (r) =>
+          Effect.flatMap(TestCaller, (caller) => r.run(caller, { report: "revenue", period: NOV })),
+        ),
       ),
     );
     expect(Exit.isSuccess(exit) && s(revenueView(exit.value).totals.net)).toBe("1000");
@@ -181,11 +197,16 @@ describe("Workspace isolation", () => {
       Effect.flatMap(Reports, (r) =>
         Effect.all(
           {
-            a: r.run({ report: "revenue", period: NOV }),
-            b: as(member("owner", { workspaceId: WORKSPACE_B }))(
-              r.run({ report: "revenue", period: NOV }),
+            a: Effect.flatMap(TestCaller, (caller) =>
+              r.run(caller, { report: "revenue", period: NOV }),
             ),
-            dash: r.dashboard(NOV),
+            b: as(member("owner", { workspaceId: WORKSPACE_B }))(
+              r.run(member("owner", { workspaceId: WORKSPACE_B }), {
+                report: "revenue",
+                period: NOV,
+              }),
+            ),
+            dash: Effect.flatMap(TestCaller, (caller) => r.dashboard(caller, NOV)),
           },
           { concurrency: 1 },
         ),
@@ -209,9 +230,10 @@ describe("Workspace isolation", () => {
   test("another Workspace's export job is NotFound", async () => {
     const body = Effect.flatMap(Reports, (r) =>
       Effect.gen(function* () {
-        const job = yield* r.startExport();
+        const testCaller = yield* TestCaller;
+        const job = yield* r.startExport(testCaller);
         return yield* r
-          .getExport(job.id)
+          .getExport(member("owner", { workspaceId: WORKSPACE_B }), job.id)
           .pipe(Effect.exit, as(member("owner", { workspaceId: WORKSPACE_B })));
       }),
     );
@@ -256,7 +278,7 @@ describe("run", () => {
   ] as const)("rejects %j", async (query, path, reason) => {
     const exit = await run(
       member("owner"),
-      Effect.flatMap(Reports, (r) => r.run(query)),
+      Effect.flatMap(Reports, (r) => Effect.flatMap(TestCaller, (caller) => r.run(caller, query))),
     );
     expect(exit.pipe(withoutStackTrace)).toEqual(
       Exit.fail(
@@ -274,7 +296,9 @@ describe("run", () => {
         member("accountant"),
         Effect.andThen(
           seedBoth,
-          Effect.flatMap(Reports, (r) => r.run({ report, period: NOV })),
+          Effect.flatMap(Reports, (r) =>
+            Effect.flatMap(TestCaller, (caller) => r.run(caller, { report, period: NOV })),
+          ),
         ),
       );
       expect(Exit.isSuccess(exit) && reportView(exit.value).report).toBe(report);
@@ -283,12 +307,13 @@ describe("run", () => {
 
   test("receivables age against today's Prague date", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const fake = yield* ReportsSourceFake;
       yield* fake.seed({
         documents: [document(1, { dueOn: IsoDate.make("2026-10-23"), outstanding: d("100") })],
       });
       const r = yield* Reports;
-      const report = yield* r.run({ report: "receivables", period: NOV });
+      const report = yield* r.run(testCaller, { report: "receivables", period: NOV });
       return receivablesView(report);
     });
     const exit = await run(member("owner"), body);
@@ -299,9 +324,10 @@ describe("run", () => {
 
   test("a store outage is Unavailable{database}", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const fake = yield* ReportsSourceFake;
       yield* Ref.set(fake.unavailable, true);
-      return yield* (yield* Reports).run({ report: "cashflow", period: NOV });
+      return yield* (yield* Reports).run(testCaller, { report: "cashflow", period: NOV });
     });
     expect((await run(member("owner"), body)).pipe(withoutStackTrace)).toEqual(
       Exit.fail(Unavailable.make({ dependency: "database" })),
@@ -312,11 +338,12 @@ describe("run", () => {
 describe("export", () => {
   test("csv: locale-formatted, named after report and period, streamed", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       yield* seedBoth;
       const r = yield* Reports;
-      const cs = yield* r.export({ report: "cashflow", period: NOV }, "csv");
+      const cs = yield* r.export(testCaller, { report: "cashflow", period: NOV }, "csv");
       const en = yield* as(member("owner", { locale: "en" }))(
-        r.export({ report: "cashflow", period: NOV }, "csv"),
+        r.export(member("owner", { locale: "en" }), { report: "cashflow", period: NOV }, "csv"),
       );
       return { cs, csText: yield* bodyText(cs.bytes), enText: yield* bodyText(en.bytes) };
     });
@@ -336,7 +363,12 @@ describe("export", () => {
 
   test("pdf goes through the renderer port with the view and the caller's locale", async () => {
     const body = Effect.gen(function* () {
-      const file = yield* (yield* Reports).export({ report: "vat_summary", period: NOV }, "pdf");
+      const testCaller = yield* TestCaller;
+      const file = yield* (yield* Reports).export(
+        testCaller,
+        { report: "vat_summary", period: NOV },
+        "pdf",
+      );
       const calls = yield* Ref.get((yield* FakeReportPdfRenderer).calls);
       return { file, text: yield* bodyText(file.bytes), calls };
     });
@@ -369,7 +401,9 @@ describe("fxRate", () => {
     const exit = await run(
       member("member"),
       Effect.flatMap(Reports, (r) =>
-        r.fxRate({ currency: CurrencyCode.make("JPY"), on: IsoDate.make("2026-11-22") }),
+        Effect.flatMap(TestCaller, (caller) =>
+          r.fxRate(caller, { currency: CurrencyCode.make("JPY"), on: IsoDate.make("2026-11-22") }),
+        ),
       ),
       fixings,
     );
@@ -393,7 +427,9 @@ describe("fxRate", () => {
     const missing = await run(
       member("member"),
       Effect.flatMap(Reports, (r) =>
-        r.fxRate({ currency: CurrencyCode.make("USD"), on: IsoDate.make("2026-11-22") }),
+        Effect.flatMap(TestCaller, (caller) =>
+          r.fxRate(caller, { currency: CurrencyCode.make("USD"), on: IsoDate.make("2026-11-22") }),
+        ),
       ),
       fixings,
     );
@@ -406,7 +442,11 @@ describe("fxRate", () => {
     );
     const down = await run(
       member("member"),
-      Effect.flatMap(Reports, (r) => r.fxRate({ currency: EUR, on: IsoDate.make("2026-01-01") })),
+      Effect.flatMap(Reports, (r) =>
+        Effect.flatMap(TestCaller, (caller) =>
+          r.fxRate(caller, { currency: EUR, on: IsoDate.make("2026-01-01") }),
+        ),
+      ),
       fixings,
     );
     expect(down.pipe(withoutStackTrace)).toEqual(
@@ -420,9 +460,10 @@ describe("export jobs", () => {
 
   test("startExport: one running job per Workspace, audited once, workflow started after commit", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const r = yield* Reports;
-      const first = yield* r.startExport();
-      const second = yield* r.startExport();
+      const first = yield* r.startExport(testCaller);
+      const second = yield* r.startExport(testCaller);
       const started = yield* Ref.get((yield* FakeExportWorkflow).started);
       const store = yield* CoreStore;
       const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Export", id: first.id });
@@ -448,12 +489,15 @@ describe("export jobs", () => {
 
   test("request key replay returns the stored job; a different method/payload never collides", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const r = yield* Reports;
-      const a = yield* r.startExport({ requestKey: key });
+      const a = yield* r.startExport(testCaller, { requestKey: key });
       const jobs = yield* ExportJobs;
       yield* jobs.finish(WORKSPACE_A, a.id, 10);
-      const replay = yield* r.startExport({ requestKey: key });
-      const fresh = yield* r.startExport({ requestKey: RequestKey.make("export-key-0002") });
+      const replay = yield* r.startExport(testCaller, { requestKey: key });
+      const fresh = yield* r.startExport(testCaller, {
+        requestKey: RequestKey.make("export-key-0002"),
+      });
       const started = yield* Ref.get((yield* FakeExportWorkflow).started);
       return { a, replay, fresh, started: started.length };
     });
@@ -466,10 +510,11 @@ describe("export jobs", () => {
 
   test("lifecycle: running -> Conflict{export.not_ready}; finish -> ZIP download for 7 days; then NotFound", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const r = yield* Reports;
       const jobs = yield* ExportJobs;
-      const job = yield* r.startExport();
-      const whileRunning = yield* Effect.exit(r.exportFile(job.id));
+      const job = yield* r.startExport(testCaller);
+      const whileRunning = yield* Effect.exit(r.exportFile(testCaller, job.id));
       const zip = new TextEncoder().encode("PK-zip");
       yield* (yield* BlobStorage).put(exportBlobKey(WORKSPACE_A, job.id), Stream.succeed(zip), {
         contentType: "application/zip",
@@ -478,10 +523,10 @@ describe("export jobs", () => {
       yield* TestClock.adjust(60_000);
       const ready = yield* jobs.finish(WORKSPACE_A, job.id, zip.byteLength);
       const again = yield* jobs.fail(WORKSPACE_A, job.id); // no effect once ready
-      const file = yield* r.exportFile(job.id);
+      const file = yield* r.exportFile(testCaller, job.id);
       const text = yield* bodyText(file.bytes);
       yield* TestClock.adjust(EXPORT_RETENTION_MILLIS);
-      const expired = yield* Effect.exit(r.getExport(job.id));
+      const expired = yield* Effect.exit(r.getExport(testCaller, job.id));
       const purged = yield* jobs.purgeExpired;
       const blobGone = yield* Effect.exit(
         (yield* BlobStorage).get(exportBlobKey(WORKSPACE_A, job.id)),
@@ -514,14 +559,15 @@ describe("export jobs", () => {
 
   test("a failed job stays Conflict{export.not_ready}; a missing ZIP is NotFound", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const r = yield* Reports;
       const jobs = yield* ExportJobs;
-      const failed = yield* r.startExport();
+      const failed = yield* r.startExport(testCaller);
       yield* jobs.fail(WORKSPACE_A, failed.id);
-      const onFailed = yield* Effect.exit(r.exportFile(failed.id));
-      const next = yield* r.startExport();
+      const onFailed = yield* Effect.exit(r.exportFile(testCaller, failed.id));
+      const next = yield* r.startExport(testCaller);
       yield* jobs.finish(WORKSPACE_A, next.id, 1);
-      const noBlob = yield* Effect.exit(r.exportFile(next.id));
+      const noBlob = yield* Effect.exit(r.exportFile(testCaller, next.id));
       return { onFailed, noBlob, distinct: failed.id !== next.id };
     });
     const exit = await run(member("owner"), body);
@@ -577,13 +623,14 @@ describe("review round 1 (service level)", () => {
       },
     ];
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const r = yield* Reports;
-      const first = yield* r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-22") });
+      const first = yield* r.fxRate(testCaller, { currency: EUR, on: IsoDate.make("2026-11-22") });
       yield* Ref.set((yield* FixtureRates).unavailable, true);
-      const cached = yield* r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-22") });
-      const friday = yield* r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-20") });
+      const cached = yield* r.fxRate(testCaller, { currency: EUR, on: IsoDate.make("2026-11-22") });
+      const friday = yield* r.fxRate(testCaller, { currency: EUR, on: IsoDate.make("2026-11-20") });
       const uncached = yield* Effect.exit(
-        r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-21") }),
+        r.fxRate(testCaller, { currency: EUR, on: IsoDate.make("2026-11-21") }),
       );
       return {
         first: s(first.rate),
@@ -605,6 +652,7 @@ describe("review round 1 (service level)", () => {
 
   test("Reports.run vat_summary selects by tax point, not issue date", async () => {
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const fake = yield* ReportsSourceFake;
       yield* fake.seed({
         documents: [
@@ -633,7 +681,10 @@ describe("review round 1 (service level)", () => {
           },
         ],
       });
-      const report = yield* (yield* Reports).run({ report: "vat_summary", period: NOV });
+      const report = yield* (yield* Reports).run(testCaller, {
+        report: "vat_summary",
+        period: NOV,
+      });
       const v = reportView(report);
       if (v.report !== "vat_summary") throw new Error(v.report);
       return {
@@ -667,8 +718,9 @@ describe("review round 1 (service level)", () => {
       },
     ];
     const body = Effect.gen(function* () {
+      const testCaller = yield* TestCaller;
       const r = yield* Reports;
-      const before = yield* r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-23") });
+      const before = yield* r.fxRate(testCaller, { currency: EUR, on: IsoDate.make("2026-11-23") });
       yield* Ref.update((yield* FixtureRates).fixings, (all) => [
         ...all,
         {
@@ -677,7 +729,7 @@ describe("review round 1 (service level)", () => {
           rates: [{ code: EUR, quantity: 1, rate: d("25.2") }],
         },
       ]);
-      const after = yield* r.fxRate({ currency: EUR, on: IsoDate.make("2026-11-23") });
+      const after = yield* r.fxRate(testCaller, { currency: EUR, on: IsoDate.make("2026-11-23") });
       return [s(before.rate), String(before.fixingDate), s(after.rate), String(after.fixingDate)];
     });
     expect(await run(member("member"), body, fixings)).toEqual(

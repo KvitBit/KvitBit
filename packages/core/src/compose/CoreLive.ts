@@ -25,7 +25,7 @@
  * `TestCore` build starts empty.
  *
  * No layer keeps a per-request service from its build: each captures only its declared build
- * dependencies (`Context.pick`) and merges the call-site context (CurrentCaller, RequestOutcome,
+ * dependencies (`Context.pick`) and merges the call-site context (RequestOutcome,
  * an enclosing transaction) on every call.
  */
 import type {

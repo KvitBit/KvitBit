@@ -14,7 +14,6 @@ import * as Order from "effect/Order";
 import { actionScope, can } from "../src/contract";
 import { authorize, authorizeInWorkspace } from "../src/policy";
 import { account, invitationHolder, member, shareVisitor, system } from "./helpers/callers";
-import { runWithCaller } from "./helpers/run";
 
 const ACTIONS: ReadonlyArray<Action> = ActionSchema.literals;
 const ROLES: ReadonlyArray<Role> = ["owner", "admin", "member", "accountant"];
@@ -330,23 +329,26 @@ describe("can: special rules", () => {
 
 describe("Policy enforcement", () => {
   test("authorize fails with Forbidden{action}", async () => {
-    const exit = await runWithCaller(member("accountant"), authorize("contact.write"));
+    const exit = await Effect.runPromiseExit(authorize(member("accountant"), "contact.write"));
     expect(exit).toEqual(Exit.fail(Forbidden.make({ action: "contact.write" })));
   });
 
   test("authorizeInWorkspace returns the caller's Workspace", async () => {
     const caller = member("member");
-    const exit = await runWithCaller(caller, authorizeInWorkspace("contact.write"));
+    const exit = await Effect.runPromiseExit(authorizeInWorkspace(caller, "contact.write"));
     expect(exit).toEqual(Exit.succeed({ caller, workspaceId: caller.workspaceId }));
   });
 
   test("authorizeInWorkspace rejects non-Workspace callers", async () => {
-    const exit = await runWithCaller(account(), authorizeInWorkspace("workspace.create"));
+    const exit = await Effect.runPromiseExit(authorizeInWorkspace(account(), "workspace.create"));
     expect(Exit.isFailure(exit)).toBe(true);
   });
 
   test("authorize passes an allowed caller through", async () => {
-    const exit = await runWithCaller(account(), Effect.asVoid(authorize("workspace.create")));
+    const exit = await authorize(account(), "workspace.create").pipe(
+      Effect.asVoid,
+      Effect.runPromiseExit,
+    );
     expect(Exit.isSuccess(exit)).toBe(true);
   });
 });

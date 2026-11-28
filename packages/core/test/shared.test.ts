@@ -281,11 +281,16 @@ describe("appendAudit (rule C5)", () => {
       Effect.gen(function* () {
         const store = yield* CoreStore;
         yield* store.transaction(
-          appendAudit({ workspaceId: WORKSPACE_A, subject, action: "document.draft", revision: 1 }),
+          appendAudit(caller, {
+            workspaceId: WORKSPACE_A,
+            subject,
+            action: "document.draft",
+            revision: 1,
+          }),
         );
         yield* TestClock.adjust(1000);
         yield* store.transaction(
-          appendAudit({
+          appendAudit(caller, {
             workspaceId: WORKSPACE_A,
             subject,
             action: "document.edit",
@@ -332,7 +337,12 @@ describe("appendAudit (rule C5)", () => {
       Effect.gen(function* () {
         const store = yield* CoreStore;
         const entry = yield* store.transaction(
-          appendAudit({ workspaceId: WORKSPACE_A, subject, action: "document.send", revision: 3 }),
+          appendAudit(system(job), {
+            workspaceId: WORKSPACE_A,
+            subject,
+            action: "document.send",
+            revision: 3,
+          }),
         );
         return entry?.actor;
       }),
@@ -343,7 +353,7 @@ describe("appendAudit (rule C5)", () => {
       Effect.gen(function* () {
         const store = yield* CoreStore;
         const entry = yield* store.transaction(
-          appendAudit({
+          appendAudit(account(), {
             workspaceId: WORKSPACE_A,
             subject,
             action: "workspace.create",

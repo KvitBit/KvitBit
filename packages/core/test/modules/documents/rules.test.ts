@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 /** Documents P1: replay, references, D9 edge cases, list filters, pdf language, seams. */
 
 import { describe, expect, test } from "bun:test";
@@ -81,15 +82,19 @@ describe("idempotency (C3) and audit", () => {
     const [first, second, denied] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const firstResult = yield* withOutcome(
-            docs.createDraft(invoiceInput(), { requestKey: key }),
+            docs.createDraft(testCaller, invoiceInput(), { requestKey: key }),
           );
           const secondResult = yield* withOutcome(
-            docs.createDraft(invoiceInput(), { requestKey: key }),
+            docs.createDraft(testCaller, invoiceInput(), { requestKey: key }),
           );
           const deniedResult = yield* Effect.flip(
-            as(member("accountant"), docs.createDraft(invoiceInput(), { requestKey: key })),
+            as(
+              member("accountant"),
+              docs.createDraft(member("accountant"), invoiceInput(), { requestKey: key }),
+            ),
           );
           return [firstResult, secondResult, deniedResult] as const;
         }),
@@ -105,10 +110,11 @@ describe("idempotency (C3) and audit", () => {
     const history = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput());
-          yield* docs.edit(view.id, { note: "changed" }, 1);
-          return yield* docs.history(view.id);
+          const view = yield* docs.createDraft(testCaller, invoiceInput());
+          yield* docs.edit(testCaller, view.id, { note: "changed" }, 1);
+          return yield* docs.history(testCaller, view.id);
         }),
       ),
     );
@@ -121,16 +127,20 @@ describe("referenced records", () => {
     const [item, bank, series] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           return [
             yield* Effect.flip(
-              docs.preview(invoiceInput({ lines: [{ item: PriceListItemId.make(MISSING) }] })),
+              docs.preview(
+                testCaller,
+                invoiceInput({ lines: [{ item: PriceListItemId.make(MISSING) }] }),
+              ),
             ),
             yield* Effect.flip(
-              docs.preview(invoiceInput({ bankAccount: BankAccountId.make(MISSING) })),
+              docs.preview(testCaller, invoiceInput({ bankAccount: BankAccountId.make(MISSING) })),
             ),
             yield* Effect.flip(
-              docs.preview(invoiceInput({ series: NumberingSeriesId.make(MISSING) })),
+              docs.preview(testCaller, invoiceInput({ series: NumberingSeriesId.make(MISSING) })),
             ),
           ] as const;
         }),
@@ -145,6 +155,7 @@ describe("referenced records", () => {
     const [series, bank, kept] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const store = yield* CoreStore;
           const created = yield* store.transaction(
@@ -155,14 +166,20 @@ describe("referenced records", () => {
             ),
           );
           const id = NumberingSeriesId.make(created.view.id);
-          const view = yield* docs.createDraft(invoiceInput({ series: id }));
+          const view = yield* docs.createDraft(testCaller, invoiceInput({ series: id }));
           const row = yield* (yield* DocumentsRepo).get(WS, view.id);
           return [
             yield* Effect.flip(
-              docs.createDraft(invoiceInput({ series: NumberingSeriesId.make(MISSING) })),
+              docs.createDraft(
+                testCaller,
+                invoiceInput({ series: NumberingSeriesId.make(MISSING) }),
+              ),
             ),
             yield* Effect.flip(
-              docs.createDraft(invoiceInput({ bankAccount: BankAccountId.make(MISSING) })),
+              docs.createDraft(
+                testCaller,
+                invoiceInput({ bankAccount: BankAccountId.make(MISSING) }),
+              ),
             ),
             [row.seriesId, id] as const,
           ] as const;
@@ -178,6 +195,7 @@ describe("referenced records", () => {
     const [fromName, blank] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           yield* (yield* DocumentFixtures).putItem(WS, {
             id: ITEM,
             name: "Hodina",
@@ -191,9 +209,13 @@ describe("referenced records", () => {
           });
           const docs = yield* Documents;
           return [
-            yield* docs.createDraft(invoiceInput({ lines: [{ item: ITEM, description: " " }] })),
+            yield* docs.createDraft(
+              testCaller,
+              invoiceInput({ lines: [{ item: ITEM, description: " " }] }),
+            ),
             yield* Effect.flip(
               docs.createDraft(
+                testCaller,
                 invoiceInput({ lines: [{ description: "  ", unitPrice: dec("1") }] }),
               ),
             ),
@@ -218,10 +240,11 @@ describe("rule D9 edge cases", () => {
     const [eu, domestic] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           return [
-            yield* docs.createDraft(invoiceInput({ contact: DE_BUYER, lines: exempt })),
-            yield* Effect.flip(docs.createDraft(invoiceInput({ lines: exempt }))),
+            yield* docs.createDraft(testCaller, invoiceInput({ contact: DE_BUYER, lines: exempt })),
+            yield* Effect.flip(docs.createDraft(testCaller, invoiceInput({ lines: exempt }))),
           ] as const;
         }),
       ),
@@ -236,13 +259,15 @@ describe("rule D9 edge cases", () => {
     const [exemptErr, standardErr] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           return [
             yield* Effect.flip(
-              docs.createDraft(invoiceInput({ contact: DE_BUYER, lines: exempt })),
+              docs.createDraft(testCaller, invoiceInput({ contact: DE_BUYER, lines: exempt })),
             ),
             yield* Effect.flip(
               docs.createDraft(
+                testCaller,
                 invoiceInput({
                   contact: DE_BUYER,
                   lines: [{ description: "x", unitPrice: dec("1"), vat: "standard" }],
@@ -264,13 +289,18 @@ describe("list filters", () => {
     const [issued, unpaid, period, overdue, notOverdue] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
           const a = yield* docs.createDraft(
+            testCaller,
             invoiceInput({ issuedOn: IsoDate.make("2026-10-01"), due: { inDays: 14 } }),
           );
-          yield* docs.createDraft(invoiceInput({ issuedOn: IsoDate.make("2026-11-20") }));
+          yield* docs.createDraft(
+            testCaller,
+            invoiceInput({ issuedOn: IsoDate.make("2026-11-20") }),
+          );
           const row = yield* repo.get(WS, a.id);
           yield* store.transaction(
             repo.update({ ...row, status: "issued", number: "2026-0001" }, 1),
@@ -280,16 +310,16 @@ describe("list filters", () => {
               Schema.asserts(DocumentSummaryData, item);
               return item.id;
             });
-          const issuedPage = yield* docs.list({ status: "issued" });
+          const issuedPage = yield* docs.list(testCaller, { status: "issued" });
           const issuedIds = ids(issuedPage);
-          const unpaidCount = (yield* docs.list({ settlement: "unpaid" })).items.length;
-          const periodCount = (yield* docs.list({
+          const unpaidCount = (yield* docs.list(testCaller, { settlement: "unpaid" })).items.length;
+          const periodCount = (yield* docs.list(testCaller, {
             from: IsoDate.make("2026-11-01"),
             to: IsoDate.make("2026-11-30"),
           })).items.length;
-          const overduePage = yield* docs.list({ overdue: true });
+          const overduePage = yield* docs.list(testCaller, { overdue: true });
           const overdueIds = ids(overduePage);
-          const notOverdueCount = (yield* docs.list({ overdue: false })).items.length;
+          const notOverdueCount = (yield* docs.list(testCaller, { overdue: false })).items.length;
           return [issuedIds, unpaidCount, periodCount, overdueIds, notOverdueCount] as const;
         }),
       ),
@@ -305,10 +335,11 @@ describe("list filters", () => {
     const [limit, cursor] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           return [
-            yield* Effect.flip(docs.list({ limit: 0 })),
-            yield* Effect.flip(docs.list({ cursor: "not-a-cursor" })),
+            yield* Effect.flip(docs.list(testCaller, { limit: 0 })),
+            yield* Effect.flip(docs.list(testCaller, { cursor: "not-a-cursor" })),
           ] as const;
         }),
       ),
@@ -323,9 +354,10 @@ describe("pdf", () => {
     const [stored, rendered] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput({ kind: "proforma" }));
-          yield* docs.pdf(view.id, { language: "en" });
+          const view = yield* docs.createDraft(testCaller, invoiceInput({ kind: "proforma" }));
+          yield* docs.pdf(testCaller, view.id, { language: "en" });
           const [render] = yield* Ref.get((yield* DocumentFixtures).renders);
           return [view, render] as const;
         }),
@@ -380,7 +412,10 @@ describe("seams", () => {
       Effect.gen(function* () {
         yield* seed();
         const docs = yield* Documents;
-        return [yield* docs.send(id), (yield* docs.previewSend(id)).subject] as const;
+        return [
+          yield* docs.send(caller, id),
+          (yield* docs.previewSend(caller, id)).subject,
+        ] as const;
       }).pipe(Effect.provide(layer)),
     );
     exit.pipe(ok, expect).toEqual([{ deliveryId: STUB_DELIVERY_ID, status: "queued" }, "s"]);
@@ -392,7 +427,11 @@ describe("seams", () => {
   });
 
   test("the default sender stub dies clearly", async () => {
-    const exit = await scenario(Effect.flatMap(Documents, (d) => d.send(DocumentId.make(MISSING))));
+    const exit = await scenario(
+      Effect.flatMap(Documents, (d) =>
+        Effect.flatMap(TestCaller, (caller) => d.send(caller, DocumentId.make(MISSING))),
+      ),
+    );
     expect(Exit.isFailure(exit) && String(exit.cause)).toContain("not implemented (stage 2");
   });
 
@@ -402,11 +441,12 @@ describe("seams", () => {
     const [row, dup] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
-          const a = yield* docs.createDraft(invoiceInput());
-          const b = yield* docs.createDraft(invoiceInput({ contact: CZ_BUYER }));
+          const a = yield* docs.createDraft(testCaller, invoiceInput());
+          const b = yield* docs.createDraft(testCaller, invoiceInput({ contact: CZ_BUYER }));
           yield* store.transaction(
             repo.linkSchedule(WS, a.id, { scheduleId: schedule, occurrence }),
           );
@@ -443,10 +483,17 @@ describe("review round 1 regressions", () => {
     const [created, edited] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           yield* putItem();
           const docs = yield* Documents;
-          const view = yield* docs.createDraft(invoiceInput({ lines: [{ item: ITEM }] }));
-          return [view, yield* Effect.flip(docs.edit(view.id, { currency: EUR }, 1))] as const;
+          const view = yield* docs.createDraft(
+            testCaller,
+            invoiceInput({ lines: [{ item: ITEM }] }),
+          );
+          return [
+            view,
+            yield* Effect.flip(docs.edit(testCaller, view.id, { currency: EUR }, 1)),
+          ] as const;
         }),
         { fixings: [fixing("2026-11-20", "25")] },
       ),
@@ -462,13 +509,23 @@ describe("review round 1 regressions", () => {
     const [inclusive, toggled] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           yield* putItem();
           const docs = yield* Documents;
           const inclusiveResult = yield* docs.preview(
+            testCaller,
             invoiceInput({ lines: [{ item: ITEM }], pricesIncludeVat: true }),
           );
-          const draft = yield* docs.createDraft(invoiceInput({ lines: [{ item: ITEM }] }));
-          const toggledResult = yield* docs.edit(draft.id, { pricesIncludeVat: true }, 1);
+          const draft = yield* docs.createDraft(
+            testCaller,
+            invoiceInput({ lines: [{ item: ITEM }] }),
+          );
+          const toggledResult = yield* docs.edit(
+            testCaller,
+            draft.id,
+            { pricesIncludeVat: true },
+            1,
+          );
           return [inclusiveResult, toggledResult] as const;
         }),
       ),
@@ -487,6 +544,7 @@ describe("review round 1 regressions", () => {
     const err = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const us = ContactId.make("01900000-0000-7000-8000-0000c0000005");
           yield* (yield* DocumentFixtures).putContact(
             WS,
@@ -494,6 +552,7 @@ describe("review round 1 regressions", () => {
           );
           return yield* Effect.flip(
             (yield* Documents).createDraft(
+              testCaller,
               invoiceInput({
                 contact: us,
                 lines: [{ description: "x", unitPrice: dec("1"), vat: "reverse_charge" }],
@@ -511,8 +570,9 @@ describe("review round 1 regressions", () => {
     const err = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           yield* Ref.update((yield* DocumentFixtures).issuers, () => new Map());
-          return yield* Effect.flip((yield* Documents).createDraft(invoiceInput()));
+          return yield* Effect.flip((yield* Documents).createDraft(testCaller, invoiceInput()));
         }),
       ),
     );
@@ -522,7 +582,11 @@ describe("review round 1 regressions", () => {
   test("a computed due date beyond 9999-12-31 is Invalid at due", async () => {
     const err = ok(
       await Documents.pipe(
-        Effect.flatMap((d) => d.preview(invoiceInput({ due: { inDays: 10000000 } }))),
+        Effect.flatMap((d) =>
+          Effect.flatMap(TestCaller, (caller) =>
+            d.preview(caller, invoiceInput({ due: { inDays: 10000000 } })),
+          ),
+        ),
         Effect.flip,
         scenario,
       ),
@@ -536,10 +600,10 @@ describe("review round 1 regressions", () => {
         Effect.gen(function* () {
           const docs = yield* Documents;
           return [
-            (yield* as(member("admin"), docs.createDraft(invoiceInput()))).status,
+            (yield* as(member("admin"), docs.createDraft(member("admin"), invoiceInput()))).status,
             (yield* as(
               member("member", { scopes: ["documents:write"] }),
-              docs.createDraft(invoiceInput()),
+              docs.createDraft(member("member", { scopes: ["documents:write"] }), invoiceInput()),
             )).status,
           ] as const;
         }),
@@ -580,10 +644,10 @@ describe("store outages", () => {
         yield* seed();
         const docs = yield* Documents;
         return [
-          yield* Effect.flip(docs.get(id)),
-          yield* Effect.flip(docs.list({})),
-          yield* Effect.flip(docs.history(id)),
-          yield* Effect.flip(docs.discardDraft(id, 1)),
+          yield* Effect.flip(docs.get(member("owner"), id)),
+          yield* Effect.flip(docs.list(member("owner"), {})),
+          yield* Effect.flip(docs.history(member("owner"), id)),
+          yield* Effect.flip(docs.discardDraft(member("owner"), id, 1)),
         ] as const;
       }).pipe(Effect.provide(layer)),
     );
@@ -598,22 +662,24 @@ describe("variable symbol and payment QR (P1 scope)", () => {
     const [kept, tooLong, letters, listed] = ok(
       await scenario(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const docs = yield* Documents;
           const keptResult = yield* docs.createDraft(
+            testCaller,
             invoiceInput({ variableSymbol: "0012345678" }),
           );
           const tooLongResult = yield* Effect.flip(
-            docs.createDraft(invoiceInput({ variableSymbol: "12345678901" })),
+            docs.createDraft(testCaller, invoiceInput({ variableSymbol: "12345678901" })),
           );
           const lettersResult = yield* Effect.flip(
-            docs.preview(invoiceInput({ variableSymbol: "VS-1" })),
+            docs.preview(testCaller, invoiceInput({ variableSymbol: "VS-1" })),
           );
           const row = yield* (yield* DocumentsRepo).get(WS, keptResult.id);
           return [
             row.variableSymbol,
             tooLongResult,
             lettersResult,
-            (yield* docs.list({})).items.length,
+            (yield* docs.list(testCaller, {})).items.length,
           ] as const;
         }),
       ),
@@ -636,7 +702,11 @@ describe("variable symbol and payment QR (P1 scope)", () => {
 
   test("paymentQr is null until the PaymentQr engine lands (rule D12 deferred)", async () => {
     const view = ok(
-      await scenario(Effect.flatMap(Documents, (d) => d.createDraft(invoiceInput()))),
+      await scenario(
+        Effect.flatMap(Documents, (d) =>
+          Effect.flatMap(TestCaller, (caller) => d.createDraft(caller, invoiceInput())),
+        ),
+      ),
     );
     expect(view.paymentQr).toBeNull();
   });

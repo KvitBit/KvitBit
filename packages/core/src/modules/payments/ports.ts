@@ -8,8 +8,8 @@
  *   core-identity, bound from its Workspace snapshot).
  */
 import type {
+  Caller,
   CurrencyCode,
-  CurrentCaller,
   ExpenseId,
   Money,
   NotFound,
@@ -61,7 +61,8 @@ export class PaymentSettings extends Context.Service<
   {
     /** P2: whether a new Payment Tax Document is sent in the recording transaction. */
     readonly autoSendPaymentTaxDocument: (
+      caller: Caller,
       workspaceId: WorkspaceId,
-    ) => Effect.Effect<boolean, NotFound | StoreUnavailable, CurrentCaller>;
+    ) => Effect.Effect<boolean, NotFound | StoreUnavailable>;
   }
 >()("@kvitbit/core/modules/payments/ports/PaymentSettings") {}

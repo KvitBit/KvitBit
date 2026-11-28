@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 /**
  * Proforma -> Payment Tax Documents -> Final Invoice -> Credit Notes, net to zero per VAT
  * bucket (skill `verify-vat-numbering-math`, Filip's decisions 2 and 3).
@@ -18,7 +19,7 @@
 
 import { beforeAll, describe, expect, test } from "bun:test";
 import type { DocumentId, DocumentView } from "@kvitbit/domain/contract";
-import { CurrentCaller, Documents, IsoDate } from "@kvitbit/domain/contract";
+import { Documents, IsoDate } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as BigIntMath from "effect/BigInt";
@@ -169,7 +170,7 @@ const pay = (id: DocumentId, amount: BigDecimal.BigDecimal, paidOn: IsoDate) =>
   Effect.gen(function* () {
     const store = yield* CoreStore;
     const seam = yield* DocumentPayments;
-    const caller = yield* CurrentCaller;
+    const caller = yield* TestCaller;
     return yield* store.transaction(
       Effect.gen(function* () {
         const on = (yield* seam.lock(WORKSPACE_A, id)).settleOn;
@@ -205,6 +206,7 @@ const chain = (seed: number) => {
   const partialCredit = r.next() < 0.5;
   const creditDays = r.int(0, 2);
   return Effect.gen(function* () {
+    const testCaller = yield* TestCaller;
     yield* Effect.flatMap(CoreStore, (store) =>
       store.transaction(
         Effect.flatMap(NumberingSeries, (n) =>
@@ -218,7 +220,7 @@ const chain = (seed: number) => {
       ),
     );
     const docs = yield* Documents;
-    const proforma = yield* docs.issue({
+    const proforma = yield* docs.issue(testCaller, {
       input: invoiceInput({
         kind: "proforma",
         currency,
@@ -246,7 +248,7 @@ const chain = (seed: number) => {
       if (ptd === null) throw new Error("vat_payer advance without a PTD");
       ptds.push(ptd);
     }
-    const fi = yield* docs.issueFinalInvoice(proforma.id);
+    const fi = yield* docs.issueFinalInvoice(testCaller, proforma.id);
     // What the VAT report declares for a document: its stored record through the real
     // ReportsSource mapping (`reportFigures`, all deductions are PTDs) and `taxableBucketsCzk`.
     const declare = (id: DocumentId) =>
@@ -262,19 +264,25 @@ const chain = (seed: number) => {
     if (creditDays > 0) yield* TestClock.adjust(`${creditDays} days`);
     const credits: Array<DocumentView> = [];
     if (partialCredit && BigDecimal.isGreaterThan(first.quantity, BigDecimal.fromBigInt(1n))) {
-      const correctResult = yield* docs.correct(fi.id, {
+      const correctResult = yield* docs.correct(testCaller, fi.id, {
         reason: "částečný dobropis",
         lines: [{ line: lineOf(fi, 0), quantity: BigDecimal.fromBigInt(1n) }],
       });
       credits.push(correctResult);
     }
-    const correctResult = yield* docs.correct(fi.id, { reason: "storno", lines: "full" });
+    const correctResult = yield* docs.correct(testCaller, fi.id, {
+      reason: "storno",
+      lines: "full",
+    });
     credits.push(correctResult);
     const creditsReported: Array<typeof reported> = [];
     for (const cn of credits) creditsReported.push((yield* declare(cn.id)).declared);
     const ptdCredits: Array<DocumentView> = yield* Effect.forEach(
       ptds,
-      (ptd) => docs.correct(ptd.id, { reason: "storno zálohy", lines: "full" }),
+      (ptd) =>
+        Effect.flatMap(TestCaller, (caller) =>
+          docs.correct(caller, ptd.id, { reason: "storno zálohy", lines: "full" }),
+        ),
       { concurrency: 1 },
     );
     return {

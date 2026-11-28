@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { Contacts, CurrentCaller, type MemberCaller } from "@kvitbit/domain/contract";
+import { Contacts, type MemberCaller } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 let h: Harness;
@@ -39,13 +40,13 @@ beforeEach(async () => {
   const contact = await h.run(
     Effect.gen(function* () {
       const contacts = yield* Contacts;
-      return yield* contacts.save({
+      return yield* contacts.save(member, {
         name: "Klient s.r.o.",
         ico: "25596641",
         address: { city: "Brno", country: "CZ" },
         roles: ["customer"],
       });
-    }).pipe(Effect.provideService(CurrentCaller, member)),
+    }),
   );
   contactId = Schema.decodeUnknownEffect(Schema.String)(contact["id"]).pipe(Effect.runSync);
 });

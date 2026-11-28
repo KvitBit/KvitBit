@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 /** Documents P2: issue, numbering, the state machine, lock/unlock, number override, cancel. */
 
@@ -94,7 +95,9 @@ const run = <A, E>(
   );
 
 const issueInvoice = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
-  Effect.flatMap(Documents, (d) => d.issue({ input: invoiceInput(extra) }));
+  Effect.flatMap(Documents, (d) =>
+    Effect.flatMap(TestCaller, (caller) => d.issue(caller, { input: invoiceInput(extra) })),
+  );
 const issueProforma = () => issueInvoice({ kind: "proforma" });
 
 describe("issue", () => {
@@ -102,14 +105,15 @@ describe("issue", () => {
     const [view, row, history] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
-          const draft = yield* d.createDraft(invoiceInput({ issuedOn: undefined }));
-          const documentView = yield* d.issue({
+          const draft = yield* d.createDraft(testCaller, invoiceInput({ issuedOn: undefined }));
+          const documentView = yield* d.issue(testCaller, {
             draft: draft.id,
             expectedRevision: draft.revision,
           });
           const rowResult = yield* (yield* DocumentsRepo).get(WS, documentView.id);
-          return [documentView, rowResult, yield* d.history(documentView.id)] as const;
+          return [documentView, rowResult, yield* d.history(testCaller, documentView.id)] as const;
         }),
       ),
     );
@@ -140,13 +144,14 @@ describe("issue", () => {
     const numbers = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const a = yield* issueInvoice();
-          const draft = yield* d.createDraft(invoiceInput());
-          yield* d.discardDraft(draft.id, draft.revision);
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
+          yield* d.discardDraft(testCaller, draft.id, draft.revision);
           const b = yield* issueInvoice();
           const p = yield* issueProforma();
-          const history = yield* d.history(a.id);
+          const history = yield* d.history(testCaller, a.id);
           return [a.number, b.number, p.number, EffectArray.map(history, (e) => e.action)];
         }),
       ),
@@ -158,6 +163,7 @@ describe("issue", () => {
     const [error, draft] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const store = yield* CoreStore;
           yield* store.transaction(
@@ -175,11 +181,11 @@ describe("issue", () => {
           );
           const first = yield* issueInvoice();
           expect(first.number).toBe(`${EffectString.repeat(18)("A")}-9`);
-          const draftResult = yield* d.createDraft(invoiceInput());
+          const draftResult = yield* d.createDraft(testCaller, invoiceInput());
           const errorResult = yield* Effect.flip(
-            d.issue({ draft: draftResult.id, expectedRevision: draftResult.revision }),
+            d.issue(testCaller, { draft: draftResult.id, expectedRevision: draftResult.revision }),
           );
-          return [errorResult, yield* d.get(draftResult.id)] as const;
+          return [errorResult, yield* d.get(testCaller, draftResult.id)] as const;
         }),
       ),
     );
@@ -195,13 +201,18 @@ describe("issue", () => {
     const [retry, stale] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
-          const draft = yield* d.createDraft(invoiceInput());
-          yield* d.issue({ draft: draft.id, expectedRevision: 1 });
-          const retryResult = yield* Effect.flip(d.issue({ draft: draft.id, expectedRevision: 1 }));
-          const other = yield* d.createDraft(invoiceInput());
-          yield* d.edit(other.id, { note: "změna" }, 1);
-          const staleResult = yield* Effect.flip(d.issue({ draft: other.id, expectedRevision: 1 }));
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
+          yield* d.issue(testCaller, { draft: draft.id, expectedRevision: 1 });
+          const retryResult = yield* Effect.flip(
+            d.issue(testCaller, { draft: draft.id, expectedRevision: 1 }),
+          );
+          const other = yield* d.createDraft(testCaller, invoiceInput());
+          yield* d.edit(testCaller, other.id, { note: "změna" }, 1);
+          const staleResult = yield* Effect.flip(
+            d.issue(testCaller, { draft: other.id, expectedRevision: 1 }),
+          );
           return [retryResult, staleResult] as const;
         }),
       ),
@@ -214,14 +225,17 @@ describe("issue", () => {
     const [first, again, next, mismatch] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const key = { requestKey: RequestKey.make("issue-1") };
-          const draft = yield* d.createDraft(invoiceInput());
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
           const from = { draft: draft.id, expectedRevision: 1 };
-          const firstResult = yield* d.issue(from, key);
-          const repeated = yield* d.issue(from, key);
+          const firstResult = yield* d.issue(testCaller, from, key);
+          const repeated = yield* d.issue(testCaller, from, key);
           const nextResult = yield* issueInvoice();
-          const mismatchResult = yield* Effect.flip(d.issue({ input: invoiceInput() }, key));
+          const mismatchResult = yield* Effect.flip(
+            d.issue(testCaller, { input: invoiceInput() }, key),
+          );
           return [firstResult, repeated, nextResult.number, mismatchResult] as const;
         }),
       ),
@@ -235,6 +249,7 @@ describe("issue", () => {
     const [afterChange, afterEdit, refreshed, history] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const f = yield* DocumentFixtures;
           const view = yield* issueInvoice();
@@ -244,9 +259,15 @@ describe("issue", () => {
             ...changed,
             party: { ...changed.party, name: "Nová firma s.r.o." },
           });
-          const afterChangeResult = yield* d.get(view.id);
-          const afterEditResult = yield* d.edit(view.id, { note: "Díky" }, view.revision);
+          const afterChangeResult = yield* d.get(testCaller, view.id);
+          const afterEditResult = yield* d.edit(
+            testCaller,
+            view.id,
+            { note: "Díky" },
+            view.revision,
+          );
           const refreshedResult = yield* d.edit(
+            testCaller,
             view.id,
             { refreshParties: true },
             afterEditResult.revision,
@@ -255,7 +276,7 @@ describe("issue", () => {
             afterChangeResult,
             afterEditResult,
             refreshedResult,
-            yield* d.history(view.id),
+            yield* d.history(testCaller, view.id),
           ] as const;
         }),
       ),
@@ -332,30 +353,34 @@ const EXPECTED = {
 /** A Proforma (never a tax document, so cancel cancels) in `state`. */
 const inState = (state: LifecycleState) =>
   Effect.gen(function* () {
+    const testCaller = yield* TestCaller;
     const d = yield* Documents;
-    if (state === "draft") return yield* d.createDraft(invoiceInput({ kind: "proforma" }));
+    if (state === "draft")
+      return yield* d.createDraft(testCaller, invoiceInput({ kind: "proforma" }));
     const view = yield* issueProforma();
-    if (state === "locked") return yield* d.lock(view.id);
-    if (state === "cancelled") return (yield* d.cancel(view.id, { reason: "chyba" })).document;
+    if (state === "locked") return yield* d.lock(testCaller, view.id);
+    if (state === "cancelled")
+      return (yield* d.cancel(testCaller, view.id, { reason: "chyba" })).document;
     return view;
   });
 
 const act = (action: ServiceAction, view: DocumentView) =>
   Effect.gen(function* () {
+    const testCaller = yield* TestCaller;
     const d = yield* Documents;
     switch (action) {
       case "edit":
-        return yield* d.edit(view.id, { note: "x" }, view.revision);
+        return yield* d.edit(testCaller, view.id, { note: "x" }, view.revision);
       case "discard":
-        return yield* d.discardDraft(view.id, view.revision);
+        return yield* d.discardDraft(testCaller, view.id, view.revision);
       case "issue":
-        return yield* d.issue({ draft: view.id, expectedRevision: view.revision });
+        return yield* d.issue(testCaller, { draft: view.id, expectedRevision: view.revision });
       case "lock":
-        return yield* d.lock(view.id);
+        return yield* d.lock(testCaller, view.id);
       case "unlock":
-        return yield* d.unlock(view.id, "oprava");
+        return yield* d.unlock(testCaller, view.id, "oprava");
       case "cancel":
-        return yield* d.cancel(view.id, { reason: "storno" });
+        return yield* d.cancel(testCaller, view.id, { reason: "storno" });
     }
   });
 
@@ -367,16 +392,19 @@ describe("state machine", () => {
         const [before, exit, after, history] = ok(
           await run(
             Effect.gen(function* () {
+              const testCaller = yield* TestCaller;
               const d = yield* Documents;
               const beforeResult = yield* inState(state);
-              const historyBefore = (yield* d.history(beforeResult.id)).length;
+              const historyBefore = (yield* d.history(testCaller, beforeResult.id)).length;
               const exitResult = yield* Effect.exit(act(action, beforeResult));
               const afterResult =
                 action === "discard" && Exit.isSuccess(exitResult)
                   ? null
-                  : yield* d.get(beforeResult.id);
+                  : yield* d.get(testCaller, beforeResult.id);
               const historyAfter =
-                afterResult === null ? historyBefore : (yield* d.history(beforeResult.id)).length;
+                afterResult === null
+                  ? historyBefore
+                  : (yield* d.history(testCaller, beforeResult.id)).length;
               return [beforeResult, exitResult, afterResult, historyAfter - historyBefore] as const;
             }),
           ),
@@ -448,18 +476,19 @@ describe("lock and unlock", () => {
     const [first, second, blank, unlocked, history] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
-          const firstResult = yield* d.lock(view.id);
-          const secondResult = yield* d.lock(view.id);
-          const blankReason = yield* Effect.flip(d.unlock(view.id, "   "));
-          const unlockedResult = yield* d.unlock(view.id, "  oprava adresy ");
+          const firstResult = yield* d.lock(testCaller, view.id);
+          const secondResult = yield* d.lock(testCaller, view.id);
+          const blankReason = yield* Effect.flip(d.unlock(testCaller, view.id, "   "));
+          const unlockedResult = yield* d.unlock(testCaller, view.id, "  oprava adresy ");
           return [
             firstResult,
             secondResult,
             blankReason,
             unlockedResult,
-            yield* d.history(view.id),
+            yield* d.history(testCaller, view.id),
           ] as const;
         }),
       ),
@@ -486,10 +515,14 @@ describe("lock and unlock", () => {
         Effect.gen(function* () {
           const d = yield* Documents;
           const view = yield* issueInvoice();
-          const accountantLock = yield* Effect.flip(as(member("accountant"), d.lock(view.id)));
-          yield* as(member("member"), d.lock(view.id));
-          const memberUnlock = yield* Effect.flip(as(member("member"), d.unlock(view.id, "x")));
-          const adminUnlock = yield* as(member("admin"), d.unlock(view.id, "x"));
+          const accountantLock = yield* Effect.flip(
+            as(member("accountant"), d.lock(member("accountant"), view.id)),
+          );
+          yield* as(member("member"), d.lock(member("member"), view.id));
+          const memberUnlock = yield* Effect.flip(
+            as(member("member"), d.unlock(member("member"), view.id, "x")),
+          );
+          const adminUnlock = yield* as(member("admin"), d.unlock(member("admin"), view.id, "x"));
           return [accountantLock, memberUnlock, adminUnlock.locked] as const;
         }),
       ),
@@ -509,21 +542,24 @@ describe("edit of an issued document", () => {
     const [edited, history, series] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
           const editedResult = yield* d.edit(
+            testCaller,
             view.id,
             { lines: [invoiceInput().lines[0]] },
             view.revision,
           );
           const seriesResult = yield* Effect.flip(
             d.edit(
+              testCaller,
               view.id,
               { series: NumberingSeriesId.make("01900000-0000-7000-8000-000000000999") },
               editedResult.revision,
             ),
           );
-          return [editedResult, yield* d.history(view.id), seriesResult] as const;
+          return [editedResult, yield* d.history(testCaller, view.id), seriesResult] as const;
         }),
       ),
     );
@@ -540,6 +576,7 @@ describe("edit of an issued document", () => {
     const [linesErr, taxPointErr, note] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
@@ -547,12 +584,17 @@ describe("edit of an issued document", () => {
           const row = yield* repo.get(WS, view.id);
           const paid = yield* store.transaction(repo.update({ ...row, payments: 1 }, row.revision));
           const linesErrResult = yield* Effect.flip(
-            d.edit(view.id, { lines: invoiceInput().lines }, paid.revision),
+            d.edit(testCaller, view.id, { lines: invoiceInput().lines }, paid.revision),
           );
           const taxPointErrResult = yield* Effect.flip(
-            d.edit(view.id, { taxableSupplyOn: IsoDate.make("2026-11-20") }, paid.revision),
+            d.edit(
+              testCaller,
+              view.id,
+              { taxableSupplyOn: IsoDate.make("2026-11-20") },
+              paid.revision,
+            ),
           );
-          const noteResult = yield* d.edit(view.id, { note: "Záloha" }, paid.revision);
+          const noteResult = yield* d.edit(testCaller, view.id, { note: "Záloha" }, paid.revision);
           return [linesErrResult, taxPointErrResult, noteResult.revision] as const;
         }),
       ),
@@ -570,17 +612,32 @@ describe("number override", () => {
     const [renamed, taken, old, memberTry, draftTry, history, row] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const a = yield* issueInvoice();
           const b = yield* issueInvoice();
-          const renamedResult = yield* d.edit(a.id, { number: " 2026-0100 " }, a.revision);
-          const takenResult = yield* Effect.flip(d.edit(b.id, { number: "2026-0100" }, b.revision));
-          const oldResult = yield* Effect.flip(d.edit(b.id, { number: "2026-0001" }, b.revision));
-          const memberTryResult = yield* Effect.flip(
-            as(member("member"), d.edit(b.id, { number: "2026-0200" }, b.revision)),
+          const renamedResult = yield* d.edit(
+            testCaller,
+            a.id,
+            { number: " 2026-0100 " },
+            a.revision,
           );
-          const draft = yield* d.createDraft(invoiceInput());
-          const draftTryResult = yield* Effect.flip(d.edit(draft.id, { number: "D-1" }, 1));
+          const takenResult = yield* Effect.flip(
+            d.edit(testCaller, b.id, { number: "2026-0100" }, b.revision),
+          );
+          const oldResult = yield* Effect.flip(
+            d.edit(testCaller, b.id, { number: "2026-0001" }, b.revision),
+          );
+          const memberTryResult = yield* Effect.flip(
+            as(
+              member("member"),
+              d.edit(member("member"), b.id, { number: "2026-0200" }, b.revision),
+            ),
+          );
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
+          const draftTryResult = yield* Effect.flip(
+            d.edit(testCaller, draft.id, { number: "D-1" }, 1),
+          );
           const rowResult = yield* (yield* DocumentsRepo).get(WS, a.id);
           return [
             renamedResult,
@@ -588,7 +645,7 @@ describe("number override", () => {
             oldResult,
             memberTryResult,
             draftTryResult,
-            yield* d.history(a.id),
+            yield* d.history(testCaller, a.id),
             rowResult,
           ] as const;
         }),
@@ -614,13 +671,14 @@ describe("cancel", () => {
     const [result, history] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueProforma();
-          const operationResult = yield* d.cancel(view.id, {
+          const operationResult = yield* d.cancel(testCaller, view.id, {
             reason: "duplicita",
             on: IsoDate.make("2026-11-23"),
           });
-          return [operationResult, yield* d.history(view.id)] as const;
+          return [operationResult, yield* d.history(testCaller, view.id)] as const;
         }),
       ),
     );
@@ -635,14 +693,15 @@ describe("cancel", () => {
     const [result, again, cnHistory] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
-          const operationResult2 = yield* d.cancel(view.id, { reason: "vráceno" });
-          const repeated = yield* Effect.flip(d.cancel(view.id, { reason: "znovu" }));
+          const operationResult2 = yield* d.cancel(testCaller, view.id, { reason: "vráceno" });
+          const repeated = yield* Effect.flip(d.cancel(testCaller, view.id, { reason: "znovu" }));
           return [
             operationResult2,
             repeated,
-            yield* d.history(present(operationResult2.creditNote).id),
+            yield* d.history(testCaller, present(operationResult2.creditNote).id),
           ] as const;
         }),
       ),
@@ -680,6 +739,7 @@ describe("cancel", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
@@ -694,14 +754,16 @@ describe("cancel", () => {
               pRow.revision,
             ),
           );
-          const lockedDoc = yield* d.lock((yield* issueInvoice()).id);
+          const lockedDoc = yield* d.lock(testCaller, (yield* issueInvoice()).id);
           const open = yield* issueInvoice();
           return [
-            yield* Effect.flip(d.cancel(paid.id, { reason: "x" })),
-            yield* Effect.flip(d.cancel(proforma.id, { reason: "x" })),
-            yield* Effect.flip(d.cancel(lockedDoc.id, { reason: "x" })),
-            yield* Effect.flip(d.cancel(open.id, { reason: " " })),
-            yield* Effect.flip(d.cancel(open.id, { reason: "x", on: IsoDate.make("2026-11-01") })),
+            yield* Effect.flip(d.cancel(testCaller, paid.id, { reason: "x" })),
+            yield* Effect.flip(d.cancel(testCaller, proforma.id, { reason: "x" })),
+            yield* Effect.flip(d.cancel(testCaller, lockedDoc.id, { reason: "x" })),
+            yield* Effect.flip(d.cancel(testCaller, open.id, { reason: " " })),
+            yield* Effect.flip(
+              d.cancel(testCaller, open.id, { reason: "x", on: IsoDate.make("2026-11-01") }),
+            ),
           ];
         }),
       ),
@@ -723,13 +785,14 @@ describe("cancel", () => {
     const [first, again, next] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const key = { requestKey: RequestKey.make("cancel-1") };
           const view = yield* issueInvoice();
-          const firstResult = yield* d.cancel(view.id, { reason: "x" }, key);
-          const repeatedResult = yield* d.cancel(view.id, { reason: "x" }, key);
+          const firstResult = yield* d.cancel(testCaller, view.id, { reason: "x" }, key);
+          const repeatedResult = yield* d.cancel(testCaller, view.id, { reason: "x" }, key);
           const other = yield* issueInvoice();
-          const nextResult = yield* d.cancel(other.id, { reason: "x" });
+          const nextResult = yield* d.cancel(testCaller, other.id, { reason: "x" });
           return [firstResult, repeatedResult, nextResult.creditNote?.number] as const;
         }),
       ),
@@ -749,16 +812,25 @@ describe("authorization and scoping", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const accountant = member("accountant");
-          const draft = yield* d.createDraft(invoiceInput());
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
           const view = yield* issueInvoice();
           return [
-            yield* Effect.flip(as(accountant, d.issue({ draft: draft.id, expectedRevision: 1 }))),
-            yield* Effect.flip(as(accountant, d.cancel(view.id, { reason: "x" }))),
-            yield* Effect.flip(as(accountant, d.edit(view.id, { note: "x" }, view.revision))),
-            (yield* as(member("member"), d.issue({ draft: draft.id, expectedRevision: 1 }))).status,
-            (yield* as(member("member"), d.cancel(view.id, { reason: "x" }))).document.settlement,
+            yield* Effect.flip(
+              as(accountant, d.issue(accountant, { draft: draft.id, expectedRevision: 1 })),
+            ),
+            yield* Effect.flip(as(accountant, d.cancel(accountant, view.id, { reason: "x" }))),
+            yield* Effect.flip(
+              as(accountant, d.edit(accountant, view.id, { note: "x" }, view.revision)),
+            ),
+            (yield* as(
+              member("member"),
+              d.issue(member("member"), { draft: draft.id, expectedRevision: 1 }),
+            )).status,
+            (yield* as(member("member"), d.cancel(member("member"), view.id, { reason: "x" })))
+              .document.settlement,
           ];
         }),
       ),
@@ -776,17 +848,18 @@ describe("authorization and scoping", () => {
     const misses = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const other = member("owner", { workspaceId: WORKSPACE_B });
-          const draft = yield* d.createDraft(invoiceInput());
+          const draft = yield* d.createDraft(testCaller, invoiceInput());
           const view = yield* issueInvoice();
           return [
-            yield* Effect.flip(as(other, d.issue({ draft: draft.id, expectedRevision: 1 }))),
-            yield* Effect.flip(as(other, d.edit(view.id, { note: "x" }, view.revision))),
-            yield* Effect.flip(as(other, d.edit(view.id, { number: "X-1" }, view.revision))),
-            yield* Effect.flip(as(other, d.lock(view.id))),
-            yield* Effect.flip(as(other, d.unlock(view.id, "x"))),
-            yield* Effect.flip(as(other, d.cancel(view.id, { reason: "x" }))),
+            yield* Effect.flip(as(other, d.issue(other, { draft: draft.id, expectedRevision: 1 }))),
+            yield* Effect.flip(as(other, d.edit(other, view.id, { note: "x" }, view.revision))),
+            yield* Effect.flip(as(other, d.edit(other, view.id, { number: "X-1" }, view.revision))),
+            yield* Effect.flip(as(other, d.lock(other, view.id))),
+            yield* Effect.flip(as(other, d.unlock(other, view.id, "x"))),
+            yield* Effect.flip(as(other, d.cancel(other, view.id, { reason: "x" }))),
           ];
         }),
       ),
@@ -800,13 +873,23 @@ describe("Credit Notes", () => {
     const [linesErr, refreshErr, noted] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
-          const { creditNote } = yield* d.cancel((yield* issueInvoice()).id, { reason: "x" });
+          const { creditNote } = yield* d.cancel(testCaller, (yield* issueInvoice()).id, {
+            reason: "x",
+          });
           const cn = present(creditNote);
           return [
-            yield* Effect.flip(d.edit(cn.id, { lines: invoiceInput().lines }, cn.revision)),
-            yield* Effect.flip(d.edit(cn.id, { refreshParties: true }, cn.revision)),
-            yield* d.edit(cn.id, { note: "Dobropis", orderNumber: "PO-7" }, cn.revision),
+            yield* Effect.flip(
+              d.edit(testCaller, cn.id, { lines: invoiceInput().lines }, cn.revision),
+            ),
+            yield* Effect.flip(d.edit(testCaller, cn.id, { refreshParties: true }, cn.revision)),
+            yield* d.edit(
+              testCaller,
+              cn.id,
+              { note: "Dobropis", orderNumber: "PO-7" },
+              cn.revision,
+            ),
           ] as const;
         }),
       ),
@@ -860,6 +943,7 @@ describe("council follow-ups", () => {
     const [before, edited, refreshed] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const f = yield* DocumentFixtures;
           const view = yield* issueInvoice();
@@ -867,8 +951,14 @@ describe("council follow-ups", () => {
           yield* f.putIssuer(
             issuer(WS, "non_vat_payer", { seriesByKind: {}, defaultNote: "Nová" }),
           );
-          const editedResult = yield* d.edit(view.id, { orderNumber: "PO-1" }, view.revision);
+          const editedResult = yield* d.edit(
+            testCaller,
+            view.id,
+            { orderNumber: "PO-1" },
+            view.revision,
+          );
           const refreshedResult = yield* d.edit(
+            testCaller,
             view.id,
             { paymentMethod: "cash", issuedOn: IsoDate.make("2026-11-22") },
             editedResult.revision,
@@ -892,6 +982,7 @@ describe("council follow-ups", () => {
     const [guarded, settlement] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
@@ -901,7 +992,7 @@ describe("council follow-ups", () => {
             repo.update({ ...pRow, payments: 1 }, pRow.revision),
           );
           const guardedResult = yield* Effect.flip(
-            d.edit(proforma.id, { pricesIncludeVat: true }, paidP.revision),
+            d.edit(testCaller, proforma.id, { pricesIncludeVat: true }, paidP.revision),
           );
           const invoice = yield* issueInvoice();
           const iRow = yield* repo.get(WS, invoice.id);
@@ -912,6 +1003,7 @@ describe("council follow-ups", () => {
             ),
           );
           const cheaper = yield* d.edit(
+            testCaller,
             invoice.id,
             { lines: [invoiceInput().lines[0]] },
             paidI.revision,
@@ -928,12 +1020,13 @@ describe("council follow-ups", () => {
     const [cn, cancelCn, future] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice({ issuedOn: IsoDate.make("2026-11-20") });
           const futureResult = yield* Effect.flip(
-            d.cancel(view.id, { reason: "x", on: IsoDate.make("2026-11-24") }),
+            d.cancel(testCaller, view.id, { reason: "x", on: IsoDate.make("2026-11-24") }),
           );
-          const { creditNote } = yield* d.cancel(view.id, {
+          const { creditNote } = yield* d.cancel(testCaller, view.id, {
             reason: "x",
             on: IsoDate.make("2026-11-21"),
           });
@@ -945,7 +1038,7 @@ describe("council follow-ups", () => {
               correctedNumber: row.correctedNumber,
               reason: row.reason,
             },
-            yield* Effect.flip(d.cancel(creditNoteView.id, { reason: "x" })),
+            yield* Effect.flip(d.cancel(testCaller, creditNoteView.id, { reason: "x" })),
             futureResult,
           ] as const;
         }),
@@ -970,6 +1063,7 @@ describe("diff council follow-ups", () => {
     const [reverse, regime] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const f = yield* DocumentFixtures;
           const eu = yield* issueInvoice({
@@ -981,6 +1075,7 @@ describe("diff council follow-ups", () => {
           // The live Contact loses its VAT ID; the issued buyer still has it.
           yield* f.putContact(WS, contact(DE_BUYER, { country: "DE", dic: null }));
           const reverseResult = yield* d.edit(
+            testCaller,
             eu.id,
             { lines: [{ description: "Služba", unitPrice: dec("120") }] },
             eu.revision,
@@ -988,6 +1083,7 @@ describe("diff council follow-ups", () => {
           const cz = yield* issueInvoice();
           yield* f.putIssuer(issuer(WS, "non_vat_payer", { seriesByKind: {} }));
           const regimeResult = yield* d.edit(
+            testCaller,
             cz.id,
             { lines: [invoiceInput().lines[0]] },
             cz.revision,
@@ -1008,18 +1104,24 @@ describe("diff council follow-ups", () => {
     const [account, currency, rate] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const repo = yield* DocumentsRepo;
           const store = yield* CoreStore;
           const view = yield* issueInvoice();
           const accountResult = yield* Effect.flip(
-            d.edit(view.id, { bankAccount: EUR_ACCOUNT }, view.revision),
+            d.edit(testCaller, view.id, { bankAccount: EUR_ACCOUNT }, view.revision),
           );
-          const same = yield* d.edit(view.id, { bankAccount: CZK_ACCOUNT }, view.revision);
+          const same = yield* d.edit(
+            testCaller,
+            view.id,
+            { bankAccount: CZK_ACCOUNT },
+            view.revision,
+          );
           const row = yield* repo.get(WS, view.id);
           const paid = yield* store.transaction(repo.update({ ...row, payments: 1 }, row.revision));
           const currencyResult = yield* Effect.flip(
-            d.edit(view.id, { currency: EUR }, paid.revision),
+            d.edit(testCaller, view.id, { currency: EUR }, paid.revision),
           );
           const proforma = yield* issueProforma();
           const pRow = yield* repo.get(WS, proforma.id);
@@ -1028,6 +1130,7 @@ describe("diff council follow-ups", () => {
           );
           const rateResult = yield* Effect.flip(
             d.edit(
+              testCaller,
               proforma.id,
               { fx: { manual: { rate: dec("25"), quantity: 1 } } },
               paidP.revision,
@@ -1048,11 +1151,12 @@ describe("diff council follow-ups", () => {
     const related = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
-          const { document, creditNote } = yield* d.cancel(view.id, { reason: "x" });
-          yield* d.edit(view.id, { number: "2026-0500" }, document.revision);
-          return (yield* d.get(present(creditNote).id)).related;
+          const { document, creditNote } = yield* d.cancel(testCaller, view.id, { reason: "x" });
+          yield* d.edit(testCaller, view.id, { number: "2026-0500" }, document.revision);
+          return (yield* d.get(testCaller, present(creditNote).id)).related;
         }),
       ),
     );
@@ -1067,17 +1171,22 @@ describe("review round 1 follow-ups", () => {
     const [refreshed, again] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const f = yield* DocumentFixtures;
           const view = yield* issueInvoice();
-          const { document } = yield* d.cancel(view.id, { reason: "x" });
+          const { document } = yield* d.cancel(testCaller, view.id, { reason: "x" });
           yield* f.putIssuer(issuer(WS, "non_vat_payer", { seriesByKind: {} }));
           const refreshedResult = yield* d.edit(
+            testCaller,
             view.id,
             { refreshParties: true },
             document.revision,
           );
-          return [refreshedResult, yield* Effect.flip(d.cancel(view.id, { reason: "y" }))] as const;
+          return [
+            refreshedResult,
+            yield* Effect.flip(d.cancel(testCaller, view.id, { reason: "y" })),
+          ] as const;
         }),
       ),
     );
@@ -1091,6 +1200,7 @@ describe("review round 1 follow-ups", () => {
     const [before, after] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const f = yield* DocumentFixtures;
           const view = yield* issueInvoice({
@@ -1100,7 +1210,10 @@ describe("review round 1 follow-ups", () => {
             ...issuer(WS, "vat_payer", { seriesByKind: {} }),
             paymentRounding: "whole_unit",
           });
-          return [view, yield* d.edit(view.id, { refreshParties: true }, view.revision)] as const;
+          return [
+            view,
+            yield* d.edit(testCaller, view.id, { refreshParties: true }, view.revision),
+          ] as const;
         }),
       ),
     );
@@ -1114,12 +1227,20 @@ describe("review round 1 follow-ups", () => {
     const [alone, withContact] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
           return [
-            yield* Effect.flip(d.edit(view.id, { bankAccount: EUR_ACCOUNT }, view.revision)),
             yield* Effect.flip(
-              d.edit(view.id, { bankAccount: EUR_ACCOUNT, contact: CZ_BUYER }, view.revision),
+              d.edit(testCaller, view.id, { bankAccount: EUR_ACCOUNT }, view.revision),
+            ),
+            yield* Effect.flip(
+              d.edit(
+                testCaller,
+                view.id,
+                { bankAccount: EUR_ACCOUNT, contact: CZ_BUYER },
+                view.revision,
+              ),
             ),
           ] as const;
         }),
@@ -1137,12 +1258,15 @@ describe("review round 1 follow-ups", () => {
     const [before, after] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const repo = yield* DocumentsRepo;
-          const { creditNote } = yield* d.cancel((yield* issueInvoice()).id, { reason: "x" });
+          const { creditNote } = yield* d.cancel(testCaller, (yield* issueInvoice()).id, {
+            reason: "x",
+          });
           const cn = present(creditNote);
           const beforeResult = (yield* repo.get(WS, cn.id)).variableSymbol;
-          yield* d.edit(cn.id, { number: "OD-777" }, cn.revision);
+          yield* d.edit(testCaller, cn.id, { number: "OD-777" }, cn.revision);
           return [beforeResult, (yield* repo.get(WS, cn.id)).variableSymbol] as const;
         }),
       ),
@@ -1154,10 +1278,16 @@ describe("review round 1 follow-ups", () => {
     const changes = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
-          yield* d.edit(view.id, { due: { on: IsoDate.make("2026-12-07") } }, view.revision);
-          return (yield* d.history(view.id)).at(-1)?.changes;
+          yield* d.edit(
+            testCaller,
+            view.id,
+            { due: { on: IsoDate.make("2026-12-07") } },
+            view.revision,
+          );
+          return (yield* d.history(testCaller, view.id)).at(-1)?.changes;
         }),
       ),
     );
@@ -1205,17 +1335,18 @@ describe("review round 1 follow-ups", () => {
     const [failed, draft, history, retried] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const key = { requestKey: RequestKey.make("issue-send") };
-          const created = yield* d.createDraft(invoiceInput());
+          const created = yield* d.createDraft(testCaller, invoiceInput());
           const from = { draft: created.id, expectedRevision: 1 };
           // The sender stub dies (stage 2 delivers): everything since the row lock reverts.
-          const failedResult = yield* Effect.exit(d.issue(from, { ...key, send: {} }));
-          const draftResult = yield* d.get(created.id);
-          const trail = yield* d.history(created.id);
+          const failedResult = yield* Effect.exit(d.issue(testCaller, from, { ...key, send: {} }));
+          const draftResult = yield* d.get(testCaller, created.id);
+          const trail = yield* d.history(testCaller, created.id);
           const historyResult = EffectArray.map(trail, (e) => e.action);
           // Same key, other payload: no request-log row survived, so this runs fresh.
-          const retriedResult = yield* d.issue(from, key);
+          const retriedResult = yield* d.issue(testCaller, from, key);
           return [
             Exit.isFailure(failedResult),
             draftResult,
@@ -1237,11 +1368,17 @@ describe("review round 2 follow-ups", () => {
     const [changes, renumbered] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice();
-          const pinned = yield* d.edit(view.id, { variableSymbol: "20260001" }, view.revision);
-          const changesResult = (yield* d.history(view.id)).at(-1)?.changes;
-          yield* d.edit(view.id, { number: "X-777" }, pinned.revision);
+          const pinned = yield* d.edit(
+            testCaller,
+            view.id,
+            { variableSymbol: "20260001" },
+            view.revision,
+          );
+          const changesResult = (yield* d.history(testCaller, view.id)).at(-1)?.changes;
+          yield* d.edit(testCaller, view.id, { number: "X-777" }, pinned.revision);
           return [
             changesResult,
             (yield* (yield* DocumentsRepo).get(WS, view.id)).variableSymbol,
@@ -1257,9 +1394,10 @@ describe("review round 2 follow-ups", () => {
     const symbol = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const view = yield* issueInvoice({ variableSymbol: "555" });
-          const { creditNote } = yield* d.cancel(view.id, { reason: "x" });
+          const { creditNote } = yield* d.cancel(testCaller, view.id, { reason: "x" });
           return (yield* (yield* DocumentsRepo).get(WS, present(creditNote).id)).variableSymbol;
         }),
       ),
@@ -1273,14 +1411,15 @@ describe("review round 3 follow-ups", () => {
     const [fixed, relative] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const a = yield* issueInvoice();
           const b = yield* issueInvoice();
-          yield* d.edit(a.id, { due: { on: IsoDate.make("2026-12-08") } }, a.revision);
-          yield* d.edit(b.id, { due: { inDays: 15 } }, b.revision);
+          yield* d.edit(testCaller, a.id, { due: { on: IsoDate.make("2026-12-08") } }, a.revision);
+          yield* d.edit(testCaller, b.id, { due: { inDays: 15 } }, b.revision);
           return [
-            (yield* d.history(a.id)).at(-1)?.changes,
-            (yield* d.history(b.id)).at(-1)?.changes,
+            (yield* d.history(testCaller, a.id)).at(-1)?.changes,
+            (yield* d.history(testCaller, b.id)).at(-1)?.changes,
           ] as const;
         }),
       ),

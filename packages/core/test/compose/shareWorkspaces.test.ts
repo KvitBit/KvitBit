@@ -41,8 +41,10 @@ describe("ShareWorkspacesLive", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const s = yield* seed();
-        const other = yield* as(accountOf(OUTSIDER))(ws.create({ name: "Jiná s.r.o." }));
-        yield* as(s.member)(ws.leave);
+        const other = yield* as(accountOf(OUTSIDER))(
+          ws.create(accountOf(OUTSIDER), { name: "Jiná s.r.o." }),
+        );
+        yield* as(s.member)(ws.leave(s.member));
         const share = yield* SW;
         const isMemberResult = yield* share.isMember(s.workspaceId, OWNER);
         expect(isMemberResult).toBe(true);
@@ -64,14 +66,17 @@ describe("ShareWorkspacesLive", () => {
         const ws = yield* W;
         const s = yield* seed();
         const share = yield* SW;
-        const current = yield* as(s.member)(ws.current);
+        const current = yield* as(s.member)(ws.current(s.member));
         const brandingResult = yield* share.branding(s.workspaceId);
         expect(current.branding).toEqual(brandingResult);
         // No logo yet.
         (yield* share.logo(s.workspaceId)).pipe(Option.isNone, expect).toBe(true);
 
         const ref = yield* as(s.admin)(
-          ws.setBrandingImage("logo", { contentType: "image/png", bytes: Stream.make(png(900)) }),
+          ws.setBrandingImage(s.admin, "logo", {
+            contentType: "image/png",
+            bytes: Stream.make(png(900)),
+          }),
         );
         expect((yield* share.branding(s.workspaceId)).logo).toEqual(ref);
         const logo = yield* share.logo(s.workspaceId);
@@ -85,7 +90,7 @@ describe("ShareWorkspacesLive", () => {
         yield* Ref.set(blobs.blobs, new Map());
         (yield* share.logo(s.workspaceId)).pipe(Option.isNone, expect).toBe(true);
 
-        yield* as(s.admin)(ws.removeBrandingImage("logo"));
+        yield* as(s.admin)(ws.removeBrandingImage(s.admin, "logo"));
         expect((yield* share.branding(s.workspaceId)).logo).toBeNull();
       }).pipe(Effect.provide(ShareWorkspacesLive)),
     ));
@@ -96,7 +101,10 @@ describe("ShareWorkspacesLive", () => {
         const ws = yield* W;
         const s = yield* seed();
         yield* as(s.admin)(
-          ws.setBrandingImage("logo", { contentType: "image/png", bytes: Stream.make(png()) }),
+          ws.setBrandingImage(s.admin, "logo", {
+            contentType: "image/png",
+            bytes: Stream.make(png()),
+          }),
         );
         const real = yield* BlobStorage;
         const failing = Layer.succeed(BlobStorage, {

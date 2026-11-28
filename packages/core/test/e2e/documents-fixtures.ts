@@ -1,6 +1,6 @@
 /** Seed data for the Documents e2e scenarios on TestCore (registry records, CNB fixings, setup). */
 
-import type { DocumentView, TaxRegime } from "@kvitbit/domain/contract";
+import type { AccountCaller, DocumentView, TaxRegime } from "@kvitbit/domain/contract";
 import {
   BankAccountInput,
   ContactId,
@@ -14,7 +14,6 @@ import * as EffectArray from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { asCaller } from "../helpers";
 
 export const dec = (s: string) => BigDecimal.fromStringUnsafe(s);
 /** Normalized decimal string, for assertions. */
@@ -65,32 +64,28 @@ export const fixing = ({
  * As an Account: creates a Workspace from the issuer's IČO with `regime`, adds a CZK and a EUR
  * bank account, and saves the buyer from ARES with an invoicing email. Returns the owner and buyer.
  */
-export const onboard = (regime: TaxRegime) =>
-  Effect.gen(function* () {
-    const ws = yield* Workspaces;
-    const owner = yield* ws.create({ ico: ISSUER_ICO, taxRegime: regime });
-    const buyer = yield* asCaller(
-      owner,
-      Effect.gen(function* () {
-        yield* ws.saveBankAccount(
-          BankAccountInput.make({ iban: "CZ1801000000000123456789", currency: CZK }),
-        );
-        yield* ws.saveBankAccount(
-          BankAccountInput.make({ iban: "CZ6701000000000987654321", currency: EUR }),
-        );
-        const contacts = yield* Contacts;
-        const fromAres = yield* contacts.fromIco(BUYER_ICO);
-        const id = yield* Schema.decodeUnknownEffect(ContactId)(fromAres["id"]);
-        return yield* contacts.save({
-          id,
-          expectedRevision: fromAres.revision,
-          billingEmails: ["fakturace@odberatel.cz"],
-        });
-      }),
-    );
-    const id = yield* Schema.decodeUnknownEffect(ContactId)(buyer["id"]);
-    return { owner, buyer: id };
+export const onboard = Effect.fn("onboard")(function* (account: AccountCaller, regime: TaxRegime) {
+  const ws = yield* Workspaces;
+  const owner = yield* ws.create(account, { ico: ISSUER_ICO, taxRegime: regime });
+  yield* ws.saveBankAccount(
+    owner,
+    BankAccountInput.make({ iban: "CZ1801000000000123456789", currency: CZK }),
+  );
+  yield* ws.saveBankAccount(
+    owner,
+    BankAccountInput.make({ iban: "CZ6701000000000987654321", currency: EUR }),
+  );
+  const contacts = yield* Contacts;
+  const fromAres = yield* contacts.fromIco(owner, BUYER_ICO);
+  const id = yield* Schema.decodeUnknownEffect(ContactId)(fromAres["id"]);
+  const buyer = yield* contacts.save(owner, {
+    id,
+    expectedRevision: fromAres.revision,
+    billingEmails: ["fakturace@odberatel.cz"],
   });
+  const buyerId = yield* Schema.decodeUnknownEffect(ContactId)(buyer["id"]);
+  return { owner, buyer: buyerId };
+});
 
 export const amounts = (view: Pick<DocumentView, "totals">) => ({
   net: str(view.totals.net.amount),

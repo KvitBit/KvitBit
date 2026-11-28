@@ -11,6 +11,7 @@
  */
 
 import type {
+  Caller,
   DocumentId,
   DocumentSettlement,
   IsoDate,
@@ -494,6 +495,7 @@ export const creditNoteRecord: {
  * and checks D7's per-bucket cap before calling.
  */
 export const issueCreditNote = Effect.fn("issueCreditNote")(function* (
+  caller: Caller,
   original: DocumentRecord,
   input: IssueCreditNoteInput,
 ) {
@@ -542,7 +544,7 @@ export const issueCreditNote = Effect.fn("issueCreditNote")(function* (
       original.revision,
     )
     .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-  yield* appendAudit({
+  yield* appendAudit(caller, {
     workspaceId,
     subject: { entity: "Document", id: creditNote.id },
     action: "document.issue",

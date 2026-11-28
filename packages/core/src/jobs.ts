@@ -11,7 +11,7 @@ import type {
   ScheduleId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, DocumentId, Documents, IsoDate } from "@kvitbit/domain/contract";
+import { DocumentId, Documents, IsoDate } from "@kvitbit/domain/contract";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
@@ -27,50 +27,36 @@ import { documentsTable, expensesTable, paymentsTable } from "./modules/reports/
 import { WorkspacesRepo } from "./modules/workspaces/repo";
 import { CoreStore, type StoreUnavailable } from "./store/CoreStore";
 
-const asDeliverySystem = (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
-  Effect.provideService(
-    CurrentCaller,
-    systemCaller(workspaceId, { _tag: "DocumentDelivery", deliveryId }),
-  );
+const deliveryCaller = (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
+  systemCaller(workspaceId, { _tag: "DocumentDelivery", deliveryId });
 
 // The workspace selection phase has no individual document.
 const workspaceReminderDocument = DocumentId.make("00000000-0000-7000-8000-000000000000");
 
-const asReminderSystem = (workspaceId: WorkspaceId, documentId: DocumentId) =>
-  Effect.provideService(
-    CurrentCaller,
-    systemCaller(workspaceId, { _tag: "PaymentReminders", documentId }),
-  );
+const reminderCaller = (workspaceId: WorkspaceId, documentId: DocumentId) =>
+  systemCaller(workspaceId, { _tag: "PaymentReminders", documentId });
 
-const asRecurringSystem = (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurrence: IsoDate) =>
-  Effect.provideService(
-    CurrentCaller,
-    systemCaller(workspaceId, { _tag: "RecurringIssuance", scheduleId, occurrence }),
-  );
-
-const asExportSystem = (workspaceId: WorkspaceId, exportId: ExportId) =>
-  Effect.provideService(CurrentCaller, systemCaller(workspaceId, { _tag: "DataExport", exportId }));
+const recurringCaller = (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurrence: IsoDate) =>
+  systemCaller(workspaceId, { _tag: "RecurringIssuance", scheduleId, occurrence });
 
 // 1. DocumentDelivery -------------------------------------------------------------------------
 
 export const deliveryJob = {
   /** `queued -> sending | skipped` (J3 re-check), run as `System{DocumentDelivery, deliveryId}`. */
   claim: (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
-    deliveries.claim(workspaceId, deliveryId).pipe(asDeliverySystem(workspaceId, deliveryId)),
+    deliveries.claim(deliveryCaller(workspaceId, deliveryId), workspaceId, deliveryId),
 
   /** `sending -> sent | failed` (or `DeliveryRetry`), run as `System{DocumentDelivery, deliveryId}`. */
   dispatch: (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
-    deliveries.dispatch(workspaceId, deliveryId).pipe(asDeliverySystem(workspaceId, deliveryId)),
+    deliveries.dispatch(workspaceId, deliveryId),
 
   /** `sending -> failed` once retries are exhausted, run as `System{DocumentDelivery, deliveryId}`. */
   giveUp: (workspaceId: WorkspaceId, deliveryId: DeliveryId, reason = "retries_exhausted") =>
-    deliveries
-      .giveUp(workspaceId, deliveryId, reason)
-      .pipe(asDeliverySystem(workspaceId, deliveryId)),
+    deliveries.giveUp(workspaceId, deliveryId, reason),
 
   /** `claim`, then `dispatch` when claimed, run as `System{DocumentDelivery, deliveryId}`. */
   deliver: (workspaceId: WorkspaceId, deliveryId: DeliveryId) =>
-    deliveries.deliver(workspaceId, deliveryId).pipe(asDeliverySystem(workspaceId, deliveryId)),
+    deliveries.deliver(deliveryCaller(workspaceId, deliveryId), workspaceId, deliveryId),
 
   /** Cross-tenant OutboxReconcile for stale `queued`/`sending` deliveries (J1a). */
   reconcileStaleDeliveries: (olderThanMillis: number) =>
@@ -92,13 +78,18 @@ const sweepWorkspace = Effect.fn("sweepWorkspace")(function* (
   workspaceId: WorkspaceId,
   today: IsoDate,
 ) {
-  const due = yield* selectDueReminders(workspaceId, today).pipe(
-    asReminderSystem(workspaceId, workspaceReminderDocument),
+  const due = yield* selectDueReminders(
+    reminderCaller(workspaceId, workspaceReminderDocument),
+    workspaceId,
+    today,
   );
   const deliveryIds: Array<DeliveryId> = [];
   for (const reminder of due) {
-    const queued = yield* enqueueReminder(workspaceId, reminder).pipe(
-      asReminderSystem(workspaceId, reminder.documentId),
+    const queued = yield* enqueueReminder(
+      reminderCaller(workspaceId, reminder.documentId),
+      workspaceId,
+      reminder,
+    ).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterrupts(cause)
           ? Effect.interrupt
@@ -117,13 +108,11 @@ const sweepWorkspace = Effect.fn("sweepWorkspace")(function* (
 export const reminderJob = {
   /** Selects all reminders due in `workspaceId` on `today`, run as `System{PaymentReminders}`. */
   selectDue: (workspaceId: WorkspaceId, today: IsoDate) =>
-    selectDueReminders(workspaceId, today).pipe(
-      asReminderSystem(workspaceId, workspaceReminderDocument),
-    ),
+    selectDueReminders(reminderCaller(workspaceId, workspaceReminderDocument), workspaceId, today),
 
   /** Enqueues one due reminder, run as `System{PaymentReminders, documentId}`. */
   enqueue: (workspaceId: WorkspaceId, reminder: DueReminder) =>
-    enqueueReminder(workspaceId, reminder).pipe(asReminderSystem(workspaceId, reminder.documentId)),
+    enqueueReminder(reminderCaller(workspaceId, reminder.documentId), workspaceId, reminder),
 
   sweepWorkspace,
 
@@ -165,26 +154,26 @@ export const reminderJob = {
 export const recurringJob = {
   /** Activity "issue" + "advance", run as `System{RecurringIssuance, scheduleId, occurrence}`. */
   issue: (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurrence: IsoDate) =>
-    Effect.flatMap(RecurringIssuance, (svc) => svc.issue(scheduleId, occurrence)).pipe(
-      asRecurringSystem(workspaceId, scheduleId, occurrence),
+    Effect.flatMap(RecurringIssuance, (svc) =>
+      svc.issue(recurringCaller(workspaceId, scheduleId, occurrence), scheduleId, occurrence),
     ),
 
   /** Activity "enqueue-delivery", run as `System{RecurringIssuance, scheduleId, occurrence}`. */
   send: (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurrence: IsoDate) =>
-    Effect.flatMap(RecurringIssuance, (svc) => svc.send(scheduleId, occurrence)).pipe(
-      asRecurringSystem(workspaceId, scheduleId, occurrence),
+    Effect.flatMap(RecurringIssuance, (svc) =>
+      svc.send(recurringCaller(workspaceId, scheduleId, occurrence), scheduleId, occurrence),
     ),
 
   /** Full occurrence workflow body (issue then send if pending), safe to rerun. */
   run: (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurrence: IsoDate) =>
-    Effect.flatMap(RecurringIssuance, (svc) => svc.run(scheduleId, occurrence)).pipe(
-      asRecurringSystem(workspaceId, scheduleId, occurrence),
+    Effect.flatMap(RecurringIssuance, (svc) =>
+      svc.run(recurringCaller(workspaceId, scheduleId, occurrence), scheduleId, occurrence),
     ),
 
   /** Pauses a schedule that exceeded its catch-up cap (`schedule.missed_occurrences`). */
   pauseMissed: (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurrence: IsoDate) =>
-    Effect.flatMap(RecurringIssuance, (svc) => svc.pauseMissed(scheduleId, occurrence)).pipe(
-      asRecurringSystem(workspaceId, scheduleId, occurrence),
+    Effect.flatMap(RecurringIssuance, (svc) =>
+      svc.pauseMissed(recurringCaller(workspaceId, scheduleId, occurrence), scheduleId, occurrence),
     ),
 
   /**
@@ -195,14 +184,19 @@ export const recurringJob = {
     const svc = yield* RecurringIssuance;
     const pending = yield* svc.pendingSends(olderThanMillis);
     for (const item of pending) {
-      yield* svc.run(item.scheduleId, item.occurrence).pipe(
-        asRecurringSystem(item.workspaceId, item.scheduleId, item.occurrence),
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause)
-            ? Effect.interrupt
-            : Effect.logWarning("OutboxReconcile: recurring pending send failed", item, cause),
-        ),
-      );
+      yield* svc
+        .run(
+          recurringCaller(item.workspaceId, item.scheduleId, item.occurrence),
+          item.scheduleId,
+          item.occurrence,
+        )
+        .pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.interrupt
+              : Effect.logWarning("OutboxReconcile: recurring pending send failed", item, cause),
+          ),
+        );
     }
     return pending;
   }),
@@ -215,15 +209,12 @@ const issuedReportDates = { ...allReportDates, field: "issuedOn" } as const;
 
 export const exportJob = {
   /** Builds the reporting CSV tables as `System{DataExport, exportId}`. */
-  reportingTables: (workspaceId: WorkspaceId, exportId: ExportId, locale: Locale) =>
-    Effect.flatMap(ExportJobs, (svc) => svc.reportingTables(workspaceId, locale)).pipe(
-      asExportSystem(workspaceId, exportId),
-    ),
+  reportingTables: (workspaceId: WorkspaceId, locale: Locale) =>
+    Effect.flatMap(ExportJobs, (svc) => svc.reportingTables(workspaceId, locale)),
 
   /** Uses the archive's ID-ordered pages to read and encode the canonical CSVs on demand. */
   reportingFiles: <E, R>(
     workspaceId: WorkspaceId,
-    exportId: ExportId,
     locale: Locale,
     pages: <Row>(
       table: keyof typeof REPORTING_FILES,
@@ -240,7 +231,7 @@ export const exportJob = {
         contentType: CSV_CONTENT_TYPE,
         bytes: Stream.concat(
           csvStream(format([]), locale),
-          pages(table, read.pipe(asExportSystem(workspaceId, exportId))).pipe(
+          pages(table, read).pipe(
             Stream.flatMap((rows) => csvStream(format(rows), locale).pipe(Stream.drop(1))),
           ),
         ),
@@ -254,21 +245,17 @@ export const exportJob = {
 
   /** Renders an uncached document PDF as the read-only DataExport System caller. */
   documentPdf: (workspaceId: WorkspaceId, exportId: ExportId, documentId: DocumentId) =>
-    Effect.flatMap(Documents, (svc) => svc.pdf(documentId)).pipe(
-      asExportSystem(workspaceId, exportId),
+    Effect.flatMap(Documents, (svc) =>
+      svc.pdf(systemCaller(workspaceId, { _tag: "DataExport", exportId }), documentId),
     ),
 
   /** Marks an export `ready` with its ZIP size and 7-day retention window. */
   finish: (workspaceId: WorkspaceId, exportId: ExportId, sizeBytes: number) =>
-    Effect.flatMap(ExportJobs, (svc) => svc.finish(workspaceId, exportId, sizeBytes)).pipe(
-      asExportSystem(workspaceId, exportId),
-    ),
+    Effect.flatMap(ExportJobs, (svc) => svc.finish(workspaceId, exportId, sizeBytes)),
 
   /** Marks an export `failed`. */
   fail: (workspaceId: WorkspaceId, exportId: ExportId) =>
-    Effect.flatMap(ExportJobs, (svc) => svc.fail(workspaceId, exportId)).pipe(
-      asExportSystem(workspaceId, exportId),
-    ),
+    Effect.flatMap(ExportJobs, (svc) => svc.fail(workspaceId, exportId)),
 
   /** Housekeeping: deletes expired ready exports (blob + row) and old failed exports. */
   purgeExpired: Effect.flatMap(ExportJobs, (svc) => svc.purgeExpired),

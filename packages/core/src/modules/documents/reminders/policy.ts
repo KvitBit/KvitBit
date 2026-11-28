@@ -6,7 +6,7 @@
  * due date. Nothing derived (offsets, dates) is stored.
  */
 
-import type { IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
+import type { Caller, IsoDate, WorkspaceId } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
 import { type ReminderStep, Reminders } from "../../../engines/schedules";
@@ -18,13 +18,14 @@ import { hasFinalInvoice } from "../transitions";
 
 /** The effective reminders for `record` with `choice` (default: the stored one). */
 export const effectiveReminders = Effect.fn("effectiveReminders")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   record: Pick<DocumentRecord, "kind" | "contactId" | "remindersChoice">,
   today: IsoDate,
   choice: RemindersChoice = record.remindersChoice,
 ) {
   const contact = yield* (yield* DocumentContacts).forDocument(workspaceId, record.contactId);
-  const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, today);
+  const issuer = yield* (yield* DocumentIssuers).forDocument(caller, workspaceId, today);
   return resolveReminders({
     kind: record.kind,
     choice,

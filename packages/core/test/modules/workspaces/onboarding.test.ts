@@ -16,6 +16,7 @@ import * as Ref from "effect/Ref";
 import * as EffectString from "effect/String";
 import { FakeCompanyRegistry } from "../../../src/testing";
 import { member } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import {
   accountOf,
   as,
@@ -38,7 +39,13 @@ import {
 const key = (k: string) => RequestKey.make(k);
 const create = (input: NewWorkspace, requestKey?: string) =>
   Effect.flatMap(W, (ws) =>
-    ws.create(input, requestKey === undefined ? undefined : { requestKey: key(requestKey) }),
+    Effect.flatMap(TestCaller, (caller) =>
+      ws.create(
+        caller,
+        input,
+        requestKey === undefined ? undefined : { requestKey: key(requestKey) },
+      ),
+    ),
   );
 
 describe("Workspaces.create", () => {
@@ -55,7 +62,7 @@ describe("Workspaces.create", () => {
           channel: "web",
           client: null,
         });
-        const result = yield* as(caller)(ws.current);
+        const result = yield* as(caller)(ws.current(caller));
         const current = yield* workspaceView(result);
         expect(current.slug).toBe(WorkspaceSlug.make("kavarna-skoda"));
         expect(current.revision).toBe(1);
@@ -66,7 +73,7 @@ describe("Workspaces.create", () => {
           email: "owner@example.cz",
         });
         // Default series: invoice, proforma, credit note; no Payment Tax Document for non-payers.
-        const series = yield* as(caller)(ws.listSeries);
+        const series = yield* as(caller)(ws.listSeries(caller));
         expect(EffectArray.map(series, (s) => [s.kind, s.pattern, s.isDefault]).sort()).toEqual([
           ["credit_note", "OD-YYYY-NNNN", true],
           ["invoice", "YYYY-NNNN", true],
@@ -90,7 +97,7 @@ describe("Workspaces.create", () => {
         const caller = yield* as(accountOf(OWNER))(
           create({ name: "Plátce", taxRegime: "vat_payer" }),
         );
-        const series = yield* as(caller)(ws.listSeries);
+        const series = yield* as(caller)(ws.listSeries(caller));
         const kinds = EffectArray.map(series, (s) => s.kind).sort();
         expect(kinds).toEqual(["credit_note", "invoice", "payment_tax_document", "proforma"]);
       }),
@@ -102,9 +109,9 @@ describe("Workspaces.create", () => {
         const ws = yield* W;
         const a = yield* as(accountOf(OWNER))(create({ name: "Acme" }));
         const b = yield* as(accountOf(OWNER))(create({ name: "Acme" }));
-        const result = yield* as(a)(ws.current);
+        const result = yield* as(a)(ws.current(a));
         expect(result.slug).toBe(WorkspaceSlug.make("acme"));
-        const result2 = yield* as(b)(ws.current);
+        const result2 = yield* as(b)(ws.current(b));
         expect(result2.slug).toBe(WorkspaceSlug.make("acme-2"));
         const failureResult = yield* create({
           name: "X",
@@ -128,7 +135,7 @@ describe("Workspaces.create", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const caller = yield* as(accountOf(OWNER))(create({ ico: ICO }));
-        const result = yield* as(caller)(ws.current);
+        const result = yield* as(caller)(ws.current(caller));
         const current = yield* workspaceView(result);
         expect(current.name).toBe(RECORD.name);
         expect(current.issuingEntity).toMatchObject({
@@ -178,7 +185,7 @@ describe("Workspaces.create", () => {
         const first = yield* as(accountOf(OWNER))(create({ name: "Acme" }, "k1"));
         const again = yield* as(accountOf(OWNER))(create({ name: "Acme" }, "k1"));
         expect(again).toEqual(first);
-        expect((yield* as(accountOf(OWNER))(ws.listMine)).length).toBe(1);
+        expect((yield* as(accountOf(OWNER))(ws.listMine(accountOf(OWNER)))).length).toBe(1);
         // The domain tag omits Conflict on create (reported gap); the method raises it.
         const mismatch = yield* create({ name: "Other" }, "k1").pipe(as(accountOf(OWNER)), failure);
         expect(mismatch).toEqual(Conflict.make({ reason: "idempotency_mismatch" }));
@@ -192,7 +199,7 @@ describe("Workspaces.listMine and enter", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const { workspaceId } = yield* seed();
-        const mine = yield* as(accountOf(MEMBER))(ws.listMine);
+        const mine = yield* as(accountOf(MEMBER))(ws.listMine(accountOf(MEMBER)));
         expect(mine).toEqual([
           {
             id: workspaceId,
@@ -204,7 +211,7 @@ describe("Workspaces.listMine and enter", () => {
             closed: false,
           },
         ]);
-        const result = yield* as(accountOf(OUTSIDER))(ws.listMine);
+        const result = yield* as(accountOf(OUTSIDER))(ws.listMine(accountOf(OUTSIDER)));
         expect(result).toEqual([]);
       }),
     ));
@@ -216,7 +223,11 @@ describe("Workspaces.listMine and enter", () => {
         const { workspaceId } = yield* seed();
         const client = { kind: "mcp" as const, id: "grant-9", name: "Claude" };
         const caller = yield* as(accountOf(MEMBER))(
-          ws.enter(workspaceId, { scopes: ["documents:read"], channel: "mcp", client }),
+          ws.enter(accountOf(MEMBER), workspaceId, {
+            scopes: ["documents:read"],
+            channel: "mcp",
+            client,
+          }),
         );
         expect(caller).toEqual({
           _tag: "Member",
@@ -229,7 +240,7 @@ describe("Workspaces.listMine and enter", () => {
           client,
         });
         const session = yield* as(accountOf(MEMBER))(
-          ws.enter(workspaceId, { scopes: "all", channel: "web" }),
+          ws.enter(accountOf(MEMBER), workspaceId, { scopes: "all", channel: "web" }),
         );
         expect(session.client).toBeNull();
         const entries = yield* history(workspaceId);
@@ -245,7 +256,10 @@ describe("Workspaces.listMine and enter", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const { workspaceId } = yield* seed();
-        const enter = (id: WorkspaceId) => ws.enter(id, { scopes: "all", channel: "web" });
+        const enter = (id: WorkspaceId) =>
+          Effect.flatMap(TestCaller, (caller) =>
+            ws.enter(caller, id, { scopes: "all", channel: "web" }),
+          );
         const failureResult = yield* enter(workspaceId).pipe(as(accountOf(OUTSIDER)), failure);
         expect(failureResult).toEqual(NotFound.make({ entity: "Workspace", id: workspaceId }));
         const unknown = WorkspaceId.make("01900000-0000-7000-8000-0000000fffff");
@@ -263,20 +277,22 @@ describe("Workspaces.lookupCompany", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const { workspaceId, accountant } = yield* seed();
-        const viaAccount = yield* as(accountOf(OUTSIDER))(ws.lookupCompany(ICO));
+        const viaAccount = yield* as(accountOf(OUTSIDER))(
+          ws.lookupCompany(accountOf(OUTSIDER), ICO),
+        );
         expect(viaAccount).toEqual({ ico: ICO, ...RECORD });
-        const lookupCompanyResult = yield* as(accountant)(ws.lookupCompany(ICO));
+        const lookupCompanyResult = yield* as(accountant)(ws.lookupCompany(accountant, ICO));
         expect(lookupCompanyResult).toEqual(viaAccount);
         const lookupCompanyResult2 = yield* as(scoped(["contacts:read"])(accountant))(
-          ws.lookupCompany(ICO),
+          ws.lookupCompany(scoped(["contacts:read"])(accountant), ICO),
         );
         expect(lookupCompanyResult2).toEqual(viaAccount);
         const lookupCompanyFailure = yield* ws
-          .lookupCompany(ICO)
+          .lookupCompany(scoped(["documents:read"])(accountant), ICO)
           .pipe(as(scoped(["documents:read"])(accountant)), failure);
         expect(lookupCompanyFailure).toEqual(Forbidden.make({ action: "contact.read" }));
         const before = (yield* history(workspaceId)).length;
-        yield* as(accountant)(ws.lookupCompany(ICO));
+        yield* as(accountant)(ws.lookupCompany(accountant, ICO));
         expect((yield* history(workspaceId)).length).toBe(before);
       }),
     ));
@@ -286,7 +302,8 @@ describe("Workspaces.lookupCompany", () => {
       Effect.gen(function* () {
         const ws = yield* W;
         const registry = yield* FakeCompanyRegistry;
-        const lookup = (ico: string) => as(accountOf(OWNER))(ws.lookupCompany(ico));
+        const lookup = (ico: string) =>
+          as(accountOf(OWNER))(ws.lookupCompany(accountOf(OWNER), ico));
         const failureResult = yield* failure(lookup(BAD_ICO));
         expect(failureResult).toEqual(
           Invalid.make({ issues: [{ path: ["ico"], code: "ico.checksum" }] }),

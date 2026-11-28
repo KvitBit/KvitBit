@@ -4,7 +4,6 @@ import {
   ContactId,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
   DocumentId,
   IsoDate,
   type MemberCaller,
@@ -17,6 +16,7 @@ import * as Fn from "effect/Function";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
+
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 
 const decodeRevisionedId = Fn.flow(
@@ -104,14 +104,14 @@ beforeEach(async () => {
   base = `/api/v1/workspaces/${member.workspaceId}/documents`;
   const contact = await h.run(
     Effect.flatMap(Contacts, (c) =>
-      c.save({
+      c.save(member, {
         name: "Odběratel a.s.",
         ico: "25596641",
         address: { city: "Brno", country: "CZ" },
         roles: ["customer"],
         billingEmails: ["fakturace@odberatel.cz"],
       }),
-    ).pipe(Effect.provideService(CurrentCaller, member)),
+    ),
   );
   contactId = Schema.decodeUnknownEffect(ContactId)(contact["id"]).pipe(Effect.runSync);
 });
@@ -439,7 +439,7 @@ describe("documents group", () => {
     // Record payment against the proforma directly via core
     await h.run(
       Effect.flatMap(Payments, (p) =>
-        p.record({
+        p.record(member, {
           target: { document: DocumentId.make(proforma.id) },
           amount: {
             amount: BigDecimal.fromStringUnsafe("3000"),
@@ -447,7 +447,7 @@ describe("documents group", () => {
           },
           paidOn: IsoDate.make("2026-11-23"),
         }),
-      ).pipe(Effect.provideService(CurrentCaller, member)),
+      ),
     );
 
     const fiRes = await postJson(

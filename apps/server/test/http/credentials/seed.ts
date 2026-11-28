@@ -9,7 +9,6 @@ import { WorkspacesModule } from "@kvitbit/core";
 import { CaptureInvitationDelivery } from "@kvitbit/core/testing";
 import {
   Caller,
-  CurrentCaller,
   InvitationToken,
   type MemberCaller,
   type Role,
@@ -19,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
 import * as SqlClient from "effect/sql/SqlClient";
+
 import type { Harness, TestUser } from "../harness";
 
 /** Inserts a Better Auth user row into `auth."user"` (idempotent). */
@@ -68,7 +68,7 @@ export const joinMember = Effect.fn("joinMember")(
     yield* seedUser(invitee);
     const ws = yield* Workspaces;
     const capture = yield* CaptureInvitationDelivery;
-    yield* ws.invite(invitee.email, role).pipe(Effect.provideService(CurrentCaller, owner));
+    yield* ws.invite(owner, invitee.email, role);
     const sent = yield* Ref.get(capture.sent);
     const latest = sent.at(-1);
     if (latest === undefined) {
@@ -76,16 +76,14 @@ export const joinMember = Effect.fn("joinMember")(
     }
     const tokens = yield* WorkspacesModule.InvitationTokens;
     const token = yield* tokens.token(latest.invitationId, latest.epoch);
-    return yield* ws.acceptInvitation(InvitationToken.make(token)).pipe(
-      Effect.provideService(
-        CurrentCaller,
-        Caller.account({
-          userId: invitee.id,
-          email: invitee.email,
-          locale: "cs",
-          channel: "web",
-        }),
-      ),
+    return yield* ws.acceptInvitation(
+      Caller.account({
+        userId: invitee.id,
+        email: invitee.email,
+        locale: "cs",
+        channel: "web",
+      }),
+      InvitationToken.make(token),
     );
   },
   (effect, h) => h.run(effect),

@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 /** PublicShareLinks (core-ports 4.6) through the service on real layers. */
 
@@ -76,22 +77,33 @@ const run = <A, E>(
     caller: options.caller ?? member("owner"),
   });
 
-const issueInvoice = Effect.flatMap(Documents, (d) => d.issue({ input: invoiceInput() }));
+const issueInvoice = Effect.flatMap(Documents, (d) =>
+  Effect.flatMap(TestCaller, (caller) => d.issue(caller, { input: invoiceInput() })),
+);
 /** A Proforma is never a tax document, so `cancel` cancels it (no Credit Note, D6). */
 const issueProforma = Effect.flatMap(Documents, (d) =>
-  d.issue({ input: invoiceInput({ kind: "proforma" }) }),
+  Effect.flatMap(TestCaller, (caller) =>
+    d.issue(caller, { input: invoiceInput({ kind: "proforma" }) }),
+  ),
 );
-const share = (id: DocumentId) => Effect.flatMap(PublicShareLinks, (s) => s.create(id));
+const share = (id: DocumentId) =>
+  Effect.flatMap(PublicShareLinks, (s) =>
+    Effect.flatMap(TestCaller, (caller) => s.create(caller, id)),
+  );
 const tokenOf = (url: string) =>
   ShareToken.make(EffectString.slice("https://share.test/s/".length)(url));
 const visit = <A, E, R>(token: ShareToken, effect: Effect.Effect<A, E, R>, user?: UserId) =>
   as(shareVisitor(user === undefined ? { token } : { token, signedInUser: user }), effect);
-const open = Effect.flatMap(PublicShareLinks, (s) => s.open);
+const open = Effect.flatMap(PublicShareLinks, (s) =>
+  Effect.flatMap(TestCaller, (caller) => s.open(caller)),
+);
 const views = (id: DocumentId, page?: { cursor?: string; limit?: number }) =>
-  Effect.flatMap(PublicShareLinks, (s) => s.views(id, page));
+  Effect.flatMap(PublicShareLinks, (s) =>
+    Effect.flatMap(TestCaller, (caller) => s.views(caller, id, page)),
+  );
 const historyActions = (id: DocumentId) =>
   Effect.map(
-    Effect.flatMap(Documents, (d) => d.history(id)),
+    Effect.flatMap(Documents, (d) => Effect.flatMap(TestCaller, (caller) => d.history(caller, id))),
     (entries) => EffectArray.map(entries, (e) => e.action),
   );
 
@@ -213,10 +225,11 @@ describe("create", () => {
     const [draft, cancelled] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
-          const draftResult = yield* d.createDraft(invoiceInput());
+          const draftResult = yield* d.createDraft(testCaller, invoiceInput());
           const issued = yield* issueProforma;
-          yield* d.cancel(issued.id, { reason: "chyba" });
+          yield* d.cancel(testCaller, issued.id, { reason: "chyba" });
           return [
             yield* Effect.exit(share(draftResult.id)),
             yield* Effect.exit(share(issued.id)),
@@ -255,7 +268,9 @@ describe("create", () => {
               oldOpen,
               oldAgain: yield* Effect.exit(visit(token, open)),
               fresh: yield* visit(first, open),
-              history: yield* Effect.flatMap(Documents, (d) => d.history(doc.id)),
+              history: yield* Effect.flatMap(Documents, (d) =>
+                Effect.flatMap(TestCaller, (caller) => d.history(caller, doc.id)),
+              ),
             };
           }).pipe(Effect.provideService(ShareLinkKeys, shareLinkKeysTest(2)));
         }),
@@ -281,12 +296,13 @@ describe("revoke", () => {
     const [revokedOpen, again, fresh, oldOpen, freshOpen, actions] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const s = yield* PublicShareLinks;
           const { doc, token } = yield* shared;
-          yield* s.revoke(doc.id);
+          yield* s.revoke(testCaller, doc.id);
           const revokedOpenResult = yield* Effect.exit(visit(token, open));
-          const againResult = yield* Effect.exit(s.revoke(doc.id));
-          const freshResult = tokenOf((yield* s.create(doc.id)).url);
+          const againResult = yield* Effect.exit(s.revoke(testCaller, doc.id));
+          const freshResult = tokenOf((yield* s.create(testCaller, doc.id)).url);
           return [
             revokedOpenResult,
             againResult,
@@ -315,7 +331,9 @@ describe("revoke", () => {
       await run(
         Effect.gen(function* () {
           const { doc } = yield* shared;
-          const revoke = Effect.flatMap(PublicShareLinks, (s) => s.revoke(doc.id));
+          const revoke = Effect.flatMap(PublicShareLinks, (s) =>
+            Effect.flatMap(TestCaller, (caller) => s.revoke(caller, doc.id)),
+          );
           return [
             yield* Effect.exit(as(member("accountant"), revoke)),
             yield* Effect.exit(as(member("owner", { workspaceId: WORKSPACE_B }), revoke)),
@@ -455,12 +473,13 @@ describe("open", () => {
     const results = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           yield* shared;
           const s = yield* PublicShareLinks;
           return [
-            yield* Effect.exit(s.open),
-            yield* Effect.exit(s.pdf()),
-            yield* Effect.exit(s.logo),
+            yield* Effect.exit(s.open(testCaller)),
+            yield* Effect.exit(s.pdf(testCaller)),
+            yield* Effect.exit(s.logo(testCaller)),
           ] as const;
         }),
       ),
@@ -486,7 +505,9 @@ describe("open", () => {
           const issuerViewResult = yield* visit(token, open, member("owner").userId);
           yield* visit(
             token,
-            Effect.flatMap(PublicShareLinks, (s) => s.pdf()),
+            Effect.flatMap(PublicShareLinks, (s) =>
+              Effect.flatMap(TestCaller, (caller) => s.pdf(caller)),
+            ),
             member("owner").userId,
           );
           const outsiderViewResult = yield* visit(token, open, OTHER_USER);
@@ -503,9 +524,10 @@ describe("open", () => {
     const view = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const doc = yield* issueProforma;
           const token = tokenOf((yield* share(doc.id)).url);
-          yield* (yield* Documents).cancel(doc.id, { reason: "chyba" });
+          yield* (yield* Documents).cancel(testCaller, doc.id, { reason: "chyba" });
           return yield* visit(token, open);
         }),
       ),
@@ -520,8 +542,11 @@ describe("credited documents", () => {
     const [invoiceView, creditView] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const { doc, token } = yield* shared;
-          const { creditNote } = yield* (yield* Documents).cancel(doc.id, { reason: "chyba" });
+          const { creditNote } = yield* (yield* Documents).cancel(testCaller, doc.id, {
+            reason: "chyba",
+          });
           if (creditNote === null) return yield* Effect.die("expected a Credit Note");
           const creditToken = tokenOf((yield* share(creditNote.id)).url);
           return [yield* visit(token, open), yield* visit(creditToken, open)] as const;
@@ -542,7 +567,9 @@ describe("pdf and logo", () => {
       await run(
         Effect.gen(function* () {
           const { doc, token } = yield* shared;
-          const pdf = Effect.flatMap(PublicShareLinks, (s) => s.pdf({ language: "en" }));
+          const pdf = Effect.flatMap(PublicShareLinks, (s) =>
+            Effect.flatMap(TestCaller, (caller) => s.pdf(caller, { language: "en" })),
+          );
           const fileResult = yield* visit(token, pdf);
           yield* visit(token, pdf);
           const bytesResult = yield* Stream.runCollect(fileResult.bytes);
@@ -565,7 +592,9 @@ describe("pdf and logo", () => {
           const exitResult = yield* Effect.exit(
             visit(
               token,
-              Effect.flatMap(PublicShareLinks, (s) => s.pdf()),
+              Effect.flatMap(PublicShareLinks, (s) =>
+                Effect.flatMap(TestCaller, (caller) => s.pdf(caller)),
+              ),
             ),
           );
           yield* Ref.set((yield* ShareFixtures).unavailable, false);
@@ -583,15 +612,18 @@ describe("pdf and logo", () => {
     const [missing, found, revoked] = ok(
       await run(
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const { doc, token } = yield* shared;
-          const logo = Effect.flatMap(PublicShareLinks, (s) => s.logo);
+          const logo = Effect.flatMap(PublicShareLinks, (s) =>
+            Effect.flatMap(TestCaller, (caller) => s.logo(caller)),
+          );
           const missingResult = yield* Effect.exit(visit(token, logo));
           yield* (yield* ShareFixtures).setLogo(WS, {
             contentType: "image/png",
             bytes: new Uint8Array([1, 2, 3]),
           });
           const foundResult = yield* visit(token, logo);
-          yield* (yield* PublicShareLinks).revoke(doc.id);
+          yield* (yield* PublicShareLinks).revoke(testCaller, doc.id);
           return [missingResult, foundResult, yield* Effect.exit(visit(token, logo))] as const;
         }),
       ),

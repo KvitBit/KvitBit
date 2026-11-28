@@ -3,7 +3,7 @@
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import type { CurrentCaller } from "../caller";
+import type { Caller } from "../caller";
 import { ContactDefaults } from "../contact";
 import type { Conflict, Forbidden, Invalid, NotFound, Unavailable } from "../errors";
 import type { ContactId, PriceListItemId } from "../ids";
@@ -22,35 +22,37 @@ export const ContactView = OpenStruct({
 export type ContactView = typeof ContactView.Type;
 export type ContactRole = "customer" | "supplier";
 
-// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class Contacts extends Context.Service<
   Contacts,
   {
     /** IČO in, saved Contact out: checksum, CompanyRegistry lookup, cache, upsert by IČO. */
     readonly fromIco: (
+      caller: Caller,
       ico: string,
       opts?: { readonly role?: ContactRole },
-    ) => Effect.Effect<ContactView, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ContactView, Invalid | NotFound | Unavailable | Forbidden>;
     readonly save: (
+      caller: Caller,
       input: ContactInput & { readonly id?: ContactId; readonly expectedRevision?: number },
       opts?: RequestOptions,
-    ) => Effect.Effect<
-      ContactView,
-      Invalid | NotFound | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<ContactView, Invalid | NotFound | Conflict | Unavailable | Forbidden>;
     readonly archive: (
+      caller: Caller,
       id: ContactId,
-    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden>;
     readonly get: (
+      caller: Caller,
       id: ContactId,
-    ) => Effect.Effect<ContactView, NotFound | Unavailable | Forbidden, CurrentCaller>;
-    readonly search: (q: {
-      readonly text?: string;
-      readonly role?: ContactRole;
-      readonly cursor?: string;
-      readonly limit?: number; // 1 to 100, default 50
-    }) => Effect.Effect<Page<ContactView>, Invalid | Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<ContactView, NotFound | Unavailable | Forbidden>;
+    readonly search: (
+      caller: Caller,
+      q: {
+        readonly text?: string;
+        readonly role?: ContactRole;
+        readonly cursor?: string;
+        readonly limit?: number; // 1 to 100, default 50
+      },
+    ) => Effect.Effect<Page<ContactView>, Invalid | Unavailable | Forbidden>;
   }
 >()("@kvitbit/domain/modules/contacts") {}
 
@@ -62,27 +64,27 @@ export const PriceListItemView = OpenStruct({ revision: Schema.Int });
 export type PriceListItemView = typeof PriceListItemView.Type;
 
 /** A Price List Item only supplies defaults; lines copy its values when a document is drafted. */
-// @effect-diagnostics-next-line leakingRequirements:off Resolve the caller at method invocation.
 export class PriceList extends Context.Service<
   PriceList,
   {
     readonly save: (
+      caller: Caller,
       input: PriceListItemInput & {
         readonly id?: PriceListItemId;
         readonly expectedRevision?: number;
       },
       opts?: RequestOptions,
-    ) => Effect.Effect<
-      PriceListItemView,
-      Invalid | NotFound | Conflict | Unavailable | Forbidden,
-      CurrentCaller
-    >;
+    ) => Effect.Effect<PriceListItemView, Invalid | NotFound | Conflict | Unavailable | Forbidden>;
     readonly archive: (
+      caller: Caller,
       id: PriceListItemId,
-    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden, CurrentCaller>;
-    readonly list: (q?: {
-      readonly text?: string;
-      readonly includeArchived?: boolean;
-    }) => Effect.Effect<ReadonlyArray<PriceListItemView>, Unavailable | Forbidden, CurrentCaller>;
+    ) => Effect.Effect<void, NotFound | Unavailable | Forbidden>;
+    readonly list: (
+      caller: Caller,
+      q?: {
+        readonly text?: string;
+        readonly includeArchived?: boolean;
+      },
+    ) => Effect.Effect<ReadonlyArray<PriceListItemView>, Unavailable | Forbidden>;
   }
 >()("@kvitbit/domain/modules/contacts/PriceList") {}

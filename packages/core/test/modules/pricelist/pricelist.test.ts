@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Caller, CoreError, CurrentCaller, PriceListItemView } from "@kvitbit/domain/contract";
+import type { Caller, CoreError, PriceListItemView } from "@kvitbit/domain/contract";
 import {
   PriceList,
   PriceListItemId,
@@ -21,11 +21,12 @@ import {
 } from "../../../src/modules/pricelist";
 import type { CoreStore } from "../../../src/store/CoreStore";
 import { member, runTest, shareVisitor, system, WORKSPACE_A, WORKSPACE_B } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import { as, failureOf, history, successOf } from "../contacts/harness";
 
 const run = <A, E>(
   caller: Caller,
-  effect: Effect.Effect<A, E, PriceList | PriceListItems | CoreStore | CurrentCaller>,
+  effect: Effect.Effect<A, E, PriceList | PriceListItems | CoreStore | TestCaller>,
 ) => runTest(caller, Effect.provide(effect, PriceListTestLayer));
 
 const owner = member("owner");
@@ -39,15 +40,18 @@ const dec = (s: string) => BigDecimal.fromStringUnsafe(s);
 
 const saveHour = (fields: FixtureFields = {}) =>
   Effect.flatMap(PriceList, (p) =>
-    p.save(
-      PriceListItemInput.make({
-        name: "Konzultace",
-        unit: "hod",
-        unitPrice: dec("1500"),
-        currency: "CZK",
-        vat: "standard",
-        ...fields,
-      }),
+    Effect.flatMap(TestCaller, (caller) =>
+      p.save(
+        caller,
+        PriceListItemInput.make({
+          name: "Konzultace",
+          unit: "hod",
+          unitPrice: dec("1500"),
+          currency: "CZK",
+          vat: "standard",
+          ...fields,
+        }),
+      ),
     ),
   ).pipe(Effect.map(view));
 
@@ -87,7 +91,9 @@ describe("PriceList.save", () => {
     const noPrice = await run(
       owner,
       Effect.flatMap(PriceList, (p) =>
-        p.save(PriceListItemInput.make({ name: "X", currency: "CZK" })),
+        Effect.flatMap(TestCaller, (caller) =>
+          p.save(caller, PriceListItemInput.make({ name: "X", currency: "CZK" })),
+        ),
       ),
     );
     const noPriceFailure = failureOf<unknown, CoreError>(noPrice);
@@ -137,9 +143,11 @@ describe("PriceList.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const prices = yield* PriceList;
         const created = yield* saveHour();
         const saveResult = yield* prices.save(
+          testCaller,
           PriceListItemInput.make({
             id: created.id,
             expectedRevision: 1,
@@ -149,20 +157,23 @@ describe("PriceList.save", () => {
         );
         const second = view(saveResult);
         const saveResult2 = yield* prices.save(
+          testCaller,
           PriceListItemInput.make({ id: created.id, expectedRevision: 2, name: "Konzultace+" }),
         );
         const third = view(saveResult2);
         const saveResult3 = yield* prices.save(
+          testCaller,
           PriceListItemInput.make({ id: created.id, expectedRevision: 3, unitPrice: "1800.00" }),
         );
         const unchanged = view(saveResult3);
         const stale = yield* Effect.flip(
           prices.save(
+            testCaller,
             PriceListItemInput.make({ id: created.id, expectedRevision: 2, name: "Old" }),
           ),
         );
         const missing = yield* Effect.flip(
-          prices.save(PriceListItemInput.make({ id: created.id, name: "Old" })),
+          prices.save(testCaller, PriceListItemInput.make({ id: created.id, name: "Old" })),
         );
         return { second, third, unchanged, stale, missing };
       }),
@@ -186,21 +197,23 @@ describe("PriceList.save", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const prices = yield* PriceList;
         const body = PriceListItemInput.make({ name: "Hodina", unitPrice: "100", currency: "CZK" });
-        const saveResult = yield* prices.save(body, { requestKey: key });
+        const saveResult = yield* prices.save(testCaller, body, { requestKey: key });
         const first = view(saveResult);
-        const saveResult2 = yield* prices.save(body, { requestKey: key });
+        const saveResult2 = yield* prices.save(testCaller, body, { requestKey: key });
         const replay = view(saveResult2);
         const mismatch = yield* Effect.flip(
           prices.save(
+            testCaller,
             PriceListItemInput.make({ name: "Jiné", unitPrice: "100", currency: "CZK" }),
             {
               requestKey: key,
             },
           ),
         );
-        return { first, replay, mismatch, all: yield* prices.list() };
+        return { first, replay, mismatch, all: yield* prices.list(testCaller) };
       }),
     );
     const { first, replay, mismatch, all } = successOf(exit);
@@ -216,20 +229,23 @@ describe("PriceList.archive and list", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const prices = yield* PriceList;
         const hour = yield* saveHour();
         yield* saveHour({ name: "Školení", description: "Celodenní workshop" });
         yield* saveHour({ name: "Audit kódu" });
-        yield* prices.archive(hour.id);
-        yield* prices.archive(hour.id);
-        const names = (q?: Parameters<PriceList["Service"]["list"]>[0]) =>
-          Effect.map(prices.list(q), (items) =>
-            EffectArray.map(
-              items,
-              (i) => `${view(i).name}${view(i).archived ? " (archived)" : ""}`,
-            ),
+        yield* prices.archive(testCaller, hour.id);
+        yield* prices.archive(testCaller, hour.id);
+        const names = (q?: Parameters<PriceList["Service"]["list"]>[1]) =>
+          Effect.map(
+            Effect.flatMap(TestCaller, (caller) => prices.list(caller, q)),
+            (items) =>
+              EffectArray.map(
+                items,
+                (i) => `${view(i).name}${view(i).archived ? " (archived)" : ""}`,
+              ),
           );
-        const includingArchived = yield* prices.list({ includeArchived: true });
+        const includingArchived = yield* prices.list(testCaller, { includeArchived: true });
         return {
           active: yield* names(),
           all: yield* names({ includeArchived: true }),
@@ -256,11 +272,15 @@ describe("PriceList.archive and list", () => {
     const exit = await run(
       owner,
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const prices = yield* PriceList;
         return [
-          yield* Effect.exit(prices.archive(id)),
+          yield* Effect.exit(prices.archive(testCaller, id)),
           yield* Effect.exit(
-            prices.save(PriceListItemInput.make({ id, expectedRevision: 1, name: "X" })),
+            prices.save(
+              testCaller,
+              PriceListItemInput.make({ id, expectedRevision: 1, name: "X" }),
+            ),
           ),
         ] as const;
       }),
@@ -282,14 +302,15 @@ describe("PriceList authorization and tenancy", () => {
         return yield* as(caller)(
           Effect.all(
             {
-              list: Effect.exit(prices.list()),
+              list: Effect.exit(prices.list(caller)),
               create: Effect.exit(saveHour()),
               save: Effect.exit(
                 prices.save(
+                  caller,
                   PriceListItemInput.make({ id: saved.id, expectedRevision: 1, name: "Edited" }),
                 ),
               ),
-              archive: Effect.exit(prices.archive(saved.id)),
+              archive: Effect.exit(prices.archive(caller, saved.id)),
             },
             { concurrency: 1 },
           ),

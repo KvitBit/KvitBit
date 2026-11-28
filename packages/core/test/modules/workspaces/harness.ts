@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 /** Test harness for the Workspaces module: real layers over the in-memory ports. */
 
 import type {
@@ -9,7 +10,7 @@ import type {
   WorkspaceId,
   WorkspaceView,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, InvitationToken, UserId, Workspaces } from "@kvitbit/domain/contract";
+import { InvitationToken, UserId, Workspaces } from "@kvitbit/domain/contract";
 import type { RegistryRecord } from "@kvitbit/domain/ports";
 import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
@@ -79,8 +80,8 @@ export const workspaceView = (view: WorkspaceView) =>
 /** Runs `effect` as `caller`. */
 export const as =
   (caller: Caller) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, CurrentCaller>> =>
-    Effect.provideService(effect, CurrentCaller, caller);
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, TestCaller>> =>
+    Effect.provideService(effect, TestCaller, caller);
 
 export const W = Effect.service(Workspaces);
 
@@ -107,16 +108,16 @@ interface Seeded {
 export const join = (inviter: MemberCaller) => (userId: UserId, role: Exclude<Role, "owner">) =>
   Effect.gen(function* () {
     const ws = yield* W;
-    yield* as(inviter)(ws.invite(emailOf(userId), role));
+    yield* as(inviter)(ws.invite(inviter, emailOf(userId), role));
     const token = yield* lastToken;
-    return yield* as(accountOf(userId))(ws.acceptInvitation(token));
+    return yield* as(accountOf(userId))(ws.acceptInvitation(accountOf(userId), token));
   });
 
 /** Acme with an owner, an admin, a member and an accountant. */
 export const seed = (name = "Acme s.r.o.") =>
   Effect.gen(function* () {
     const ws = yield* W;
-    const owner = yield* as(accountOf(OWNER))(ws.create({ name }));
+    const owner = yield* as(accountOf(OWNER))(ws.create(accountOf(OWNER), { name }));
     const admin = yield* join(owner)(ADMIN, "admin");
     const member = yield* join(owner)(MEMBER, "member");
     const accountant = yield* join(owner)(ACCOUNTANT, "accountant");

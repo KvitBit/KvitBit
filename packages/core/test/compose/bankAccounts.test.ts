@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 /** BankAccountReferencesLive over the real documents layers and the memory repos. */
 
 import { describe, expect, test } from "bun:test";
@@ -65,6 +66,7 @@ const template = (
  * it, one without an account). Workspace B: a draft and a Template on the same account id.
  */
 const fixture = Effect.gen(function* () {
+  const testCaller = yield* TestCaller;
   const store = yield* CoreStore;
   yield* store.transaction(
     Effect.flatMap(NumberingSeries, (n) =>
@@ -72,13 +74,17 @@ const fixture = Effect.gen(function* () {
     ),
   );
   const docs = yield* Documents;
-  const chosen = yield* docs.createDraft(invoiceInput({ bankAccount: CZK_ACCOUNT }));
-  const defaulted = yield* docs.createDraft(invoiceInput());
-  const eur = yield* docs.createDraft(invoiceInput({ currency: CurrencyCode.make("EUR") }));
-  const issued = yield* docs.issue({ input: invoiceInput() });
+  const chosen = yield* docs.createDraft(testCaller, invoiceInput({ bankAccount: CZK_ACCOUNT }));
+  const defaulted = yield* docs.createDraft(testCaller, invoiceInput());
+  const eur = yield* docs.createDraft(
+    testCaller,
+    invoiceInput({ currency: CurrencyCode.make("EUR") }),
+  );
+  const issued = yield* docs.issue(testCaller, { input: invoiceInput() });
   const otherDraft = yield* as(
     member("owner", { workspaceId: WORKSPACE_B }),
     docs.createDraft(
+      member("owner", { workspaceId: WORKSPACE_B }),
       invoiceInput({
         contact: B_BUYER,
         bankAccount: CZK_ACCOUNT,
@@ -171,7 +177,9 @@ describe("BankAccountReferencesLive", () => {
             t2: yield* recurring.getTemplate(WORKSPACE_A, template("2").id),
             t3: yield* recurring.getTemplate(WORKSPACE_A, template("3").id),
             t4: yield* recurring.getTemplate(WORKSPACE_B, template("4").id),
-            view: yield* Effect.flatMap(Documents, (d) => d.get(f.chosen.id)),
+            view: yield* Effect.flatMap(Documents, (d) =>
+              Effect.flatMap(TestCaller, (caller) => d.get(caller, f.chosen.id)),
+            ),
           };
         }).pipe(Effect.provide(layer)),
         OPTIONS,
@@ -279,7 +287,11 @@ describe("BankAccountReferencesLive", () => {
           );
           // Concurrent changes: discard one draft, move the other off the account, archive T1.
           const chosen = yield* record(f.chosen.id);
-          yield* Effect.flatMap(Documents, (d) => d.discardDraft(f.chosen.id, chosen.revision));
+          yield* Effect.flatMap(Documents, (d) =>
+            Effect.flatMap(TestCaller, (caller) =>
+              d.discardDraft(caller, f.chosen.id, chosen.revision),
+            ),
+          );
           yield* store.transaction(
             Effect.gen(function* () {
               const row = yield* docsRepo.lock(WORKSPACE_A, f.defaulted.id);

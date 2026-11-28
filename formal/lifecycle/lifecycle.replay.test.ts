@@ -43,11 +43,11 @@ import {
   ContactId,
   Contacts,
   CurrencyCode,
-  CurrentCaller,
   DocumentId,
   Documents,
   IsoDate,
   LineId,
+  type MemberCaller,
   MoneyMath,
   PaymentId,
   Payments,
@@ -69,7 +69,7 @@ const fixing = (date: string, eur: string): CnbFixing => ({
   rates: [{ code: EUR, quantity: 1, rate: dec(eur) }],
 });
 
-type Env = TestCoreServices | CurrentCaller;
+type Env = TestCoreServices;
 type Fx<A> = Effect.Effect<A, CoreError, Env>;
 
 const ReplayLine = Schema.Struct({
@@ -134,8 +134,10 @@ class Lab {
   finalStorno = false;
   readonly vat: boolean;
   readonly customer: ContactId;
+  readonly caller: MemberCaller;
 
-  constructor(vat: boolean, customer: ContactId) {
+  constructor(caller: MemberCaller, vat: boolean, customer: ContactId) {
+    this.caller = caller;
     this.vat = vat;
     this.customer = customer;
   }
@@ -148,7 +150,7 @@ class Lab {
         ]
       : [{ description: "Vývoj", unitPrice: dec("1500") }];
     return Effect.flatMap(Documents, (d) =>
-      d.issue({
+      d.issue(this.caller, {
         input: {
           kind: "proforma",
           contact: this.customer,
@@ -181,6 +183,7 @@ class Lab {
       };
       const payments = yield* Payments;
       const result = yield* payments.record(
+        self.caller,
         paidOn === undefined ? input : { ...input, paidOn: IsoDate.make(paidOn) },
       );
       const view = yield* Schema.decodeUnknownEffect(ReplayPayment)(result.payment).pipe(
@@ -198,8 +201,8 @@ class Lab {
     });
   }
 
-  static remove(booked: Booked) {
-    return Effect.flatMap(Payments, (p) => p.remove(booked.id, "vrácení")).pipe(
+  remove(booked: Booked) {
+    return Effect.flatMap(Payments, (p) => p.remove(this.caller, booked.id, "vrácení")).pipe(
       Effect.tap(() =>
         Effect.sync(() => {
           booked.removed = true;
@@ -212,6 +215,7 @@ class Lab {
     const self = this;
     return Effect.gen(function* () {
       const fi = yield* (yield* Documents).issueFinalInvoice(
+        self.caller,
         self.p,
         patch === undefined ? undefined : { patch },
       );
@@ -221,19 +225,21 @@ class Lab {
   }
 
   finalId(): Fx<DocumentId | null> {
-    return Effect.map(Lab.get(this.p), (p) => related(p, "final_invoice_for")[0] ?? null);
+    return Effect.map(this.get(this.p), (p) => related(p, "final_invoice_for")[0] ?? null);
   }
 
-  static get(id: DocumentId) {
-    return Effect.flatMap(Documents, (d) => d.get(id));
+  get(id: DocumentId) {
+    return Effect.flatMap(Documents, (d) => d.get(this.caller, id));
   }
 
-  static correct(id: DocumentId, lines: "full" | ReadonlyArray<{ readonly line: LineId }>) {
-    return Effect.flatMap(Documents, (d) => d.correct(id, { reason: "oprava", lines }));
+  correct(id: DocumentId, lines: "full" | ReadonlyArray<{ readonly line: LineId }>) {
+    return Effect.flatMap(Documents, (d) =>
+      d.correct(this.caller, id, { reason: "oprava", lines }),
+    );
   }
 
   cancel(id: DocumentId) {
-    return Effect.flatMap(Documents, (d) => d.cancel(id, { reason: "storno" })).pipe(
+    return Effect.flatMap(Documents, (d) => d.cancel(this.caller, id, { reason: "storno" })).pipe(
       Effect.tap((r) =>
         Effect.sync(() => {
           if (r.document.kind === "invoice" && r.creditNote !== null) this.finalStorno = true;
@@ -242,18 +248,20 @@ class Lab {
     );
   }
 
-  static lock(id: DocumentId) {
-    return Effect.flatMap(Documents, (d) => d.lock(id));
+  lock(id: DocumentId) {
+    return Effect.flatMap(Documents, (d) => d.lock(this.caller, id));
   }
 
-  static unlock(id: DocumentId) {
-    return Effect.flatMap(Documents, (d) => d.unlock(id, "oprava"));
+  unlock(id: DocumentId) {
+    return Effect.flatMap(Documents, (d) => d.unlock(this.caller, id, "oprava"));
   }
 
-  static editLines(id: DocumentId) {
+  editLines(id: DocumentId) {
+    const self = this;
     return Effect.gen(function* () {
-      const current = yield* Lab.get(id);
+      const current = yield* self.get(id);
       return yield* (yield* Documents).edit(
+        self.caller,
         id,
         { lines: [{ description: "Vývoj", unitPrice: dec("1500") }] },
         current.revision,
@@ -262,7 +270,8 @@ class Lab {
   }
 
   /** The uncredited base per bucket of `doc` (its buckets plus its Credit Notes'). */
-  static remaining(doc: DocumentView): Fx<Map<string, string>> {
+  remaining(doc: DocumentView): Fx<Map<string, string>> {
+    const self = this;
     return Effect.gen(function* () {
       const sums = new Map<string, BigDecimal.BigDecimal>();
       const add = (d: DocumentView) => {
@@ -273,7 +282,7 @@ class Lab {
       };
       add(doc);
       for (const cn of related(doc, "corrected_by")) {
-        const creditNote = yield* Lab.get(cn);
+        const creditNote = yield* self.get(cn);
         add(creditNote);
       }
       return new Map(
@@ -292,13 +301,13 @@ class Lab {
       if (self.proforma === null) return;
       const docs = yield* Documents;
       const payments = yield* Payments;
-      const p = yield* docs.get(self.p);
+      const p = yield* docs.get(self.caller, self.p);
       const finals = related(p, "final_invoice_for");
       // OneFinalInvoice
       ok(finals.length <= 1, "OneFinalInvoice");
-      const fi = finals[0] === undefined ? null : yield* docs.get(finals[0]);
-      const liveOnP = yield* payments.listFor({ document: self.p });
-      const liveOnFi = fi === null ? [] : yield* payments.listFor({ document: fi.id });
+      const fi = finals[0] === undefined ? null : yield* docs.get(self.caller, finals[0]);
+      const liveOnP = yield* payments.listFor(self.caller, { document: self.p });
+      const liveOnFi = fi === null ? [] : yield* payments.listFor(self.caller, { document: fi.id });
       const ptds = related(p, "tax_document_for");
       // CancelledProformaUnpaid, CancelledIsLocked
       if (p.status === "cancelled") {
@@ -329,8 +338,8 @@ class Lab {
       const fiLive = fi !== null && fi.status === "issued" && fi.settlement !== "credited";
       const fiReversed = fi !== null && (fi.settlement === "credited" || fi.status === "cancelled");
       for (const id of ptds) {
-        const ptd = yield* docs.get(id);
-        const remaining = yield* Lab.remaining(ptd);
+        const ptd = yield* docs.get(self.caller, id);
+        const remaining = yield* self.remaining(ptd);
         // CreditWithinOriginal: per bucket the credits never pass the original's base
         for (const b of ptd.totals.buckets) {
           const left = dec(remaining.get(bucketKey(b)) ?? "0");
@@ -365,7 +374,7 @@ class Lab {
         }
         const credited = new Map<string, BigDecimal.BigDecimal>();
         for (const cnId of related(fi, "corrected_by")) {
-          const document2 = yield* docs.get(cnId);
+          const document2 = yield* docs.get(self.caller, cnId);
           for (const l of EffectArray.filter(linesOf(document2), (line) => line.deducts === null)) {
             credited.set(
               bucketKey(l),
@@ -381,7 +390,7 @@ class Lab {
       // bookkeeping: live on the Proforma when issueFinalInvoice succeeded)
       for (const b of EffectArray.filter(onP, (payment) => payment.removed)) {
         if (b.ptd !== null) {
-          const document = yield* docs.get(b.ptd);
+          const document = yield* docs.get(self.caller, b.ptd);
           strictEqual(document.settlement, "credited");
         }
         if (b.deductedByFinal) strictEqual(fiReversed, true);
@@ -438,44 +447,41 @@ const replay = async <A>(regime: TaxRegime, body: (lab: Lab) => Fx<A>): Promise<
     channel: "web",
   });
   const program = Effect.gen(function* () {
-    const owner = yield* Effect.flatMap(Workspaces, (ws) =>
-      ws.create({ name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: regime }),
-    );
-    return yield* Effect.provideService(
-      Effect.gen(function* () {
-        const ws = yield* Workspaces;
-        yield* ws.saveBankAccount(
-          BankAccountInput.make({
-            iban: "CZ65 0800 0000 1920 0014 5399",
-            currency: "CZK",
-          }),
-        );
-        yield* ws.saveBankAccount(
-          BankAccountInput.make({ iban: "DE89370400440532013000", currency: "EUR" }),
-        );
-        const customer = yield* Effect.flatMap(Contacts, (c) =>
-          c.save({
-            name: "Odběratel a.s.",
-            ico: "25596641",
-            dic: "CZ25596641",
-            address: { city: "Brno", country: "CZ" },
-            roles: ["customer"],
-            billingEmails: ["fakturace@odberatel.cz"],
-          }),
-        );
-        const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
-          Effect.orDie,
-        );
-        const lab = new Lab(regime === "vat_payer", contactId);
-        return yield* body(lab);
-      }),
-      CurrentCaller,
+    const ws = yield* Workspaces;
+    const owner = yield* ws.create(account, {
+      name: "Alfa Beta s.r.o.",
+      ico: ICO,
+      taxRegime: regime,
+    });
+    yield* ws.saveBankAccount(
       owner,
+      BankAccountInput.make({
+        iban: "CZ65 0800 0000 1920 0014 5399",
+        currency: "CZK",
+      }),
     );
+    yield* ws.saveBankAccount(
+      owner,
+      BankAccountInput.make({ iban: "DE89370400440532013000", currency: "EUR" }),
+    );
+    const customer = yield* Effect.flatMap(Contacts, (c) =>
+      c.save(owner, {
+        name: "Odběratel a.s.",
+        ico: "25596641",
+        dic: "CZ25596641",
+        address: { city: "Brno", country: "CZ" },
+        roles: ["customer"],
+        billingEmails: ["fakturace@odberatel.cz"],
+      }),
+    );
+    const contactId = yield* Schema.decodeUnknownEffect(ContactId)(customer["id"]).pipe(
+      Effect.orDie,
+    );
+    const lab = new Lab(owner, regime === "vat_payer", contactId);
+    return yield* body(lab);
   });
   const exit = await Effect.runPromiseExit(
     Effect.andThen(TestClock.setTime(TEST_NOW), program).pipe(
-      Effect.provideService(CurrentCaller, account),
       Effect.provide(
         Layer.merge(
           TestCore({
@@ -508,9 +514,9 @@ const ptdLine = (ptd: DocumentView, treatment: string) => {
 };
 
 /** Puts the default series of `kind` at its last valid counter: the next allocation fails. */
-const exhaustSeries = (kind: "credit_note" | "invoice") =>
+const exhaustSeries = (caller: MemberCaller, kind: "credit_note" | "invoice") =>
   Effect.flatMap(Workspaces, (ws) =>
-    ws.configureSeries({
+    ws.configureSeries(caller, {
       kind,
       name: "last",
       pattern: "N",
@@ -544,7 +550,7 @@ describe("Shortest path per model action", () => {
       Effect.gen(function* () {
         const proformaResult = yield* lab.step(lab.issueProforma());
         value(proformaResult);
-        const editResult = yield* lab.step(Lab.editLines(lab.p));
+        const editResult = yield* lab.step(lab.editLines(lab.p));
         expect(Exit.isSuccess(editResult)).toBe(true);
       }),
     );
@@ -555,9 +561,9 @@ describe("Shortest path per model action", () => {
       Effect.gen(function* () {
         const proformaResult = yield* lab.step(lab.issueProforma());
         value(proformaResult);
-        const lockResult = yield* lab.step(Lab.lock(lab.p));
+        const lockResult = yield* lab.step(lab.lock(lab.p));
         expect(value(lockResult).locked).toBe(true);
-        const unlockResult = yield* lab.step(Lab.unlock(lab.p));
+        const unlockResult = yield* lab.step(lab.unlock(lab.p));
         expect(value(unlockResult).locked).toBe(false);
       }),
     );
@@ -570,7 +576,7 @@ describe("Shortest path per model action", () => {
         value(proformaResult);
         const paymentResult = yield* lab.step(lab.pay("700"));
         const { booked } = value(paymentResult);
-        const removalResult = yield* lab.step(Lab.remove(booked));
+        const removalResult = yield* lab.step(lab.remove(booked));
         expect(Exit.isSuccess(removalResult)).toBe(true);
       }),
     );
@@ -584,7 +590,7 @@ describe("Shortest path per model action", () => {
         const paymentResult = yield* lab.step(lab.pay());
         const { issued } = value(paymentResult);
         const ptd = required(issued[0], "expected an issued document");
-        const correctionResult = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         expect(Exit.isSuccess(correctionResult)).toBe(true);
       }),
     );
@@ -615,9 +621,9 @@ describe("Shortest path per model action", () => {
         value(paymentResult);
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
-        const lockResult = yield* lab.step(Lab.lock(fi.id));
+        const lockResult = yield* lab.step(lab.lock(fi.id));
         expect(value(lockResult).locked).toBe(true);
-        const unlockResult = yield* lab.step(Lab.unlock(fi.id));
+        const unlockResult = yield* lab.step(lab.unlock(fi.id));
         expect(value(unlockResult).locked).toBe(false);
       }),
     );
@@ -636,7 +642,7 @@ describe("Shortest path per model action", () => {
           Option.getOrUndefined(EffectArray.findFirst(linesOf(fi), (l) => l.deducts === null)),
           "expected a supply line",
         );
-        const correctionResult = yield* lab.step(Lab.correct(fi.id, [{ line: supply.id }]));
+        const correctionResult = yield* lab.step(lab.correct(fi.id, [{ line: supply.id }]));
         expect(Exit.isSuccess(correctionResult)).toBe(true);
       }),
     );
@@ -651,9 +657,9 @@ describe("Shortest path per model action", () => {
         value(paymentResult);
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
-        const correctionResult = yield* lab.step(Lab.correct(fi.id, "full"));
+        const correctionResult = yield* lab.step(lab.correct(fi.id, "full"));
         value(correctionResult);
-        expect((yield* Lab.get(fi.id)).settlement).toBe("credited");
+        expect((yield* lab.get(fi.id)).settlement).toBe("credited");
       }),
     );
   });
@@ -699,14 +705,14 @@ describe("Proforma actions", () => {
         const proformaResult = yield* lab.step(lab.issueProforma());
         const p = value(proformaResult);
         expect(p.status).toBe("issued");
-        const editResult = yield* lab.step(Lab.editLines(lab.p));
+        const editResult = yield* lab.step(lab.editLines(lab.p));
         value(editResult);
-        const lockResult = yield* lab.step(Lab.lock(lab.p));
+        const lockResult = yield* lab.step(lab.lock(lab.p));
         value(lockResult);
         // D5: cancel on a locked document fails with document_locked
         const cancellationResult = yield* lab.step(lab.cancel(lab.p));
         conflict(cancellationResult, "document_locked");
-        const unlockResult = yield* lab.step(Lab.unlock(lab.p));
+        const unlockResult = yield* lab.step(lab.unlock(lab.p));
         value(unlockResult);
         const cancellationResult2 = yield* lab.step(lab.cancel(lab.p));
         const cancelled = value(cancellationResult2);
@@ -731,14 +737,14 @@ describe("Proforma actions", () => {
         value(paymentResult);
         const cancellationResult = yield* lab.step(lab.cancel(lab.p));
         conflict(cancellationResult, "illegal_transition");
-        const editResult = yield* lab.step(Lab.editLines(lab.p));
+        const editResult = yield* lab.step(lab.editLines(lab.p));
         conflict(editResult, "illegal_transition");
         // P4: a locked Proforma still takes payments.
-        const lockResult = yield* lab.step(Lab.lock(lab.p));
+        const lockResult = yield* lab.step(lab.lock(lab.p));
         value(lockResult);
         const paymentResult2 = yield* lab.step(lab.pay());
         value(paymentResult2);
-        expect((yield* Lab.get(lab.p)).status).toBe("issued");
+        expect((yield* lab.get(lab.p)).status).toBe("issued");
       }),
     );
   });
@@ -783,16 +789,16 @@ describe("Payment actions", () => {
         value(proformaResult);
         const paymentResult = yield* lab.step(lab.pay());
         const { booked } = value(paymentResult);
-        const removalResult = yield* lab.step(Lab.remove(booked));
+        const removalResult = yield* lab.step(lab.remove(booked));
         conflict(removalResult, "illegal_transition", "payment.has_tax_document");
         const cancellationResult = yield* lab.step(
           lab.cancel(required(booked.ptd, "expected a PTD")),
         );
         value(cancellationResult);
-        const removalResult2 = yield* lab.step(Lab.remove(booked));
+        const removalResult2 = yield* lab.step(lab.remove(booked));
         value(removalResult2);
         // Idempotent by state (C6).
-        const removalResult3 = yield* lab.step(Lab.remove(booked));
+        const removalResult3 = yield* lab.step(lab.remove(booked));
         value(removalResult3);
         // No payment left: the Proforma can be cancelled.
         const cancellationResult2 = yield* lab.step(lab.cancel(lab.p));
@@ -843,7 +849,7 @@ describe("Final Invoice actions", () => {
         // The Final Invoice's own payment blocks its cancel (D6), not its removal (P3).
         const cancellationResult = yield* lab.step(lab.cancel(fi.id));
         conflict(cancellationResult, "illegal_transition");
-        const removalResult = yield* lab.step(Lab.remove(late.booked));
+        const removalResult = yield* lab.step(lab.remove(late.booked));
         value(removalResult);
       }),
     );
@@ -858,27 +864,27 @@ describe("Final Invoice actions", () => {
         const { booked } = value(paymentResult);
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
-        const removalResult = yield* lab.step(Lab.remove(booked));
+        const removalResult = yield* lab.step(lab.remove(booked));
         conflict(removalResult, "illegal_transition", "payment.has_tax_document");
         // A partial credit leaves the deductions standing.
         const supply = required(
           Option.getOrUndefined(EffectArray.findFirst(linesOf(fi), (l) => l.deducts === null)),
           "expected a supply line",
         );
-        const correctionResult = yield* lab.step(Lab.correct(fi.id, [{ line: supply.id }]));
+        const correctionResult = yield* lab.step(lab.correct(fi.id, [{ line: supply.id }]));
         value(correctionResult);
-        const removalResult2 = yield* lab.step(Lab.remove(booked));
+        const removalResult2 = yield* lab.step(lab.remove(booked));
         conflict(removalResult2, "illegal_transition", "payment.has_tax_document");
         // The full remainder reverses them; the PTD is still open, then credited.
-        const correctionResult2 = yield* lab.step(Lab.correct(fi.id, "full"));
+        const correctionResult2 = yield* lab.step(lab.correct(fi.id, "full"));
         value(correctionResult2);
-        const removalResult3 = yield* lab.step(Lab.remove(booked));
+        const removalResult3 = yield* lab.step(lab.remove(booked));
         conflict(removalResult3, "illegal_transition", "payment.has_tax_document");
         const correctionResult3 = yield* lab.step(
-          Lab.correct(required(booked.ptd, "expected a PTD"), "full"),
+          lab.correct(required(booked.ptd, "expected a PTD"), "full"),
         );
         value(correctionResult3);
-        const removalResult4 = yield* lab.step(Lab.remove(booked));
+        const removalResult4 = yield* lab.step(lab.remove(booked));
         expect(Exit.isSuccess(removalResult4)).toBe(true);
       }),
     );
@@ -893,11 +899,11 @@ describe("Final Invoice actions", () => {
         value(paymentResult);
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
-        const lockResult = yield* lab.step(Lab.lock(fi.id));
+        const lockResult = yield* lab.step(lab.lock(fi.id));
         value(lockResult);
         const cancellationResult = yield* lab.step(lab.cancel(fi.id));
         conflict(cancellationResult, "document_locked");
-        const unlockResult = yield* lab.step(Lab.unlock(fi.id));
+        const unlockResult = yield* lab.step(lab.unlock(fi.id));
         value(unlockResult);
         const cancellationResult2 = yield* lab.step(lab.cancel(fi.id));
         const cancelled = value(cancellationResult2);
@@ -923,13 +929,13 @@ describe("Final Invoice actions", () => {
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
         expect(EffectArray.some(linesOf(fi), (l) => l.deducts === lab.p)).toBe(true);
-        const removalResult = yield* lab.step(Lab.remove(booked));
+        const removalResult = yield* lab.step(lab.remove(booked));
         conflict(removalResult, "illegal_transition", "payment.has_tax_document");
         const cancellationResult = yield* lab.step(lab.cancel(fi.id));
         const cancelled = value(cancellationResult);
         expect(cancelled.document.status).toBe("cancelled");
         expect(cancelled.creditNote).toBeNull();
-        const removalResult2 = yield* lab.step(Lab.remove(booked));
+        const removalResult2 = yield* lab.step(lab.remove(booked));
         value(removalResult2);
       }),
     );
@@ -949,7 +955,7 @@ describe("Final Invoice actions", () => {
           Option.getOrUndefined(EffectArray.findFirst(linesOf(fi), (l) => l.deducts === null)),
           "expected a supply line",
         );
-        const correctionResult = yield* lab.step(Lab.correct(fi.id, [{ line: supply.id }]));
+        const correctionResult = yield* lab.step(lab.correct(fi.id, [{ line: supply.id }]));
         value(correctionResult);
         const cancellationResult = yield* lab.step(lab.cancel(fi.id));
         const error = failure(cancellationResult);
@@ -973,7 +979,7 @@ describe("H2: PTD correction around Final Invoice issue", () => {
         const paymentResult = yield* lab.step(lab.pay());
         const { issued } = value(paymentResult);
         const ptd = required(issued[0], "expected an issued document");
-        const correctionResult = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         value(correctionResult);
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
@@ -998,13 +1004,13 @@ describe("H2: PTD correction around Final Invoice issue", () => {
         const ptd = required(issued[0], "expected an issued document");
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         const fi = value(finalInvoiceResult);
-        const correctionResult = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         conflict(correctionResult, "illegal_transition");
         const cancellationResult = yield* lab.step(lab.cancel(ptd.id));
         conflict(cancellationResult, "illegal_transition");
-        const correctionResult2 = yield* lab.step(Lab.correct(fi.id, "full"));
+        const correctionResult2 = yield* lab.step(lab.correct(fi.id, "full"));
         value(correctionResult2);
-        const correctionResult3 = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult3 = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         expect(Exit.isSuccess(correctionResult3)).toBe(true);
       }),
     );
@@ -1018,14 +1024,14 @@ describe("H2: PTD correction around Final Invoice issue", () => {
         const paymentResult = yield* lab.step(lab.pay());
         const { issued } = value(paymentResult);
         const ptd = required(issued[0], "expected an issued document");
-        const correctionResult = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         value(correctionResult);
-        const correctionResult2 = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult2 = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         invalid(correctionResult2, "credit_note.exceeds_original");
-        const correctionResult3 = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "standard")));
+        const correctionResult3 = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "standard")));
         value(correctionResult3);
-        expect((yield* Lab.get(ptd.id)).settlement).toBe("credited");
-        const correctionResult4 = yield* lab.step(Lab.correct(ptd.id, "full"));
+        expect((yield* lab.get(ptd.id)).settlement).toBe("credited");
+        const correctionResult4 = yield* lab.step(lab.correct(ptd.id, "full"));
         conflict(correctionResult4, "illegal_transition");
       }),
     );
@@ -1044,9 +1050,9 @@ describe("H2: PTD correction around Final Invoice issue", () => {
           Option.getOrUndefined(EffectArray.findFirst(linesOf(fi), (l) => l.deducts === null)),
           "expected a supply line",
         );
-        const correctionResult = yield* lab.step(Lab.correct(fi.id, [{ line: supply.id }]));
+        const correctionResult = yield* lab.step(lab.correct(fi.id, [{ line: supply.id }]));
         value(correctionResult);
-        const correctionResult2 = yield* lab.step(Lab.correct(fi.id, [{ line: supply.id }]));
+        const correctionResult2 = yield* lab.step(lab.correct(fi.id, [{ line: supply.id }]));
         const error = failure(correctionResult2);
         expect(error).toMatchObject({
           _tag: "Invalid",
@@ -1065,19 +1071,19 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
   test("CpAbort: a PTD Credit Note that cannot be numbered writes nothing", async () => {
     await replay("vat_payer", (lab) =>
       Effect.gen(function* () {
-        yield* exhaustSeries("credit_note");
+        yield* exhaustSeries(lab.caller, "credit_note");
         const proformaResult = yield* lab.step(lab.issueProforma());
         value(proformaResult);
         const paymentResult = yield* lab.step(lab.pay());
         const { issued } = value(paymentResult);
         const ptd = required(issued[0], "expected an issued document");
         // The last number goes to the first Credit Note; the second allocation fails.
-        const correctionResult = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "reduced")));
+        const correctionResult = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "reduced")));
         value(correctionResult);
-        const before = yield* Lab.get(ptd.id);
-        const correctionResult2 = yield* lab.step(Lab.correct(ptd.id, ptdLine(ptd, "standard")));
+        const before = yield* lab.get(ptd.id);
+        const correctionResult2 = yield* lab.step(lab.correct(ptd.id, ptdLine(ptd, "standard")));
         conflict(correctionResult2, "illegal_transition", "numbering.pattern_invalid");
-        const after = yield* Lab.get(ptd.id);
+        const after = yield* lab.get(ptd.id);
         expect(related(after, "corrected_by")).toEqual(related(before, "corrected_by"));
         expect(after.revision).toBe(before.revision);
         expect(after.settlement).toBe(before.settlement);
@@ -1092,12 +1098,12 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
         value(proformaResult);
         const paymentResult = yield* lab.step(lab.pay());
         value(paymentResult);
-        yield* exhaustSeries("invoice");
-        const before = yield* Lab.get(lab.p);
+        yield* exhaustSeries(lab.caller, "invoice");
+        const before = yield* lab.get(lab.p);
         // The series' last number is still free: take it with an unrelated Invoice first.
         const exit2 = yield* Effect.exit(
           Effect.flatMap(Documents, (d) =>
-            d.issue({
+            d.issue(lab.caller, {
               input: {
                 kind: "invoice",
                 contact: lab.customer,
@@ -1109,7 +1115,7 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
         value(exit2);
         const finalInvoiceResult = yield* lab.step(lab.issueFinal());
         conflict(finalInvoiceResult, "illegal_transition", "numbering.pattern_invalid");
-        const after = yield* Lab.get(lab.p);
+        const after = yield* lab.get(lab.p);
         const finalId2 = yield* lab.finalId();
         expect(finalId2).toBeNull();
         expect(after.revision).toBe(before.revision);
@@ -1129,10 +1135,12 @@ describe("Crash points (FiAbort, CpAbort, a failed RecordOnProforma)", () => {
         const exit = yield* Effect.exit(lab.pay("10", undefined, "2026-11-20", EUR));
         expect(failure(exit)._tag).toBe("Unavailable");
         yield* lab.check();
-        const p = yield* Lab.get(lab.p);
+        const p = yield* lab.get(lab.p);
         expect(related(p, "tax_document_for")).toEqual([]);
         expect(p.settlement).toBe("unpaid");
-        const flatMap2 = yield* Effect.flatMap(Payments, (x) => x.listFor({ document: lab.p }));
+        const flatMap2 = yield* Effect.flatMap(Payments, (x) =>
+          x.listFor(lab.caller, { document: lab.p }),
+        );
         expect(flatMap2).toEqual([]);
         yield* ratesDown(false);
         const paymentResult = yield* lab.step(lab.pay("10", undefined, "2026-11-20", EUR));

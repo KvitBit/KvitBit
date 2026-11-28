@@ -19,6 +19,7 @@ import * as Ref from "effect/Ref";
 import { decodeSummary } from "../../../src/modules/expenses";
 import { CoreStore } from "../../../src/store/CoreStore";
 import { FixtureRates, member, WORKSPACE_A } from "../../helpers";
+import { TestCaller } from "../../helpers/callerContext";
 import { withoutStackTrace } from "../../helpers/run";
 import {
   asCaller,
@@ -159,12 +160,13 @@ describe("Expenses.record", () => {
   test("idempotency: same key and input replays; a different input conflicts", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const recordWithRequestKey = recordWithKey("key-1");
         const first = yield* recordWithRequestKey(czkInput);
         const again = yield* recordWithRequestKey(czkInput);
         const other = yield* Effect.exit(recordWithRequestKey({ ...czkInput, note: "changed" }));
         const s = yield* Expenses;
-        const page = yield* s.list({});
+        const page = yield* s.list(testCaller, {});
         return { first, again, other, count: page.items.length };
       }),
     );
@@ -230,11 +232,11 @@ describe("authorization and Workspace scoping", () => {
         const view = yield* record(czkInput);
         const id = expenseId(view);
         const s = yield* Expenses;
-        const asAccountant = asCaller(member("accountant"));
-        const read = yield* s.get(id).pipe(asAccountant);
-        const write = yield* record(czkInput).pipe(asAccountant, Effect.exit);
-        const edit = yield* s.edit(id, { note: "x" }, 1).pipe(asAccountant, Effect.exit);
-        const remove = yield* s.remove(id, 1).pipe(asAccountant, Effect.exit);
+        const accountant = member("accountant");
+        const read = yield* s.get(accountant, id);
+        const write = yield* s.record(accountant, czkInput).pipe(Effect.exit);
+        const edit = yield* s.edit(accountant, id, { note: "x" }, 1).pipe(Effect.exit);
+        const remove = yield* s.remove(accountant, id, 1).pipe(Effect.exit);
         return { read: fields(read).id === id, write, edit, remove };
       }),
     );
@@ -249,25 +251,30 @@ describe("authorization and Workspace scoping", () => {
   });
 
   test("a token scoped to expenses:read reads, lists and downloads but cannot write", async () => {
-    const asReader = asCaller(member("member", { scopes: ["expenses:read"] }));
+    const reader = member("member", { scopes: ["expenses:read"] });
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record(czkInput);
         const id = expenseId(result);
         const s = yield* Expenses;
-        const attached = yield* s.attach(id, {
+        const attached = yield* s.attach(testCaller, id, {
           name: "a.pdf",
           contentType: "application/pdf",
           bytes: bytesOf("%PDF-1.7"),
         });
         const att = yield* attachmentFields(attached);
-        yield* s.get(id).pipe(asReader);
-        yield* s.list({}).pipe(asReader);
-        const download = yield* s.attachment(id, att.id).pipe(asReader);
+        yield* s.get(reader, id);
+        yield* s.list(reader, {});
+        const download = yield* s.attachment(reader, id, att.id);
         expect(download.filename).toBe("a.pdf");
         return yield* s
-          .attach(id, { name: "a.pdf", contentType: "application/pdf", bytes: bytesOf("%PDF") })
-          .pipe(asReader, Effect.exit);
+          .attach(reader, id, {
+            name: "a.pdf",
+            contentType: "application/pdf",
+            bytes: bytesOf("%PDF"),
+          })
+          .pipe(Effect.exit);
       }),
     );
     expect(exit).toEqual(Forbidden.make({ action: "expense.write" }).pipe(Exit.fail, Exit.succeed));
@@ -278,7 +285,7 @@ describe("authorization and Workspace scoping", () => {
     const exit = await scenario(
       Effect.gen(function* () {
         const s = yield* Expenses;
-        return yield* s.list({}).pipe(asCaller(outsider));
+        return yield* s.list(outsider, {}).pipe(asCaller(outsider));
       }),
     );
     expect(exit.pipe(withoutStackTrace)).toEqual(
@@ -293,19 +300,18 @@ describe("authorization and Workspace scoping", () => {
         const id = expenseId(result);
         const s = yield* Expenses;
         const attachmentId = AttachmentId.make(id);
-        const asForeignOwner = asCaller(ownerB);
         const results = yield* Effect.forEach(
           [
-            s.get(id),
-            s.edit(id, { note: "x" }, 1),
-            s.remove(id, 1),
-            s.attachment(id, attachmentId),
-            s.detach(id, attachmentId),
+            s.get(ownerB, id),
+            s.edit(ownerB, id, { note: "x" }, 1),
+            s.remove(ownerB, id, 1),
+            s.attachment(ownerB, id, attachmentId),
+            s.detach(ownerB, id, attachmentId),
           ],
-          (operation) => operation.pipe(asForeignOwner, Effect.exit),
+          Effect.exit,
           { concurrency: 1 },
         );
-        const list = yield* s.list({}).pipe(asForeignOwner);
+        const list = yield* s.list(ownerB, {});
         return { results, listed: list.items.length, id };
       }),
     );
@@ -387,13 +393,14 @@ describe("Expenses.edit and remove", () => {
   test("optimistic revision: a stale expectedRevision is Conflict{revision_changed}", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record(czkInput);
         const id = expenseId(result);
         const s = yield* Expenses;
-        const editResult = yield* s.edit(id, { note: "first" }, 1);
+        const editResult = yield* s.edit(testCaller, id, { note: "first" }, 1);
         const edited = fields(editResult);
-        const staleEdit = yield* Effect.exit(s.edit(id, { note: "second" }, 1));
-        const staleRemove = yield* Effect.exit(s.remove(id, 1));
+        const staleEdit = yield* Effect.exit(s.edit(testCaller, id, { note: "second" }, 1));
+        const staleRemove = yield* Effect.exit(s.remove(testCaller, id, 1));
         return { revision: edited.revision, note: edited.note, staleEdit, staleRemove };
       }),
     );
@@ -406,11 +413,12 @@ describe("Expenses.edit and remove", () => {
   test("setting status complete runs the full validation; filling the fields then passes", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ status: "incomplete" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const tooEarly = yield* Effect.exit(s.edit(id, { status: "complete" }, 1));
-        const editResult = yield* s.edit(id, { ...czkInput, status: "complete" }, 1);
+        const tooEarly = yield* Effect.exit(s.edit(testCaller, id, { status: "complete" }, 1));
+        const editResult = yield* s.edit(testCaller, id, { ...czkInput, status: "complete" }, 1);
         const done = fields(editResult);
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
@@ -438,10 +446,11 @@ describe("Expenses.edit and remove", () => {
   test("null clears a field; an absent field keeps it", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ ...czkInput, note: "keep me" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        const editResult = yield* s.edit(id, { category: null }, 1);
+        const editResult = yield* s.edit(testCaller, id, { category: null }, 1);
         return fields(editResult);
       }),
     );
@@ -454,13 +463,14 @@ describe("Expenses.edit and remove", () => {
   test("remove soft-deletes: the Expense is NotFound and leaves the list; audit kept", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record(czkInput);
         const id = expenseId(result);
         const s = yield* Expenses;
-        yield* s.remove(id, 1);
-        const get = yield* Effect.exit(s.get(id));
-        const again = yield* Effect.exit(s.remove(id, 2));
-        const page = yield* s.list({});
+        yield* s.remove(testCaller, id, 1);
+        const get = yield* Effect.exit(s.get(testCaller, id));
+        const again = yield* Effect.exit(s.remove(testCaller, id, 2));
+        const page = yield* s.list(testCaller, {});
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
         return {
@@ -619,15 +629,18 @@ describe("FX stability and self-assessment scope", () => {
   test("an unrelated edit keeps the stored fixing (no CNB call); a new tax point refetches", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const eur = { ...czkInput, currency: "EUR", taxableSupplyOn: "2026-11-22" };
         const result = yield* record(eur);
         const id = expenseId(result);
         const s = yield* Expenses;
         const rates = yield* FixtureRates;
         yield* Ref.set(rates.unavailable, true);
-        const editResult = yield* s.edit(id, { note: "paid by card" }, 1);
+        const editResult = yield* s.edit(testCaller, id, { note: "paid by card" }, 1);
         const noted = fields(editResult);
-        const moved = yield* Effect.exit(s.edit(id, { taxableSupplyOn: "2026-11-21" }, 2));
+        const moved = yield* Effect.exit(
+          s.edit(testCaller, id, { taxableSupplyOn: "2026-11-21" }, 2),
+        );
         return {
           fx: noted.fx?.fixingDate,
           czk: fmt(noted.totalCzk),
@@ -647,10 +660,11 @@ describe("FX stability and self-assessment scope", () => {
   test("a currency change is audited with its new rate and CZK total", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record({ ...czkInput, taxableSupplyOn: "2026-11-22" });
         const id = expenseId(result);
         const s = yield* Expenses;
-        yield* s.edit(id, { currency: "EUR" }, 1);
+        yield* s.edit(testCaller, id, { currency: "EUR" }, 1);
         const store = yield* CoreStore;
         const audit = yield* store.audit.history(WORKSPACE_A, { entity: "Expense", id });
         return EffectArray.map(audit[1]?.changes ?? [], (c) => c.path);
@@ -687,6 +701,7 @@ describe("Expenses.list", () => {
   test("pages newest first; incomplete filter; a cursor is bound to its filter", async () => {
     const exit = await scenario(
       Effect.gen(function* () {
+        const testCaller = yield* TestCaller;
         const result = yield* record(czkInput);
         const a = expenseId(result);
         const result2 = yield* record({ status: "incomplete" });
@@ -694,13 +709,13 @@ describe("Expenses.list", () => {
         const result3 = yield* record(czkInput);
         const c = expenseId(result3);
         const s = yield* Expenses;
-        const first = yield* s.list({ limit: 2 });
-        const second = yield* s.list({ limit: 2, cursor: first.nextCursor ?? "" });
-        const incomplete = yield* s.list({ incomplete: true });
+        const first = yield* s.list(testCaller, { limit: 2 });
+        const second = yield* s.list(testCaller, { limit: 2, cursor: first.nextCursor ?? "" });
+        const incomplete = yield* s.list(testCaller, { incomplete: true });
         const mismatch = yield* Effect.exit(
-          s.list({ incomplete: true, cursor: first.nextCursor ?? "" }),
+          s.list(testCaller, { incomplete: true, cursor: first.nextCursor ?? "" }),
         );
-        const garbage = yield* Effect.exit(s.list({ cursor: "%%%" }));
+        const garbage = yield* Effect.exit(s.list(testCaller, { cursor: "%%%" }));
         const ids = (p: typeof first) =>
           EffectArray.map(p.items, (i) => ExpenseId.make(decodeSummary(i).id));
         return {

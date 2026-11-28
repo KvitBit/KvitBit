@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 /**
  * Cross-module e2e on TestCore: payments on invoices and Expenses, recurring issuance, D16
  * reminders and reports over the data the scenario creates. Every step goes through the domain
@@ -55,7 +56,9 @@ const at = (date: string) =>
 
 const report = <S extends Schema.Constraint>(kind: ReportKind, schema: S) =>
   Effect.flatMap(
-    Effect.flatMap(Reports, (r) => r.run({ report: kind, period: NOV })),
+    Effect.flatMap(Reports, (r) =>
+      Effect.flatMap(TestCaller, (caller) => r.run(caller, { report: kind, period: NOV })),
+    ),
     Schema.decodeUnknownEffect(Schema.toType(schema)),
   );
 
@@ -75,30 +78,31 @@ describe("payments flow (d)", () => {
     const r = ok(
       await inWorkspace(({ customer, supplier }) =>
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const inv = yield* issueInvoice({ contact: customer });
           const before = yield* outstandingOf(docId(inv));
           const partial = yield* payDocument({ document: docId(inv), amount: "1000" });
           const afterPartial = {
-            settlement: (yield* d.get(docId(inv))).settlement,
+            settlement: (yield* d.get(testCaller, docId(inv))).settlement,
             outstanding: yield* outstandingOf(docId(inv)),
           };
           const over = yield* payDocument({ document: docId(inv), amount: "2500" });
           const afterOver = {
-            settlement: (yield* d.get(docId(inv))).settlement,
+            settlement: (yield* d.get(testCaller, docId(inv))).settlement,
             outstanding: yield* outstandingOf(docId(inv)),
           };
 
           const e = yield* Expenses;
-          const recordResult = yield* e.record(expenseInput(supplier));
+          const recordResult = yield* e.record(testCaller, expenseInput(supplier));
           const expense = ExpenseId.make(expenseFields(recordResult).id);
-          const getResult = yield* e.get(expense);
+          const getResult = yield* e.get(testCaller, expense);
           const unpaid = expenseFields(getResult).payment;
           const firstPart = yield* payExpense({ expense, amount: "21" });
-          const getResult2 = yield* e.get(expense);
+          const getResult2 = yield* e.get(testCaller, expense);
           const partly = expenseFields(getResult2).payment;
           const rest = yield* payExpense({ expense });
-          const getResult3 = yield* e.get(expense);
+          const getResult3 = yield* e.get(testCaller, expense);
           const paid = expenseFields(getResult3).payment;
           return {
             gross: str(inv.totals.gross.amount),
@@ -150,12 +154,16 @@ const occurrenceJob = (workspaceId: WorkspaceId, scheduleId: ScheduleId, occurre
 
 /** One RecurringSweep tick whose `start` runs the workflow body inline (as the sweep's caller). */
 const sweep = Effect.flatMap(RecurringIssuance, (r) =>
-  r.sweep((decision) => Effect.asVoid(r.run(decision.scheduleId, decision.occurrence))),
+  r.sweep((caller, decision) =>
+    Effect.asVoid(r.run(caller, decision.scheduleId, decision.occurrence)),
+  ),
 );
 
 const decodeSummary = Schema.decodeUnknownResult(Schema.toType(DocumentSummaryData));
 const invoices = Effect.map(
-  Effect.flatMap(Documents, (d) => d.list({ kind: "invoice" })),
+  Effect.flatMap(Documents, (d) =>
+    Effect.flatMap(TestCaller, (caller) => d.list(caller, { kind: "invoice" })),
+  ),
   (page) => EffectArray.map(page.items, (summary) => Result.getOrThrow(decodeSummary(summary)).id),
 );
 
@@ -166,8 +174,9 @@ describe("recurring issuance (e)", () => {
     const r = ok(
       await inWorkspace(({ owner, customer }) =>
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const t = yield* Templates;
-          const saved = yield* t.save({
+          const saved = yield* t.save(testCaller, {
             name: "Monthly hosting",
             kind: "invoice",
             contact: customer,
@@ -176,7 +185,7 @@ describe("recurring issuance (e)", () => {
           });
           const created = yield* decodeTemplate(saved);
           const templateId = created.id;
-          const scheduleView = yield* t.schedule(templateId, MONTHLY, created.revision);
+          const scheduleView = yield* t.schedule(testCaller, templateId, MONTHLY, created.revision);
           const scheduled = yield* decodeTemplate(scheduleView);
           if (scheduled.schedule === null || scheduled.schedule.nextOccurrence === null) {
             return yield* Effect.die("Expected the first scheduled occurrence");
@@ -185,20 +194,22 @@ describe("recurring issuance (e)", () => {
 
           const tick1 = yield* sweep;
           const docs1 = yield* invoices;
-          const runs1 = (yield* t.runs(templateId)).items;
+          const runs1 = (yield* t.runs(testCaller, templateId)).items;
 
           // The same occurrence again: as its job's System caller (a workflow retry) and a
           // second sweep tick the same day.
           const rerun = yield* asCaller(
             occurrenceJob(owner.workspaceId, scheduleId, first),
-            Effect.flatMap(RecurringIssuance, (ri) => ri.run(scheduleId, first)),
+            Effect.flatMap(RecurringIssuance, (ri) =>
+              ri.run(occurrenceJob(owner.workspaceId, scheduleId, first), scheduleId, first),
+            ),
           );
           const tick1b = yield* sweep;
           const docs1b = yield* invoices;
-          const runs1b = (yield* t.runs(templateId)).items;
+          const runs1b = (yield* t.runs(testCaller, templateId)).items;
 
           // Next month: the second occurrence.
-          const nextView = yield* t.get(templateId);
+          const nextView = yield* t.get(testCaller, templateId);
           const next = yield* decodeTemplate(nextView);
           const second = next.schedule?.nextOccurrence;
           if (second === undefined || second === null)
@@ -206,7 +217,7 @@ describe("recurring issuance (e)", () => {
           yield* at(second);
           const tick2 = yield* sweep;
           const docs2 = yield* invoices;
-          const runs2 = (yield* t.runs(templateId)).items;
+          const runs2 = (yield* t.runs(testCaller, templateId)).items;
           return {
             first,
             second,
@@ -264,33 +275,37 @@ describe("D16 reminders (f)", () => {
     const r = ok(
       await inWorkspace(({ owner, customer }) =>
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           const workspaceId = owner.workspaceId;
           const inv = yield* issueInvoice({ contact: customer });
           const id = docId(inv);
-          yield* d.send(id);
-          const dueOn = (yield* d.get(id)).dates.dueOn;
+          yield* d.send(testCaller, id);
+          const dueOn = (yield* d.get(testCaller, id)).dates.dueOn;
 
           // The PaymentReminders sweep, three days after the due date (first offset).
           const today = yield* at("2026-12-10");
           const worker = system({ _tag: "PaymentReminders", documentId: id }, workspaceId);
-          const due = yield* asCaller(worker, selectDueReminders(workspaceId, today));
+          const due = yield* asCaller(worker, selectDueReminders(worker, workspaceId, today));
           const queued = yield* Effect.forEach(
             due,
-            (reminder) => asCaller(worker, enqueueReminder(workspaceId, reminder)),
+            (reminder) => asCaller(worker, enqueueReminder(worker, workspaceId, reminder)),
             { concurrency: 1 },
           );
           const deliveryId = queued[0];
           if (deliveryId === undefined || deliveryId === null)
             return yield* Effect.die("Expected a queued reminder");
           const queuedView = Option.getOrUndefined(
-            EffectArray.findFirst((yield* d.get(id)).deliveries, (x) => x.id === deliveryId),
+            EffectArray.findFirst(
+              (yield* d.get(testCaller, id)).deliveries,
+              (x) => x.id === deliveryId,
+            ),
           );
 
           // Reminders turned off on the Contact before the send step runs.
           const contacts = yield* Contacts;
-          const c = yield* contacts.get(customer);
-          yield* contacts.save({
+          const c = yield* contacts.get(testCaller, customer);
+          yield* contacts.save(testCaller, {
             id: customer,
             expectedRevision: c.revision,
             name: c["name"],
@@ -303,9 +318,12 @@ describe("D16 reminders (f)", () => {
           });
 
           const sender = system({ _tag: "DocumentDelivery", deliveryId }, workspaceId);
-          const outcome = yield* asCaller(sender, deliver(workspaceId, deliveryId));
+          const outcome = yield* asCaller(sender, deliver(sender, workspaceId, deliveryId));
           const after = Option.getOrUndefined(
-            EffectArray.findFirst((yield* d.get(id)).deliveries, (x) => x.id === deliveryId),
+            EffectArray.findFirst(
+              (yield* d.get(testCaller, id)).deliveries,
+              (x) => x.id === deliveryId,
+            ),
           );
           return {
             dueOn,
@@ -335,6 +353,7 @@ describe("reports over the scenario's data (g)", () => {
     const r = ok(
       await inWorkspace(({ customer, supplier }) =>
         Effect.gen(function* () {
+          const testCaller = yield* TestCaller;
           const d = yield* Documents;
           // Paid in full: 2000 + 420 standard, 500 + 60 reduced.
           const paid = yield* issueInvoice({ contact: customer });
@@ -355,10 +374,13 @@ describe("reports over the scenario's data (g)", () => {
             contact: customer,
             lines: [{ description: "Služby", unitPrice: dec("1000") }],
           });
-          const cn = yield* d.correct(docId(credited), { reason: "sleva", lines: "full" });
+          const cn = yield* d.correct(testCaller, docId(credited), {
+            reason: "sleva",
+            lines: "full",
+          });
 
           const e = yield* Expenses;
-          const recordResult = yield* e.record(expenseInput(supplier));
+          const recordResult = yield* e.record(testCaller, expenseInput(supplier));
           const expense = ExpenseId.make(expenseFields(recordResult).id);
           yield* payExpense({ expense });
 
@@ -368,7 +390,9 @@ describe("reports over the scenario's data (g)", () => {
           const cashflow = yield* report("cashflow", CashflowView);
           const receivables = yield* report("receivables", ReceivablesView);
           const csv = yield* Effect.flatMap(Reports, (rep) =>
-            rep.export({ report: "cashflow", period: NOV }, "csv"),
+            Effect.flatMap(TestCaller, (caller) =>
+              rep.export(caller, { report: "cashflow", period: NOV }, "csv"),
+            ),
           );
           return {
             ids: { overdue: docId(overdue), eur: docId(eur), cn: docId(cn) },

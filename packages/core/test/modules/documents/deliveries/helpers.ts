@@ -3,7 +3,6 @@ import type {
   Caller,
   ContactDefaults,
   ContactId,
-  CurrentCaller,
   DocumentId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
@@ -25,12 +24,13 @@ import type { StoreUnavailable, UniqueViolation } from "../../../../src/store/Co
 import { CoreStore } from "../../../../src/store/CoreStore";
 import type { InMemoryPortsLive } from "../../../../src/testing";
 import { member, runTest, WORKSPACE_A, WORKSPACE_B } from "../../../helpers";
+import { TestCaller } from "../../../helpers/callerContext";
 import { CZ_BUYER, contact, invoiceInput, issuer, seed } from "../fixtures";
 
 export type DeliveryServices =
   | Layer.Success<typeof DocumentsDeliveryTestLayer>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 const NO_SERIES = { seriesByKind: {} };
 
@@ -85,7 +85,8 @@ export const deliveryScenario: {
 /** Issues an Invoice (default CZ_BUYER, due 2026-12-07) and returns its id. */
 export const issueInvoice = (extra: Parameters<typeof invoiceInput>[0] = {}) =>
   Effect.gen(function* () {
-    const view = yield* (yield* Documents).issue({ input: invoiceInput(extra) });
+    const testCaller = yield* TestCaller;
+    const view = yield* (yield* Documents).issue(testCaller, { input: invoiceInput(extra) });
     return view.id;
   });
 

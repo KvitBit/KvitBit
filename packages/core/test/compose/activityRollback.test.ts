@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 import { withoutStackTrace } from "../helpers/run";
 /**
  * Write results are never enriched with `DocumentView.share` / `.deliveries` (rule C3: a keyed
@@ -7,7 +8,7 @@ import { withoutStackTrace } from "../helpers/run";
  */
 
 import { describe, expect, test } from "bun:test";
-import type { CurrentCaller, DocumentView } from "@kvitbit/domain/contract";
+import type { DocumentView } from "@kvitbit/domain/contract";
 import {
   DocumentId,
   Documents,
@@ -100,7 +101,7 @@ const world = ShareLinksTestLayer.pipe(
 type Services =
   | Layer.Success<typeof world>
   | Layer.Success<ReturnType<typeof InMemoryPortsLive>>
-  | CurrentCaller;
+  | TestCaller;
 
 const series = Effect.flatMap(CoreStore, (store) =>
   store.transaction(
@@ -152,9 +153,16 @@ const storedResult = (key: RequestKey) =>
 const database = Exit.fail(Unavailable.make({ dependency: "database" }));
 const issueInvoice = (key?: RequestKey) =>
   Effect.flatMap(Documents, (d) =>
-    d.issue({ input: invoiceInput() }, key === undefined ? undefined : { requestKey: key }),
+    Effect.flatMap(TestCaller, (caller) =>
+      d.issue(
+        caller,
+        { input: invoiceInput() },
+        key === undefined ? undefined : { requestKey: key },
+      ),
+    ),
   );
-const getDocument = (id: DocumentId) => Effect.flatMap(Documents, (d) => d.get(id));
+const getDocument = (id: DocumentId) =>
+  Effect.flatMap(Documents, (d) => Effect.flatMap(TestCaller, (caller) => d.get(caller, id)));
 
 /** The result as the request log stores it (decoding normalizes decimals, so compare this). */
 const asStored = <A>(codec: Schema.Codec<A, unknown>, value: A) =>
@@ -181,7 +189,9 @@ describe("Documents.issue: write results are never enriched", () => {
           // An owner read still enriches, so it reports the failing read.
           const read = yield* Effect.exit(getDocument(id));
           yield* setDown(false);
-          const list = yield* Effect.flatMap(Documents, (d) => d.list({}));
+          const list = yield* Effect.flatMap(Documents, (d) =>
+            Effect.flatMap(TestCaller, (caller) => d.list(caller, {})),
+          );
           return { keyless, keyed, replay, read, list, stored: yield* storedResult(key) };
         }),
       ),
@@ -206,8 +216,12 @@ describe("Documents.issue: write results are never enriched", () => {
         Effect.gen(function* () {
           const first = ok((yield* call(issueInvoice(key))).exit);
           const id = DocumentId.make(first.id);
-          const { url } = yield* Effect.flatMap(PublicShareLinks, (s) => s.create(id));
-          yield* Effect.flatMap(Documents, (d) => d.send(id));
+          const { url } = yield* Effect.flatMap(PublicShareLinks, (s) =>
+            Effect.flatMap(TestCaller, (caller) => s.create(caller, id)),
+          );
+          yield* Effect.flatMap(Documents, (d) =>
+            Effect.flatMap(TestCaller, (caller) => d.send(caller, id)),
+          );
           const replay = yield* call(issueInvoice(key));
           yield* setDown(true);
           const downReplay = yield* call(issueInvoice(key));
@@ -242,13 +256,18 @@ describe("Documents.issue: write results are never enriched", () => {
 /** Pays the whole Proforma: a vat_payer Proforma payment issues a PTD (P2). */
 const payProforma = (proforma: DocumentId, key?: RequestKey) =>
   Effect.flatMap(Payments, (p) =>
-    p.record(
-      { target: { document: proforma } },
-      key === undefined ? undefined : { requestKey: key },
+    Effect.flatMap(TestCaller, (caller) =>
+      p.record(
+        caller,
+        { target: { document: proforma } },
+        key === undefined ? undefined : { requestKey: key },
+      ),
     ),
   );
 const issueProforma = Effect.flatMap(Documents, (d) =>
-  d.issue({ input: invoiceInput({ kind: "proforma" }) }),
+  Effect.flatMap(TestCaller, (caller) =>
+    d.issue(caller, { input: invoiceInput({ kind: "proforma" }) }),
+  ),
 );
 
 describe("Payments.record: write results are never enriched", () => {
@@ -286,7 +305,7 @@ describe("Payments.record: write results are never enriched", () => {
           const first = ok((yield* call(payProforma(DocumentId.make(pf.id), key))).exit);
           const ptd = EffectArray.getUnsafe(first.issued, 0);
           const { url } = yield* Effect.flatMap(PublicShareLinks, (s) =>
-            s.create(DocumentId.make(ptd.id)),
+            Effect.flatMap(TestCaller, (caller) => s.create(caller, DocumentId.make(ptd.id))),
           );
           const replay = yield* call(payProforma(DocumentId.make(pf.id), key));
           const read = yield* getDocument(DocumentId.make(ptd.id));

@@ -171,7 +171,7 @@ export const ConnectedAppsGroupLive = HttpApiBuilder.group(
                     and workspace_id = ${caller.workspaceId}
                 `;
 
-                yield* workspaces.recordAccessEvent({
+                yield* workspaces.recordAccessEvent(caller, {
                   action: "grant.revoke",
                   subject: {
                     entity: "McpGrant",

@@ -5,6 +5,7 @@
  */
 
 import type {
+  Caller,
   DocumentId,
   DocumentPatch,
   DocumentView,
@@ -151,10 +152,17 @@ const numberTaken = () => Conflict.make({ reason: "duplicate" });
  * delivery in the same transaction.
  */
 export const issue = Effect.fn("issue")(
-  function* (from: IssueFrom, opts?: RequestOptions & { readonly send?: SendOptions }) {
-    const { caller, workspaceId } = yield* authorizeInWorkspace("document.issue");
+  function* (
+    caller: Caller,
+    from: IssueFrom,
+    opts?: RequestOptions & { readonly send?: SendOptions },
+  ) {
+    const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+      caller,
+      "document.issue",
+    );
     // R1a: every policy check runs before a replay (`send` queues a delivery).
-    if (opts?.send !== undefined) yield* authorizeInWorkspace("document.send");
+    if (opts?.send !== undefined) yield* authorizeInWorkspace(workspaceCaller, "document.send");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -179,7 +187,7 @@ export const issue = Effect.fn("issue")(
               currentRevision: draft.revision,
             });
           }
-          const composed = yield* compose(workspaceId, specFromRecord(draft), { today });
+          const composed = yield* compose(caller, workspaceId, specFromRecord(draft), { today });
           const next = yield* numbered(workspaceId, draft.id, composed);
           row = yield* repo
             .update(
@@ -190,7 +198,7 @@ export const issue = Effect.fn("issue")(
         } else {
           const id = yield* newId(DocumentIdSchema.make);
           const value_1 = yield* specFromInput(workspaceId, from.input);
-          const composed = yield* compose(workspaceId, value_1, { today });
+          const composed = yield* compose(caller, workspaceId, value_1, { today });
           const draftRow = newDraftRecord(id, workspaceId, composed, at);
           row = yield* insertNumbered(
             draftRow,
@@ -202,7 +210,7 @@ export const issue = Effect.fn("issue")(
             })),
           );
         }
-        yield* appendAudit({
+        yield* appendAudit(workspaceCaller, {
           workspaceId,
           subject: { entity: "Document", id: row.id },
           action: "document.issue",
@@ -210,7 +218,7 @@ export const issue = Effect.fn("issue")(
           changes: [{ path: "number", before: null, after: row.number }],
         });
         if (opts?.send !== undefined) {
-          yield* (yield* DocumentSender).send(caller, row.id, opts.send);
+          yield* (yield* DocumentSender).send(workspaceCaller, row.id, opts.send);
           // The sender may have written the document (reminder choice, revision).
           row = yield* repo.get(workspaceId, row.id);
         }
@@ -333,6 +341,7 @@ const malformed = (path: string, reason: string) =>
 
 /** The light path: text, dates and payment fields on the stored record; amounts untouched. */
 const lightEdit = Effect.fn("lightEdit")(function* (
+  caller: Caller,
   row: DocumentRecord,
   patch: DocumentPatch,
   number: string | null,
@@ -352,6 +361,7 @@ const lightEdit = Effect.fn("lightEdit")(function* (
   let issuerSnapshot = row.issuer;
   if (patch.bankAccount !== undefined && patch.bankAccount !== row.issuer.bankAccount?.id) {
     const workspace = yield* (yield* DocumentIssuers).forDocument(
+      caller,
       row.workspaceId,
       row.taxableSupplyOn ?? row.issuedOn,
     );
@@ -423,6 +433,7 @@ const lightEdit = Effect.fn("lightEdit")(function* (
  * writes one `document.edit` entry with the diff; the settlement follows a changed total.
  */
 export const editIssued = Effect.fn("editIssued")(function* (
+  caller: Caller,
   row: DocumentRecord,
   patch: DocumentPatch,
 ) {
@@ -461,14 +472,14 @@ export const editIssued = Effect.fn("editIssued")(function* (
 
   let next: DocumentRecord;
   if (EffectArray.every(keys, (k) => LIGHT_FIELDS.has(k))) {
-    next = yield* lightEdit(row, patch, number);
+    next = yield* lightEdit(caller, row, patch, number);
   } else {
     const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), {
       ...patch,
       series: undefined,
     });
     const refresh = patch.refreshParties === true;
-    const composed = yield* compose(row.workspaceId, spec, {
+    const composed = yield* compose(caller, row.workspaceId, spec, {
       today,
       // Tax results stay frozen even when the parties are refreshed (D6 eligibility,
       // amounts owed); only the printed particulars follow `refreshParties`.
@@ -510,7 +521,7 @@ export const editIssued = Effect.fn("editIssued")(function* (
   const saved = yield* repo
     .update(next, row.revision)
     .pipe(Effect.catchTag("UniqueViolation", numberTaken));
-  yield* appendAudit({
+  yield* appendAudit(caller, {
     workspaceId: row.workspaceId,
     subject: { entity: "Document", id: row.id },
     action: "document.edit",
@@ -524,8 +535,8 @@ export const editIssued = Effect.fn("editIssued")(function* (
 
 /** Document Lock (D5). Idempotent: a locked or cancelled document is returned unchanged. */
 export const lock = Effect.fn("lock")(
-  function* (id: DocumentId) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.lock");
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.lock");
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -536,7 +547,7 @@ export const lock = Effect.fn("lock")(
         const next = yield* repo
           .update({ ...row, locked: true, lockedAt: at, updatedAt: at }, row.revision)
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.lock",
@@ -555,8 +566,8 @@ export const lock = Effect.fn("lock")(
  * document that is not locked is returned unchanged; drafts and cancelled documents fail.
  */
 export const unlock = Effect.fn("unlock")(
-  function* (id: DocumentId, reason: string) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.unlock");
+  function* (caller: Caller, id: DocumentId, reason: string) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.unlock");
     const why = yield* reasonOf(reason);
     const store = yield* CoreStore;
     return yield* store.transaction(
@@ -568,7 +579,7 @@ export const unlock = Effect.fn("unlock")(
         const next = yield* repo
           .update({ ...row, locked: false, lockedAt: null, updatedAt: at }, row.revision)
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.unlock",
@@ -613,8 +624,8 @@ export const CancelResultCodec = Schema.Struct({
  * document already fully credited fail with `Conflict{illegal_transition}`.
  */
 export const cancel = Effect.fn("cancel")(
-  function* (id: DocumentId, input: CancelInput, opts?: RequestOptions) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.cancel");
+  function* (caller: Caller, id: DocumentId, input: CancelInput, opts?: RequestOptions) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.cancel");
     const reason = yield* reasonOf(input.reason);
     return yield* withIdempotency(
       {
@@ -657,13 +668,13 @@ export const cancel = Effect.fn("cancel")(
               (l) => l.id,
             ),
           );
-          const { original, creditNote } = yield* issueCreditNote(row, {
+          const { original, creditNote } = yield* issueCreditNote(caller, row, {
             reason,
             issuedOn: today,
             correctedOn: on,
             credit: remainderSpec(row, earlier),
           });
-          yield* appendAudit({
+          yield* appendAudit(caller, {
             workspaceId,
             subject: { entity: "Document", id },
             action: "document.cancel",
@@ -697,7 +708,7 @@ export const cancel = Effect.fn("cancel")(
             row.revision,
           )
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.cancel",

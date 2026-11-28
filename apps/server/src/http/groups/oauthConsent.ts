@@ -1,3 +1,4 @@
+import { RequestCaller } from "@kvitbit/api-contract";
 /**
  * `oauthConsent` group handlers (http-mcp-contracts 3.5.2, 6.2-6.3; board agreement #889).
  *
@@ -270,6 +271,7 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(
       .handle(
         "getConsent",
         Effect.fnUntraced(function* ({ params }) {
+          const caller = yield* RequestCaller;
           const { parsed, decision, notFound } = yield* loadConsent(params.consentId);
           const used = yield* sql`select id from auth.verification where id = ${decision.id}`.pipe(
             Effect.mapError(() => Unavailable.make({ dependency: "database" })),
@@ -277,7 +279,7 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(
           if (used.length > 0) return yield* notFound;
 
           const client = yield* loadClient(parsed, params.consentId);
-          const mine = yield* workspaces.listMine;
+          const mine = yield* workspaces.listMine(caller);
 
           const requestedSet = new Set(parsed.requestedScopes);
           const consentWorkspaces = Arr.map(mine, (ws) => {
@@ -309,6 +311,7 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(
       .handle(
         "decide",
         Effect.fnUntraced(function* ({ params, payload }) {
+          const caller = yield* RequestCaller;
           const request = yield* HttpServerRequest.HttpServerRequest;
           const { principal, sessionId, parsed, decision, notFound, nowMs } = yield* loadConsent(
             params.consentId,
@@ -336,7 +339,7 @@ export const OauthConsentGroupLive = HttpApiBuilder.group(
                     for update
                   `;
                 if (openWorkspaces.length === 0) return yield* notFound;
-                const member = yield* workspaces.enter(payload.workspace, {
+                const member = yield* workspaces.enter(caller, payload.workspace, {
                   scopes: "all",
                   channel: principal.channel,
                 });

@@ -12,7 +12,6 @@
 import type { Conflict, CurrencyCode, Invalid } from "@kvitbit/domain/contract";
 import {
   CurrencyCode as CurrencyCodeSchema,
-  CurrentCaller,
   DeliveryId as DeliveryIdSchema,
   DocumentId,
   ExpenseId,
@@ -160,7 +159,8 @@ export const PaymentFakesLive: Layer.Layer<
         PaymentSettings,
         PaymentSettings.of({
           autoSendPaymentTaxDocument: Effect.fn("PaymentSettings.autoSendPaymentTaxDocument")(
-            (workspaceId) => Effect.map(Ref.get(autoSend), (m) => m.get(workspaceId) ?? false),
+            (_caller, workspaceId) =>
+              Effect.map(Ref.get(autoSend), (m) => m.get(workspaceId) ?? false),
           ),
         }),
       ),
@@ -168,9 +168,7 @@ export const PaymentFakesLive: Layer.Layer<
         DocumentSender,
         DocumentSender.of({
           send: Effect.fn("DocumentSender.send")(function* (caller, id) {
-            const { workspaceId } = yield* authorizeInWorkspace("document.send").pipe(
-              Effect.provideService(CurrentCaller, caller),
-            );
+            const { workspaceId } = yield* authorizeInWorkspace(caller, "document.send");
             const deliveryId = yield* Effect.provideContext(newId(DeliveryIdSchema.make), idGen);
             yield* deliveries
               .insert({ id: deliveryId, workspaceId, revision: 1, documentId: id })

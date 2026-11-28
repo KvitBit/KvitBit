@@ -1,4 +1,4 @@
-import type { DocumentId, PageRequest, ShareViewEvent } from "@kvitbit/domain/contract";
+import type { Caller, DocumentId, PageRequest, ShareViewEvent } from "@kvitbit/domain/contract";
 import { Conflict, Invalid } from "@kvitbit/domain/contract";
 /**
  * Member side of Public Share Links (core-ports 4.6): `create`, `revoke`, `views`. Both writes
@@ -37,8 +37,11 @@ const currentToken = Effect.fn("currentToken")(function* (linkId: string) {
  * and a new link (new id, new token) replaces it in the same transaction.
  */
 export const create = Effect.fn("create")(
-  function* (id: DocumentId) {
-    const { caller, workspaceId } = yield* authorizeInWorkspace("share.write");
+  function* (caller: Caller, id: DocumentId) {
+    const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+      caller,
+      "share.write",
+    );
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -66,13 +69,13 @@ export const create = Effect.fn("create")(
           documentId: id,
           tokenHash,
           keyVersion: version,
-          createdBy: caller._tag === "Member" ? caller.userId : null,
+          createdBy: workspaceCaller._tag === "Member" ? workspaceCaller.userId : null,
           viewedAt: null,
           revokedAt: null,
           createdAt: at,
         };
         yield* repo.insert(link).pipe(Effect.catchTag("UniqueViolation", Effect.die));
-        yield* appendAudit({
+        yield* appendAudit(workspaceCaller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "share.create",
@@ -88,8 +91,8 @@ export const create = Effect.fn("create")(
 
 /** Idempotent: revokes the active link if there is one; its token then returns NotFound. */
 export const revoke = Effect.fn("revoke")(
-  function* (id: DocumentId) {
-    const { workspaceId } = yield* authorizeInWorkspace("share.write");
+  function* (caller: Caller, id: DocumentId) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "share.write");
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -99,7 +102,7 @@ export const revoke = Effect.fn("revoke")(
         if (Option.isNone(active)) return;
         const nowIso_1 = yield* nowIso;
         yield* repo.revoke(workspaceId, active.value.id, nowIso_1);
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "share.revoke",
@@ -128,8 +131,8 @@ const encodeCursor = Schema.encodeEffect(ViewCursor);
 
 /** View and download events of the document's links (all of them), newest first. */
 export const views = Effect.fn("views")(
-  function* (id: DocumentId, page: PageRequest = {}) {
-    const { workspaceId } = yield* authorizeInWorkspace("share.read");
+  function* (caller: Caller, id: DocumentId, page: PageRequest = {}) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "share.read");
     const limit = page.limit ?? DEFAULT_LIMIT;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
       return yield* pageIssue("limit", "request.malformed");

@@ -16,7 +16,6 @@ import type {
   AttachmentId,
   AttachmentView,
   Caller,
-  CurrentCaller,
   ExpenseId,
   ExpenseInput as ExpenseInputType,
   ExpensePatch,
@@ -114,48 +113,48 @@ const DEFAULT_LIMIT = 50;
 /** The honest service: each method's errors as the spec and the store produce them. */
 export interface ExpensesImpl {
   readonly record: (
+    caller: Caller,
     input: ExpenseInputType,
     opts?: RequestOptions,
-  ) => Effect.Effect<
-    ExpenseView,
-    Invalid | NotFound | Unavailable | Forbidden | Conflict,
-    CurrentCaller
-  >;
+  ) => Effect.Effect<ExpenseView, Invalid | NotFound | Unavailable | Forbidden | Conflict>;
   readonly edit: (
+    caller: Caller,
     id: ExpenseId,
     patch: ExpensePatch,
     expectedRevision: number,
-  ) => Effect.Effect<
-    ExpenseView,
-    NotFound | Invalid | Conflict | Unavailable | Forbidden,
-    CurrentCaller
-  >;
+  ) => Effect.Effect<ExpenseView, NotFound | Invalid | Conflict | Unavailable | Forbidden>;
   readonly remove: (
+    caller: Caller,
     id: ExpenseId,
     expectedRevision: number,
-  ) => Effect.Effect<void, NotFound | Conflict | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Conflict | Forbidden | Unavailable>;
   readonly attach: (
+    caller: Caller,
     id: ExpenseId,
     file: {
       readonly name: string;
       readonly contentType: string;
       readonly bytes: Stream.Stream<Uint8Array>;
     },
-  ) => Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden, CurrentCaller>;
+  ) => Effect.Effect<AttachmentView, NotFound | Invalid | Unavailable | Forbidden>;
   readonly detach: (
+    caller: Caller,
     id: ExpenseId,
     attachment: AttachmentId,
-  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable>;
   readonly attachment: (
+    caller: Caller,
     id: ExpenseId,
     attachment: AttachmentId,
-  ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden, CurrentCaller>;
+  ) => Effect.Effect<FileDownload, NotFound | Unavailable | Forbidden>;
   readonly get: (
+    caller: Caller,
     id: ExpenseId,
-  ) => Effect.Effect<ExpenseView, NotFound | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<ExpenseView, NotFound | Forbidden | Unavailable>;
   readonly list: (
+    caller: Caller,
     q: ExpenseQuery,
-  ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<Page<ExpenseSummary>, Invalid | Forbidden | Unavailable>;
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -208,8 +207,8 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
   const ids = yield* IdGenerator;
 
   const provide = <A, E>(
-    effect: Effect.Effect<A, E, CurrentCaller | CoreStore | IdGenerator>,
-  ): Effect.Effect<A, E, CurrentCaller> =>
+    effect: Effect.Effect<A, E, CoreStore | IdGenerator>,
+  ): Effect.Effect<A, E> =>
     effect.pipe(Effect.provideService(CoreStore, store), Effect.provideService(IdGenerator, ids));
 
   const live = (row: ExpenseRow) =>
@@ -341,10 +340,13 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
   const requireJson = (value: ExpenseInputType | ExpensePatch) =>
     isJsonValue(value) ? Effect.void : Effect.fail(invalid("request.malformed", []));
 
-  const record: ExpensesImpl["record"] = (input, opts) =>
+  const record: ExpensesImpl["record"] = (caller, input, opts) =>
     provide(
       Effect.gen(function* () {
-        const { caller, workspaceId } = yield* authorizeInWorkspace("expense.write");
+        const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+          caller,
+          "expense.write",
+        );
         yield* requireJson(input);
         return yield* withIdempotency(
           {
@@ -381,11 +383,11 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
               createdAt: now,
               updatedAt: now,
             };
-            const merged = yield* applyFields(caller, empty, fields);
+            const merged = yield* applyFields(workspaceCaller, empty, fields);
             const value_1 = yield* prepareRate(merged, null);
             const row = yield* finish(merged, value_1);
             const saved = yield* repo.insert(row);
-            yield* appendAudit({
+            yield* appendAudit(workspaceCaller, {
               workspaceId,
               subject: subject(saved.id),
               action: "expense.record",
@@ -397,10 +399,13 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       }).pipe(orUnavailable, dieOnUnique),
     );
 
-  const edit: ExpensesImpl["edit"] = (id, patch, expectedRevision) =>
+  const edit: ExpensesImpl["edit"] = (caller, id, patch, expectedRevision) =>
     provide(
       Effect.gen(function* () {
-        const { caller, workspaceId } = yield* authorizeInWorkspace("expense.write");
+        const { caller: workspaceCaller, workspaceId } = yield* authorizeInWorkspace(
+          caller,
+          "expense.write",
+        );
         yield* requireJson(patch);
         const fields = yield* decodeFields(patch);
         const existing = yield* getLive(workspaceId, id);
@@ -408,14 +413,17 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
         // read at the expected revision; the supplier is resolved inside the transaction because
         // `fromIco` may upsert a Contact, which must roll back with a failed edit (C1).
         const seen = yield* checkRevision(existing, expectedRevision);
-        const withFields = yield* applyFields(caller, seen, { ...fields, supplier: undefined });
+        const withFields = yield* applyFields(workspaceCaller, seen, {
+          ...fields,
+          supplier: undefined,
+        });
         const fx = yield* prepareRate(withFields, seen);
         return yield* store.transaction(
           Effect.gen(function* () {
             const locked = yield* lockLive(workspaceId, id);
             // Same revision as `seen`, so `fx` was derived from the row now locked.
             const current = yield* checkRevision(locked, expectedRevision);
-            const applied = yield* applyFields(caller, current, fields);
+            const applied = yield* applyFields(workspaceCaller, current, fields);
             const prepared = yield* finish({ ...applied, updatedAt: yield* nowIso }, fx);
             if (current.payments > 0) {
               // A paid Expense keeps the currency its Payments are in (P1) and stays complete.
@@ -427,7 +435,7 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
               }
             }
             const saved = yield* repo.update(prepared, current.revision);
-            yield* appendAudit({
+            yield* appendAudit(workspaceCaller, {
               workspaceId,
               subject: subject(id),
               action: "expense.edit",
@@ -440,10 +448,10 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       }).pipe(orUnavailable, dieOnUnique),
     );
 
-  const remove: ExpensesImpl["remove"] = (id, expectedRevision) =>
+  const remove: ExpensesImpl["remove"] = (caller, id, expectedRevision) =>
     provide(
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("expense.write");
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "expense.write");
         yield* store.transaction(
           Effect.gen(function* () {
             const value_1 = yield* lockLive(workspaceId, id);
@@ -456,7 +464,7 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
               { ...current, removedAt: now, updatedAt: now },
               current.revision,
             );
-            yield* appendAudit({
+            yield* appendAudit(caller, {
               workspaceId,
               subject: subject(id),
               action: "expense.remove",
@@ -467,10 +475,10 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       }).pipe(orUnavailable, dieOnUnique),
     );
 
-  const attach: ExpensesImpl["attach"] = (id, file) =>
+  const attach: ExpensesImpl["attach"] = (caller, id, file) =>
     provide(
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("expense.write");
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "expense.write");
         const contentType = EffectString.toLowerCase(
           EffectString.trim(EffectString.split(file.contentType, ";")[0] ?? ""),
         );
@@ -523,7 +531,7 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
                 createdAt: now,
               });
               const saved = yield* repo.update({ ...expense, updatedAt: now }, expense.revision);
-              yield* appendAudit({
+              yield* appendAudit(caller, {
                 workspaceId,
                 subject: subject(id),
                 action: "expense.attach",
@@ -566,10 +574,10 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       () => NotFound.make({ entity: "Attachment", id: attachment }),
     );
 
-  const detach: ExpensesImpl["detach"] = (id, attachment) =>
+  const detach: ExpensesImpl["detach"] = (caller, id, attachment) =>
     provide(
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("expense.write");
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "expense.write");
         yield* store.transaction(
           Effect.gen(function* () {
             const expense = yield* lockLive(workspaceId, id);
@@ -582,7 +590,7 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
               { ...expense, updatedAt: yield* nowIso },
               expense.revision,
             );
-            yield* appendAudit({
+            yield* appendAudit(caller, {
               workspaceId,
               subject: subject(id),
               action: "expense.detach",
@@ -600,10 +608,10 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       ),
     );
 
-  const attachmentRead: ExpensesImpl["attachment"] = (id, attachment) =>
+  const attachmentRead: ExpensesImpl["attachment"] = (caller, id, attachment) =>
     provide(
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("expense.attachment.read");
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "expense.attachment.read");
         yield* getLive(workspaceId, id);
         const found = yield* findAttachmentOf(workspaceId, id, attachment);
         if (Option.isNone(found)) {
@@ -620,10 +628,10 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       }).pipe(orUnavailable),
     );
 
-  const get: ExpensesImpl["get"] = (id) =>
+  const get: ExpensesImpl["get"] = (caller, id) =>
     provide(
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("expense.read");
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "expense.read");
         // One snapshot for the row and its attachments, so the view matches its revision.
         const { row, attachments } = yield* store.transaction(repo.detail(workspaceId, id));
         if (row.removedAt !== null) return yield* notFound(id);
@@ -631,10 +639,10 @@ export const makeExpenses = Effect.fn("makeExpenses")(function* (options: Expens
       }).pipe(orUnavailable),
     );
 
-  const list: ExpensesImpl["list"] = (q) =>
+  const list: ExpensesImpl["list"] = (caller, q) =>
     provide(
       Effect.gen(function* () {
-        const { workspaceId } = yield* authorizeInWorkspace("expense.read");
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "expense.read");
         const limit = q.limit ?? DEFAULT_LIMIT;
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
           return yield* invalid("request.malformed", ["limit"]);

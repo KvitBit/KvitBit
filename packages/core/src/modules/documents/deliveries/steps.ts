@@ -13,13 +13,12 @@
  * OutboxReconcile (J1a): it restarts the job of a delivery left `queued` or `sending`.
  */
 
-import { DeliveryId, type WorkspaceId } from "@kvitbit/domain/contract";
+import { type Caller, DeliveryId, type WorkspaceId } from "@kvitbit/domain/contract";
 import { EmailSender } from "@kvitbit/domain/ports";
 import * as EffectArray from "effect/Array";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Fn from "effect/Function";
 import * as Schema from "effect/Schema";
 import { CoreStore } from "../../../store/CoreStore";
 import { DocumentDeliveryReads } from "../delivery";
@@ -47,6 +46,7 @@ export class DeliveryRetry extends Schema.TaggedError<
 
 /** Why a queued delivery is no longer sent (J3), or null when it still is. */
 const ineligible = Effect.fn("ineligible")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   delivery: DeliveryRecord,
 ) {
@@ -57,7 +57,7 @@ const ineligible = Effect.fn("ineligible")(function* (
   if (delivery.reminder === null) return null; // a manual reminder (D14)
   // Automatic reminder: the same check as selection and enqueue (reminders/eligibility.ts).
   const { today } = yield* now;
-  const state = yield* reminderState(workspaceId, record, today);
+  const state = yield* reminderState(caller, workspaceId, record, today);
   return stepBlock(state, record, delivery.reminder, today, delivery.id);
 });
 
@@ -80,46 +80,48 @@ const transition = Effect.fn("transition")(function* (
  * queued -> sending | skipped. A sending row (a restarted job, J1a) is re-checked as well: it
  * stays sending (re-dispatch) or is skipped before any further provider call. Terminal rows stay.
  */
-const claimImpl = (workspaceId: WorkspaceId, id: DeliveryId) =>
-  Effect.flatMap(CoreStore, (store) =>
-    store.transaction(
-      Effect.gen(function* () {
-        const repo = yield* DeliveriesRepo;
-        const row = yield* repo.lock(workspaceId, id);
-        if (isTerminal(row.status)) return row.status;
-        const reason = yield* ineligible(workspaceId, row);
-        if (row.status === "sending" && reason === null) return row.status;
-        // A sending row may have reached the provider (a job that died before recording the
-        // attempt), so skipping it keeps that uncertainty and its reminder step (isReleased).
-        const next = yield* transition(workspaceId, id, () =>
-          reason === null
-            ? { status: "sending" }
-            : row.status === "sending"
-              ? {
-                  status: "skipped",
-                  failure: reason,
-                  lastOutcome: row.lastOutcome ?? "outcome_unknown",
-                }
-              : { status: "skipped", failure: reason },
-        );
-        return next.status;
-      }),
+export const claim = Effect.fn("claim")(
+  (caller: Caller, workspaceId: WorkspaceId, id: DeliveryId) =>
+    Effect.flatMap(CoreStore, (store) =>
+      store.transaction(
+        Effect.gen(function* () {
+          const repo = yield* DeliveriesRepo;
+          const row = yield* repo.lock(workspaceId, id);
+          if (isTerminal(row.status)) return row.status;
+          const reason = yield* ineligible(caller, workspaceId, row);
+          if (row.status === "sending" && reason === null) return row.status;
+          // A sending row may have reached the provider (a job that died before recording the
+          // attempt), so skipping it keeps that uncertainty and its reminder step (isReleased).
+          const next = yield* transition(workspaceId, id, () =>
+            reason === null
+              ? { status: "sending" }
+              : row.status === "sending"
+                ? {
+                    status: "skipped",
+                    failure: reason,
+                    lastOutcome: row.lastOutcome ?? "outcome_unknown",
+                  }
+                : { status: "skipped", failure: reason },
+          );
+          return next.status;
+        }),
+      ),
     ),
-  );
-export const claim: {
-  (id: DeliveryId): (workspaceId: WorkspaceId) => ReturnType<typeof claimImpl>;
-  (workspaceId: WorkspaceId, id: DeliveryId): ReturnType<typeof claimImpl>;
-} = Fn.dual(2, claimImpl);
+);
 
 /** Sends a `sending` delivery; any other status is returned unchanged without sending. */
 export const dispatch = Effect.fn("dispatch")(function* (workspaceId: WorkspaceId, id: DeliveryId) {
   const store = yield* CoreStore;
   const row = yield* (yield* DeliveriesRepo).get(workspaceId, id);
   if (row.status !== "sending") return row.status;
-  const bytes = yield* (yield* DocumentDeliveryReads).render(row.view, {
-    template: row.attachment.template,
-    language: row.language,
-  });
+  const bytes = yield* (yield* DocumentDeliveryReads).render(
+    row.view,
+    {
+      template: row.attachment.template,
+      language: row.language,
+    },
+    workspaceId,
+  );
   const email = yield* EmailSender;
   const outcome = yield* email
     .send(
@@ -200,16 +202,14 @@ export const giveUp = Effect.fnUntraced(function* (
 });
 
 /** claim, then dispatch when claimed: the delivery's terminal (or retryable) outcome. */
-const deliverImpl = (workspaceId: WorkspaceId, id: DeliveryId) =>
-  Effect.filterOrElse(
-    claim(workspaceId, id),
-    (status) => isTerminal(status),
-    () => dispatch(workspaceId, id),
-  );
-export const deliver: {
-  (id: DeliveryId): (workspaceId: WorkspaceId) => ReturnType<typeof deliverImpl>;
-  (workspaceId: WorkspaceId, id: DeliveryId): ReturnType<typeof deliverImpl>;
-} = Fn.dual(2, deliverImpl);
+export const deliver = Effect.fn("deliver")(
+  (caller: Caller, workspaceId: WorkspaceId, id: DeliveryId) =>
+    Effect.filterOrElse(
+      claim(caller, workspaceId, id),
+      (status) => isTerminal(status),
+      () => dispatch(workspaceId, id),
+    ),
+);
 
 /**
  * OutboxReconcile for deliveries (J1a, cross-tenant; integration runs it from a cron). Restarts

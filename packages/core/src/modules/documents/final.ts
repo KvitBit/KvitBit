@@ -11,7 +11,7 @@
  * (`non_vat_payer`, `identified_person`), one `outside_scope` line for the amount paid.
  */
 
-import type { DocumentId, DocumentPatch, RequestOptions } from "@kvitbit/domain/contract";
+import type { Caller, DocumentId, DocumentPatch, RequestOptions } from "@kvitbit/domain/contract";
 import {
   Conflict,
   DocumentId as DocumentIdSchema,
@@ -21,8 +21,6 @@ import {
 import * as EffectArray from "effect/Array";
 import * as BigDecimal from "effect/BigDecimal";
 import * as Effect from "effect/Effect";
-import * as Fn from "effect/Function";
-import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import * as EffectString from "effect/String";
 import { ZERO } from "../../engines/decimal";
@@ -195,11 +193,12 @@ const finalLinks = (proforma: DocumentRecord, spec: DocumentSpec): ReadonlyArray
  */
 export const issueFinalInvoice = Effect.fn("issueFinalInvoice")(
   function* (
+    caller: Caller,
     proformaId: DocumentId,
     input?: { readonly patch?: DocumentPatch },
     opts?: RequestOptions,
   ) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.finalInvoice");
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.finalInvoice");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -220,7 +219,7 @@ export const issueFinalInvoice = Effect.fn("issueFinalInvoice")(
         const proforma = yield* repo.lock(workspaceId, proformaId);
         const spec = yield* plan(proforma, input?.patch, true);
         const id = yield* newId(DocumentIdSchema.make);
-        const composed = yield* compose(workspaceId, spec, { today });
+        const composed = yield* compose(caller, workspaceId, spec, { today });
         const draftRow = newDraftRecord(id, workspaceId, composed, at);
         const links = finalLinks(proforma, spec);
         const saved = yield* insertNumbered(
@@ -239,7 +238,7 @@ export const issueFinalInvoice = Effect.fn("issueFinalInvoice")(
             proforma.revision,
           )
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.issue",
@@ -249,7 +248,7 @@ export const issueFinalInvoice = Effect.fn("issueFinalInvoice")(
             { path: "finalInvoiceFor", before: null, after: proforma.id },
           ],
         });
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id: proforma.id },
           action: "document.finalInvoice",
@@ -267,9 +266,9 @@ interface FinalPreviewInput {
   readonly patch?: DocumentPatch;
 }
 
-const previewFinalInvoiceImpl = Effect.fnUntraced(
-  function* (proformaId: DocumentId, input?: FinalPreviewInput) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.finalInvoice");
+export const previewFinalInvoice = Effect.fnUntraced(
+  function* (caller: Caller, proformaId: DocumentId, input?: FinalPreviewInput) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.finalInvoice");
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
@@ -277,7 +276,7 @@ const previewFinalInvoiceImpl = Effect.fnUntraced(
         const { today, at } = yield* now;
         const proforma = yield* repo.get(workspaceId, proformaId);
         const spec = yield* plan(proforma, input?.patch, false);
-        const composed = yield* compose(workspaceId, spec, { today });
+        const composed = yield* compose(caller, workspaceId, spec, { today });
         const id = yield* newId(DocumentIdSchema.make);
         const row = newDraftRecord(id, workspaceId, composed, at);
         // D15: fails like issue would (series exhausted), then rolls the row and allocation back.
@@ -291,12 +290,6 @@ const previewFinalInvoiceImpl = Effect.fnUntraced(
 );
 
 /** The Final Invoice `issueFinalInvoice` would issue, with its deductions, unnumbered. */
-export const previewFinalInvoice: {
-  (
-    input?: FinalPreviewInput,
-  ): (proformaId: DocumentId) => ReturnType<typeof previewFinalInvoiceImpl>;
-  (proformaId: DocumentId, input?: FinalPreviewInput): ReturnType<typeof previewFinalInvoiceImpl>;
-} = Fn.dual((args) => Predicate.isString(args[0]), previewFinalInvoiceImpl);
 
 /** A Final Invoice whose advances cover it is `paid` (or `overpaid`) from the start. */
 const withSettlement = (row: DocumentRecord): DocumentRecord => {

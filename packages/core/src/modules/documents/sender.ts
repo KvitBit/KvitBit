@@ -4,31 +4,18 @@
  * sender authorizes `document.send` itself, rule R1a). Stage 2 (cd-delivery, under
  * documents/deliveries/**) provides the real layer; until then `DocumentSenderStub` dies.
  */
-import type { Caller, Documents } from "@kvitbit/domain/contract";
+import type { Documents } from "@kvitbit/domain/contract";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 type DocumentsShape = Documents["Service"];
 
-type SenderMethod<Args extends ReadonlyArray<unknown>, A, E> = (
-  caller: Caller,
-  ...args: Args
-) => Effect.Effect<A, E>;
-
 export class DocumentSender extends Context.Service<
   DocumentSender,
   {
-    readonly send: SenderMethod<
-      Parameters<DocumentsShape["send"]>,
-      Effect.Success<ReturnType<DocumentsShape["send"]>>,
-      Effect.Error<ReturnType<DocumentsShape["send"]>>
-    >;
-    readonly previewSend: SenderMethod<
-      Parameters<DocumentsShape["previewSend"]>,
-      Effect.Success<ReturnType<DocumentsShape["previewSend"]>>,
-      Effect.Error<ReturnType<DocumentsShape["previewSend"]>>
-    >;
+    readonly send: DocumentsShape["send"];
+    readonly previewSend: DocumentsShape["previewSend"];
   }
 >()("@kvitbit/core/modules/documents/sender/DocumentSender") {}
 

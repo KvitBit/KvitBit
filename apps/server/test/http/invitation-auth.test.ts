@@ -3,7 +3,7 @@ import { inspect } from "node:util";
 import { BotProtection, BotProtectionUnavailable, InvalidBotProof } from "@kvitbit/adapters/altcha";
 import { InvitationTokens } from "@kvitbit/core";
 import { CaptureEmailSender } from "@kvitbit/core/testing";
-import { CurrentCaller, Workspaces } from "@kvitbit/domain/contract";
+import { Workspaces } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -12,6 +12,7 @@ import * as Ref from "effect/Ref";
 import * as EffectString from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
+
 import { type Harness, json, makeHarness, ORIGIN } from "./harness";
 
 const emailLink = /https:\/\/\S+/;
@@ -50,10 +51,10 @@ const setup = () => {
       Effect.gen(function* () {
         const workspaces = yield* Workspaces;
         const tokens = yield* InvitationTokens;
-        const invitation = yield* workspaces.invite(email, "accountant");
+        const invitation = yield* workspaces.invite(caller, email, "accountant");
         const token = yield* tokens.token(invitation.id, 0);
         return { token, id: invitation.id };
-      }).pipe(Effect.provideService(CurrentCaller, caller)),
+      }),
     );
   };
   const signUp = (email: string, proof: string, fields = {}, origin = ORIGIN) =>
@@ -182,8 +183,8 @@ test("invalid invitation signup attempts leave accounts and memberships unchange
   await app.run(
     Effect.gen(function* () {
       const workspaces = yield* Workspaces;
-      yield* workspaces.revokeInvitation(revoked.id);
-    }).pipe(Effect.provideService(CurrentCaller, caller)),
+      yield* workspaces.revokeInvitation(caller, revoked.id);
+    }),
   );
   expect(
     (

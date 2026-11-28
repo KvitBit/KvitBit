@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 /** The seam bindings of src/compose/bindings.ts on TestCore (board IDs in each test name). */
 
 import { describe, expect, test } from "bun:test";
@@ -25,7 +26,9 @@ const RECORD: RegistryRecord = {
   terminatedOn: null,
 };
 
-const newWorkspace = Effect.flatMap(Workspaces, (ws) => ws.create({ name: "Kvitbit s.r.o." }));
+const newWorkspace = Effect.flatMap(Workspaces, (ws) =>
+  Effect.flatMap(TestCaller, (caller) => ws.create(caller, { name: "Kvitbit s.r.o." })),
+);
 
 /** The tag of the effect's expected failure. */
 const failureTag = <A, E extends { readonly _tag: string }, R>(effect: Effect.Effect<A, E, R>) =>
@@ -39,7 +42,7 @@ describe("bindings", () => {
         const owner = yield* newWorkspace;
         const series = yield* asCaller(
           owner,
-          Effect.flatMap(Workspaces, (ws) => ws.listSeries),
+          Effect.flatMap(Workspaces, (ws) => ws.listSeries(owner)),
         );
         const invoice = Option.getOrThrow(
           EffectArray.findFirst(series, (s) => s.kind === "invoice"),
@@ -74,9 +77,12 @@ describe("bindings", () => {
       Effect.gen(function* () {
         const owner = yield* newWorkspace;
         const settings = yield* PaymentSettings;
-        const own = yield* asCaller(owner, settings.autoSendPaymentTaxDocument(owner.workspaceId));
+        const own = yield* asCaller(
+          owner,
+          settings.autoSendPaymentTaxDocument(owner, owner.workspaceId),
+        );
         const other = yield* failureTag(
-          asCaller(owner, settings.autoSendPaymentTaxDocument(WORKSPACE_B)),
+          asCaller(owner, settings.autoSendPaymentTaxDocument(owner, WORKSPACE_B)),
         );
         return [Schema.is(Schema.Boolean)(own), other];
       }),

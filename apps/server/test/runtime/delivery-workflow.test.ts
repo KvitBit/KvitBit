@@ -33,7 +33,7 @@ import {
   makeWorkflowHandlersLayer,
 } from "../../src/runtime/workflows";
 import { DeliveryJobsLive } from "../../src/wiring/workflows";
-import { asCaller, runSqlCore } from "../persistence/conformance/sqlCore";
+import { runSqlCore } from "../persistence/conformance/sqlCore";
 
 test.each([
   { succeeds: true, expired: false, expectedAttempts: 2, terminal: "sent" },
@@ -60,61 +60,58 @@ test.each([
             : Effect.fail(EmailNotAccepted.make({}));
         }),
     });
-    const exit = await runSqlCore(
-      Caller.account({ ...user, channel: "web", locale: "cs" }),
-      Effect.gen(function* () {
+    const exit = await runSqlCore({
+      effect: Effect.gen(function* () {
         const workspaces = yield* Workspaces;
         const contacts = yield* Contacts;
         const documents = yield* Documents;
-        const caller = yield* workspaces.create({ name: "Delivery fixture" });
-        return yield* asCaller(
-          caller,
-          Effect.gen(function* () {
-            const contact = yield* contacts.save({ name: "Buyer", roles: ["customer"] });
-            const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
-            const doc = yield* documents.issue({
-              input: {
-                kind: "invoice",
-                contact: contactId,
-                issuedOn: IsoDate.make("2026-11-23"),
-                currency: CurrencyCode.make("CZK"),
-                due: { inDays: 14 },
-                paymentMethod: "cash",
-                lines: [
-                  {
-                    description: "Fixture",
-                    quantity: BigDecimal.fromBigInt(1n),
-                    unitPrice: BigDecimal.fromBigInt(50n),
-                  },
-                ],
-              },
-            });
-            const { deliveryId: id } = yield* documents.send(doc.id, {
-              to: ["buyer@example.test"],
-            });
-            if (expired) {
-              // A recovered intent keeps its original time budget even without a live execution.
-              const sql = yield* SqlClient.SqlClient;
-              yield* sql`UPDATE deliveries SET workflow_started_at = '2020-01-01T00:00:00Z'
-                WHERE workspace_id = ${caller.workspaceId} AND id = ${id}`;
-            }
-            const outcome = yield* DocumentDeliveryWorkflow.execute({
-              workspaceId: caller.workspaceId,
-              deliveryId: id,
-            }).pipe(Effect.provide(workflow), Effect.provideService(EmailSender, email));
-            const updated = yield* documents.get(doc.id);
-            return {
-              id,
-              outcome,
-              status: Option.getOrUndefined(
-                Arr.findFirst(updated.deliveries, (entry) => entry.id === id),
-              )?.status,
-            };
-          }),
+        const caller = yield* workspaces.create(
+          Caller.account({ ...user, channel: "web", locale: "cs" }),
+          { name: "Delivery fixture" },
         );
+        const contact = yield* contacts.save(caller, { name: "Buyer", roles: ["customer"] });
+        const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
+        const doc = yield* documents.issue(caller, {
+          input: {
+            kind: "invoice",
+            contact: contactId,
+            issuedOn: IsoDate.make("2026-11-23"),
+            currency: CurrencyCode.make("CZK"),
+            due: { inDays: 14 },
+            paymentMethod: "cash",
+            lines: [
+              {
+                description: "Fixture",
+                quantity: BigDecimal.fromBigInt(1n),
+                unitPrice: BigDecimal.fromBigInt(50n),
+              },
+            ],
+          },
+        });
+        const { deliveryId: id } = yield* documents.send(caller, doc.id, {
+          to: ["buyer@example.test"],
+        });
+        if (expired) {
+          // A recovered intent keeps its original time budget even without a live execution.
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`UPDATE deliveries SET workflow_started_at = '2020-01-01T00:00:00Z'
+                WHERE workspace_id = ${caller.workspaceId} AND id = ${id}`;
+        }
+        const outcome = yield* DocumentDeliveryWorkflow.execute({
+          workspaceId: caller.workspaceId,
+          deliveryId: id,
+        }).pipe(Effect.provide(workflow), Effect.provideService(EmailSender, email));
+        const updated = yield* documents.get(caller, doc.id);
+        return {
+          id,
+          outcome,
+          status: Option.getOrUndefined(
+            Arr.findFirst(updated.deliveries, (entry) => entry.id === id),
+          )?.status,
+        };
       }),
-      { users: [user] },
-    );
+      options: { users: [user] },
+    });
     expect(exit).toMatchObject({
       _tag: "Success",
       value: { outcome: terminal, status: terminal },

@@ -1,3 +1,4 @@
+import { TestCaller } from "../../helpers/callerContext";
 /**
  * Test fixtures for the recurring module: a stub of the domain `Documents` tag whose rows live
  * in `MemoryTables`, so its writes commit and roll back with the caller's transaction (as the
@@ -16,7 +17,6 @@ import {
   ContactId,
   ContactSnapshot,
   CurrencyCode,
-  CurrentCaller,
   DeliveryId,
   DocumentId,
   DocumentInput,
@@ -228,33 +228,38 @@ export const DocumentsStubLayer = Layer.effectContext(
       list: unsupported,
       history: unsupported,
       discardDraft: Effect.fn("DocumentsStub.discardDraft")(function* (
+        testCaller: Caller,
         id: DocumentId,
         expectedRevision: number,
       ) {
-        const { workspaceId } = yield* authorizeInWorkspace("document.draft");
+        const { workspaceId } = yield* authorizeInWorkspace(testCaller, "document.draft");
         yield* orUnavailable(store.transaction(docs.remove(workspaceId, id, expectedRevision)));
       }),
-      get: Effect.fn("DocumentsStub.get")(function* (id: DocumentId) {
-        const { workspaceId } = yield* authorizeInWorkspace("document.read");
+      get: Effect.fn("DocumentsStub.get")(function* (testCaller: Caller, id: DocumentId) {
+        const { workspaceId } = yield* authorizeInWorkspace(testCaller, "document.read");
         const row = yield* orUnavailable(store.transaction(docs.get(workspaceId, id)));
         return viewOf(row);
       }),
-      createDraft: Effect.fn("DocumentsStub.createDraft")(function* (input: DocumentInput) {
-        const { caller } = yield* authorizeInWorkspace("document.draft");
+      createDraft: Effect.fn("DocumentsStub.createDraft")(function* (
+        testCaller: Caller,
+        input: DocumentInput,
+      ) {
+        const { caller } = yield* authorizeInWorkspace(testCaller, "document.draft");
         return yield* create(input, "draft", caller);
       }),
       issue: Effect.fn("DocumentsStub.issue")(function* (
-        from: Parameters<Documents["Service"]["issue"]>[0],
+        testCaller: Caller,
+        from: Parameters<Documents["Service"]["issue"]>[1],
       ) {
-        const { caller } = yield* authorizeInWorkspace("document.issue");
+        const { caller } = yield* authorizeInWorkspace(testCaller, "document.issue");
         yield* Ref.update(attempts, (a) => ({ ...a, issue: a.issue + 1 }));
         const failure = yield* takeOnce(failNextIssue, null);
         if (failure !== null) return yield* failure;
         if (!("input" in from)) return yield* Effect.die("stub: issue from draft");
         return yield* create(from.input, "issued", caller);
       }),
-      send: Effect.fn("DocumentsStub.send")(function* (id: DocumentId) {
-        const { workspaceId } = yield* authorizeInWorkspace("document.send");
+      send: Effect.fn("DocumentsStub.send")(function* (testCaller: Caller, id: DocumentId) {
+        const { workspaceId } = yield* authorizeInWorkspace(testCaller, "document.send");
         yield* Ref.update(attempts, (a) => ({ ...a, send: a.send + 1 }));
         const failure = yield* takeOnce(failNextSend, null);
         if (failure !== null) return yield* failure;
@@ -307,7 +312,7 @@ type Services = Layer.Success<typeof TestLayer>;
 /** Runs `body` on fresh in-memory ports (TestClock at TEST_NOW) as `caller`. */
 export const scenario =
   (caller: Caller) =>
-  <A, E>(body: Effect.Effect<A, E, Services | CurrentCaller | CoreStore | MemoryTables>) =>
+  <A, E>(body: Effect.Effect<A, E, Services | TestCaller | CoreStore | MemoryTables>) =>
     runTest(caller, body.pipe(Effect.provide(TestLayer)));
 
 const decodeTemplateView = Schema.decodeUnknownEffect(TemplateViewSchema);
@@ -316,8 +321,8 @@ export const templateView = (value: TemplateView) => decodeTemplateView(value).p
 /** Runs `effect` as `caller` (switches the current caller inside a scenario). */
 export const as =
   (caller: Caller) =>
-  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, CurrentCaller>> =>
-    Effect.provideService(effect, CurrentCaller, caller);
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, Exclude<R, TestCaller>> =>
+    Effect.provideService(effect, TestCaller, caller);
 
 /** The sealed System caller of one occurrence's RecurringIssuance job. */
 export const job =

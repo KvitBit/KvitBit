@@ -1,3 +1,4 @@
+import { TestCaller } from "../helpers/callerContext";
 /**
  * Shared setup for the payments-flow e2e tests: a vat_payer Workspace onboarded through
  * `Workspaces.create` on a fresh `TestCore`, with CZK and EUR bank accounts and a customer and a
@@ -6,7 +7,6 @@
 
 import type {
   ContactView,
-  CurrentCaller,
   DocumentInput,
   DocumentView,
   ExpenseId,
@@ -63,7 +63,7 @@ interface World {
   readonly supplier: ContactId;
 }
 
-type Body<A, E> = (world: World) => Effect.Effect<A, E, TestCoreServices | CurrentCaller>;
+type Body<A, E> = (world: World) => Effect.Effect<A, E, TestCoreServices | TestCaller>;
 
 /**
  * Runs `body` as the owner of a new vat_payer Workspace on a fresh TestCore (TestClock at
@@ -74,23 +74,25 @@ export const inWorkspace = <A, E>(body: Body<A, E>) =>
     account(),
     Effect.gen(function* () {
       const owner = yield* Effect.flatMap(Workspaces, (ws) =>
-        ws.create({ name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" }),
+        ws.create(account(), { name: "Alfa Beta s.r.o.", ico: ICO, taxRegime: "vat_payer" }),
       );
       return yield* asCaller(
         owner,
         Effect.gen(function* () {
           const ws = yield* Workspaces;
           yield* ws.saveBankAccount(
+            owner,
             BankAccountInput.make({
               iban: "CZ65 0800 0000 1920 0014 5399",
               currency: "CZK",
             }),
           );
           yield* ws.saveBankAccount(
+            owner,
             BankAccountInput.make({ iban: "DE89370400440532013000", currency: "EUR" }),
           );
           const contacts = yield* Contacts;
-          const customer = yield* contacts.save({
+          const customer = yield* contacts.save(owner, {
             name: "Odběratel a.s.",
             ico: "25596641",
             dic: "CZ25596641",
@@ -98,7 +100,7 @@ export const inWorkspace = <A, E>(body: Body<A, E>) =>
             roles: ["customer"],
             billingEmails: ["fakturace@odberatel.cz"],
           });
-          const supplier = yield* contacts.save({
+          const supplier = yield* contacts.save(owner, {
             name: "Dodavatel s.r.o.",
             ico: "27074358",
             dic: "CZ27074358",
@@ -132,18 +134,20 @@ export const issueInvoice = ({
   ...extra
 }: Partial<DocumentInput> & { readonly contact: ContactId }) =>
   Effect.flatMap(Documents, (d) =>
-    d.issue({
-      input: {
-        kind: "invoice",
-        contact,
-        lines: [
-          { description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") },
-          { description: "Kniha", unitPrice: dec("500"), vat: "reduced" },
-        ],
-        issuedOn: TODAY,
-        ...extra,
-      },
-    }),
+    Effect.flatMap(TestCaller, (caller) =>
+      d.issue(caller, {
+        input: {
+          kind: "invoice",
+          contact,
+          lines: [
+            { description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") },
+            { description: "Kniha", unitPrice: dec("500"), vat: "reduced" },
+          ],
+          issuedOn: TODAY,
+          ...extra,
+        },
+      }),
+    ),
   );
 
 const money = (amount: string, currency: CurrencyCode = CZK) =>
@@ -160,8 +164,11 @@ export const payDocument = ({
 }) =>
   Effect.flatMap(Payments, (p) => {
     const target = { document };
-    return p.record(
-      amount === undefined ? { target } : { target, amount: money(amount, currency) },
+    return Effect.flatMap(TestCaller, (caller) =>
+      p.record(
+        caller,
+        amount === undefined ? { target } : { target, amount: money(amount, currency) },
+      ),
     );
   });
 
@@ -174,7 +181,9 @@ export const payExpense = ({
 }) =>
   Effect.flatMap(Payments, (p) => {
     const target = { expense };
-    return p.record(amount === undefined ? { target } : { target, amount: money(amount) });
+    return Effect.flatMap(TestCaller, (caller) =>
+      p.record(caller, amount === undefined ? { target } : { target, amount: money(amount) }),
+    );
   });
 
 /**

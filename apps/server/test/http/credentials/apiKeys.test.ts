@@ -2,13 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { apiKeyMatches } from "@kvitbit/adapters/auth";
 import { ALL_SCOPES, ApiKeyCreated, ApiKeyView, READ_SCOPES } from "@kvitbit/api-contract";
 import { CoreStore } from "@kvitbit/core/ports";
-import {
-  CurrentCaller,
-  Invalid,
-  type MemberCaller,
-  OpenStruct,
-  Workspaces,
-} from "@kvitbit/domain/contract";
+import { Invalid, type MemberCaller, OpenStruct, Workspaces } from "@kvitbit/domain/contract";
 import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
@@ -16,6 +10,7 @@ import * as Schema from "effect/Schema";
 import * as Str from "effect/String";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
+
 import { as, type Harness, json, makeHarness, TEST_NOW, type TestUser } from "../harness";
 import { createSeededWorkspace, joinMember } from "./seed";
 
@@ -254,7 +249,7 @@ describe("apiKeys group", () => {
     await h.run(
       Effect.gen(function* () {
         const ws = yield* Workspaces;
-        yield* ws.close("Alfa s.r.o.").pipe(Effect.provideService(CurrentCaller, ownerCaller));
+        yield* ws.close(ownerCaller, "Alfa s.r.o.");
       }),
     );
 

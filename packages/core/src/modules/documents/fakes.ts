@@ -10,7 +10,7 @@ import type {
   PriceListItemId,
   WorkspaceId,
 } from "@kvitbit/domain/contract";
-import { CurrentCaller, NotFound } from "@kvitbit/domain/contract";
+import { type Caller, NotFound } from "@kvitbit/domain/contract";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fn from "effect/Function";
@@ -139,8 +139,10 @@ const ports = Layer.mergeAll(
     Effect.map(DocumentFixtures, (f) =>
       DocumentIssuers.of({
         // As agreed in #418: only the current Member/System caller's Workspace is visible.
-        forDocument: Effect.fn("DocumentIssuers.forDocument")(function* (workspaceId: WorkspaceId) {
-          const caller = yield* CurrentCaller;
+        forDocument: Effect.fn("DocumentIssuers.forDocument")(function* (
+          caller: Caller,
+          workspaceId: WorkspaceId,
+        ) {
           const found = (yield* Ref.get(f.issuers)).get(workspaceId);
           const own =
             (caller._tag === "Member" || caller._tag === "System") &&

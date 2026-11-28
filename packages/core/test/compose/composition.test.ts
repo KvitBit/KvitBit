@@ -105,8 +105,8 @@ describe("TestCore", () => {
       account(),
       Effect.gen(function* () {
         const ws = yield* Workspaces;
-        const owner = yield* ws.create({ name: "Kvitbit s.r.o." });
-        const series = yield* asCaller(owner, ws.listSeries);
+        const owner = yield* ws.create(account(), { name: "Kvitbit s.r.o." });
+        const series = yield* asCaller(owner, ws.listSeries(owner));
         return EffectArray.map(series, (s) => s.kind).sort();
       }),
     );
@@ -118,13 +118,13 @@ describe("TestCore", () => {
       account(),
       Effect.gen(function* () {
         const owner = yield* Effect.flatMap(Workspaces, (ws) =>
-          ws.create({ name: "Kvitbit s.r.o." }),
+          ws.create(account(), { name: "Kvitbit s.r.o." }),
         );
         return yield* asCaller(
           owner,
           Effect.gen(function* () {
             const contact = yield* Effect.flatMap(Contacts, (c) =>
-              c.save({ name: "Acme s.r.o.", billingEmails: ["fakturace@acme.cz"] }),
+              c.save(owner, { name: "Acme s.r.o.", billingEmails: ["fakturace@acme.cz"] }),
             );
             const docs = yield* Documents;
             const contactId = yield* Schema.decodeUnknownEffect(ContactId)(contact["id"]);
@@ -134,10 +134,10 @@ describe("TestCore", () => {
               lines: [{ description: "Konzultace", quantity: dec("2"), unitPrice: dec("1000") }],
               issuedOn: IsoDate.make("2026-11-23"),
             };
-            const issued = yield* docs.issue({ input });
-            yield* docs.send(issued.id);
-            yield* Effect.flatMap(PublicShareLinks, (l) => l.create(issued.id));
-            const got = yield* docs.get(issued.id);
+            const issued = yield* docs.issue(owner, { input });
+            yield* docs.send(owner, issued.id);
+            yield* Effect.flatMap(PublicShareLinks, (l) => l.create(owner, issued.id));
+            const got = yield* docs.get(owner, issued.id);
             return { deliveries: got.deliveries.length > 0, share: got.share !== null };
           }),
         );

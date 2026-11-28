@@ -1,9 +1,9 @@
 /**
  * `DocumentsLive`: the domain `Documents` tag over the method files. Every dependency is
- * captured when the layer is built, so each method only needs `CurrentCaller`.
+ * captured when the layer is built, so each method needs only its explicit `caller`.
  */
-import type { DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
-import { CurrentCaller, Documents } from "@kvitbit/domain/contract";
+import type { Caller, DocumentId, DocumentPatch, DocumentView } from "@kvitbit/domain/contract";
+import { Documents } from "@kvitbit/domain/contract";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -47,9 +47,9 @@ export type DocumentsDeps =
  * A `number` needs `document.overrideNumber` (owner/admin, D4) on top of `document.edit`.
  */
 const edit = Effect.fn("edit")(
-  function* (id: DocumentId, patch: DocumentPatch, expectedRevision: number) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.edit");
-    if (patch.number !== undefined) yield* authorizeInWorkspace("document.overrideNumber");
+  function* (caller: Caller, id: DocumentId, patch: DocumentPatch, expectedRevision: number) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.edit");
+    if (patch.number !== undefined) yield* authorizeInWorkspace(caller, "document.overrideNumber");
     const store = yield* CoreStore;
     const repo = yield* DocumentsRepo;
     return yield* store.transaction(
@@ -57,8 +57,8 @@ const edit = Effect.fn("edit")(
         const row = yield* repo.getForUpdate(workspaceId, id, expectedRevision);
         yield* guard(row, "edit");
         return row.status === "draft"
-          ? yield* editDraft(row, patch)
-          : yield* editIssued(row, patch);
+          ? yield* editDraft(caller, row, patch)
+          : yield* editIssued(caller, row, patch);
       }),
     );
   },
@@ -71,9 +71,8 @@ const edit = Effect.fn("edit")(
  * returns exactly the stored result (rule C3) and an activity read never touches a write.
  */
 const enriched = Effect.fn("enriched")(
-  function* <E, R>(effect: Effect.Effect<DocumentView, E, R>) {
+  function* <E, R>(caller: Caller, effect: Effect.Effect<DocumentView, E, R>) {
     const view = yield* effect;
-    const caller = yield* CurrentCaller;
     // A successful method had a Workspace caller (authorizeInWorkspace).
     return caller._tag === "Member" || caller._tag === "System"
       ? yield* withActivity(caller.workspaceId, view, can(caller, "share.read"))
@@ -83,7 +82,7 @@ const enriched = Effect.fn("enriched")(
 );
 
 const make = Effect.gen(function* () {
-  // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+  // Only the build dependencies: the build-time context may hold a RequestOutcome
   // or transaction frame, and providing them per call would override the caller's own.
   const buildContext = yield* Effect.context<DocumentsDeps>();
   const context = Context.pick(
@@ -105,8 +104,8 @@ const make = Effect.gen(function* () {
    * `RequestOutcome` and the CoreStore transaction frame of an enclosing transaction (nested
    * calls, e.g. recurring issuance, run as savepoints) all come from the call site.
    */
-  const run = <A, E>(effect: Effect.Effect<A, E, DocumentsDeps | CurrentCaller>) =>
-    Effect.flatMap(Effect.context<CurrentCaller>(), (callSite) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, DocumentsDeps>) =>
+    Effect.flatMap(Effect.context<never>(), (callSite) =>
       Effect.provideContext(effect, Context.merge(context, callSite)),
     );
   /**
@@ -117,39 +116,45 @@ const make = Effect.gen(function* () {
    * `request.malformed` + `params.reason` (#430/#478).
    */
   return Documents.of({
-    preview: Effect.fn("Documents.preview")((input) => preview(input).pipe(enriched, run)),
-    createDraft: Effect.fn("Documents.createDraft")((input, opts) => run(createDraft(input, opts))),
-    discardDraft: Effect.fn("Documents.discardDraft")((id, expectedRevision) =>
-      run(discardDraft(id, expectedRevision)),
+    preview: Effect.fn("Documents.preview")((caller, input) =>
+      run(enriched(caller, preview(caller, input))),
     ),
-    edit: Effect.fn("Documents.edit")((id, patch, expectedRevision) =>
-      run(edit(id, patch, expectedRevision)),
+    createDraft: Effect.fn("Documents.createDraft")((caller, input, opts) =>
+      run(createDraft(caller, input, opts)),
     ),
-    get: Effect.fn("Documents.get")((id) => get(id).pipe(enriched, run)),
-    list: Effect.fn("Documents.list")((q) => run(list(q))),
-    history: Effect.fn("Documents.history")((id) => run(history(id))),
-    pdf: Effect.fn("Documents.pdf")((id, opts) => run(pdf(id, opts))),
-    send: Effect.fn("Documents.send")(function* (id, input, opts) {
-      const caller = yield* CurrentCaller;
-      return yield* sender.send(caller, id, input, opts);
-    }),
-    previewSend: Effect.fn("Documents.previewSend")(function* (id, input) {
-      const caller = yield* CurrentCaller;
-      return yield* sender.previewSend(caller, id, input);
-    }),
-    issue: Effect.fn("Documents.issue")((from, opts) => run(issue(from, opts))),
-    lock: Effect.fn("Documents.lock")((id) => run(lock(id))),
-    unlock: Effect.fn("Documents.unlock")((id, reason) => run(unlock(id, reason))),
-    cancel: Effect.fn("Documents.cancel")((id, input, opts) => run(cancel(id, input, opts))),
-    correct: Effect.fn("Documents.correct")((id, input, opts) => run(correct(id, input, opts))),
-    previewCorrection: Effect.fn("Documents.previewCorrection")((id, input) =>
-      previewCorrection(id, input).pipe(enriched, run),
+    discardDraft: Effect.fn("Documents.discardDraft")((caller, id, expectedRevision) =>
+      run(discardDraft(caller, id, expectedRevision)),
     ),
-    issueFinalInvoice: Effect.fn("Documents.issueFinalInvoice")((proforma, input, opts) =>
-      run(issueFinalInvoice(proforma, input, opts)),
+    edit: Effect.fn("Documents.edit")((caller, id, patch, expectedRevision) =>
+      run(edit(caller, id, patch, expectedRevision)),
     ),
-    previewFinalInvoice: Effect.fn("Documents.previewFinalInvoice")((proforma, input) =>
-      previewFinalInvoice(proforma, input).pipe(enriched, run),
+    get: Effect.fn("Documents.get")((caller, id) => run(enriched(caller, get(caller, id)))),
+    list: Effect.fn("Documents.list")((caller, q) => run(list(caller, q))),
+    history: Effect.fn("Documents.history")((caller, id) => run(history(caller, id))),
+    pdf: Effect.fn("Documents.pdf")((caller, id, opts) => run(pdf(caller, id, opts))),
+    send: Effect.fn("Documents.send")((caller, id, input, opts) =>
+      sender.send(caller, id, input, opts),
+    ),
+    previewSend: Effect.fn("Documents.previewSend")((caller, id, input) =>
+      sender.previewSend(caller, id, input),
+    ),
+    issue: Effect.fn("Documents.issue")((caller, from, opts) => run(issue(caller, from, opts))),
+    lock: Effect.fn("Documents.lock")((caller, id) => run(lock(caller, id))),
+    unlock: Effect.fn("Documents.unlock")((caller, id, reason) => run(unlock(caller, id, reason))),
+    cancel: Effect.fn("Documents.cancel")((caller, id, input, opts) =>
+      run(cancel(caller, id, input, opts)),
+    ),
+    correct: Effect.fn("Documents.correct")((caller, id, input, opts) =>
+      run(correct(caller, id, input, opts)),
+    ),
+    previewCorrection: Effect.fn("Documents.previewCorrection")((caller, id, input) =>
+      run(enriched(caller, previewCorrection(caller, id, input))),
+    ),
+    issueFinalInvoice: Effect.fn("Documents.issueFinalInvoice")((caller, proforma, input, opts) =>
+      run(issueFinalInvoice(caller, proforma, input, opts)),
+    ),
+    previewFinalInvoice: Effect.fn("Documents.previewFinalInvoice")((caller, proforma, input) =>
+      run(enriched(caller, previewFinalInvoice(caller, proforma, input))),
     ),
   });
 });

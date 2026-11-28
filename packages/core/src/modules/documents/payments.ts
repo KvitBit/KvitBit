@@ -29,7 +29,6 @@ import type {
 } from "@kvitbit/domain/contract";
 import {
   Conflict,
-  CurrentCaller,
   DocumentId as DocumentIdSchema,
   Invalid,
   LineId as LineIdSchema,
@@ -254,6 +253,7 @@ const malformed = (path: string, reason: string) =>
   Invalid.make({ issues: [{ path: [path], code: "request.malformed", params: { reason } }] });
 
 const settle = Effect.fn("settle")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   id: DocumentId,
   paid: { readonly amount: BigDecimal.BigDecimal; readonly payments: number },
@@ -283,7 +283,7 @@ const settle = Effect.fn("settle")(function* (
   const next = yield* repo
     .update({ ...changed, settlement: settlementOf(changed, credits), updatedAt: at }, row.revision)
     .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-  yield* appendAudit({
+  yield* appendAudit(caller, {
     workspaceId,
     subject: { entity: "Document", id },
     action: audit.action,
@@ -406,6 +406,7 @@ export const paymentTaxDocumentRecord: {
 );
 
 const issuePaymentTaxDocument = Effect.fn("issuePaymentTaxDocument")(function* (
+  caller: Caller,
   workspaceId: WorkspaceId,
   proformaId: DocumentId,
   payment: { readonly amount: BigDecimal.BigDecimal; readonly paidOn: IsoDate },
@@ -423,7 +424,7 @@ const issuePaymentTaxDocument = Effect.fn("issuePaymentTaxDocument")(function* (
     return yield* Conflict.make({ reason: "illegal_transition" });
   }
   if (!BigDecimal.isPositive(payment.amount)) return yield* malformed("amount", "out_of_range");
-  const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, payment.paidOn);
+  const issuer = yield* (yield* DocumentIssuers).forDocument(caller, workspaceId, payment.paidOn);
   if (issuer.regime !== "vat_payer") return null;
   // The VAT rate table starts at its first entry; an earlier tax point has no rates.
   if (payment.paidOn < (VAT_RATE_TABLE[0]?.from ?? payment.paidOn)) {
@@ -508,7 +509,7 @@ const issuePaymentTaxDocument = Effect.fn("issuePaymentTaxDocument")(function* (
       proforma.revision,
     )
     .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-  yield* appendAudit({
+  yield* appendAudit(caller, {
     workspaceId,
     subject: { entity: "Document", id },
     action: "document.issue",
@@ -518,7 +519,7 @@ const issuePaymentTaxDocument = Effect.fn("issuePaymentTaxDocument")(function* (
       { path: "advanceOf", before: null, after: proforma.id },
     ],
   });
-  yield* appendAudit({
+  yield* appendAudit(caller, {
     workspaceId,
     subject: { entity: "Document", id: proforma.id },
     action: "document.taxDocument",
@@ -567,7 +568,7 @@ export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, Document
   Layer.effect(
     DocumentPayments,
     Effect.gen(function* () {
-      // Only the build dependencies: the build-time context may hold a CurrentCaller, RequestOutcome
+      // Only the build dependencies: the build-time context may hold a RequestOutcome
       // or transaction frame, and providing them per call would override the caller's own.
       const buildContext = yield* Effect.context<DocumentPaymentsDeps>();
       const context = Context.pick(
@@ -578,7 +579,7 @@ export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, Document
         FxFixings,
         DocumentIssuers,
       )(buildContext);
-      // The call site's context wins: its caller and CoreStore transaction frame.
+      // The call site's context wins: its CoreStore transaction frame.
       const run = <A, E>(effect: Effect.Effect<A, E, DocumentPaymentsDeps>) =>
         Effect.flatMap(Effect.context<never>(), (callSite) =>
           Effect.provideContext(effect, Context.merge(context, callSite)),
@@ -586,15 +587,10 @@ export const DocumentPaymentsLive: Layer.Layer<DocumentPayments, never, Document
       return DocumentPayments.of({
         lock: Effect.fn("DocumentPayments.lock")((ws, id) => run(lock(ws, id))),
         settle: Effect.fn("DocumentPayments.settle")((caller, ws, id, paid, audit) =>
-          run(settle(ws, id, paid, audit).pipe(Effect.provideService(CurrentCaller, caller))),
+          run(settle(caller, ws, id, paid, audit)),
         ),
         issuePaymentTaxDocument: Effect.fn("DocumentPayments.issuePaymentTaxDocument")(
-          (caller, ws, id, payment) =>
-            run(
-              issuePaymentTaxDocument(ws, id, payment).pipe(
-                Effect.provideService(CurrentCaller, caller),
-              ),
-            ),
+          (caller, ws, id, payment) => run(issuePaymentTaxDocument(caller, ws, id, payment)),
         ),
         removalBlocked: Effect.fn("DocumentPayments.removalBlocked")((ws, target, taxDocument) =>
           run(removalBlocked(ws, target, taxDocument)),

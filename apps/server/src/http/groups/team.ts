@@ -1,5 +1,5 @@
 /** `team` group handlers (http-mcp-contracts 3.5.3): members, invitations, roles and ownership transfer. */
-import { API_PREFIX, Api, CurrentPrincipal } from "@kvitbit/api-contract";
+import { API_PREFIX, Api, CurrentPrincipal, RequestCaller } from "@kvitbit/api-contract";
 import { Workspaces } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -15,40 +15,59 @@ export const TeamGroupLive = HttpApiBuilder.group(
     const workspaces = yield* Workspaces;
     const sql = yield* SqlClient.SqlClient;
     return handlers
-      .handle("listMembers", () => workspaces.members)
-      .handle("setRole", ({ params, payload }) => workspaces.setRole(params.userId, payload.role))
+      .handle("listMembers", () => Effect.flatMap(RequestCaller, workspaces.members))
+      .handle("setRole", ({ params, payload }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.setRole(caller, params.userId, payload.role),
+        ),
+      )
       .handle("removeMember", ({ params }) =>
-        changeMembershipAndRevokeCredentials(
-          sql,
-          workspaces.setRole(params.userId, null),
-          params.workspaceId,
-          params.userId,
+        Effect.flatMap(RequestCaller, (caller) =>
+          changeMembershipAndRevokeCredentials(
+            sql,
+            workspaces.setRole(caller, params.userId, null),
+            params.workspaceId,
+            params.userId,
+          ),
         ),
       )
       .handle(
         "leave",
         Effect.fnUntraced(function* ({ params }) {
+          const caller = yield* RequestCaller;
           const principal = yield* CurrentPrincipal;
           yield* changeMembershipAndRevokeCredentials(
             sql,
-            workspaces.leave,
+            workspaces.leave(caller),
             params.workspaceId,
             principal.userId,
           );
         }),
       )
-      .handle("listInvitations", () => workspaces.invitations)
+      .handle("listInvitations", () => Effect.flatMap(RequestCaller, workspaces.invitations))
       .handle("invite", ({ params, headers, payload }) =>
-        Effect.tap(
-          workspaces.invite(payload.email, payload.role, requestOptions(headers)),
-          (view) =>
-            setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/invitations/${view.id}`),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.tap(
+            workspaces.invite(caller, payload.email, payload.role, requestOptions(headers)),
+            (view) =>
+              setLocation(`${API_PREFIX}/workspaces/${params.workspaceId}/invitations/${view.id}`),
+          ),
         ),
       )
-      .handle("revokeInvitation", ({ params }) => workspaces.revokeInvitation(params.invitationId))
-      .handle("resendInvitation", ({ params }) => workspaces.resendInvitation(params.invitationId))
+      .handle("revokeInvitation", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.revokeInvitation(caller, params.invitationId),
+        ),
+      )
+      .handle("resendInvitation", ({ params }) =>
+        Effect.flatMap(RequestCaller, (caller) =>
+          workspaces.resendInvitation(caller, params.invitationId),
+        ),
+      )
       .handle("transferOwnership", ({ payload }) =>
-        Effect.andThen(requireFreshSession, workspaces.transferOwnership(payload.to)),
+        Effect.flatMap(RequestCaller, (caller) =>
+          Effect.andThen(requireFreshSession, workspaces.transferOwnership(caller, payload.to)),
+        ),
       );
   }),
 );

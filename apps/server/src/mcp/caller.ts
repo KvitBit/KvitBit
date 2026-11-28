@@ -11,7 +11,7 @@ import {
   type PrincipalCredential,
   Unauthorized,
 } from "@kvitbit/api-contract";
-import { Caller, CurrentCaller, type MemberCaller, Workspaces } from "@kvitbit/domain/contract";
+import { Caller, type MemberCaller, Workspaces } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import type * as HttpServerRequest from "effect/http/HttpServerRequest";
 import * as EffectRecord from "effect/Record";
@@ -92,13 +92,12 @@ export const authenticateMcpRequest = (config: McpConfigShape) =>
       channel: "mcp",
     });
     const caller = yield* workspaces
-      .enter(grant.workspaceId, {
+      .enter(account, grant.workspaceId, {
         scopes: grant.scopes,
         channel: "mcp",
         client: { kind: "mcp", id: grant.grantId, name: grant.clientName },
       })
       .pipe(
-        Effect.provideService(CurrentCaller, account),
         Effect.catchTags({
           NotFound: () => Unauthorized.make({ reason: "invalid" }),
           Forbidden: () => Unauthorized.make({ reason: "invalid" }),

@@ -44,33 +44,33 @@ test("decoded payloads are assignable to their core inputs", () => {
     ok<Assignable<RecordPaymentInput, CoreRecordPaymentInput>>(true),
     ok<Assignable<CorrectionInput, CoreCorrectionInput>>(true),
     ok<Assignable<SendInput, SendOptions>>(true),
-    ok<Assignable<typeof CancelInput.Type, Arg<Shape<typeof Documents>["cancel"], 1>>>(true),
+    ok<Assignable<typeof CancelInput.Type, Arg<Shape<typeof Documents>["cancel"], 2>>>(true),
     ok<
       Assignable<
         typeof FinalInvoiceInput.Type,
-        Arg<Shape<typeof Documents>["issueFinalInvoice"], 1>
+        Arg<Shape<typeof Documents>["issueFinalInvoice"], 2>
       >
     >(true),
-    ok<Assignable<(typeof UnlockInput.Type)["reason"], Arg<Shape<typeof Documents>["unlock"], 1>>>(
+    ok<Assignable<(typeof UnlockInput.Type)["reason"], Arg<Shape<typeof Documents>["unlock"], 2>>>(
       true,
     ),
     ok<
       Assignable<
         (typeof IssueFromInputPayload.Type)["send"],
-        Arg<Shape<typeof Documents>["issue"], 1>["send"] | undefined
+        Arg<Shape<typeof Documents>["issue"], 2>["send"] | undefined
       >
     >(true),
     ok<
       Assignable<
         (typeof IssueDraftPayload.Type)["send"],
-        Arg<Shape<typeof Documents>["issue"], 1>["send"] | undefined
+        Arg<Shape<typeof Documents>["issue"], 2>["send"] | undefined
       >
     >(true),
-    ok<Assignable<RemovePaymentInput["reason"], Arg<Shape<typeof Payments>["remove"], 1>>>(true),
-    ok<Assignable<UseTemplateInput, Arg<Shape<typeof Templates>["use"], 1>>>(true),
-    ok<Assignable<ScheduleInput, Arg<Shape<typeof Templates>["schedule"], 1>>>(true),
-    ok<Assignable<SeriesInput, Arg<Shape<typeof Workspaces>["configureSeries"], 0>>>(true),
-    ok<Assignable<Omit<FromIcoInput, "ico">, Arg<Shape<typeof Contacts>["fromIco"], 1>>>(true),
+    ok<Assignable<RemovePaymentInput["reason"], Arg<Shape<typeof Payments>["remove"], 2>>>(true),
+    ok<Assignable<UseTemplateInput, Arg<Shape<typeof Templates>["use"], 2>>>(true),
+    ok<Assignable<ScheduleInput, Arg<Shape<typeof Templates>["schedule"], 2>>>(true),
+    ok<Assignable<SeriesInput, Arg<Shape<typeof Workspaces>["configureSeries"], 1>>>(true),
+    ok<Assignable<Omit<FromIcoInput, "ico">, Arg<Shape<typeof Contacts>["fromIco"], 2>>>(true),
   ];
   expect(Arr.every(checks, Boolean)).toBe(true);
 });

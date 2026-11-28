@@ -3,7 +3,7 @@
  * method shape of src/index.ts. Drafts audit only create and discard (issue is P2's).
  */
 
-import type { DocumentId, DocumentPatch, RequestOptions } from "@kvitbit/domain/contract";
+import type { Caller, DocumentId, DocumentPatch, RequestOptions } from "@kvitbit/domain/contract";
 import { Conflict, DocumentId as DocumentIdSchema, DocumentInput } from "@kvitbit/domain/contract";
 import * as Effect from "effect/Effect";
 import { authorizeInWorkspace } from "../../policy/Policy";
@@ -25,14 +25,14 @@ import { DocumentViewCodec, toView } from "./view";
  * (the snapshot ports' contract, #402), with nothing stored, numbered, audited or logged.
  */
 export const preview = Effect.fn("preview")(
-  function* (input: DocumentInput) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.draft");
+  function* (caller: Caller, input: DocumentInput) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.draft");
     const store = yield* CoreStore;
     return yield* store.transaction(
       Effect.gen(function* () {
         const { today, at } = yield* now;
         const spec = yield* specFromInput(workspaceId, input);
-        const composed = yield* compose(workspaceId, spec, { today });
+        const composed = yield* compose(caller, workspaceId, spec, { today });
         const value_1 = yield* newId(DocumentIdSchema.make);
         const row = newDraftRecord(value_1, workspaceId, composed, at);
         return toView(row, { today });
@@ -44,8 +44,8 @@ export const preview = Effect.fn("preview")(
 );
 
 export const createDraft = Effect.fn("createDraft")(
-  function* (input: DocumentInput, opts?: RequestOptions) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.draft");
+  function* (caller: Caller, input: DocumentInput, opts?: RequestOptions) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.draft");
     return yield* withIdempotency(
       {
         scope: { _tag: "Workspace", workspaceId },
@@ -58,13 +58,13 @@ export const createDraft = Effect.fn("createDraft")(
         const repo = yield* DocumentsRepo;
         const { today, at } = yield* now;
         const spec = yield* specFromInput(workspaceId, input);
-        const composed = yield* compose(workspaceId, spec, { today });
+        const composed = yield* compose(caller, workspaceId, spec, { today });
         const value_1 = yield* newId(DocumentIdSchema.make);
         const row = yield* repo
           .insert(newDraftRecord(value_1, workspaceId, composed, at))
           // A draft has no number, so no unique index can break.
           .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id: row.id },
           action: "document.create",
@@ -79,8 +79,8 @@ export const createDraft = Effect.fn("createDraft")(
 
 /** Drafts only (rule D2); a hard delete that never consumes a number (D1). */
 export const discardDraft = Effect.fn("discardDraft")(
-  function* (id: DocumentId, expectedRevision: number) {
-    const { workspaceId } = yield* authorizeInWorkspace("document.draft");
+  function* (caller: Caller, id: DocumentId, expectedRevision: number) {
+    const { workspaceId } = yield* authorizeInWorkspace(caller, "document.draft");
     const store = yield* CoreStore;
     const repo = yield* DocumentsRepo;
     yield* store.transaction(
@@ -88,7 +88,7 @@ export const discardDraft = Effect.fn("discardDraft")(
         const row = yield* repo.getForUpdate(workspaceId, id, expectedRevision);
         yield* guard(row, "discard");
         yield* repo.remove(workspaceId, id, row.revision);
-        yield* appendAudit({
+        yield* appendAudit(caller, {
           workspaceId,
           subject: { entity: "Document", id },
           action: "document.discard",
@@ -106,6 +106,7 @@ export const discardDraft = Effect.fn("discardDraft")(
  * `number` is for issued documents only (rule D4).
  */
 export const editDraft = Effect.fn("editDraft")(function* (
+  caller: Caller,
   row: DocumentRecord,
   patch: DocumentPatch,
 ) {
@@ -115,7 +116,7 @@ export const editDraft = Effect.fn("editDraft")(function* (
   const repo = yield* DocumentsRepo;
   const { today, at } = yield* now;
   const spec = yield* applyPatch(row.workspaceId, specFromRecord(row), patch);
-  const composed = yield* compose(row.workspaceId, spec, { today });
+  const composed = yield* compose(caller, row.workspaceId, spec, { today });
   const next = yield* repo
     .update({ ...row, ...composed, updatedAt: at }, row.revision)
     .pipe(Effect.catchTag("UniqueViolation", (e) => Effect.die(e)));

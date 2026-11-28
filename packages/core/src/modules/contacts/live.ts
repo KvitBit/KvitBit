@@ -1,9 +1,9 @@
 import type {
   AuditEntry,
+  Caller,
   ContactId,
   ContactInput,
   ContactRole,
-  CurrentCaller,
   Forbidden,
   Invalid,
   Page,
@@ -63,30 +63,33 @@ export const CONTACT_PAGE_MAX = 100;
 /** The Contacts methods with the errors the spec gives them, as the domain tag declares them. */
 export interface ContactsImpl {
   readonly fromIco: (
+    caller: Caller,
     ico: string,
     opts?: { readonly role?: ContactRole },
-  ) => Effect.Effect<ContactViewData, Invalid | NotFound | Unavailable | Forbidden, CurrentCaller>;
+  ) => Effect.Effect<ContactViewData, Invalid | NotFound | Unavailable | Forbidden>;
   readonly save: (
+    caller: Caller,
     input: ContactInput & { readonly id?: ContactId; readonly expectedRevision?: number },
     opts?: RequestOptions,
-  ) => Effect.Effect<
-    ContactViewData,
-    Invalid | NotFound | Conflict | Forbidden | Unavailable,
-    CurrentCaller
-  >;
+  ) => Effect.Effect<ContactViewData, Invalid | NotFound | Conflict | Forbidden | Unavailable>;
   readonly archive: (
+    caller: Caller,
     id: ContactId,
-  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<void, NotFound | Forbidden | Unavailable>;
   readonly get: (
+    caller: Caller,
     id: ContactId,
-  ) => Effect.Effect<ContactViewData, NotFound | Forbidden | Unavailable, CurrentCaller>;
-  readonly search: (q: {
-    readonly text?: string;
-    readonly role?: ContactRole;
-    readonly cursor?: string;
-    /** 1 to 100, default 50 (http-mcp-contracts 342). */
-    readonly limit?: number;
-  }) => Effect.Effect<Page<ContactViewData>, Invalid | Forbidden | Unavailable, CurrentCaller>;
+  ) => Effect.Effect<ContactViewData, NotFound | Forbidden | Unavailable>;
+  readonly search: (
+    caller: Caller,
+    q: {
+      readonly text?: string;
+      readonly role?: ContactRole;
+      readonly cursor?: string;
+      /** 1 to 100, default 50 (http-mcp-contracts 342). */
+      readonly limit?: number;
+    },
+  ) => Effect.Effect<Page<ContactViewData>, Invalid | Forbidden | Unavailable>;
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -259,8 +262,8 @@ export const makeContacts: Effect.Effect<
     );
   };
 
-  const audit = (before: ContactRow | null, after: ContactRow, action: string) =>
-    appendAudit({
+  const audit = (caller: Caller, before: ContactRow | null, after: ContactRow, action: string) =>
+    appendAudit(caller, {
       workspaceId: after.workspaceId,
       subject: { entity: "Contact", id: after.id },
       action,
@@ -269,6 +272,7 @@ export const makeContacts: Effect.Effect<
     });
 
   const create = Effect.fn("create")(function* (
+    caller: Caller,
     workspaceId: WorkspaceId,
     fields: ContactSaveFields,
   ) {
@@ -303,11 +307,12 @@ export const makeContacts: Effect.Effect<
     const inserted = yield* repo
       .insert(row)
       .pipe(Effect.catchTag("UniqueViolation", onUniqueViolation));
-    yield* audit(null, inserted, "contact.save");
+    yield* audit(caller, null, inserted, "contact.save");
     return inserted;
   });
 
   const edit = Effect.fn("edit")(function* (
+    caller: Caller,
     workspaceId: WorkspaceId,
     id: ContactId,
     expectedRevision: number | undefined,
@@ -331,7 +336,7 @@ export const makeContacts: Effect.Effect<
     const updated = yield* repo
       .update(next, current.revision)
       .pipe(Effect.catchTag("UniqueViolation", onUniqueViolation));
-    yield* audit(current, updated, "contact.save");
+    yield* audit(caller, current, updated, "contact.save");
     return updated;
   });
 
@@ -341,6 +346,7 @@ export const makeContacts: Effect.Effect<
    * IČO edit between the unlocked lookup and the lock); the caller then looks again.
    */
   const refresh = Effect.fn("refresh")(function* (
+    caller: Caller,
     existing: ContactRow,
     result: RegistryResult,
     role: ContactRole | undefined,
@@ -374,7 +380,7 @@ export const makeContacts: Effect.Effect<
         Conflict: Effect.die,
       }),
     );
-    yield* audit(current, updated, "contact.save");
+    yield* audit(caller, current, updated, "contact.save");
     return Option.some(updated);
   });
 
@@ -383,15 +389,12 @@ export const makeContacts: Effect.Effect<
 
   /** Refreshes the active Contact holding the IČO, else inserts one (inside the transaction). */
   const upsertByIco = (
+    caller: Caller,
     workspaceId: WorkspaceId,
     result: RegistryResult,
     role: ContactRole | undefined,
     attempt: number,
-  ): Effect.Effect<
-    ContactRow,
-    StoreUnavailable,
-    CoreStore | IdGenerator | ContactsRepo | CurrentCaller
-  > =>
+  ): Effect.Effect<ContactRow, StoreUnavailable, CoreStore | IdGenerator | ContactsRepo> =>
     Effect.gen(function* () {
       if (attempt > UPSERT_ATTEMPTS) {
         // Sustained contention is an expected outcome, not a bug: retryable Unavailable{database}.
@@ -399,11 +402,11 @@ export const makeContacts: Effect.Effect<
           cause: `fromIco: IČO ${result.ico} kept moving under concurrent writes`,
         });
       }
-      const again = () => upsertByIco(workspaceId, result, role, attempt + 1);
+      const again = () => upsertByIco(caller, workspaceId, result, role, attempt + 1);
       const now = yield* nowIso;
       const existing = yield* repo.findActiveByIco(workspaceId, result.ico);
       if (Option.isSome(existing)) {
-        const refreshed = yield* refresh(existing.value, result, role, now);
+        const refreshed = yield* refresh(caller, existing.value, result, role, now);
         return Option.isSome(refreshed) ? refreshed.value : yield* again();
       }
       const fresh: ContactRow = {
@@ -424,7 +427,7 @@ export const makeContacts: Effect.Effect<
       };
       // Savepoint: a concurrent fromIco may insert the same IČO first; then look again.
       return yield* store.transaction(repo.insert(fresh)).pipe(
-        Effect.tap((inserted) => audit(null, inserted, "contact.save")),
+        Effect.tap((inserted) => audit(caller, null, inserted, "contact.save")),
         Effect.catchTag("UniqueViolation", (violation) =>
           violation.constraint === CONTACTS_ACTIVE_ICO_UNIQUE ? again() : Effect.die(violation),
         ),
@@ -433,12 +436,14 @@ export const makeContacts: Effect.Effect<
 
   const impl: ContactsImpl = {
     fromIco: Effect.fn("fromIco")(
-      function* (ico, opts) {
-        const { workspaceId } = yield* authorizeInWorkspace("contact.write");
+      function* (caller: Caller, ico, opts) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "contact.write");
         // Checksum, cache and serialized registry call, outside the transaction.
         const result = yield* registry.lookup(ico);
         if (result === null) return yield* NotFound.make({ entity: "Contact", id: ico });
-        const row = yield* store.transaction(upsertByIco(workspaceId, result, opts?.role, 1));
+        const row = yield* store.transaction(
+          upsertByIco(caller, workspaceId, result, opts?.role, 1),
+        );
         return toContactView(row);
       },
       Effect.provide(context),
@@ -446,8 +451,8 @@ export const makeContacts: Effect.Effect<
     ),
 
     save: Effect.fn("save")(
-      function* (input, opts) {
-        const { workspaceId } = yield* authorizeInWorkspace("contact.write");
+      function* (caller: Caller, input, opts) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "contact.write");
         // The whole input, strictly: unknown fields, a malformed id or revision are Invalid.
         const { id, expectedRevision, ...fields } = yield* decodeInput(ContactSaveInput, input);
         yield* checkFields(fields);
@@ -465,8 +470,8 @@ export const makeContacts: Effect.Effect<
           Effect.gen(function* () {
             const saved =
               id === undefined
-                ? yield* create(workspaceId, fields)
-                : yield* edit(workspaceId, id, expectedRevision, fields);
+                ? yield* create(caller, workspaceId, fields)
+                : yield* edit(caller, workspaceId, id, expectedRevision, fields);
             return toContactView(saved);
           }),
         );
@@ -477,8 +482,8 @@ export const makeContacts: Effect.Effect<
     ),
 
     archive: Effect.fn("archive")(
-      function* (id) {
-        const { workspaceId } = yield* authorizeInWorkspace("contact.write");
+      function* (caller: Caller, id) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "contact.write");
         yield* store.transaction(
           Effect.gen(function* () {
             // Idempotent by state (rule C6): archiving an archived Contact changes nothing.
@@ -488,7 +493,7 @@ export const makeContacts: Effect.Effect<
             const updated = yield* repo
               .update({ ...current, archivedAt: now, updatedAt: now }, current.revision)
               .pipe(Effect.catchTags({ UniqueViolation: Effect.die, Conflict: Effect.die }));
-            yield* audit(current, updated, "contact.archive");
+            yield* audit(caller, current, updated, "contact.archive");
           }),
         );
       },
@@ -497,8 +502,8 @@ export const makeContacts: Effect.Effect<
     ),
 
     get: Effect.fn("get")(
-      function* (id) {
-        const { workspaceId } = yield* authorizeInWorkspace("contact.read");
+      function* (caller: Caller, id) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "contact.read");
         const value_1 = yield* repo.get(workspaceId, id);
         return toContactView(value_1);
       },
@@ -507,8 +512,8 @@ export const makeContacts: Effect.Effect<
     ),
 
     search: Effect.fn("search")(
-      function* (q) {
-        const { workspaceId } = yield* authorizeInWorkspace("contact.read");
+      function* (caller: Caller, q) {
+        const { workspaceId } = yield* authorizeInWorkspace(caller, "contact.read");
         const limit = q.limit ?? CONTACT_PAGE_SIZE;
         if (!Number.isInteger(limit) || limit < 1 || limit > CONTACT_PAGE_MAX) {
           return yield* invalidAt(["limit"], "request.malformed");

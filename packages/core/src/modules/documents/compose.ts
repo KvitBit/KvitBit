@@ -16,9 +16,9 @@
 
 import type {
   BankAccountId,
+  Caller,
   ContactId,
   CurrencyCode,
-  CurrentCaller,
   DocumentId,
   DocumentInput,
   DocumentKind,
@@ -171,7 +171,6 @@ export interface ComposeOptions {
 
 export type ComposeError = Invalid | NotFound | StoreUnavailable | RatesUnavailable;
 export type ComposeServices =
-  | CurrentCaller
   | DocumentContacts
   | DocumentIssuers
   | NumberingSeries
@@ -557,17 +556,20 @@ export const mergeBuckets = (
 
 export const compose: {
   (
+    workspaceId: WorkspaceId,
     spec: DocumentSpec,
     options: ComposeOptions,
-  ): (workspaceId: WorkspaceId) => Effect.Effect<Composed, ComposeError, ComposeServices>;
+  ): (caller: Caller) => Effect.Effect<Composed, ComposeError, ComposeServices>;
   (
+    caller: Caller,
     workspaceId: WorkspaceId,
     spec: DocumentSpec,
     options: ComposeOptions,
   ): Effect.Effect<Composed, ComposeError, ComposeServices>;
 } = Fn.dual(
-  3,
+  4,
   (
+    caller: Caller,
     workspaceId: WorkspaceId,
     spec: DocumentSpec,
     options: ComposeOptions,
@@ -579,7 +581,7 @@ export const compose: {
       // DocumentInput: default issuedOn, for every kind; it drives the VAT rate and CNB fixing.
       const taxPoint = given.taxableSupplyOn ?? issuedOn;
       // NotFound{Workspace} (agreements #414/#418) passes through.
-      const issuer = yield* (yield* DocumentIssuers).forDocument(workspaceId, taxPoint);
+      const issuer = yield* (yield* DocumentIssuers).forDocument(caller, workspaceId, taxPoint);
       const frozen = options.freeze;
       const samePoint = frozen !== undefined && frozen.taxableSupplyOn === taxPoint;
       // D10: an issued document's tax results follow its frozen parties, not live changes.

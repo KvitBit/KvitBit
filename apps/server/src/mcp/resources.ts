@@ -13,7 +13,6 @@ import {
   Contacts,
   ContactView,
   type CoreError,
-  type CurrentCaller,
   DocumentId,
   Documents,
   DocumentView,
@@ -197,7 +196,7 @@ export const readResource = Effect.fn("readMcpResource")(function* (
 ): Effect.fn.Return<
   ReadonlyArray<McpResourceContent>,
   ResourceInvalidParams | CoreError,
-  McpResourceServices | CurrentCaller
+  McpResourceServices
 > {
   if (uri === "kvitbit://guide") {
     return [
@@ -211,21 +210,21 @@ export const readResource = Effect.fn("readMcpResource")(function* (
 
   if (uri === "kvitbit://workspace") {
     const ws = yield* Workspaces;
-    const view = yield* ws.current;
+    const view = yield* ws.current(caller);
     const encoded = yield* encodeWorkspace(jsonizeOpenValue(view));
     return [yield* jsonContent(uri, encoded)];
   }
 
   if (uri === "kvitbit://templates") {
     const templates = yield* Templates;
-    const items = yield* templates.list;
+    const items = yield* templates.list(caller);
     const encoded = yield* encodeTemplates(Arr.map(items, jsonizeOpenValue));
     return [yield* jsonContent(uri, encoded)];
   }
 
   if (uri === "kvitbit://price-list") {
     const priceList = yield* PriceList;
-    const items = yield* priceList.list();
+    const items = yield* priceList.list(caller);
     const encoded = yield* encodePriceList(Arr.map(items, jsonizeOpenValue));
     return [yield* jsonContent(uri, encoded)];
   }
@@ -249,7 +248,7 @@ export const readResource = Effect.fn("readMcpResource")(function* (
   if (host === "documents" && segments.length === 1 && parsed.search === "") {
     const docId = yield* decodeId(DocumentId, segments[0] ?? "", "documentId");
     const documents = yield* Documents;
-    const doc = yield* documents.get(docId);
+    const doc = yield* documents.get(caller, docId);
     const encoded = yield* encodeDocument(prepareDocumentView(doc));
     return [yield* jsonContent(uri, encoded)];
   }
@@ -264,7 +263,7 @@ export const readResource = Effect.fn("readMcpResource")(function* (
     const language =
       languageParam !== null ? yield* decodeId(Locale, languageParam, "language") : undefined;
     const documents = yield* Documents;
-    const download = yield* documents.pdf(docId, {
+    const download = yield* documents.pdf(caller, docId, {
       ...(template !== undefined ? { template } : undefined),
       ...(language !== undefined ? { language } : undefined),
     });
@@ -282,7 +281,7 @@ export const readResource = Effect.fn("readMcpResource")(function* (
   if (host === "contacts" && segments.length === 1 && parsed.search === "") {
     const contactId = yield* decodeId(ContactId, segments[0] ?? "", "contactId");
     const contacts = yield* Contacts;
-    const contact = yield* contacts.get(contactId);
+    const contact = yield* contacts.get(caller, contactId);
     const encoded = yield* encodeContact(jsonizeOpenValue(contact));
     return [yield* jsonContent(uri, encoded)];
   }
@@ -291,7 +290,7 @@ export const readResource = Effect.fn("readMcpResource")(function* (
   if (host === "expenses" && segments.length === 1 && parsed.search === "") {
     const expenseId = yield* decodeId(ExpenseId, segments[0] ?? "", "expenseId");
     const expenses = yield* Expenses;
-    const expense = yield* expenses.get(expenseId);
+    const expense = yield* expenses.get(caller, expenseId);
     const encoded = yield* encodeExpense(jsonizeOpenValue(expense));
     return [yield* jsonContent(uri, encoded)];
   }
@@ -306,7 +305,7 @@ export const readResource = Effect.fn("readMcpResource")(function* (
     const expenseId = yield* decodeId(ExpenseId, segments[0] ?? "", "expenseId");
     const attachmentId = yield* decodeId(AttachmentId, segments[2] ?? "", "attachmentId");
     const expenses = yield* Expenses;
-    const download = yield* expenses.attachment(expenseId, attachmentId);
+    const download = yield* expenses.attachment(caller, expenseId, attachmentId);
     const bytes = yield* collectBoundedBytes(download.bytes, MCP_RESOURCE_BLOB_MAX_BYTES);
     return [
       {

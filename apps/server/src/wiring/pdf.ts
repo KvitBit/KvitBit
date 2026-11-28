@@ -25,13 +25,11 @@ import {
   DocumentsRepo,
   ReportPdfRenderer,
   type ReportsModule,
-  ShareLinksRepo,
   type WorkspacesModule,
   WorkspacesRepo,
 } from "@kvitbit/core";
 import {
   CurrencyCode,
-  CurrentCaller,
   type DocumentView,
   type ImageRef,
   IsoDate,
@@ -60,7 +58,6 @@ import {
   readLegacyDeliveryInfo,
   resolveDocumentFieldsAtRevision,
   resolveVariableSymbol,
-  sha256HexSync,
 } from "../projections/documents";
 import { PdfWiringConfigSchema } from "./config";
 
@@ -631,28 +628,11 @@ const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngine> = La
     const documentsRepoOpt = yield* Effect.serviceOption(DocumentsRepo);
     const workspacesRepoOpt = yield* Effect.serviceOption(WorkspacesRepo);
     const coreStoreOpt = yield* Effect.serviceOption(CoreStore);
-    const shareLinksRepoOpt = yield* Effect.serviceOption(ShareLinksRepo);
     const sqlOpt = yield* Effect.serviceOption(SqlClient.SqlClient);
 
     const resolveWorkspaceId = Effect.fn("DocumentRenderer.resolveWorkspaceId")(function* (
       documentId: DocumentView["id"],
     ) {
-      const callerOpt = yield* Effect.serviceOption(CurrentCaller);
-      if (Option.isSome(callerOpt)) {
-        const caller = callerOpt.value;
-        if (caller._tag === "Member") return caller.workspaceId;
-        if (
-          caller._tag === "ShareLinkVisitor" &&
-          Option.isSome(shareLinksRepoOpt) &&
-          Option.isSome(coreStoreOpt)
-        ) {
-          const tokenHash = sha256HexSync(caller.token);
-          const linkOpt = yield* coreStoreOpt.value
-            .transaction(shareLinksRepoOpt.value.lockByTokenHash(tokenHash))
-            .pipe(Effect.orElseSucceed(() => Option.none()));
-          if (Option.isSome(linkOpt)) return linkOpt.value.workspaceId;
-        }
-      }
       if (Option.isSome(sqlOpt)) {
         const rows = yield* sqlOpt.value<{ readonly workspace_id: WorkspaceId }>`
             SELECT workspace_id FROM documents WHERE id = ${documentId} LIMIT 1
@@ -664,7 +644,7 @@ const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngine> = La
     });
 
     return DocumentRenderer.of({
-      render: Effect.fn("DocumentRenderer.render")(function* (view, options) {
+      render: Effect.fn("DocumentRenderer.render")(function* (view, options, knownWorkspaceId) {
         // Legacy delivery rows without a frozen __snapshot cannot recover enqueue-time branding,
         // template, or balance; refuse before consulting cache (J3).
         const legacyDelivery = readLegacyDeliveryInfo(view);
@@ -674,7 +654,7 @@ const DocumentRendererLive: Layer.Layer<DocumentRenderer, never, PdfEngine> = La
           );
         }
 
-        const workspaceId = yield* resolveWorkspaceId(view.id);
+        const workspaceId = knownWorkspaceId ?? (yield* resolveWorkspaceId(view.id));
         const deliverySnapshot = readDeliverySnapshot(view);
         const explicitOpt = yield* Effect.serviceOption(ExplicitPdfTemplate);
         const isExplicitTemplate = Option.getOrElse(explicitOpt, () => false);

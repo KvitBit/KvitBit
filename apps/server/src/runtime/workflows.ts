@@ -335,7 +335,6 @@ export const makeWorkflowHandlersLayer = (options: WorkflowHandlerOptions = {}) 
 
           const reportingFiles = yield* exportJob.reportingFiles(
             workspaceId,
-            exportId,
             locale,
             (table, read) =>
               archivePages(sql, workspaceId, table, sql`id`, (rows) =>

@@ -6,7 +6,7 @@
  */
 
 import type { ContactView, NumberingSeriesId, WorkspaceId } from "@kvitbit/domain/contract";
-import { Contacts, CurrentCaller, NotFound } from "@kvitbit/domain/contract";
+import { type Caller, Contacts, NotFound } from "@kvitbit/domain/contract";
 import * as EffectArray from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -73,9 +73,9 @@ export const PaymentSettingsLive: Layer.Layer<PaymentSettings, never, WorkspaceS
     PaymentSettings,
     Effect.map(Effect.service(WorkspaceSnapshots), (snapshots) => ({
       autoSendPaymentTaxDocument: Effect.fn("autoSendPaymentTaxDocument")(function* (
+        caller: Caller,
         workspaceId: WorkspaceId,
       ) {
-        const caller = yield* CurrentCaller;
         const own =
           (caller._tag === "Member" || caller._tag === "System") &&
           caller.workspaceId === workspaceId;
@@ -104,14 +104,9 @@ export const ExpenseSuppliersLive: Layer.Layer<ExpenseSuppliers, never, Contacts
     const decodeSupplier = (view: ContactView) =>
       Schema.decodeUnknownEffect(ContactViewSchema)(view).pipe(Effect.orDie, Effect.map(supplier));
     return {
-      contact: (caller, id) =>
-        contacts
-          .get(id)
-          .pipe(Effect.provideService(CurrentCaller, caller), Effect.flatMap(decodeSupplier)),
+      contact: (caller, id) => contacts.get(caller, id).pipe(Effect.flatMap(decodeSupplier)),
       fromIco: (caller, ico) =>
-        contacts
-          .fromIco(ico, { role: "supplier" })
-          .pipe(Effect.provideService(CurrentCaller, caller), Effect.flatMap(decodeSupplier)),
+        contacts.fromIco(caller, ico, { role: "supplier" }).pipe(Effect.flatMap(decodeSupplier)),
     };
   }),
 );
